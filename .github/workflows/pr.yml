@@ -115,7 +115,7 @@ jobs:
         run: pnpm -r typecheck
 
       - name: Run tests
-        run: pnpm test:run
+        run: pnpm test:cov
 
       - name: Build
         run: pnpm build
