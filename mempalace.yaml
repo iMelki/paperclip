@@ -1,0 +1,16 @@
+wing: agents
+source: upstream
+# NOTE: Paperclip is an upstream/third-party project, not authored by iMelki.
+# Indexed for reference — understand the codebase but don't treat it as a first-party repo.
+rooms:
+  - name: core
+    description: Core app logic, adapters, plugins
+    keywords: [adapter, plugin, connector, skill, core, handler]
+  - name: config
+    description: Build, packages, workspace config
+    keywords: [config, package, workspace, tsconfig, docker, build]
+  - name: docs
+    description: Documentation, specs, agent instructions
+    keywords: [doc, readme, spec, guide, agents, skill, contributing]
+  - name: general
+    description: Everything else
