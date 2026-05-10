@@ -1,17 +1,22 @@
-# Replace @cryppadotta if a different maintainer or team should own release infrastructure.
+# Default ownership for the iMelki Paperclip fork.
+* @iMelki
 
-.github/** @cryppadotta @devinfoley
-scripts/release*.sh @cryppadotta @devinfoley
-scripts/release-*.mjs @cryppadotta @devinfoley
-scripts/create-github-release.sh @cryppadotta @devinfoley
-scripts/rollback-latest.sh @cryppadotta @devinfoley
-doc/RELEASING.md @cryppadotta @devinfoley
-doc/PUBLISHING.md @cryppadotta @devinfoley
-doc/RELEASE-AUTOMATION-SETUP.md @cryppadotta @devinfoley
+# Governance and release infrastructure require explicit owner review.
+.github/** @iMelki
+AGENTS.md @iMelki
+CONTRIBUTING.md @iMelki
+OPEN_TASKS.md @iMelki
+scripts/release*.sh @iMelki
+scripts/release-*.mjs @iMelki
+scripts/create-github-release.sh @iMelki
+scripts/rollback-latest.sh @iMelki
+doc/RELEASING.md @iMelki
+doc/PUBLISHING.md @iMelki
+doc/RELEASE-AUTOMATION-SETUP.md @iMelki
 
 # Package files — dependency changes require review
 # package.json matches recursively at all depths (covers root + all workspaces)
-package.json @cryppadotta @devinfoley
-pnpm-lock.yaml @cryppadotta @devinfoley
-pnpm-workspace.yaml @cryppadotta @devinfoley
-.npmrc @cryppadotta @devinfoley
+package.json @iMelki
+pnpm-lock.yaml @iMelki
+pnpm-workspace.yaml @iMelki
+.npmrc @iMelki
