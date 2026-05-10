@@ -309,6 +309,11 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
     () => new Set(supportedEnvironmentDriversForAdapter(adapterType)),
     [adapterType],
   );
+  const adapterModelsEnvironmentId = (
+    isCreate
+      ? props.values.defaultEnvironmentId ?? ""
+      : eff("identity", "defaultEnvironmentId", props.agent.defaultEnvironmentId ?? "")
+  ) || null;
   const runnableEnvironments = useMemo(
     () => environments.filter((environment) => {
       if (!supportedEnvironmentDrivers.has(environment.driver)) return false;
@@ -321,14 +326,16 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
 
   // Fetch adapter models for the effective adapter type
   const modelQueryKey = selectedCompanyId
-    ? queryKeys.agents.adapterModels(selectedCompanyId, adapterType)
-    : ["agents", "none", "adapter-models", adapterType];
+    ? queryKeys.agents.adapterModels(selectedCompanyId, adapterType, adapterModelsEnvironmentId)
+    : ["agents", "none", "adapter-models", adapterType, null];
   const {
     data: fetchedModels,
     error: fetchedModelsError,
   } = useQuery({
     queryKey: modelQueryKey,
-    queryFn: () => agentsApi.adapterModels(selectedCompanyId!, adapterType),
+    queryFn: () => agentsApi.adapterModels(selectedCompanyId!, adapterType, {
+      environmentId: adapterModelsEnvironmentId,
+    }),
     enabled: Boolean(selectedCompanyId),
   });
   const [refreshModelsError, setRefreshModelsError] = useState<string | null>(null);
@@ -500,7 +507,10 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
     setRefreshingModels(true);
     setRefreshModelsError(null);
     try {
-      const refreshed = await agentsApi.adapterModels(selectedCompanyId, adapterType, { refresh: true });
+      const refreshed = await agentsApi.adapterModels(selectedCompanyId, adapterType, {
+        refresh: true,
+        environmentId: adapterModelsEnvironmentId,
+      });
       queryClient.setQueryData(modelQueryKey, refreshed);
     } catch (error) {
       setRefreshModelsError(error instanceof Error ? error.message : "Failed to refresh adapter models.");
@@ -737,7 +747,9 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
               hint="Agent-level default execution target. Project and issue settings can still override this."
             >
               <select
+                aria-label="Default environment"
                 className={inputClass}
+                title="Default environment"
                 value={currentDefaultEnvironmentId}
                 onChange={(event) => {
                   const nextValue = event.target.value;
@@ -1441,9 +1453,11 @@ function ModelDropdown({
             />
             {modelSearch && (
               <button
+                aria-label="Clear model search"
                 type="button"
                 className="absolute right-1.5 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
                 onClick={() => setModelSearch("")}
+                title="Clear model search"
               >
                 <svg aria-hidden="true" focusable="false" className="h-3 w-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                   <line x1="18" y1="6" x2="6" y2="18" />
