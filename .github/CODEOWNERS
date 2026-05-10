@@ -1,17 +1,8 @@
-# Replace @cryppadotta if a different maintainer or team should own release infrastructure.
+# Default ownership for the portfolio operations repository.
+* @iMelki
 
-.github/** @cryppadotta @devinfoley
-scripts/release*.sh @cryppadotta @devinfoley
-scripts/release-*.mjs @cryppadotta @devinfoley
-scripts/create-github-release.sh @cryppadotta @devinfoley
-scripts/rollback-latest.sh @cryppadotta @devinfoley
-doc/RELEASING.md @cryppadotta @devinfoley
-doc/PUBLISHING.md @cryppadotta @devinfoley
-doc/RELEASE-AUTOMATION-SETUP.md @cryppadotta @devinfoley
+# Governance and agent-safety changes require explicit owner review.
+/PRD.md @iMelki
+/agent-guardrails.md @iMelki
+/.github/ @iMelki
 
-# Package files — dependency changes require review
-# package.json matches recursively at all depths (covers root + all workspaces)
-package.json @cryppadotta @devinfoley
-pnpm-lock.yaml @cryppadotta @devinfoley
-pnpm-workspace.yaml @cryppadotta @devinfoley
-.npmrc @cryppadotta @devinfoley
