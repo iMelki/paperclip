@@ -7,6 +7,14 @@ Guidance for human and AI contributors working in this repository.
 Paperclip is a control plane for AI-agent companies.
 The current implementation target is V1 and is defined in `doc/SPEC-implementation.md`.
 
+## Portfolio Governance Overlay
+
+- Treat GitHub issues as canonical task records and `OPEN_TASKS.md` as the local index for this fork.
+- Follow the scoped agent task template in `.github/ISSUE_TEMPLATE/agent_task.md` before assigning work to agents.
+- Use branch names in the form `agent/{agent-name}/{issue-number}-{slug}` for agent-authored work.
+- Stay within the allowed file scope defined in the issue and split runtime/product changes away from governance-only work.
+- Treat remote execution, sandboxing, model selection, heartbeat scheduling, billing, and credentials as high-risk areas requiring focused tests and human review.
+
 ## 2. Read This First
 
 Before making changes, read in this order:

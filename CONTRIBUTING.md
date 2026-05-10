@@ -4,6 +4,24 @@ Thanks for wanting to contribute!
 
 We really appreciate both small fixes and thoughtful larger changes.
 
+## iMelki Fork Governance
+
+This fork also follows the portfolio-wide governance baseline for AI/human agent work:
+
+1. Create scoped work from `.github/ISSUE_TEMPLATE/agent_task.md` when assigning tasks to agents.
+2. Link relevant docs, issues, PRs, and plans before implementation.
+3. Classify work with risk, agent suitability, and allowed file scope.
+4. Use labels from `.github/labels.yml`, including `domain:multi-agent` when applicable.
+5. Maintain `OPEN_TASKS.md` as the local task index.
+
+Use the agent branch convention:
+
+```text
+agent/{agent-name}/{issue-number}-{slug}
+```
+
+Request human review for medium, high, and critical risk changes. Treat remote execution, sandboxing, model selection, heartbeat scheduling, billing, and credentials as high-risk areas that need focused tests.
+
 ## Two Paths to Get Your Pull Request Accepted
 
 ### Path 1: Small, Focused Changes (Fastest way to get merged)
