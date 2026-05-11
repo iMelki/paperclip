@@ -14,6 +14,20 @@
 > - This pull request ...
 > - The benefit is ...
 
+## Linked Issue
+
+Closes #
+
+## Agent / Author
+
+- Agent:
+- Human reviewer:
+
+## Scope
+
+- Allowed files/directories:
+- Out-of-scope files/directories:
+
 ## What Changed
 
 <!-- Bullet list of concrete changes. One bullet per logical unit. -->
@@ -65,4 +79,7 @@
 - [ ] If this change affects the UI, I have included before/after screenshots
 - [ ] I have updated relevant documentation to reflect my changes
 - [ ] I have considered and documented any risks above
+- [ ] Related issue is linked
+- [ ] Scope matches the issue and out-of-scope work was split
+- [ ] Human review is requested for medium, high, or critical risk
 - [ ] I will address all Greptile and reviewer comments before requesting merge

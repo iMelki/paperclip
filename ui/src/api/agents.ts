@@ -178,8 +178,11 @@ export const agentsApi = {
   ) => {
     const params = new URLSearchParams();
     if (options?.refresh) params.set("refresh", "1");
-    if (options?.environmentId) params.set("environmentId", options.environmentId);
-    const query = params.size > 0 ? `?${params.toString()}` : "";
+    if (typeof options?.environmentId === "string" && options.environmentId.length > 0) {
+      params.set("environmentId", options.environmentId);
+    }
+    const queryString = params.toString();
+    const query = queryString.length > 0 ? `?${queryString}` : "";
     return api.get<AdapterModel[]>(
       `/companies/${encodeURIComponent(companyId)}/adapters/${encodeURIComponent(type)}/models${query}`,
     );
