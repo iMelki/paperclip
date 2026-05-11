@@ -4,6 +4,8 @@ import { mkdirSync, mkdtempSync, readdirSync, statSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+const pnpmCommand = process.platform === "win32" ? "pnpm" : "pnpm";
+
 const repoRoot = process.cwd();
 const serverRoot = path.join(repoRoot, "server");
 const serverTestsDir = path.join(repoRoot, "server", "src", "__tests__");
@@ -89,9 +91,10 @@ function runVitest(args, label) {
   };
   mkdirSync(env.PAPERCLIP_HOME, { recursive: true });
   mkdirSync(env.TMPDIR, { recursive: true });
-  const result = spawnSync("pnpm", ["exec", "vitest", "run", ...args], {
+  const result = spawnSync(pnpmCommand, ["exec", "vitest", "run", ...args], {
     cwd: repoRoot,
     env,
+    shell: process.platform === "win32",
     stdio: "inherit",
   });
   if (result.error) {
