@@ -1,2 +1,3 @@
 #!/usr/bin/env sh
 sh scripts/pre-commit-check.sh
+node scripts/run-react-doctor.js
