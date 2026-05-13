@@ -23,7 +23,7 @@ Paperclip is the **control plane for a company of AI agents**. You define compan
 | **Agent adapters** | Claude Local, Codex Local, Hermes Local, OpenClaw Gateway | Bridges Paperclip → agent runtimes |
 | **Control plane** | **Paperclip** | Org chart, goals, task hierarchy, budgets, heartbeats |
 | **Memory** | MemSys router → MemPalace / Meilisearch / qmd | Gives agents recall across sessions |
-| **Approvals / guardrails** | Mission Control / policy_gateway | Human-in-the-loop for destructive ops |
+| **Approvals / guardrails** | Mission Control / policy-gateway | Human-in-the-loop for destructive ops |
 
 Paperclip does not replace Mission Control or OpenClaw. It sits _above_ them as the strategic layer.
 
@@ -120,11 +120,11 @@ Based on your active projects across all workspace roots and Obsidian notes, her
 
 **Goal:** _Build and operate the Asimtop AI-powered assistant platform to production quality, serving paying users._
 
-**Repos:** `claw`, `mission-control`, `mission-control-kanban`, `mempalace-service`, `policy_gateway`  
+**Repos:** `claw`, `mission-control`, `mission-control-kanban`, `mempalace-service`, `policy-gateway`  
 **Key agents:**
 - CEO — strategy, delegation, issue triage
 - CTO — technical architecture decisions
-- Backend engineer — Railway services, API work (`claw/`, `policy_gateway`)
+- Backend engineer — Railway services, API work (`claw/`, `policy-gateway`)
 - DevOps engineer — Railway deployments, secrets, monitoring
 - QA engineer — test coverage, Pester tests, CI checks
 
