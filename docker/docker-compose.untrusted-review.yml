@@ -21,6 +21,7 @@ services:
     volumes:
       - review-home:/home/reviewer
       - review-work:/work
+    restart: unless-stopped
     cap_drop:
       - ALL
     security_opt:
