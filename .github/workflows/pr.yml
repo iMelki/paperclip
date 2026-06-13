@@ -92,6 +92,7 @@ jobs:
         run: |
           git checkout -B master HEAD
           git reset --hard HEAD
+          git clean -fd
           ./scripts/release.sh canary --skip-verify --dry-run
 
   e2e:
