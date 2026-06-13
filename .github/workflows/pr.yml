@@ -99,6 +99,8 @@ jobs:
     needs: [policy]
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    env:
+      PAPERCLIP_PLAYWRIGHT_CHANNEL: chrome
 
     steps:
       - name: Checkout repository
@@ -121,8 +123,8 @@ jobs:
       - name: Build
         run: pnpm build
 
-      - name: Install Playwright
-        run: pnpm exec playwright install chromium
+      - name: Verify system browser
+        run: google-chrome --version
 
       - name: Generate Paperclip config
         run: |
