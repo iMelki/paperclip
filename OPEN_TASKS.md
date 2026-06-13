@@ -1,6 +1,6 @@
 # Paperclip Open Tasks
 
-Last updated: 2026-05-23
+Last updated: 2026-06-14
 
 This file is the durable local index for active `paperclip` issues.
 
@@ -15,12 +15,11 @@ This file is the durable local index for active `paperclip` issues.
 - [#6 - Design and build a landing page](https://github.com/iMelki/paperclip/issues/6)
   - Goal: define and implement a landing page with clear audience, value proposition, proof, and CTA.
 
-- [#3 - Review and split preserved remote execution and continuation WIP](https://github.com/iMelki/paperclip/issues/3)
-  - Goal: Review the preserved runtime branch, address Copilot findings, and split the work into focused PRs.
-  - Status: Open (preserved branch `agent/codex/paperclip-remote-exec-continuation-wip`).
-
 ## Recently Completed
 
+- [#3 - Review and split preserved remote execution and continuation WIP](https://github.com/iMelki/paperclip/issues/3)
+  - Closed after the preserved remote-execution and continuation work was
+    reviewed and split out of the active task lane.
 - [#1 - Adopt projects-ops repo bootstrap governance baseline](https://github.com/iMelki/paperclip/issues/1)
   - Completed via [PR #2](https://github.com/iMelki/paperclip/pull/2) on 2026-05-10.
 
