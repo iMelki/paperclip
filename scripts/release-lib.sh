@@ -264,7 +264,13 @@ wait_for_npm_package_version() {
 }
 
 require_clean_worktree() {
-  if [ -n "$(git -C "$REPO_ROOT" status --porcelain)" ]; then
+  local untracked_changes
+  untracked_changes="$(git -C "$REPO_ROOT" ls-files --others --exclude-standard)"
+
+  if [ -n "$untracked_changes" ] ||
+    ! git -C "$REPO_ROOT" diff --quiet --ignore-cr-at-eol -- ||
+    ! git -C "$REPO_ROOT" diff --cached --quiet --ignore-cr-at-eol --; then
+    git -C "$REPO_ROOT" status --short >&2
     release_fail "working tree is not clean. Commit, stash, or remove changes before releasing."
   fi
 }
