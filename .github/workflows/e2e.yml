@@ -15,6 +15,7 @@ jobs:
     env:
       PAPERCLIP_E2E_SKIP_LLM: ${{ inputs.skip_llm && 'true' || 'false' }}
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      PAPERCLIP_PLAYWRIGHT_CHANNEL: chrome
     steps:
       - uses: actions/checkout@v4
 
@@ -29,7 +30,7 @@ jobs:
 
       - run: pnpm install --frozen-lockfile
       - run: pnpm build
-      - run: npx playwright install --with-deps chromium
+      - run: google-chrome --version
 
       - name: Run e2e tests
         run: pnpm run test:e2e

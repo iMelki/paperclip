@@ -91,13 +91,16 @@ jobs:
       - name: Release canary dry run
         run: |
           git checkout -B master HEAD
-          git checkout -- pnpm-lock.yaml
+          git reset --hard HEAD
+          git clean -fd
           ./scripts/release.sh canary --skip-verify --dry-run
 
   e2e:
     needs: [policy]
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    env:
+      PAPERCLIP_PLAYWRIGHT_CHANNEL: chrome
 
     steps:
       - name: Checkout repository
@@ -120,8 +123,8 @@ jobs:
       - name: Build
         run: pnpm build
 
-      - name: Install Playwright
-        run: npx playwright install --with-deps chromium
+      - name: Verify system browser
+        run: google-chrome --version
 
       - name: Generate Paperclip config
         run: |

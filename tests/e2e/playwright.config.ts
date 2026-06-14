@@ -8,6 +8,10 @@ import { defineConfig } from "@playwright/test";
 const PORT = Number(process.env.PAPERCLIP_E2E_PORT ?? 3199);
 const BASE_URL = `http://127.0.0.1:${PORT}`;
 const PAPERCLIP_HOME = fs.mkdtempSync(path.join(os.tmpdir(), "paperclip-e2e-home-"));
+const browserChannel = process.env.PAPERCLIP_PLAYWRIGHT_CHANNEL;
+const chromiumUse = browserChannel
+  ? { browserName: "chromium" as const, channel: browserChannel }
+  : { browserName: "chromium" as const };
 
 export default defineConfig({
   testDir: ".",
@@ -26,7 +30,7 @@ export default defineConfig({
   projects: [
     {
       name: "chromium",
-      use: { browserName: "chromium" },
+      use: chromiumUse,
     },
   ],
   // The webServer directive bootstraps a throwaway instance and then starts it.

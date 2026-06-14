@@ -2,6 +2,10 @@ import { defineConfig } from "@playwright/test";
 
 const PORT = Number(process.env.PAPERCLIP_E2E_PORT ?? 3104);
 const BASE_URL = `http://127.0.0.1:${PORT}`;
+const browserChannel = process.env.PAPERCLIP_PLAYWRIGHT_CHANNEL;
+const chromiumUse = browserChannel
+  ? { browserName: "chromium" as const, channel: browserChannel }
+  : { browserName: "chromium" as const };
 
 export default defineConfig({
   testDir: ".",
@@ -17,7 +21,7 @@ export default defineConfig({
   projects: [
     {
       name: "chromium",
-      use: { browserName: "chromium" },
+      use: chromiumUse,
     },
   ],
   // No webServer — expects an already-running server at BASE_URL.
