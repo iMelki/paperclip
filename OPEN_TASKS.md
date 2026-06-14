@@ -6,6 +6,10 @@ This file is the durable local index for active `paperclip` issues.
 
 ## Active Issues
 
+- [#9 - Fix Windows pre-commit sandbox and plugin typecheck failures](https://github.com/iMelki/paperclip/issues/9)
+  - Goal: make Paperclip's local Windows pre-commit path pass without bypassing
+    focused workflow/config commits.
+
 - [#7 - Backfill secrets hygiene and governance baseline after modernization audit wave 3](https://github.com/iMelki/paperclip/issues/7)
   - Goal: close the remaining audit wave 3 repo drift around secrets hygiene and baseline governance.
 
