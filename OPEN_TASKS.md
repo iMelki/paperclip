@@ -1,10 +1,13 @@
 # Paperclip Open Tasks
 
-Last updated: 2026-06-23
+Last updated: 2026-06-24
 
 This file is the durable local index for active `paperclip` issues.
 
 ## Active Issues
+
+- [#10 - Add native Antigravity adapter and retire legacy gemini_local path](https://github.com/iMelki/paperclip/issues/10)
+  - Goal: replace the legacy Gemini CLI adapter with a native Antigravity (`agy`) adapter once its command/session behavior is mapped and tested.
 
 - [#5 - Use relevant skills for market research, competitor analysis, and monetization planning](https://github.com/iMelki/paperclip/issues/5)
   - Goal: map competitors, ICPs, monetization options, and positioning for paperclip.
