@@ -74,8 +74,8 @@ const adapterDisplayMap: Record<string, AdapterDisplayInfo> = {
     recommended: true,
   },
   gemini_local: {
-    label: "Gemini CLI",
-    description: "Local Gemini agent",
+    label: "Gemini CLI (legacy)",
+    description: "Legacy local Gemini agent; blocked unless explicitly allowed",
     icon: Gem,
   },
   opencode_local: {

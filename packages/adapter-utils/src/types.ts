@@ -460,6 +460,7 @@ export interface CreateConfigValues {
   search: boolean;
   fastMode: boolean;
   dangerouslyBypassSandbox: boolean;
+  allowLegacyGeminiCli?: boolean;
   command: string;
   args: string;
   extraArgs: string;

@@ -183,6 +183,31 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   const command = asString(config.command, "gemini");
   const model = asString(config.model, DEFAULT_GEMINI_LOCAL_MODEL).trim();
   const sandbox = asBoolean(config.sandbox, false);
+  const envConfig = parseObject(config.env);
+  const allowLegacyGeminiCli =
+    asBoolean(config.allowLegacyGeminiCli, false) ||
+    asBoolean(envConfig.PAPERCLIP_ALLOW_LEGACY_GEMINI_CLI, false) ||
+    process.env.PAPERCLIP_ALLOW_LEGACY_GEMINI_CLI === "true";
+
+  if (!allowLegacyGeminiCli) {
+    return {
+      exitCode: 1,
+      signal: null,
+      timedOut: false,
+      errorMessage:
+        "gemini_local is a legacy Gemini CLI adapter and is blocked by default. Use Antigravity CLI (`agy`) for current Google account-backed CLI work, or set allowLegacyGeminiCli=true only for an explicit legacy inspection run.",
+      errorCode: "legacy_gemini_cli_blocked",
+      provider: "google",
+      biller: "google",
+      model,
+      billingType: "subscription",
+      resultJson: {
+        blocked: true,
+        reason: "legacy_gemini_cli_blocked",
+      },
+      clearSession: false,
+    };
+  }
 
   const workspaceContext = parseObject(context.paperclipWorkspace);
   const workspaceCwd = asString(workspaceContext.cwd, "");
@@ -214,7 +239,6 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     await ensureGeminiSkillsInjected(onLog, geminiSkillEntries, desiredGeminiSkillNames);
   }
 
-  const envConfig = parseObject(config.env);
   const hasExplicitApiKey =
     typeof envConfig.PAPERCLIP_API_KEY === "string" && envConfig.PAPERCLIP_API_KEY.trim().length > 0;
   const env: Record<string, string> = { ...buildPaperclipEnv(agent) };

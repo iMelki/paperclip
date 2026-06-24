@@ -2,6 +2,7 @@ import type { AdapterConfigFieldsProps } from "../types";
 import {
   DraftInput,
   Field,
+  ToggleField,
 } from "../../components/agent-config-primitives";
 import { ChoosePathButton } from "../../components/PathInstructionsModal";
 
@@ -22,6 +23,20 @@ export function GeminiLocalConfigFields({
   if (hideInstructionsFile) return null;
   return (
     <>
+      <ToggleField
+        label="Allow legacy Gemini CLI"
+        hint="Required to run the deprecated Gemini CLI adapter. Leave off for current Google account-backed work; use Antigravity CLI (`agy`) outside this legacy adapter."
+        checked={
+          isCreate
+            ? Boolean(values!.allowLegacyGeminiCli)
+            : Boolean(config.allowLegacyGeminiCli)
+        }
+        onChange={(v) =>
+          isCreate
+            ? set!({ allowLegacyGeminiCli: v })
+            : mark("adapterConfig", "allowLegacyGeminiCli", v || undefined)
+        }
+      />
       <Field label="Agent instructions file" hint={instructionsFileHint}>
         <div className="flex items-center gap-2">
           <DraftInput

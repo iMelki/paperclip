@@ -1,7 +1,7 @@
 import type { AdapterModelProfileDefinition } from "@paperclipai/adapter-utils";
 
 export const type = "gemini_local";
-export const label = "Gemini CLI (local)";
+export const label = "Gemini CLI (legacy local)";
 
 export const DEFAULT_GEMINI_LOCAL_MODEL = "auto";
 
@@ -18,7 +18,7 @@ export const modelProfiles: AdapterModelProfileDefinition[] = [
   {
     key: "cheap",
     label: "Cheap",
-    description: "Use Gemini Flash Lite as the budget Gemini CLI lane while preserving the primary model.",
+    description: "Use Gemini Flash Lite only for explicit legacy Gemini CLI inspection.",
     adapterConfig: {
       model: "gemini-2.5-flash-lite",
     },
@@ -30,14 +30,15 @@ export const agentConfigurationDoc = `# gemini_local agent configuration
 
 Adapter: gemini_local
 
-Use when:
-- You want Paperclip to run the Gemini CLI locally on the host machine
-- You want Gemini chat sessions resumed across heartbeats with --resume
-- You want Paperclip skills injected locally without polluting the global environment
+Use only when:
+- You are explicitly inspecting the legacy Gemini CLI on the host machine
+- You have set allowLegacyGeminiCli=true for this adapter config
+- You understand this is not the current Google account-backed CLI path; use Antigravity CLI (\`agy\`) for current work
 
 Don't use when:
 - You need webhook-style external invocation (use http or openclaw_gateway)
 - You only need a one-shot script without an AI coding agent loop (use process)
+- You need current Google account-backed CLI behavior (use Antigravity CLI outside this legacy adapter)
 - Gemini CLI is not installed on the machine that runs Paperclip
 
 Core fields:
@@ -46,7 +47,8 @@ Core fields:
 - promptTemplate (string, optional): run prompt template
 - model (string, optional): Gemini model id. Defaults to auto.
 - sandbox (boolean, optional): run in sandbox mode (default: false, passes --sandbox=none)
-- command (string, optional): defaults to "gemini"
+- command (string, optional): defaults to "gemini" after allowLegacyGeminiCli=true is set
+- allowLegacyGeminiCli (boolean, optional): defaults to false; must be true for execution
 - extraArgs (string[], optional): additional CLI args
 - env (object, optional): KEY=VALUE environment variables
 
@@ -59,4 +61,5 @@ Notes:
 - Sessions resume with --resume when stored session cwd matches the current cwd.
 - Paperclip auto-injects local skills into \`~/.gemini/skills/\` via symlinks, so the CLI can discover both credentials and skills in their natural location.
 - Authentication can use GEMINI_API_KEY / GOOGLE_API_KEY or local Gemini CLI login.
+- Google moved individual-user Gemini CLI work to Antigravity CLI after the 2026-06-18 transition. This adapter remains legacy/explicit-only until a native Antigravity adapter exists.
 `;

@@ -52,6 +52,11 @@ export async function testEnvironment(
   const checks: AdapterEnvironmentCheck[] = [];
   const config = parseObject(ctx.config);
   const command = asString(config.command, "gemini");
+  const envConfig = parseObject(config.env);
+  const allowLegacyGeminiCli =
+    asBoolean(config.allowLegacyGeminiCli, false) ||
+    asBoolean(envConfig.PAPERCLIP_ALLOW_LEGACY_GEMINI_CLI, false) ||
+    process.env.PAPERCLIP_ALLOW_LEGACY_GEMINI_CLI === "true";
   const target = ctx.executionTarget ?? null;
   const targetIsRemote = target?.kind === "remote";
   const cwd = resolveAdapterExecutionTargetCwd(target, asString(config.cwd, ""), process.cwd());
@@ -66,6 +71,21 @@ export async function testEnvironment(
       level: "info",
       message: `Probing inside environment: ${targetLabel}`,
     });
+  }
+
+  if (!allowLegacyGeminiCli) {
+    checks.push({
+      code: "gemini_legacy_cli_blocked",
+      level: "error",
+      message: "gemini_local is a legacy Gemini CLI adapter and is blocked by default.",
+      hint: "Use Antigravity CLI (`agy`) for current Google account-backed CLI work. Set allowLegacyGeminiCli=true only for an explicit legacy inspection run.",
+    });
+    return {
+      adapterType: ctx.adapterType,
+      status: summarizeStatus(checks),
+      checks,
+      testedAt: new Date().toISOString(),
+    };
   }
 
   try {
@@ -88,7 +108,6 @@ export async function testEnvironment(
     });
   }
 
-  const envConfig = parseObject(config.env);
   const env: Record<string, string> = {};
   for (const [key, value] of Object.entries(envConfig)) {
     if (typeof value === "string") env[key] = value;

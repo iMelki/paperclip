@@ -55,6 +55,7 @@ export function buildGeminiLocalConfig(v: CreateConfigValues): Record<string, un
   const ac: Record<string, unknown> = {};
   if (v.cwd) ac.cwd = v.cwd;
   if (v.instructionsFilePath) ac.instructionsFilePath = v.instructionsFilePath;
+  if (v.allowLegacyGeminiCli) ac.allowLegacyGeminiCli = true;
   ac.model = v.model || DEFAULT_GEMINI_LOCAL_MODEL;
   ac.timeoutSec = 0;
   ac.graceSec = 15;

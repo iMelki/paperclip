@@ -125,6 +125,7 @@ describe("gemini remote execution", () => {
         taskKey: null,
       },
       config: {
+        allowLegacyGeminiCli: true,
         command: "gemini",
       },
       context: {
@@ -240,6 +241,7 @@ describe("gemini remote execution", () => {
         taskKey: null,
       },
       config: {
+        allowLegacyGeminiCli: true,
         command: "gemini",
       },
       context: {
@@ -291,6 +293,7 @@ describe("gemini remote execution", () => {
         taskKey: null,
       },
       config: {
+        allowLegacyGeminiCli: true,
         command: "gemini",
       },
       context: {
