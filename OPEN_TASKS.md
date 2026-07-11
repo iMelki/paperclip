@@ -1,10 +1,13 @@
 # Paperclip Open Tasks
 
-Last updated: 2026-06-24
+Last updated: 2026-07-11
 
 This file is the durable local index for active `paperclip` issues.
 
 ## Active Issues
+
+- [#11 - Default new UI-created agents to permission prompts enabled](https://github.com/iMelki/paperclip/issues/11)
+  - Goal: require explicit opt-in before new UI-created Claude or OpenCode agents bypass permission prompts, while preserving legacy omitted-config and explicit unattended onboarding behavior.
 
 - [#10 - Add native Antigravity adapter and retire legacy gemini_local path](https://github.com/iMelki/paperclip/issues/10)
   - Goal: replace the legacy Gemini CLI adapter with a native Antigravity (`agy`) adapter once its command/session behavior is mapped and tested.
