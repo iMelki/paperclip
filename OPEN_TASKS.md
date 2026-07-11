@@ -6,6 +6,9 @@ This file is the durable local index for active `paperclip` issues.
 
 ## Active Issues
 
+- [#12 - Reconcile preserved Windows runtime and OpenAPI worktree batch](https://github.com/iMelki/paperclip/issues/12)
+  - Goal: inventory, test, and split the mixed staged/unstaged Windows runtime, sandbox, workspace, test-stability, and OpenAPI work into coherent exact-path commits without losing preserved work.
+
 - [#10 - Add native Antigravity adapter and retire legacy gemini_local path](https://github.com/iMelki/paperclip/issues/10)
   - Goal: replace the legacy Gemini CLI adapter with a native Antigravity (`agy`) adapter once its command/session behavior is mapped and tested.
 
