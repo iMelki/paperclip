@@ -4,6 +4,9 @@ All notable changes to this repository should be recorded here.
 
 ## Unreleased
 
+- Changed new UI-created Claude and OpenCode agents to require explicit opt-in
+  before bypassing permission prompts, while preserving legacy omitted-config
+  compatibility and the explicit unattended onboarding path.
 - Added a PowerShell pre-commit checker for Windows and made Husky prefer it
   when `pwsh` is available, preserving the existing shell checker as the
   fallback path.
