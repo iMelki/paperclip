@@ -6,9 +6,6 @@ This file is the durable local index for active `paperclip` issues.
 
 ## Active Issues
 
-- [#11 - Default new UI-created agents to permission prompts enabled](https://github.com/iMelki/paperclip/issues/11)
-  - Goal: require explicit opt-in before new UI-created Claude or OpenCode agents bypass permission prompts, while preserving legacy omitted-config and explicit unattended onboarding behavior.
-
 - [#10 - Add native Antigravity adapter and retire legacy gemini_local path](https://github.com/iMelki/paperclip/issues/10)
   - Goal: replace the legacy Gemini CLI adapter with a native Antigravity (`agy`) adapter once its command/session behavior is mapped and tested.
 
@@ -19,6 +16,9 @@ This file is the durable local index for active `paperclip` issues.
   - Goal: define and implement a landing page with clear audience, value proposition, proof, and CTA.
 
 ## Recently Completed
+
+- [#11 - Default new UI-created agents to permission prompts enabled](https://github.com/iMelki/paperclip/issues/11)
+  - 2026-07-11: new UI-created Claude and OpenCode agents now default permission bypass off; focused regression coverage and adapter documentation preserve the legacy omitted-config fallback and explicit unattended onboarding path.
 
 - [#9 - Fix Windows pre-commit sandbox and plugin typecheck failures](https://github.com/iMelki/paperclip/issues/9)
   - 2026-06-23: added a Windows-native PowerShell pre-commit checker, made
