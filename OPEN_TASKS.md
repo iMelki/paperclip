@@ -1,10 +1,16 @@
 # Paperclip Open Tasks
 
-Last updated: 2026-07-11
+Last updated: 2026-07-14
 
 This file is the durable local index for active `paperclip` issues.
 
 ## Active Issues
+
+- [#13 - Replace inert secrets-filter attributes with enforced secret scanning](https://github.com/iMelki/paperclip/issues/13)
+  - 2026-07-14: selected explicit scanning-only policy, removed the six inert
+    `filter=secrets` declarations, and restored a zero-warning repo-health
+    audit. Pinned current Gitleaks plus fail-closed missing-tool behavior remains
+    open under this issue.
 
 - [#12 - Reconcile preserved Windows runtime and OpenAPI worktree batch](https://github.com/iMelki/paperclip/issues/12)
   - Goal: inventory, test, and split the mixed staged/unstaged Windows runtime, sandbox, workspace, test-stability, and OpenAPI work into coherent exact-path commits without losing preserved work.
@@ -29,8 +35,9 @@ This file is the durable local index for active `paperclip` issues.
     smoke passes, and verified plugin build dependency prep passes.
 - [#7 - Backfill secrets hygiene and governance baseline after modernization audit wave 3](https://github.com/iMelki/paperclip/issues/7)
   - 2026-06-23: confirmed the wave-3 governance baseline is present and
-    `Invoke-RepoHealthAudit.ps1 -Json` reports `grade=OK`, `fail=0`; only the
-    accepted local secrets-store warnings remain.
+    `Invoke-RepoHealthAudit.ps1 -Json` reports `grade=OK`, `fail=0`.
+  - 2026-07-14: the remaining policy-unknown warnings were resolved by the
+    scanning-only policy tracked in #13.
 - [#3 - Review and split preserved remote execution and continuation WIP](https://github.com/iMelki/paperclip/issues/3)
   - Closed after the preserved remote-execution and continuation work was
     reviewed and split out of the active task lane.

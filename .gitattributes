@@ -10,10 +10,3 @@
 *.toml text eol=lf
 *.env text eol=lf
 *.env.* text eol=lf
-
-*.json filter=secrets
-*.env filter=secrets
-*.env.* filter=secrets
-*.yaml filter=secrets
-*.yml filter=secrets
-*.toml filter=secrets
