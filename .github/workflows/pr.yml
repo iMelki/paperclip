@@ -10,6 +10,38 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  secret-scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout complete history
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install pinned Gitleaks
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="8.30.1"
+          asset="gitleaks_${version}_linux_x64.tar.gz"
+          expected="551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"
+          install_dir="$RUNNER_TEMP/gitleaks-$version"
+          mkdir -p "$install_dir"
+          curl --fail --location --retry 3 --output "$install_dir/$asset" \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${version}/${asset}"
+          printf '%s  %s\n' "$expected" "$install_dir/$asset" | sha256sum --check --strict
+          tar -xzf "$install_dir/$asset" -C "$install_dir" gitleaks
+          echo "PAPERCLIP_GITLEAKS_BIN=$install_dir/gitleaks" >> "$GITHUB_ENV"
+          "$install_dir/gitleaks" version
+
+      - name: Scan complete repository history
+        run: node scripts/verify-gitleaks.mjs --history
+
   policy:
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -54,7 +86,7 @@ jobs:
           fi
 
   verify:
-    needs: [policy]
+    needs: [policy, secret-scan]
     runs-on: ubuntu-latest
     timeout-minutes: 20
 
@@ -96,7 +128,7 @@ jobs:
           ./scripts/release.sh canary --skip-verify --dry-run
 
   e2e:
-    needs: [policy]
+    needs: [policy, secret-scan]
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:

@@ -86,17 +86,12 @@ else
   fail "Forbidden tokens found."
 fi
 
-if command -v gitleaks >/dev/null 2>&1; then
-  echo
-  echo "✓ Running Gitleaks (local)..."
-  if gitleaks protect --staged --verbose; then
-    pass
-  else
-    fail "Gitleaks detected potential secrets."
-  fi
+echo
+echo "✓ Running pinned Gitleaks staged scan..."
+if node scripts/verify-gitleaks.mjs --staged; then
+  pass
 else
-  echo
-  info "Gitleaks not found. Skipping deep secret scan."
+  fail "Pinned Gitleaks scan failed or detected potential secrets."
 fi
 
 echo

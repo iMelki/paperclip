@@ -112,19 +112,13 @@ if ($LASTEXITCODE -eq 0) {
   Write-Fail "Forbidden tokens found."
 }
 
-$gitleaks = Get-Command gitleaks -ErrorAction SilentlyContinue
-if ($gitleaks) {
-  Write-Host ""
-  Write-Host "Running Gitleaks (local)..."
-  & $gitleaks.Source protect --staged --verbose
-  if ($LASTEXITCODE -eq 0) {
-    Write-Pass
-  } else {
-    Write-Fail "Gitleaks detected potential secrets."
-  }
+Write-Host ""
+Write-Host "Running pinned Gitleaks staged scan..."
+& node scripts/verify-gitleaks.mjs --staged
+if ($LASTEXITCODE -eq 0) {
+  Write-Pass
 } else {
-  Write-Host ""
-  Write-InfoLine "Gitleaks not found. Skipping deep secret scan."
+  Write-Fail "Pinned Gitleaks scan failed or detected potential secrets."
 }
 
 Write-Host ""

@@ -1,0 +1,21 @@
+# Reviewed historical synthetic fixtures and generated documentation assets.
+# Exact fingerprints only: new values, locations, or commits remain detectable.
+# Tracking: https://github.com/iMelki/paperclip/issues/13
+02a5f130448e089bb05768504c85faacff05a75e:server/src/__tests__/secrets-service.test.ts:generic-api-key:380
+02a5f130448e089bb05768504c85faacff05a75e:server/src/__tests__/secrets-service.test.ts:generic-api-key:457
+778e775c35834aabe09266fb6d415d3dafbd1deb:server/src/__tests__/secrets-service.test.ts:generic-api-key:997
+778e775c35834aabe09266fb6d415d3dafbd1deb:server/src/__tests__/secrets-service.test.ts:generic-api-key:1113
+5a0c1979cf439d434c527de4935687a178be4b8e:server/src/__tests__/redaction.test.ts:jwt:68
+5a0c1979cf439d434c527de4935687a178be4b8e:server/src/__tests__/heartbeat-active-run-output-watchdog.test.ts:jwt:220
+600839b4773ac0d4e4f5e30fc722e8cd58323382:server/src/__tests__/redaction.test.ts:jwt:68
+600839b4773ac0d4e4f5e30fc722e8cd58323382:server/src/__tests__/heartbeat-active-run-output-watchdog.test.ts:jwt:219
+9b784875251ec9bf2f053a51cee92b09f4dc77cb:ui/storybook-static/assets/MarkdownEditor-BtfKiA3v.js:generic-api-key:51
+321b90205f8fa68b476a7591022a9249426de902:server/src/__tests__/redaction.test.ts:jwt:68
+321b90205f8fa68b476a7591022a9249426de902:server/src/__tests__/heartbeat-active-run-output-watchdog.test.ts:jwt:219
+e0b8c392a56d7cd866fb2f38545726d454ef594e:server/src/__tests__/redaction.test.ts:jwt:68
+e0b8c392a56d7cd866fb2f38545726d454ef594e:server/src/__tests__/heartbeat-active-run-output-watchdog.test.ts:jwt:219
+c19197581b2ec7f9e94acf2aa586c3807c8bb4fa:ui/storybook-static/assets/MarkdownEditor-BtfKiA3v.js:generic-api-key:51
+9b784875251ec9bf2f053a51cee92b09f4dc77cb:ui/storybook-static/assets/iframe-aoIC7NDi.js:generic-api-key:1046
+c19197581b2ec7f9e94acf2aa586c3807c8bb4fa:ui/storybook-static/assets/iframe-aoIC7NDi.js:generic-api-key:1046
+09d2ef1a37c9097b983a9705ff30f5c2225fc880:docs/deploy/secrets.md:generic-api-key:76
+02dc46e78214083acebba040e9b57833596add9d:docs/deploy/secrets.md:generic-api-key:78

@@ -1,6 +1,6 @@
 # Paperclip Open Tasks
 
-Last updated: 2026-07-14
+Last updated: 2026-07-16
 
 This file is the durable local index for active `paperclip` issues.
 
@@ -9,8 +9,15 @@ This file is the durable local index for active `paperclip` issues.
 - [#13 - Replace inert secrets-filter attributes with enforced secret scanning](https://github.com/iMelki/paperclip/issues/13)
   - 2026-07-14: selected explicit scanning-only policy, removed the six inert
     `filter=secrets` declarations, and restored a zero-warning repo-health
-    audit. Pinned current Gitleaks plus fail-closed missing-tool behavior remains
-    open under this issue.
+    audit.
+  - 2026-07-16: pinned Gitleaks `8.30.1` and the official Linux/Windows x64
+    release checksums; local hooks now fail closed when the binary is absent,
+    wrong, broken, or reports a finding. The PR `verify` and `e2e` jobs depend
+    on a checksum-verified full-history scan. Local proof scanned `3,633`
+    commits / `101.82 MB` in `8.77s` with zero unignored findings after exact
+    review of 18 repeated synthetic/generated fingerprints. `master` still has
+    no branch protection or ruleset, so keep #13 open until the scanner check
+    has a capacity-approved GitHub run and can be made a required status check.
 
 - [#12 - Reconcile preserved Windows runtime and OpenAPI worktree batch](https://github.com/iMelki/paperclip/issues/12)
   - Goal: inventory, test, and split the mixed staged/unstaged Windows runtime, sandbox, workspace, test-stability, and OpenAPI work into coherent exact-path commits without losing preserved work.

@@ -83,6 +83,7 @@
               "deploy/deployment-modes",
               "deploy/database",
               "deploy/secrets",
+              "deploy/secret-scanning",
               "deploy/storage",
               "deploy/environment-variables"
             ]
