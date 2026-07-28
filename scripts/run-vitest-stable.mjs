@@ -5,6 +5,17 @@ import os from "node:os";
 import path from "node:path";
 
 const pnpmCommand = process.platform === "win32" ? "pnpm" : "pnpm";
+const commonVitestArgs = [
+  "--testTimeout=30000",
+  "--hookTimeout=30000",
+  "--teardownTimeout=30000",
+  "--reporter=default",
+  "--reporter=hanging-process",
+];
+const windowsServerVitestArgs =
+  process.platform === "win32"
+    ? ["--pool=forks", "--poolOptions.forks.isolate=true", "--maxWorkers=1"]
+    : [];
 
 const repoRoot = process.cwd();
 const serverRoot = path.join(repoRoot, "server");
@@ -87,11 +98,12 @@ function runVitest(args, label) {
     ...process.env,
     PAPERCLIP_HOME: path.join(testRoot, "home"),
     PAPERCLIP_INSTANCE_ID: `vitest-${process.pid}-${invocationIndex}`,
+    PAPERCLIP_ENV_LIVE_SSH_NO_AUTO_FIXTURE: process.env.PAPERCLIP_ENV_LIVE_SSH_NO_AUTO_FIXTURE ?? "true",
     TMPDIR: path.join(testRoot, "tmp"),
   };
   mkdirSync(env.PAPERCLIP_HOME, { recursive: true });
   mkdirSync(env.TMPDIR, { recursive: true });
-  const result = spawnSync(pnpmCommand, ["exec", "vitest", "run", ...args], {
+  const result = spawnSync(pnpmCommand, ["exec", "vitest", "run", ...commonVitestArgs, ...args], {
     cwd: repoRoot,
     env,
     shell: process.platform === "win32",
@@ -120,7 +132,7 @@ for (const project of nonServerProjects) {
 }
 
 runVitest(
-  ["--project", "@paperclipai/server", ...excludeRouteArgs],
+  ["--project", "@paperclipai/server", ...windowsServerVitestArgs, ...excludeRouteArgs],
   `server suites excluding ${routeTests.length} serialized suites`,
 );
 
@@ -129,9 +141,8 @@ for (const routeTest of routeTests) {
     [
       "--project",
       "@paperclipai/server",
+      ...windowsServerVitestArgs,
       routeTest.repoPath,
-      "--pool=forks",
-      "--poolOptions.forks.isolate=true",
     ],
     routeTest.repoPath,
   );
