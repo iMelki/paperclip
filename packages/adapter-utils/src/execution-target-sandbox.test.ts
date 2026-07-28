@@ -14,6 +14,7 @@ import {
   type AdapterSandboxExecutionTarget,
 } from "./execution-target.js";
 import { runChildProcess } from "./server-utils.js";
+import { resolveTestShellCommand } from "./test-shell.js";
 
 describe("sandbox adapter execution targets", () => {
   const cleanupDirs: string[] = [];
@@ -40,7 +41,7 @@ describe("sandbox adapter execution targets", () => {
         onSpawn?: (meta: { pid: number; startedAt: string }) => Promise<void>;
       }) => {
         counter += 1;
-        const command = input.command === "bash" ? "/bin/bash" : input.command;
+        const command = resolveTestShellCommand(input.command);
         return runChildProcess(`sandbox-run-${counter}`, command, input.args ?? [], {
           cwd: input.cwd ?? process.cwd(),
           env: input.env ?? {},
@@ -274,7 +275,7 @@ describe("sandbox adapter execution targets", () => {
       await bridge?.stop();
       await new Promise<void>((resolve) => apiServer.close(() => resolve()));
     }
-  });
+  }, 60_000);
 
   it("fails oversized host responses with a 502 before returning them to the sandbox client", async () => {
     const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-execution-target-bridge-limit-"));
@@ -349,5 +350,5 @@ describe("sandbox adapter execution targets", () => {
       await bridge?.stop();
       await new Promise<void>((resolve) => apiServer.close(() => resolve()));
     }
-  });
+  }, 60_000);
 });

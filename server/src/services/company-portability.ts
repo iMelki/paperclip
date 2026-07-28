@@ -852,6 +852,14 @@ async function readGitOutput(cwd: string, args: string[]) {
   return trimmed.length > 0 ? trimmed : null;
 }
 
+async function readConfiguredGitRemoteUrl(cwd: string, remoteName: string) {
+  try {
+    return await readGitOutput(cwd, ["config", "--get", `remote.${remoteName}.url`]);
+  } catch {
+    return null;
+  }
+}
+
 async function inferPortableWorkspaceGitMetadata(workspace: NonNullable<ProjectLike["workspaces"]>[number]) {
   const cwd = asString(workspace.cwd);
   if (!cwd) {
@@ -864,13 +872,13 @@ async function inferPortableWorkspaceGitMetadata(workspace: NonNullable<ProjectL
 
   let repoUrl: string | null = null;
   try {
-    repoUrl = await readGitOutput(cwd, ["remote", "get-url", "origin"]);
+    repoUrl = await readConfiguredGitRemoteUrl(cwd, "origin") ?? await readGitOutput(cwd, ["remote", "get-url", "origin"]);
   } catch {
     try {
       const firstRemote = await readGitOutput(cwd, ["remote"]);
       const remoteName = firstRemote?.split("\n").map((entry) => entry.trim()).find(Boolean) ?? null;
       if (remoteName) {
-        repoUrl = await readGitOutput(cwd, ["remote", "get-url", remoteName]);
+        repoUrl = await readConfiguredGitRemoteUrl(cwd, remoteName) ?? await readGitOutput(cwd, ["remote", "get-url", remoteName]);
       }
     } catch {
       repoUrl = null;

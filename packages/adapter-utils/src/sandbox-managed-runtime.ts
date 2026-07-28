@@ -3,6 +3,7 @@ import { constants as fsConstants, promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
+import { shellQuote, shellQuotePath } from "./shell-path.js";
 
 const execFile = promisify(execFileCallback);
 
@@ -52,10 +53,6 @@ function asString(value: unknown): string {
 
 function asNumber(value: unknown): number {
   return typeof value === "number" ? value : Number(value);
-}
-
-function shellQuote(value: string) {
-  return `'${value.replace(/'/g, `'\"'\"'`)}'`;
 }
 
 export function parseSandboxRemoteExecutionSpec(value: unknown): SandboxRemoteExecutionSpec | null {
@@ -118,8 +115,9 @@ async function withTempDir<T>(prefix: string, fn: (dir: string) => Promise<T>): 
   }
 }
 
-async function execTar(args: string[]): Promise<void> {
+async function execTar(args: string[], options: { cwd?: string } = {}): Promise<void> {
   await execFile("tar", args, {
+    cwd: options.cwd,
     env: {
       ...process.env,
       COPYFILE_DISABLE: "1",
@@ -135,16 +133,18 @@ async function createTarballFromDirectory(input: {
   followSymlinks?: boolean;
 }): Promise<void> {
   const excludeArgs = ["._*", ...(input.exclude ?? [])].flatMap((entry) => ["--exclude", entry]);
+  const archiveDir = path.dirname(input.archivePath);
+  const archiveName = path.basename(input.archivePath);
   await execTar([
     "-c",
     ...(input.followSymlinks ? ["-h"] : []),
     "-f",
-    input.archivePath,
+    archiveName,
     "-C",
     input.localDir,
     ...excludeArgs,
     ".",
-  ]);
+  ], { cwd: archiveDir });
 }
 
 async function extractTarballToDirectory(input: {
@@ -152,7 +152,9 @@ async function extractTarballToDirectory(input: {
   localDir: string;
 }): Promise<void> {
   await fs.mkdir(input.localDir, { recursive: true });
-  await execTar(["-xf", input.archivePath, "-C", input.localDir]);
+  const archiveDir = path.dirname(input.archivePath);
+  const archiveName = path.basename(input.archivePath);
+  await execTar(["-xf", archiveName, "-C", input.localDir], { cwd: archiveDir });
 }
 
 async function walkDirectory(root: string, relative = ""): Promise<string[]> {
@@ -263,12 +265,10 @@ export async function prepareSandboxManagedRuntime(input: {
     const preservedNames = new Set([".paperclip-runtime", ...(input.preserveAbsentOnRestore ?? [])]);
     const findPreserveArgs = [...preservedNames].map((entry) => `! -name ${shellQuote(entry)}`).join(" ");
     await input.client.run(
-      `sh -lc ${shellQuote(
-        `mkdir -p ${shellQuote(workspaceRemoteDir)} && ` +
-          `find ${shellQuote(workspaceRemoteDir)} -mindepth 1 -maxdepth 1 ${findPreserveArgs} -exec rm -rf -- {} + && ` +
-          `tar -xf ${shellQuote(remoteWorkspaceTar)} -C ${shellQuote(workspaceRemoteDir)} && ` +
-          `rm -f ${shellQuote(remoteWorkspaceTar)}`,
-      )}`,
+      `mkdir -p ${shellQuotePath(workspaceRemoteDir)} && ` +
+        `find ${shellQuotePath(workspaceRemoteDir)} -mindepth 1 -maxdepth 1 ${findPreserveArgs} -exec rm -rf -- {} + && ` +
+        `tar -xf ${shellQuotePath(remoteWorkspaceTar)} -C ${shellQuotePath(workspaceRemoteDir)} && ` +
+        `rm -f ${shellQuotePath(remoteWorkspaceTar)}`,
       { timeoutMs: input.spec.timeoutMs },
     );
 
@@ -285,12 +285,10 @@ export async function prepareSandboxManagedRuntime(input: {
       const remoteAssetTar = path.posix.join(runtimeRootDir, `${asset.key}-upload.tar`);
       await input.client.writeFile(remoteAssetTar, toArrayBuffer(assetTarBytes));
       await input.client.run(
-        `sh -lc ${shellQuote(
-          `rm -rf ${shellQuote(remoteAssetDir)} && ` +
-            `mkdir -p ${shellQuote(remoteAssetDir)} && ` +
-            `tar -xf ${shellQuote(remoteAssetTar)} -C ${shellQuote(remoteAssetDir)} && ` +
-            `rm -f ${shellQuote(remoteAssetTar)}`,
-        )}`,
+        `rm -rf ${shellQuotePath(remoteAssetDir)} && ` +
+          `mkdir -p ${shellQuotePath(remoteAssetDir)} && ` +
+          `tar -xf ${shellQuotePath(remoteAssetTar)} -C ${shellQuotePath(remoteAssetDir)} && ` +
+          `rm -f ${shellQuotePath(remoteAssetTar)}`,
         { timeoutMs: input.spec.timeoutMs },
       );
     }
@@ -310,11 +308,9 @@ export async function prepareSandboxManagedRuntime(input: {
       await withTempDir("paperclip-sandbox-restore-", async (tempDir) => {
         const remoteWorkspaceTar = path.posix.join(runtimeRootDir, "workspace-download.tar");
         await input.client.run(
-          `sh -lc ${shellQuote(
-            `mkdir -p ${shellQuote(runtimeRootDir)} && ` +
-              `tar -cf ${shellQuote(remoteWorkspaceTar)} -C ${shellQuote(workspaceRemoteDir)} ` +
-              `${tarExcludeFlags(input.workspaceExclude)} .`,
-          )}`,
+          `mkdir -p ${shellQuotePath(runtimeRootDir)} && ` +
+            `tar -cf ${shellQuotePath(remoteWorkspaceTar)} -C ${shellQuotePath(workspaceRemoteDir)} ` +
+            `${tarExcludeFlags(input.workspaceExclude)} .`,
           { timeoutMs: input.spec.timeoutMs },
         );
         const archiveBytes = await input.client.readFile(remoteWorkspaceTar);

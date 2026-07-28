@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import { prepareCommandManagedRuntime } from "./command-managed-runtime.js";
 import type { RunProcessResult } from "./server-utils.js";
+import { resolveTestShellCommand } from "./test-shell.js";
 
 const execFile = promisify(execFileCallback);
 
@@ -55,8 +56,7 @@ describe("command managed runtime", () => {
           ...process.env,
           ...input.env,
         };
-        const command =
-          input.command === "sh" ? "/bin/sh" : input.command === "bash" ? "/bin/bash" : input.command;
+        const command = resolveTestShellCommand(input.command);
         const args = [...(input.args ?? [])];
         if (
           input.stdin != null &&
@@ -117,7 +117,8 @@ describe("command managed runtime", () => {
     await expect(readFile(path.join(remoteWorkspaceDir, "README.md"), "utf8")).resolves.toBe("local workspace\n");
     await expect(readFile(path.join(remoteWorkspaceDir, ".paperclip-runtime", "state.json"), "utf8")).rejects
       .toMatchObject({ code: "ENOENT" });
-    expect(calls.every((call) => call.stdin == null)).toBe(true);
+    expect(calls.some((call) => call.stdin != null)).toBe(true);
+    expect(calls.every((call) => !(call.args?.[1] ?? "").includes("printf '%s'"))).toBe(true);
 
     await mkdir(path.join(remoteWorkspaceDir, ".paperclip-runtime"), { recursive: true });
     await writeFile(path.join(remoteWorkspaceDir, "README.md"), "remote workspace\n", "utf8");
@@ -129,6 +130,7 @@ describe("command managed runtime", () => {
       .toBe("{\"keep\":true}\n");
     await expect(readFile(path.join(localWorkspaceDir, ".paperclip-runtime", "remote-state.json"), "utf8")).rejects
       .toMatchObject({ code: "ENOENT" });
-    expect(calls.every((call) => call.stdin == null)).toBe(true);
-  });
+    expect(calls.some((call) => call.stdin != null)).toBe(true);
+    expect(calls.every((call) => !(call.args?.[1] ?? "").includes("printf '%s'"))).toBe(true);
+  }, 30_000);
 });

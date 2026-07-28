@@ -31,11 +31,48 @@ import { readExecutionWorkspaceConfig } from "./execution-workspaces.js";
 import { readProjectWorkspaceRuntimeConfig } from "./project-workspace-runtime-config.js";
 
 export function resolveShell(): string {
-  const fallback = process.platform === "win32" ? "sh" : "/bin/sh";
+  const fallback = process.platform === "win32" ? resolveWindowsShell() : "/bin/sh";
   const shell = process.env.SHELL?.trim();
   if (!shell) return fallback;
   if (path.isAbsolute(shell) && !existsSync(shell)) return fallback;
+  if (process.platform === "win32" && !looksLikePosixShell(shell)) return fallback;
   return shell;
+}
+
+function resolveWindowsShell(): string {
+  const candidates = [
+    "C:\\Program Files\\Git\\usr\\bin\\bash.exe",
+    "C:\\Program Files\\Git\\bin\\bash.exe",
+    "C:\\Program Files (x86)\\Git\\usr\\bin\\bash.exe",
+    "C:\\Program Files (x86)\\Git\\bin\\bash.exe",
+    "sh",
+  ];
+  return candidates.find((candidate) => candidate === "sh" || existsSync(candidate)) ?? "sh";
+}
+
+function looksLikePosixShell(shell: string) {
+  const normalized = path.basename(shell).toLowerCase();
+  return normalized === "sh" || normalized === "sh.exe" || normalized === "bash" || normalized === "bash.exe" || normalized === "zsh" || normalized === "zsh.exe";
+}
+
+function getWindowsPosixShellPathDirs(shell: string) {
+  if (process.platform !== "win32" || !path.isAbsolute(shell)) return [];
+  const shellDir = path.dirname(shell);
+  const candidates = [shellDir];
+  if (path.basename(shellDir).toLowerCase() === "bin") {
+    candidates.push(path.resolve(shellDir, "..", "usr", "bin"));
+  }
+  return [...new Set(candidates)].filter((candidate) => existsSync(candidate));
+}
+
+function buildShellEnv(env: NodeJS.ProcessEnv, shell: string): NodeJS.ProcessEnv {
+  const pathDirs = getWindowsPosixShellPathDirs(shell);
+  if (pathDirs.length === 0) return env;
+
+  const currentPath = env.PATH ?? env.Path ?? process.env.PATH ?? process.env.Path ?? "";
+  const nextEnv = { ...env };
+  nextEnv.PATH = [...pathDirs, currentPath].filter(Boolean).join(path.delimiter);
+  return nextEnv;
 }
 
 export interface ExecutionWorkspaceInput {
@@ -714,6 +751,13 @@ function quoteShellArg(value: string) {
   return `'${value.replace(/'/g, `'\\''`)}'`;
 }
 
+function toShellPath(value: string) {
+  const match = /^([A-Za-z]):[\\/](.*)$/.exec(value);
+  if (!match) return value;
+  const [, drive, rest] = match;
+  return `/${drive.toLowerCase()}/${rest.replace(/\\/g, "/")}`;
+}
+
 function resolveRepoManagedWorkspaceCommand(command: string, repoRoot: string) {
   const patterns = [
     /^(?<prefix>(?:bash|sh|zsh)\s+)(?<quote>["']?)(?<relative>\.\/[^"'\s]+)\k<quote>(?<suffix>(?:\s.*)?)$/s,
@@ -728,9 +772,12 @@ function resolveRepoManagedWorkspaceCommand(command: string, repoRoot: string) {
     const repoManagedPath = path.join(repoRoot, relativePath.slice(2));
     if (!existsSync(repoManagedPath)) continue;
 
-    const prefix = match.groups.prefix ?? "";
+    let prefix = match.groups.prefix ?? "";
     const suffix = match.groups.suffix ?? "";
-    return `${prefix}${quoteShellArg(repoManagedPath)}${suffix}`;
+    if (process.platform === "win32" && prefix) {
+      prefix = `${quoteShellArg(toShellPath(resolveShell()))} `;
+    }
+    return `${prefix}${quoteShellArg(toShellPath(repoManagedPath))}${suffix}`;
   }
 
   return command;
@@ -744,11 +791,12 @@ async function runWorkspaceCommand(input: {
   label: string;
 }) {
   const shell = resolveShell();
+  const env = buildShellEnv(input.env, shell);
   const proc = await executeProcess({
     command: shell,
     args: ["-c", input.resolvedCommand ?? input.command],
     cwd: input.cwd,
-    env: input.env,
+    env,
   });
   if (proc.code === 0) return;
 
@@ -2036,9 +2084,10 @@ async function startLocalRuntimeService(input: {
   });
 
   const shell = resolveShell();
+  const serviceEnv = buildShellEnv(env, shell);
   const child = spawn(shell, ["-lc", command], {
     cwd: serviceCwd,
-    env,
+    env: serviceEnv,
     detached: process.platform !== "win32",
     stdio: ["ignore", "pipe", "pipe"],
   });

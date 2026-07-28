@@ -111,7 +111,8 @@ function renderPaperclipEnvNote(env: Record<string, string>): string {
 }
 
 function cursorSkillsHome(): string {
-  return path.join(os.homedir(), ".cursor", "skills");
+  const configuredHome = process.env.HOME?.trim();
+  return path.join(configuredHome || os.homedir(), ".cursor", "skills");
 }
 
 async function buildCursorSkillsDir(config: Record<string, unknown>): Promise<string> {

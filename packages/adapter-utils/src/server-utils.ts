@@ -1,6 +1,6 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { constants as fsConstants, promises as fs, type Dirent } from "node:fs";
+import { constants as fsConstants, existsSync, promises as fs, type Dirent } from "node:fs";
 import path from "node:path";
 import { buildSshSpawnTarget, type SshRemoteExecutionSpec } from "./ssh.js";
 import { redactCommandText } from "./command-redaction.js";
@@ -981,6 +981,18 @@ function windowsPathExts(env: NodeJS.ProcessEnv): string[] {
   return (env.PATHEXT ?? ".EXE;.CMD;.BAT;.COM").split(";").filter(Boolean);
 }
 
+function windowsPosixToolDirs(): string[] {
+  if (process.platform !== "win32") return [];
+  return [
+    "C:\\Program Files\\Git\\usr\\bin",
+    "C:\\Program Files (x86)\\Git\\usr\\bin",
+  ].filter((candidate) => pathExistsSync(candidate));
+}
+
+function pathExistsSync(candidate: string) {
+  return existsSync(candidate);
+}
+
 async function pathExists(candidate: string) {
   try {
     await fs.access(candidate, process.platform === "win32" ? fsConstants.F_OK : fsConstants.X_OK);
@@ -1008,7 +1020,7 @@ async function resolveCommandPath(command: string, cwd: string, env: NodeJS.Proc
       process.platform === "win32"
         ? hasExtension
           ? [path.join(dir, command)]
-          : exts.map((ext) => path.join(dir, `${command}${ext}`))
+          : [path.join(dir, command), ...exts.map((ext) => path.join(dir, `${command}${ext}`))]
         : [path.join(dir, command)];
     for (const candidate of candidates) {
       if (await pathExists(candidate)) return candidate;
@@ -1042,6 +1054,67 @@ function quoteForCmd(arg: string) {
 function resolveWindowsCmdShell(env: NodeJS.ProcessEnv): string {
   const fallbackRoot = env.SystemRoot || process.env.SystemRoot || "C:\\Windows";
   return path.join(fallbackRoot, "System32", "cmd.exe");
+}
+
+function parseShebang(line: string): { command: string; args: string[] } | null {
+  if (!line.startsWith("#!")) return null;
+  const parts = line.slice(2).trim().split(/\s+/).filter(Boolean);
+  if (parts.length === 0) return null;
+
+  let [command, ...args] = parts;
+  if (path.basename(command).toLowerCase() === "env" && args.length > 0) {
+    command = args.shift()!;
+  }
+  return { command, args };
+}
+
+async function resolveWindowsShebangTarget(
+  executable: string,
+  args: string[],
+  cwd: string,
+  env: NodeJS.ProcessEnv,
+): Promise<SpawnTarget | null> {
+  if (process.platform !== "win32" || path.extname(executable).length > 0) return null;
+
+  let firstLine = "";
+  try {
+    const handle = await fs.open(executable, "r");
+    try {
+      const buffer = Buffer.alloc(256);
+      const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
+      firstLine = buffer.subarray(0, bytesRead).toString("utf8").split(/\r?\n/, 1)[0] ?? "";
+    } finally {
+      await handle.close();
+    }
+  } catch {
+    return null;
+  }
+
+  const shebang = parseShebang(firstLine);
+  if (!shebang) return null;
+
+  const commandName = path.basename(shebang.command).toLowerCase().replace(/\.exe$/, "");
+  if (commandName === "node") {
+    return {
+      command: process.execPath,
+      args: [...shebang.args, executable, ...args],
+    };
+  }
+
+  if (commandName === "sh" || commandName === "bash" || commandName === "zsh") {
+    const resolvedShell = await resolveCommandPath(commandName, cwd, env);
+    return {
+      command: resolvedShell ?? shebang.command,
+      args: [...shebang.args, executable, ...args],
+    };
+  }
+
+  const resolvedCommand = await resolveCommandPath(commandName, cwd, env);
+  if (!resolvedCommand) return null;
+  return {
+    command: resolvedCommand,
+    args: [...shebang.args, executable, ...args],
+  };
 }
 
 async function resolveSpawnTarget(
@@ -1094,13 +1167,29 @@ async function resolveSpawnTarget(
     };
   }
 
+  const shebangTarget = await resolveWindowsShebangTarget(executable, args, cwd, env);
+  if (shebangTarget) return shebangTarget;
+
   return { command: executable, args };
 }
 
 export function ensurePathInEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
-  if (typeof env.PATH === "string" && env.PATH.length > 0) return env;
-  if (typeof env.Path === "string" && env.Path.length > 0) return env;
-  return { ...env, PATH: defaultPathForPlatform() };
+  const pathKey = typeof env.PATH === "string" && env.PATH.length > 0 ? "PATH" : typeof env.Path === "string" && env.Path.length > 0 ? "Path" : "PATH";
+  const currentPath = env[pathKey] ?? defaultPathForPlatform();
+  const posixToolDirs = windowsPosixToolDirs();
+  if (posixToolDirs.length === 0) {
+    return pathKey in env ? env : { ...env, PATH: currentPath };
+  }
+
+  const existing = new Set(currentPath.split(";").map((entry) => entry.toLowerCase()));
+  const missing = posixToolDirs.filter((entry) => !existing.has(entry.toLowerCase()));
+  if (missing.length === 0) {
+    return pathKey in env ? env : { ...env, PATH: currentPath };
+  }
+  return {
+    ...env,
+    [pathKey]: [...missing, currentPath].join(";"),
+  };
 }
 
 export async function ensureAbsoluteDirectory(

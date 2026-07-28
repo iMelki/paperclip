@@ -1,8 +1,12 @@
+import { execFile } from "node:child_process";
 import fs from "node:fs";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
+import { promisify } from "node:util";
 import { applyPendingMigrations, ensurePostgresDatabase } from "./client.js";
+
+const execFileAsync = promisify(execFile);
 
 type EmbeddedPostgresInstance = {
   initialise(): Promise<void>;
@@ -100,8 +104,46 @@ async function createEmbeddedPostgresTestInstance(tempDirPrefix: string) {
   return { dataDir, port, instance };
 }
 
+function readPostmasterPid(dataDir: string): number | null {
+  try {
+    const firstLine = fs.readFileSync(path.join(dataDir, "postmaster.pid"), "utf8").split(/\r?\n/, 1)[0];
+    const pid = Number.parseInt(firstLine.trim(), 10);
+    return Number.isInteger(pid) && pid > 0 ? pid : null;
+  } catch {
+    return null;
+  }
+}
+
+async function terminateWindowsPostgresProcessTree(dataDir: string) {
+  if (process.platform !== "win32") return;
+  const pid = readPostmasterPid(dataDir);
+  if (!pid) return;
+  const taskkill = path.join(process.env.SystemRoot ?? "C:\\Windows", "System32", "taskkill.exe");
+  await execFileAsync(taskkill, ["/PID", String(pid), "/T", "/F"], {
+    windowsHide: true,
+  }).catch(() => {});
+}
+
+async function stopEmbeddedPostgresInstance(instance: EmbeddedPostgresInstance, dataDir: string) {
+  if (process.platform === "win32") {
+    await terminateWindowsPostgresProcessTree(dataDir);
+  }
+  await Promise.race([
+    instance.stop(),
+    new Promise((resolve) => setTimeout(resolve, 5_000)),
+  ]).catch(() => {});
+  if (process.platform === "win32") {
+    await terminateWindowsPostgresProcessTree(dataDir);
+  }
+}
+
 function cleanupEmbeddedPostgresTestDirs(dataDir: string) {
-  fs.rmSync(dataDir, { recursive: true, force: true });
+  fs.rmSync(dataDir, {
+    recursive: true,
+    force: true,
+    maxRetries: process.platform === "win32" ? 20 : 3,
+    retryDelay: process.platform === "win32" ? 100 : 10,
+  });
 }
 
 function formatEmbeddedPostgresError(error: unknown): string {
@@ -125,7 +167,7 @@ async function probeEmbeddedPostgresSupport(): Promise<EmbeddedPostgresTestSuppo
       reason: formatEmbeddedPostgresError(error),
     };
   } finally {
-    await instance.stop().catch(() => {});
+    await stopEmbeddedPostgresInstance(instance, dataDir);
     cleanupEmbeddedPostgresTestDirs(dataDir);
   }
 }
@@ -154,12 +196,12 @@ export async function startEmbeddedPostgresTestDatabase(
     return {
       connectionString,
       cleanup: async () => {
-        await instance.stop().catch(() => {});
+        await stopEmbeddedPostgresInstance(instance, dataDir);
         cleanupEmbeddedPostgresTestDirs(dataDir);
       },
     };
   } catch (error) {
-    await instance.stop().catch(() => {});
+    await stopEmbeddedPostgresInstance(instance, dataDir);
     cleanupEmbeddedPostgresTestDirs(dataDir);
     throw new Error(
       `Failed to start embedded PostgreSQL test database: ${formatEmbeddedPostgresError(error)}`,

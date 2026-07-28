@@ -5,6 +5,7 @@ import path from "node:path";
 
 import type { CommandManagedRuntimeRunner } from "./command-managed-runtime.js";
 import { preferredShellForSandbox } from "./sandbox-shell.js";
+import { shellQuotePath } from "./shell-path.js";
 import type { RunProcessResult } from "./server-utils.js";
 
 const DEFAULT_BRIDGE_TOKEN_BYTES = 24;
@@ -13,7 +14,6 @@ const DEFAULT_BRIDGE_RESPONSE_TIMEOUT_MS = 30_000;
 const DEFAULT_BRIDGE_STOP_TIMEOUT_MS = 2_000;
 const DEFAULT_BRIDGE_MAX_QUEUE_DEPTH = 64;
 const DEFAULT_BRIDGE_MAX_BODY_BYTES = 256 * 1024;
-const REMOTE_WRITE_BASE64_CHUNK_SIZE = 32 * 1024;
 const SANDBOX_CALLBACK_BRIDGE_ENTRYPOINT = "paperclip-bridge-server.mjs";
 
 export const DEFAULT_SANDBOX_CALLBACK_BRIDGE_MAX_BODY_BYTES = DEFAULT_BRIDGE_MAX_BODY_BYTES;
@@ -101,10 +101,6 @@ export interface StartedSandboxCallbackBridgeServer {
   stop(): Promise<void>;
 }
 
-function shellQuote(value: string) {
-  return `'${value.replace(/'/g, `'"'"'`)}'`;
-}
-
 function normalizeMethod(value: string | null | undefined): string {
   return typeof value === "string" && value.trim().length > 0 ? value.trim().toUpperCase() : "GET";
 }
@@ -135,11 +131,13 @@ async function runShell(
   script: string,
   timeoutMs: number,
   shellCommand: "bash" | "sh" = "sh",
+  stdin?: string,
 ): Promise<RunProcessResult> {
   return await runner.execute({
     command: shellCommand,
     args: ["-lc", script],
     cwd,
+    stdin,
     timeoutMs,
   });
 }
@@ -147,14 +145,6 @@ async function runShell(
 function requireSuccessfulResult(action: string, result: RunProcessResult): RunProcessResult {
   if (!result.timedOut && result.exitCode === 0) return result;
   throw new Error(buildRunnerFailureMessage(action, result));
-}
-
-function base64Chunks(body: string): string[] {
-  const out: string[] = [];
-  for (let offset = 0; offset < body.length; offset += REMOTE_WRITE_BASE64_CHUNK_SIZE) {
-    out.push(body.slice(offset, offset + REMOTE_WRITE_BASE64_CHUNK_SIZE));
-  }
-  return out;
 }
 
 export function createSandboxCallbackBridgeToken(bytes = DEFAULT_BRIDGE_TOKEN_BYTES): string {
@@ -274,18 +264,20 @@ export function createCommandManagedSandboxCallbackBridgeQueueClient(input: {
   const shellCommand = preferredShellForSandbox(input.shellCommand);
   const runChecked = async (action: string, script: string) =>
     requireSuccessfulResult(action, await runShell(input.runner, input.remoteCwd, script, timeoutMs, shellCommand));
+  const runCheckedWithStdin = async (action: string, script: string, stdin: string) =>
+    requireSuccessfulResult(action, await runShell(input.runner, input.remoteCwd, script, timeoutMs, shellCommand, stdin));
 
   return {
     makeDir: async (remotePath) => {
-      await runChecked(`mkdir ${remotePath}`, `mkdir -p ${shellQuote(remotePath)}`);
+      await runChecked(`mkdir ${remotePath}`, `mkdir -p ${shellQuotePath(remotePath)}`);
     },
     listJsonFiles: async (remotePath) => {
       const result = await runShell(
         input.runner,
         input.remoteCwd,
         [
-          `if [ -d ${shellQuote(remotePath)} ]; then`,
-          `  for file in ${shellQuote(remotePath)}/*.json; do`,
+          `if [ -d ${shellQuotePath(remotePath)} ]; then`,
+          `  for file in ${shellQuotePath(remotePath)}/*.json; do`,
           `    [ -f "$file" ] || continue`,
           "    basename \"$file\"",
           "  done",
@@ -302,7 +294,7 @@ export function createCommandManagedSandboxCallbackBridgeQueueClient(input: {
         .sort((left, right) => left.localeCompare(right));
     },
     readTextFile: async (remotePath) => {
-      const result = await runChecked(`read ${remotePath}`, `base64 < ${shellQuote(remotePath)}`);
+      const result = await runChecked(`read ${remotePath}`, `base64 < ${shellQuotePath(remotePath)}`);
       return Buffer.from(result.stdout.replace(/\s+/g, ""), "base64").toString("utf8");
     },
     writeTextFile: async (remotePath, body) => {
@@ -310,28 +302,23 @@ export function createCommandManagedSandboxCallbackBridgeQueueClient(input: {
       const tempPath = `${remotePath}.paperclip-upload.b64`;
       await runChecked(
         `prepare upload ${remotePath}`,
-        `mkdir -p ${shellQuote(remoteDir)} && rm -f ${shellQuote(tempPath)} && : > ${shellQuote(tempPath)}`,
+        `mkdir -p ${shellQuotePath(remoteDir)} && rm -f ${shellQuotePath(tempPath)} && : > ${shellQuotePath(tempPath)}`,
       );
       const base64Body = toBuffer(Buffer.from(body, "utf8")).toString("base64");
-      for (const chunk of base64Chunks(base64Body)) {
-        await runChecked(
-          `append upload chunk ${remotePath}`,
-          `printf '%s' ${shellQuote(chunk)} >> ${shellQuote(tempPath)}`,
-        );
-      }
+      await runCheckedWithStdin(`upload ${remotePath}`, `cat > ${shellQuotePath(tempPath)}`, base64Body);
       await runChecked(
         `finalize upload ${remotePath}`,
-        `base64 -d < ${shellQuote(tempPath)} > ${shellQuote(remotePath)} && rm -f ${shellQuote(tempPath)}`,
+        `base64 -d < ${shellQuotePath(tempPath)} > ${shellQuotePath(remotePath)} && rm -f ${shellQuotePath(tempPath)}`,
       );
     },
     rename: async (fromPath, toPath) => {
       await runChecked(
         `rename ${fromPath}`,
-        `mkdir -p ${shellQuote(path.posix.dirname(toPath))} && mv ${shellQuote(fromPath)} ${shellQuote(toPath)}`,
+        `mkdir -p ${shellQuotePath(path.posix.dirname(toPath))} && mv ${shellQuotePath(fromPath)} ${shellQuotePath(toPath)}`,
       );
     },
     remove: async (remotePath) => {
-      await runChecked(`remove ${remotePath}`, `rm -rf ${shellQuote(remotePath)}`);
+      await runChecked(`remove ${remotePath}`, `rm -rf ${shellQuotePath(remotePath)}`);
     },
   };
 }
@@ -565,13 +552,13 @@ export async function startSandboxCallbackBridgeServer(input: {
     args: [
       "-lc",
       [
-        `mkdir -p ${shellQuote(directories.requestsDir)} ${shellQuote(directories.responsesDir)} ${shellQuote(directories.logsDir)}`,
-        `rm -f ${shellQuote(directories.readyFile)} ${shellQuote(directories.pidFile)}`,
-        `nohup env ${Object.entries(env).map(([key, value]) => `${key}=${shellQuote(value)}`).join(" ")} ` +
-          `${shellQuote(nodeCommand)} ${shellQuote(remoteEntrypoint)} ` +
-          `>> ${shellQuote(directories.logFile)} 2>&1 < /dev/null &`,
+        `mkdir -p ${shellQuotePath(directories.requestsDir)} ${shellQuotePath(directories.responsesDir)} ${shellQuotePath(directories.logsDir)}`,
+        `rm -f ${shellQuotePath(directories.readyFile)} ${shellQuotePath(directories.pidFile)}`,
+        `nohup env ${Object.entries(env).map(([key, value]) => `${key}=${shellQuotePath(value)}`).join(" ")} ` +
+          `${shellQuotePath(nodeCommand)} ${shellQuotePath(remoteEntrypoint)} ` +
+          `>> ${shellQuotePath(directories.logFile)} 2>&1 < /dev/null &`,
         "pid=$!",
-        `printf '%s\\n' \"$pid\" > ${shellQuote(directories.pidFile)}`,
+        `printf '%s\\n' \"$pid\" > ${shellQuotePath(directories.pidFile)}`,
         "printf '{\"pid\":%s}\\n' \"$pid\"",
       ].join("\n"),
     ],
@@ -586,19 +573,19 @@ export async function startSandboxCallbackBridgeServer(input: {
     [
       "i=0",
       `while [ \"$i\" -lt 200 ]; do`,
-      `  if [ -s ${shellQuote(directories.readyFile)} ]; then`,
-      `    cat ${shellQuote(directories.readyFile)}`,
+      `  if [ -s ${shellQuotePath(directories.readyFile)} ]; then`,
+      `    cat ${shellQuotePath(directories.readyFile)}`,
       "    exit 0",
       "  fi",
-      `  if [ -s ${shellQuote(directories.logFile)} ] && ! kill -0 \"$(cat ${shellQuote(directories.pidFile)} 2>/dev/null)\" 2>/dev/null; then`,
-      `    cat ${shellQuote(directories.logFile)} >&2`,
+      `  if [ -s ${shellQuotePath(directories.logFile)} ] && ! kill -0 \"$(cat ${shellQuotePath(directories.pidFile)} 2>/dev/null)\" 2>/dev/null; then`,
+      `    cat ${shellQuotePath(directories.logFile)} >&2`,
       "    exit 1",
       "  fi",
       "  i=$((i + 1))",
       "  sleep 0.05",
       "done",
       `echo "Timed out waiting for bridge readiness." >&2`,
-      `if [ -s ${shellQuote(directories.logFile)} ]; then cat ${shellQuote(directories.logFile)} >&2; fi`,
+      `if [ -s ${shellQuotePath(directories.logFile)} ]; then cat ${shellQuotePath(directories.logFile)} >&2; fi`,
       "exit 1",
     ].join("\n"),
     timeoutMs,
@@ -639,8 +626,8 @@ export async function startSandboxCallbackBridgeServer(input: {
         args: [
           "-lc",
           [
-            `if [ -s ${shellQuote(directories.pidFile)} ]; then`,
-            `  pid="$(cat ${shellQuote(directories.pidFile)})"`,
+            `if [ -s ${shellQuotePath(directories.pidFile)} ]; then`,
+            `  pid="$(cat ${shellQuotePath(directories.pidFile)})"`,
             "  kill \"$pid\" 2>/dev/null || true",
             "  i=0",
             "  while kill -0 \"$pid\" 2>/dev/null && [ \"$i\" -lt 40 ]; do",
@@ -648,7 +635,7 @@ export async function startSandboxCallbackBridgeServer(input: {
             "    sleep 0.05",
             "  done",
             "fi",
-            `rm -f ${shellQuote(directories.pidFile)} ${shellQuote(directories.readyFile)}`,
+            `rm -f ${shellQuotePath(directories.pidFile)} ${shellQuotePath(directories.readyFile)}`,
           ].join("\n"),
         ],
         cwd: input.remoteCwd,

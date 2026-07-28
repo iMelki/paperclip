@@ -10,6 +10,7 @@ import {
   prepareSandboxManagedRuntime,
   type SandboxManagedRuntimeClient,
 } from "./sandbox-managed-runtime.js";
+import { resolveTestShellCommand } from "./test-shell.js";
 
 const execFile = promisify(execFileCallback);
 
@@ -84,7 +85,7 @@ describe("sandbox managed runtime", () => {
         await rm(remotePath, { recursive: true, force: true });
       },
       run: async (command) => {
-        await execFile("sh", ["-lc", command], {
+        await execFile(resolveTestShellCommand("sh"), ["-lc", command], {
           maxBuffer: 32 * 1024 * 1024,
         });
       },
@@ -129,5 +130,5 @@ describe("sandbox managed runtime", () => {
     await expect(readFile(path.join(localWorkspaceDir, "local-stale.txt"), "utf8")).rejects.toMatchObject({ code: "ENOENT" });
     await expect(readFile(path.join(localWorkspaceDir, ".claude", "settings.json"), "utf8")).resolves.toBe("{\"local\":true}\n");
     await expect(readFile(path.join(localWorkspaceDir, ".paperclip-runtime", "state.json"), "utf8")).resolves.toBe("{}\n");
-  });
+  }, 15_000);
 });

@@ -1,5 +1,6 @@
 import { execFile, spawn } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { rm } from "node:fs/promises";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
@@ -14,6 +15,8 @@ import { createStoredZipArchive } from "./helpers/zip.js";
 
 const execFileAsync = promisify(execFile);
 type ServerProcess = ReturnType<typeof spawn>;
+const paperclipCliEntryArgs = ["cli/node_modules/tsx/dist/cli.mjs", "cli/src/index.ts"];
+const taskkillCommand = path.join(process.env.SystemRoot ?? "C:\\Windows", "System32", "taskkill.exe");
 
 async function getAvailablePort(): Promise<number> {
   return await new Promise((resolve, reject) => {
@@ -188,15 +191,43 @@ function collectTextFiles(root: string, current: string, files: Record<string, s
 
 async function stopServerProcess(child: ServerProcess | null) {
   if (!child || child.exitCode !== null) return;
-  child.kill("SIGTERM");
   await new Promise<void>((resolve) => {
-    child.once("exit", () => resolve());
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      resolve();
+    };
+
+    child.once("exit", finish);
+    child.kill("SIGTERM");
     setTimeout(() => {
-      if (child.exitCode === null) {
+      if (child.exitCode !== null) {
+        finish();
+        return;
+      }
+      if (process.platform === "win32" && child.pid) {
+        execFile(taskkillCommand, ["/pid", String(child.pid), "/t", "/f"], () => finish());
+      } else {
         child.kill("SIGKILL");
+        setTimeout(finish, 2_000);
       }
     }, 5_000);
   });
+}
+
+async function removeTempRootWithRetry(root: string) {
+  let lastError: unknown = null;
+  for (let attempt = 0; attempt < 10; attempt += 1) {
+    try {
+      await rm(root, { recursive: true, force: true, maxRetries: 2, retryDelay: 100 });
+      return;
+    } catch (error) {
+      lastError = error;
+      await new Promise((resolve) => setTimeout(resolve, 200));
+    }
+  }
+  throw lastError;
 }
 
 async function api<T>(baseUrl: string, pathname: string, init?: RequestInit): Promise<T> {
@@ -213,7 +244,7 @@ async function runCliJson<T>(
   opts: TestPaperclipEnv & { apiBase?: string; includeConfigArg?: boolean },
 ) {
   const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
-  const cliArgs = ["--silent", "paperclipai", ...args];
+  const cliArgs = [...args];
   if (opts.apiBase) {
     cliArgs.push("--api-base", opts.apiBase);
   }
@@ -222,8 +253,8 @@ async function runCliJson<T>(
   }
   cliArgs.push("--json");
   const result = await execFileAsync(
-    "pnpm",
-    cliArgs,
+    process.execPath,
+    [...paperclipCliEntryArgs, ...cliArgs],
     {
       cwd: repoRoot,
       env: createCliEnv(opts),
@@ -296,8 +327,8 @@ describeEmbeddedPostgres("paperclipai company import/export e2e", () => {
     const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
     const output = { stdout: [] as string[], stderr: [] as string[] };
     const child = spawn(
-      "pnpm",
-      ["paperclipai", "run", "--config", configPath],
+      process.execPath,
+      [...paperclipCliEntryArgs, "run", "--config", configPath],
       {
         cwd: repoRoot,
         env: createServerEnv(configPath, port, tempDb.connectionString, {
@@ -323,9 +354,9 @@ describeEmbeddedPostgres("paperclipai company import/export e2e", () => {
     await stopServerProcess(serverProcess);
     await tempDb?.cleanup();
     if (tempRoot) {
-      rmSync(tempRoot, { recursive: true, force: true });
+      await removeTempRootWithRetry(tempRoot);
     }
-  });
+  }, 90_000);
 
   it("exports a company package and imports it into new and existing companies", async () => {
     expect(serverProcess).not.toBeNull();

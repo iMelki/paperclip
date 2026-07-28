@@ -761,10 +761,11 @@ describe("worktree helpers", () => {
     try {
       fs.mkdirSync(path.dirname(configPath), { recursive: true });
       fs.writeFileSync(configPath, JSON.stringify(buildSourceConfig()), "utf8");
+      const paperclipHome = path.join(tempRoot, "paperclip-worktrees");
       fs.writeFileSync(
         envPath,
         [
-          "PAPERCLIP_HOME=/tmp/paperclip-worktrees",
+          `PAPERCLIP_HOME=${paperclipHome}`,
           "PAPERCLIP_INSTANCE_ID=pap-1132-chat",
         ].join("\n"),
         "utf8",
@@ -776,7 +777,7 @@ describe("worktree helpers", () => {
         }),
       ).toMatchObject({
         cwd: worktreeRoot,
-        homeDir: "/tmp/paperclip-worktrees",
+        homeDir: paperclipHome,
         instanceId: "pap-1132-chat",
       });
     } finally {
@@ -966,29 +967,37 @@ describe("worktree helpers", () => {
   });
 
   it("rebinds same-repo workspace paths onto the current worktree root", () => {
-    expect(
-      rebindWorkspaceCwd({
-        sourceRepoRoot: "/Users/example/paperclip",
-        targetRepoRoot: "/Users/example/paperclip-pr-432",
-        workspaceCwd: "/Users/example/paperclip",
-      }),
-    ).toBe("/Users/example/paperclip-pr-432");
+    const parentDir = path.join(path.parse(process.cwd()).root, "Users", "example");
+    const sourceRepoRoot = path.join(parentDir, "paperclip");
+    const targetRepoRoot = path.join(parentDir, "paperclip-pr-432");
 
     expect(
       rebindWorkspaceCwd({
-        sourceRepoRoot: "/Users/example/paperclip",
-        targetRepoRoot: "/Users/example/paperclip-pr-432",
-        workspaceCwd: "/Users/example/paperclip/packages/db",
+        sourceRepoRoot,
+        targetRepoRoot,
+        workspaceCwd: sourceRepoRoot,
       }),
-    ).toBe("/Users/example/paperclip-pr-432/packages/db");
+    ).toBe(targetRepoRoot);
+
+    expect(
+      rebindWorkspaceCwd({
+        sourceRepoRoot,
+        targetRepoRoot,
+        workspaceCwd: path.join(sourceRepoRoot, "packages", "db"),
+      }),
+    ).toBe(path.join(targetRepoRoot, "packages", "db"));
   });
 
   it("does not rebind paths outside the source repo root", () => {
+    const parentDir = path.join(path.parse(process.cwd()).root, "Users", "example");
+    const sourceRepoRoot = path.join(parentDir, "paperclip");
+    const targetRepoRoot = path.join(parentDir, "paperclip-pr-432");
+
     expect(
       rebindWorkspaceCwd({
-        sourceRepoRoot: "/Users/example/paperclip",
-        targetRepoRoot: "/Users/example/paperclip-pr-432",
-        workspaceCwd: "/Users/example/other-project",
+        sourceRepoRoot,
+        targetRepoRoot,
+        workspaceCwd: path.join(parentDir, "other-project"),
       }),
     ).toBeNull();
   });
@@ -1033,7 +1042,9 @@ describe("worktree helpers", () => {
         copied: true,
       });
       expect(fs.readFileSync(targetHookPath, "utf8")).toBe("#!/usr/bin/env bash\nexit 0\n");
-      expect(fs.statSync(targetHookPath).mode & 0o111).not.toBe(0);
+      if (process.platform !== "win32") {
+        expect(fs.statSync(targetHookPath).mode & 0o111).not.toBe(0);
+      }
       expect(fs.readFileSync(targetTokensPath, "utf8")).toBe("secret-token\n");
     } finally {
       execFileSync("git", ["worktree", "remove", "--force", worktreePath], { cwd: repoRoot, stdio: "ignore" });

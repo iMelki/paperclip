@@ -303,7 +303,7 @@ describe("worktree config repair", () => {
 
     expect(result).toEqual({
       repairedConfig: true,
-      repairedEnv: false,
+      repairedEnv: process.platform === "win32",
     });
     expect(repairedConfig.database.embeddedPostgresDataDir).toBe(path.join(stableInstanceRoot, "db"));
     expect(repairedConfig.database.backup.dir).toBe(path.join(stableInstanceRoot, "data", "backups"));

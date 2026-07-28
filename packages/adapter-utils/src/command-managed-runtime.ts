@@ -7,6 +7,7 @@ import {
   type SandboxRemoteExecutionSpec,
 } from "./sandbox-managed-runtime.js";
 import { preferredShellForSandbox } from "./sandbox-shell.js";
+import { shellQuotePath } from "./shell-path.js";
 import type { RunProcessResult } from "./server-utils.js";
 
 export interface CommandManagedRuntimeRunner {
@@ -32,15 +33,9 @@ export interface CommandManagedRuntimeSpec {
 
 export type CommandManagedRuntimeAsset = SandboxManagedRuntimeAsset;
 
-function shellQuote(value: string) {
-  return `'${value.replace(/'/g, `'"'"'`)}'`;
-}
-
 function mergeRuntimeExcludes(entries: string[] | undefined): string[] {
   return [...new Set([".paperclip-runtime", ...(entries ?? [])])];
 }
-
-const REMOTE_WRITE_BASE64_CHUNK_SIZE = 32 * 1024;
 
 function toBuffer(bytes: Buffer | Uint8Array | ArrayBuffer): Buffer {
   if (Buffer.isBuffer(bytes)) return bytes;
@@ -76,7 +71,7 @@ export function createCommandManagedRuntimeClient(input: {
 
   return {
     makeDir: async (remotePath) => {
-      await runShell(`mkdir -p ${shellQuote(remotePath)}`);
+      await runShell(`mkdir -p ${shellQuotePath(remotePath)}`);
     },
     writeFile: async (remotePath, bytes) => {
       const body = toBuffer(bytes).toString("base64");
@@ -84,24 +79,21 @@ export function createCommandManagedRuntimeClient(input: {
       const remoteTempPath = `${remotePath}.paperclip-upload.b64`;
 
       await runShell(
-        `mkdir -p ${shellQuote(remoteDir)} && rm -f ${shellQuote(remoteTempPath)} && : > ${shellQuote(remoteTempPath)}`,
+        `mkdir -p ${shellQuotePath(remoteDir)} && rm -f ${shellQuotePath(remoteTempPath)} && : > ${shellQuotePath(remoteTempPath)}`,
       );
-      for (let offset = 0; offset < body.length; offset += REMOTE_WRITE_BASE64_CHUNK_SIZE) {
-        const chunk = body.slice(offset, offset + REMOTE_WRITE_BASE64_CHUNK_SIZE);
-        await runShell(`printf '%s' ${shellQuote(chunk)} >> ${shellQuote(remoteTempPath)}`);
-      }
+      await runShell(`cat > ${shellQuotePath(remoteTempPath)}`, { stdin: body });
       await runShell(
-        `base64 -d < ${shellQuote(remoteTempPath)} > ${shellQuote(remotePath)} && rm -f ${shellQuote(remoteTempPath)}`,
+        `base64 -d < ${shellQuotePath(remoteTempPath)} > ${shellQuotePath(remotePath)} && rm -f ${shellQuotePath(remoteTempPath)}`,
       );
     },
     readFile: async (remotePath) => {
-      const result = await runShell(`base64 < ${shellQuote(remotePath)}`);
+      const result = await runShell(`base64 < ${shellQuotePath(remotePath)}`);
       return Buffer.from(result.stdout.replace(/\s+/g, ""), "base64");
     },
     listFiles: async (remotePath) => {
       const result = await runShell(
-        `if [ -d ${shellQuote(remotePath)} ]; then ` +
-          `for entry in ${shellQuote(remotePath)}/*; do ` +
+        `if [ -d ${shellQuotePath(remotePath)} ]; then ` +
+          `for entry in ${shellQuotePath(remotePath)}/*; do ` +
           `[ -f "$entry" ] || continue; ` +
           `basename "$entry"; ` +
           `done; ` +
@@ -116,7 +108,7 @@ export function createCommandManagedRuntimeClient(input: {
     remove: async (remotePath) => {
       const result = await input.runner.execute({
         command: shellCommand,
-        args: ["-lc", `rm -rf ${shellQuote(remotePath)}`],
+        args: ["-lc", `rm -rf ${shellQuotePath(remotePath)}`],
         cwd: input.remoteCwd,
         timeoutMs: input.timeoutMs,
       });

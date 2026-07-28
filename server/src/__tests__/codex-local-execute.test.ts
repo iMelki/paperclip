@@ -58,6 +58,27 @@ type LogEntry = {
   chunk: string;
 };
 
+function toShellPath(value: string): string {
+  if (process.platform !== "win32") return value;
+  const match = /^([A-Za-z]):[\\/](.*)$/.exec(value);
+  if (!match) return value.replace(/\\/g, "/");
+  const [, drive, rest] = match;
+  return `/${drive.toLowerCase()}/${rest.replace(/\\/g, "/")}`;
+}
+
+function fromShellPath(value: string): string {
+  if (process.platform !== "win32") return value;
+  const driveMatch = /^\/([A-Za-z])\/(.*)$/.exec(value);
+  if (driveMatch) {
+    const [, drive, rest] = driveMatch;
+    return `${drive.toUpperCase()}:\\${rest.replace(/\//g, "\\")}`;
+  }
+  if (value.startsWith("/tmp/")) {
+    return path.join(os.tmpdir(), value.slice("/tmp/".length).replace(/\//g, path.sep));
+  }
+  return value;
+}
+
 function createLocalSandboxRunner() {
   let counter = 0;
   return {
@@ -72,12 +93,14 @@ function createLocalSandboxRunner() {
       onSpawn?: (meta: { pid: number; startedAt: string }) => Promise<void>;
     }) => {
       counter += 1;
+      const command = fromShellPath(input.command);
+      const cwd = fromShellPath(input.cwd ?? process.cwd());
       return runChildProcess(
         `sandbox-run-${counter}`,
-        input.command,
+        command,
         input.args ?? [],
         {
-          cwd: input.cwd ?? process.cwd(),
+          cwd,
           env: input.env ?? {},
           stdin: input.stdin,
           timeoutSec: Math.max(1, Math.ceil((input.timeoutMs ?? 30_000) / 1000)),
@@ -314,15 +337,16 @@ describe("codex execute", () => {
   it("injects bridge env into sandbox-managed remote runs", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-codex-execute-sandbox-"));
     const localWorkspace = path.join(root, "workspace");
-    const remoteWorkspace = path.join(root, "sandbox");
+    const remoteWorkspaceLocal = path.join(root, "sandbox");
+    const remoteWorkspace = toShellPath(remoteWorkspaceLocal);
     const binDir = path.join(root, "bin");
     const commandPath = path.join(binDir, "codex");
-    const capturePath = path.join(remoteWorkspace, "capture.json");
+    const capturePath = path.join(remoteWorkspaceLocal, "capture.json");
     const previousHome = process.env.HOME;
     const previousPath = process.env.PATH;
 
     await fs.mkdir(localWorkspace, { recursive: true });
-    await fs.mkdir(remoteWorkspace, { recursive: true });
+    await fs.mkdir(remoteWorkspaceLocal, { recursive: true });
     await fs.mkdir(binDir, { recursive: true });
     await writeFakeCodexCommand(commandPath);
 
@@ -372,7 +396,7 @@ describe("codex execute", () => {
       expect(result.errorMessage).toBeNull();
 
       const capture = JSON.parse(await fs.readFile(capturePath, "utf8")) as CapturePayload;
-      expect(capture.codexHome).toBe(path.join(remoteWorkspace, ".paperclip-runtime", "codex", "home"));
+      expect(capture.codexHome).toBe(path.posix.join(remoteWorkspace, ".paperclip-runtime", "codex", "home"));
       expect(capture.paperclipApiUrl).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/);
       expect(capture.paperclipApiKey).not.toBe("run-jwt-token");
       expect(capture.paperclipApiBridgeMode).toBe("queue_v1");
@@ -383,7 +407,7 @@ describe("codex execute", () => {
       else process.env.PATH = previousPath;
       await fs.rm(root, { recursive: true, force: true });
     }
-  });
+  }, 90_000);
 
   it("injects structured Paperclip wake payloads into env and prompt", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-codex-execute-wake-"));

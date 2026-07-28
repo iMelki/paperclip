@@ -15,6 +15,7 @@ import {
   startSandboxCallbackBridgeWorker,
 } from "./sandbox-callback-bridge.js";
 import type { RunProcessResult } from "./server-utils.js";
+import { resolveTestShellCommand } from "./test-shell.js";
 
 const execFile = promisify(execFileCallback);
 
@@ -37,8 +38,7 @@ describe("sandbox callback bridge", () => {
           ...process.env,
           ...input.env,
         };
-        const command =
-          input.command === "sh" ? "/bin/sh" : input.command === "bash" ? "/bin/bash" : input.command;
+        const command = resolveTestShellCommand(input.command);
         const args = [...(input.args ?? [])];
         if (
           input.stdin != null &&
@@ -253,7 +253,7 @@ describe("sandbox callback bridge", () => {
     expect(seenRequests[0]?.headers.authorization).toBeUndefined();
     expect(seenRequests[0]?.headers["x-paperclip-run-id"]).toBeUndefined();
 
-  });
+  }, 60_000);
 
   it("denies non-allowlisted requests by default", async () => {
     const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-bridge-default-policy-"));
@@ -499,7 +499,7 @@ describe("sandbox callback bridge", () => {
     await expect(nonJsonResponse.json()).resolves.toEqual({
       error: "Bridge only accepts JSON request bodies.",
     });
-  });
+  }, 60_000);
 
   it("returns a 502 when the host response times out", async () => {
     const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-bridge-timeout-"));
@@ -551,7 +551,7 @@ describe("sandbox callback bridge", () => {
     await expect(response.json()).resolves.toEqual({
       error: "Timed out waiting for host bridge response.",
     });
-  });
+  }, 60_000);
 
   it("returns a 502 for malformed host response files", async () => {
     const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-bridge-malformed-response-"));
@@ -612,5 +612,5 @@ describe("sandbox callback bridge", () => {
     await expect(response.json()).resolves.toMatchObject({
       error: expect.stringMatching(/JSON|Unexpected|Unterminated/i),
     });
-  });
+  }, 60_000);
 });

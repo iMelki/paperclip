@@ -7,6 +7,7 @@ import { promisify } from "node:util";
 import { resolvePaperclipInstanceRoot } from "../home-paths.js";
 
 const execFileAsync = promisify(execFile);
+const taskkillCommand = path.join(process.env.SystemRoot ?? "C:\\Windows", "System32", "taskkill.exe");
 
 export interface LocalServiceRegistryRecord {
   version: 1;
@@ -232,6 +233,15 @@ export function isProcessGroupAlive(processGroupId: number | null | undefined) {
   }
 }
 
+async function terminateWindowsProcessTree(pid: number) {
+  if (!Number.isInteger(pid) || pid <= 0) return;
+  try {
+    await execFileAsync(taskkillCommand, ["/pid", String(pid), "/t", "/f"]);
+  } catch {
+    // Ignore cleanup races and already-exited services.
+  }
+}
+
 async function isLikelyMatchingCommand(record: LocalServiceRegistryRecord) {
   if (process.platform === "win32") return true;
   try {
@@ -293,8 +303,19 @@ export async function terminateLocalService(
   record: Pick<LocalServiceRegistryRecord, "pid" | "processGroupId">,
   opts?: { signal?: NodeJS.Signals; forceAfterMs?: number },
 ) {
+  if (process.platform === "win32") {
+    await terminateWindowsProcessTree(record.pid);
+    const deadline = Date.now() + (opts?.forceAfterMs ?? 2_000);
+    while (Date.now() < deadline) {
+      if (!isPidAlive(record.pid)) return;
+      await delay(100);
+    }
+    await terminateWindowsProcessTree(record.pid);
+    return;
+  }
+
   const signal = opts?.signal ?? "SIGTERM";
-  const targetProcessGroup = process.platform !== "win32" && record.processGroupId && record.processGroupId > 0;
+  const targetProcessGroup = record.processGroupId && record.processGroupId > 0;
   try {
     if (targetProcessGroup) {
       process.kill(-record.processGroupId!, signal);
