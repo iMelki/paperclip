@@ -102,6 +102,7 @@ export type AuthorizationDecision = {
     | "allow_consented_change"
     | "allow_legacy_agent_creator"
     | "allow_issue_mention_grant"
+    | "allow_direct_parent_read"
     | "allow_direct_parent_report"
     | "allow_self"
     | "allow_company_agent"
@@ -225,6 +226,7 @@ type AgentAuthorizationRow = {
   role: string;
   status: string;
   reportsTo: string | null;
+  adapterType: string;
   permissions: Record<string, unknown> | null | undefined;
 };
 type ProjectAuthorizationRow = {
@@ -717,6 +719,7 @@ export function authorizationService(db: Db) {
         role: agents.role,
         status: agents.status,
         reportsTo: agents.reportsTo,
+        adapterType: agents.adapterType,
         permissions: agents.permissions,
       })
       .from(agents)
@@ -775,12 +778,17 @@ export function authorizationService(db: Db) {
       : null;
   }
 
-  async function loadRunIssueId(runId: string | null | undefined, companyId: string, agentId: string) {
+  async function loadRunIssueContext(
+    runId: string | null | undefined,
+    companyId: string,
+    agentId: string,
+  ) {
     if (!runId) return null;
     const row = await db
       .select({
         companyId: heartbeatRuns.companyId,
         agentId: heartbeatRuns.agentId,
+        status: heartbeatRuns.status,
         contextSnapshot: heartbeatRuns.contextSnapshot,
       })
       .from(heartbeatRuns)
@@ -793,7 +801,7 @@ export function authorizationService(db: Db) {
       : typeof context?.taskId === "string"
         ? context.taskId.trim()
         : "";
-    return issueId || null;
+    return issueId ? { issueId, status: row.status } : null;
   }
 
   async function isDirectParentReportTarget(input: {
@@ -804,14 +812,49 @@ export function authorizationService(db: Db) {
     requireCheckoutRun?: boolean;
   }) {
     if (input.resource.type !== "issue" || !input.resource.issueId) return false;
-    const runIssueId = await loadRunIssueId(input.actor.runId, input.companyId, input.actorAgentId);
-    if (!runIssueId || runIssueId === input.resource.issueId) return false;
-    const runIssue = await loadIssue(runIssueId);
+    const runContext = await loadRunIssueContext(input.actor.runId, input.companyId, input.actorAgentId);
+    if (!runContext || runContext.issueId === input.resource.issueId) return false;
+    const runIssue = await loadIssue(runContext.issueId);
     return Boolean(
       runIssue &&
       runIssue.companyId === input.companyId &&
       runIssue.assigneeAgentId === input.actorAgentId &&
       (input.requireCheckoutRun === false || runIssue.checkoutRunId === input.actor.runId) &&
+      runIssue.parentId === input.resource.issueId,
+    );
+  }
+
+  async function isDirectParentReadTarget(input: {
+    actor: AuthorizationActor;
+    actorAgent: AgentAuthorizationRow;
+    companyId: string;
+    resource: AuthorizationResource;
+  }) {
+    if (
+      input.actorAgent.adapterType !== "process" ||
+      input.resource.type !== "issue" ||
+      !input.resource.issueId
+    ) {
+      return false;
+    }
+    const runContext = await loadRunIssueContext(
+      input.actor.runId,
+      input.companyId,
+      input.actorAgent.id,
+    );
+    if (
+      !runContext ||
+      runContext.status !== "running" ||
+      runContext.issueId === input.resource.issueId
+    ) {
+      return false;
+    }
+    const runIssue = await loadIssue(runContext.issueId);
+    return Boolean(
+      runIssue &&
+      runIssue.companyId === input.companyId &&
+      runIssue.assigneeAgentId === input.actorAgent.id &&
+      (runIssue.checkoutRunId === null || runIssue.checkoutRunId === input.actor.runId) &&
       runIssue.parentId === input.resource.issueId,
     );
   }
@@ -1766,12 +1809,11 @@ export function authorizationService(db: Db) {
     // runs retain their explicit root boundary and sandbox requirements.
     const directParentReadTarget =
       input.action === "issue:read" &&
-      await isDirectParentReportTarget({
+      await isDirectParentReadTarget({
         actor: input.actor,
-        actorAgentId,
+        actorAgent,
         companyId,
         resource: input.resource,
-        requireCheckoutRun: false,
       });
     const lowTrustDecision = await decideLowTrustAccess({
       actorAgentId,

@@ -4,6 +4,16 @@ All notable changes to this repository should be recorded here.
 
 ## Unreleased
 
+- Narrowed deterministic Validator context access to a running standard-trust
+  Process-adapter heartbeat assigned to a direct child issue. The exception
+  permits `issue:read` for that direct parent only, accepts either a null or
+  run-owned checkout, and has negative coverage for Codex, terminal, low-trust,
+  sibling, grandparent, cross-company, and comment access.
+- Aligned the gallery-connection regression with Tool Gateway's mandatory
+  pending-review posture: newly discovered gallery tools remain quarantined
+  until the explicit finish/review step activates the selected catalog
+  entries. This preserves deny-by-default behavior instead of weakening the
+  production policy to satisfy a stale test expectation.
 - Added an explicit `company import --adapter-strategy preserve` path for #21.
   Preview and apply receipts enumerate preserved executable Process agents,
   default imports retain the existing portable Process-to-Claude fallback, and

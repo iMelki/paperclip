@@ -4616,8 +4616,16 @@ describeEmbeddedPostgres("tool access service", () => {
     const updateEntry = connect.catalog.find((entry) => entry.toolName === "update_zap")!;
     expect(connect.catalog).toEqual(
       expect.arrayContaining([
-        expect.objectContaining({ id: listEntry.id, status: "active", quarantineReason: null }),
-        expect.objectContaining({ id: updateEntry.id, status: "active", quarantineReason: null }),
+        expect.objectContaining({
+          id: listEntry.id,
+          status: "quarantined",
+          quarantineReason: "pending_review",
+        }),
+        expect.objectContaining({
+          id: updateEntry.id,
+          status: "quarantined",
+          quarantineReason: "pending_review",
+        }),
       ]),
     );
     const finish = await service.finishGalleryAppConnection(company.id, connect.connectionId, {

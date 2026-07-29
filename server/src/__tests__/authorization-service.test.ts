@@ -6,6 +6,7 @@ import {
   companies,
   companyMemberships,
   createDb,
+  heartbeatRuns,
   instanceUserRoles,
   issueComments,
   issues,
@@ -38,7 +39,12 @@ async function createCompany(db: ReturnType<typeof createDb>, label: string) {
 async function createAgent(
   db: ReturnType<typeof createDb>,
   companyId: string,
-  input: { role?: string; reportsTo?: string | null; permissions?: Record<string, unknown> } = {},
+  input: {
+    role?: string;
+    reportsTo?: string | null;
+    permissions?: Record<string, unknown>;
+    adapterType?: string;
+  } = {},
 ) {
   return db
     .insert(agents)
@@ -48,7 +54,7 @@ async function createAgent(
       role: input.role ?? "engineer",
       reportsTo: input.reportsTo ?? null,
       permissions: input.permissions ?? {},
-      adapterType: "process",
+      adapterType: input.adapterType ?? "process",
       adapterConfig: {},
       runtimeConfig: {},
     })
@@ -178,6 +184,7 @@ describeEmbeddedPostgres("authorization service", () => {
     await db.delete(principalPermissionGrants);
     await db.delete(companyMemberships);
     await db.delete(instanceUserRoles);
+    await db.delete(heartbeatRuns);
     await db.delete(issues);
     await db.delete(agents);
     await db.delete(projects);
@@ -1133,6 +1140,188 @@ describeEmbeddedPostgres("authorization service", () => {
       allowed: false,
       reason: "deny_unsupported_action",
     });
+  });
+
+  it("allows a running Process validator to read its assigned direct parent without a checkout", async () => {
+    const company = await createCompany(db, "ProcessParentRead");
+    const project = await createProject(db, company.id, "ProcessParentRead");
+    const validator = await createAgent(db, company.id, { adapterType: "process" });
+    const parentOwner = await createAgent(db, company.id);
+    const parent = await createIssue(db, company.id, {
+      projectId: project.id,
+      assigneeAgentId: parentOwner.id,
+    });
+    const child = await createIssue(db, company.id, {
+      projectId: project.id,
+      parentId: parent.id,
+      assigneeAgentId: validator.id,
+    });
+    const run = await db
+      .insert(heartbeatRuns)
+      .values({
+        companyId: company.id,
+        agentId: validator.id,
+        status: "running",
+        contextSnapshot: { issueId: child.id },
+      })
+      .returning()
+      .then((rows) => rows[0]!);
+
+    await expect(authorizationService(db).decide({
+      actor: {
+        type: "agent",
+        agentId: validator.id,
+        companyId: company.id,
+        source: "agent_key",
+        runId: run.id,
+      },
+      action: "issue:read",
+      resource: {
+        type: "issue",
+        companyId: company.id,
+        issueId: parent.id,
+        projectId: parent.projectId,
+        assigneeAgentId: parent.assigneeAgentId,
+        status: parent.status,
+      },
+    })).resolves.toMatchObject({
+      allowed: true,
+      reason: "allow_direct_parent_read",
+    });
+  });
+
+  it("does not broaden the checkout-free direct-parent read exception", async () => {
+    const company = await createCompany(db, "ProcessParentReadDenied");
+    const otherCompany = await createCompany(db, "ProcessParentReadOtherCompany");
+    const project = await createProject(db, company.id, "ProcessParentReadDenied");
+    const allowedLowTrustProject = await createProject(db, company.id, "LowTrustAllowed");
+    const parentOwner = await createAgent(db, company.id);
+    const validator = await createAgent(db, company.id, { adapterType: "process" });
+    const codexAgent = await createAgent(db, company.id, { adapterType: "codex_local" });
+    const lowTrustValidator = await createAgent(db, company.id, {
+      adapterType: "process",
+      permissions: {
+        trustPreset: LOW_TRUST_REVIEW_PRESET,
+        authorizationPolicy: {
+          trustBoundary: {
+            mode: LOW_TRUST_REVIEW_PRESET,
+            companyId: company.id,
+            projectIds: [allowedLowTrustProject.id],
+          },
+        },
+      },
+    });
+    const root = await createIssue(db, company.id, {
+      projectId: project.id,
+      assigneeAgentId: parentOwner.id,
+    });
+    const parent = await createIssue(db, company.id, {
+      projectId: project.id,
+      parentId: root.id,
+      assigneeAgentId: parentOwner.id,
+    });
+    const child = await createIssue(db, company.id, {
+      projectId: project.id,
+      parentId: parent.id,
+      assigneeAgentId: validator.id,
+    });
+    const sibling = await createIssue(db, company.id, {
+      projectId: project.id,
+      parentId: parent.id,
+      assigneeAgentId: parentOwner.id,
+    });
+    const codexChild = await createIssue(db, company.id, {
+      projectId: project.id,
+      parentId: parent.id,
+      assigneeAgentId: codexAgent.id,
+    });
+    const lowTrustChild = await createIssue(db, company.id, {
+      projectId: project.id,
+      parentId: parent.id,
+      assigneeAgentId: lowTrustValidator.id,
+    });
+    const otherCompanyIssue = await createIssue(db, otherCompany.id);
+    const [runningRun, terminalRun, codexRun, lowTrustRun] = await db
+      .insert(heartbeatRuns)
+      .values([
+        {
+          companyId: company.id,
+          agentId: validator.id,
+          status: "running",
+          contextSnapshot: { issueId: child.id },
+        },
+        {
+          companyId: company.id,
+          agentId: validator.id,
+          status: "failed",
+          contextSnapshot: { issueId: child.id },
+        },
+        {
+          companyId: company.id,
+          agentId: codexAgent.id,
+          status: "running",
+          contextSnapshot: { issueId: codexChild.id },
+        },
+        {
+          companyId: company.id,
+          agentId: lowTrustValidator.id,
+          status: "running",
+          contextSnapshot: { issueId: lowTrustChild.id },
+        },
+      ])
+      .returning();
+    const authz = authorizationService(db);
+    const resourceFor = (issue: typeof parent) => ({
+      type: "issue" as const,
+      companyId: issue.companyId,
+      issueId: issue.id,
+      projectId: issue.projectId,
+      assigneeAgentId: issue.assigneeAgentId,
+      status: issue.status,
+    });
+    const actorFor = (agent: typeof validator, runId: string) => ({
+      type: "agent" as const,
+      agentId: agent.id,
+      companyId: agent.companyId,
+      source: "agent_key" as const,
+      runId,
+    });
+
+    await expect(authz.decide({
+      actor: actorFor(codexAgent, codexRun!.id),
+      action: "issue:read",
+      resource: resourceFor(parent),
+    })).resolves.toMatchObject({ allowed: true, reason: "allow_company_agent" });
+    await expect(authz.decide({
+      actor: actorFor(validator, terminalRun!.id),
+      action: "issue:read",
+      resource: resourceFor(parent),
+    })).resolves.toMatchObject({ allowed: true, reason: "allow_company_agent" });
+    await expect(authz.decide({
+      actor: actorFor(lowTrustValidator, lowTrustRun!.id),
+      action: "issue:read",
+      resource: resourceFor(parent),
+    })).resolves.toMatchObject({ allowed: false, reason: "deny_low_trust_boundary" });
+    await expect(authz.decide({
+      actor: actorFor(validator, runningRun!.id),
+      action: "issue:read",
+      resource: resourceFor(sibling),
+    })).resolves.toMatchObject({ allowed: true, reason: "allow_company_agent" });
+    await expect(authz.decide({
+      actor: actorFor(validator, runningRun!.id),
+      action: "issue:read",
+      resource: resourceFor(root),
+    })).resolves.toMatchObject({ allowed: true, reason: "allow_company_agent" });
+    await expect(authz.decide({
+      actor: actorFor(validator, runningRun!.id),
+      action: "issue:read",
+      resource: resourceFor(otherCompanyIssue),
+    })).resolves.toMatchObject({ allowed: false, reason: "deny_company_boundary" });
+    await expect(authz.decide({
+      actor: actorFor(validator, runningRun!.id),
+      action: "issue:comment",
+      resource: resourceFor(parent),
+    })).resolves.toMatchObject({ allowed: false, reason: "deny_missing_grant" });
   });
 
   it("allows mentioned agents to read and comment on assigned issues without granting issue mutation", async () => {

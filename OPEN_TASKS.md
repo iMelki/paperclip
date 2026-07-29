@@ -6,13 +6,24 @@ This file is the durable local index for active `paperclip` issues.
 
 ## Active Issues
 
+- [#24 - Defer dev-runtime restarts while factory runs are active](https://github.com/iMelki/paperclip/issues/24)
+  - Automatic source-change restarts can currently terminate a live factory
+    heartbeat and leave the run as `process_lost`. Add an active-run drain
+    gate with a bounded deadline, explicit operator-visible deferral evidence,
+    and restart/recovery coverage before relying on the dev watcher during
+    self-hosted factory delivery. The first Builder interruption is preserved
+    in the issue as reproducible evidence; this does not block source work
+    while no heartbeat is running.
+
 - [#23 - Tool Gateway catalog and health omit configured static headers](https://github.com/iMelki/paperclip/issues/23)
   - One fail-closed header policy now governs gallery discovery, health, and
     execution. Static non-secret headers are delivered without allowing caller
     config to override the gallery URL, quarantine, managed credentials, or
     MCP protocol headers. The final hardening also rejects secret-shaped values
     hidden under benign names, non-ByteString values, unsupported versions, and
-    oversized streamed responses. Close after the complete matrix and a live
+    oversized streamed responses. The complete matrix exposed and repaired a
+    stale gallery fixture that expected new tools to bypass their mandatory
+    pending-review state. Close after the refreshed complete matrix and a live
     GitHub MCP read-only catalog probe succeed on the committed runtime.
 
 - [#21 - Allow company import to preserve explicit Process adapters](https://github.com/iMelki/paperclip/issues/21)
@@ -51,6 +62,12 @@ This file is the durable local index for active `paperclip` issues.
   - Configure the local company, goals, budgets, role agents, execution policy,
     routines, workspaces, Tool Gateway, Smoke Lab, deterministic validator, and
     secret-scrubbed export for the MCK golden path.
+  - The first live deterministic Validator exposed two fail-closed integration
+    defects: direct-parent reads needed a narrowly scoped Process/run
+    authorization exception, and PowerShell REST array results required
+    explicit enumeration. Both repairs now have focused regression coverage;
+    resume the factory only after the Agent Settings wrapper is pushed and the
+    live Validator retry succeeds.
 
 - [#15 - Provision native and WSL Paperclip factory runtimes](https://github.com/iMelki/paperclip/issues/15)
   - Prove the loopback-only Windows instance first, then the Ubuntu 24.04
