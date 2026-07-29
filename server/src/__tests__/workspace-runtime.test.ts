@@ -3122,7 +3122,7 @@ describe("realizeExecutionWorkspace", () => {
     const worktreeOp = operations.find(op => op.phase === "worktree_prepare" && op.metadata?.created);
     expect(worktreeOp).toBeDefined();
     expect(worktreeOp!.metadata!.baseRef).toBe("origin/master");
-  }, 10_000);
+  }, 30_000);
 
   it("removes a created git worktree and branch during cleanup", async () => {
     const repoRoot = await createTempRepo();
@@ -3629,7 +3629,7 @@ describe("ensureRuntimeServicesForRun", () => {
         }
       }, { timeout: 5_000 })
       .toBe(false);
-  });
+  }, 20_000);
 
   it("does not reuse project-scoped shared services across different workspace launch contexts", async () => {
     const primaryWorkspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-runtime-primary-"));

@@ -13,6 +13,11 @@ All notable changes to this repository should be recorded here.
   fallback cleanup and CLI/runtime fixtures now prove exact ownership, retain
   reparented descendants, reject PID reuse, fail closed when identity cannot
   be established, and report before/after PID evidence without command lines.
+  Load-sensitive nested-Git and runtime-reset checks retain finite 30-second
+  and 20-second ceilings instead of failing at the previously observed edge;
+  explicit dependency-directory globs also prevent tsx's Windows watcher from
+  treating the compact brace form literally and restarting during dependency
+  churn.
 - Extended #23's static remote-MCP policy to reject high-confidence secret
   values even under benign header names, control/non-ByteString values, and
   unsupported policy versions before persistence. Tool Gateway response reads

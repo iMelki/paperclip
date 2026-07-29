@@ -177,7 +177,7 @@ function parseWindowsTestProcessSnapshot(
 
 export async function readWindowsTestProcessIdentity(
   pid: number,
-  timeoutMs = 2_000,
+  timeoutMs = 5_000,
 ): Promise<WindowsTestProcessIdentity | null> {
   if (process.platform !== "win32" || !Number.isInteger(pid) || pid <= 0) {
     return null;

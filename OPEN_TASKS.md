@@ -27,7 +27,10 @@ This file is the durable local index for active `paperclip` issues.
     non-Windows constant, with an AST regression guard. Windows teardown now
     captures creation-time identities, reaps the complete exact tree, follows
     reparented descendants, rejects reused PIDs, and fails closed when
-    ownership cannot be proved. Keep this issue open until the fresh
+    ownership cannot be proved. The two observed loaded-host checks now use
+    bounded 30-second and 20-second limits and pass together, while explicit
+    dependency globs prevent spurious Windows watcher restarts. Keep this issue
+    open until the fresh
     complete-suite receipt is green with zero surviving fixtures.
 
 - [#22 - Make complete validation and package builds Windows-portable](https://github.com/iMelki/paperclip/issues/22)

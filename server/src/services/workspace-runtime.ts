@@ -218,7 +218,7 @@ export async function resetRuntimeServicesForTests(options?: { preserveProcesses
         && record.child?.signalCode === null;
       const windowsProcessIdentity =
         process.platform === "win32" && childIsLive
-          ? await readWindowsTestProcessIdentity(childPid!).catch(() => null)
+          ? await readWindowsTestProcessIdentity(childPid!, 5_000).catch(() => null)
           : null;
       if (process.platform === "win32" && childIsLive && !windowsProcessIdentity) {
         throw new Error(
@@ -231,7 +231,7 @@ export async function resetRuntimeServicesForTests(options?: { preserveProcesses
               rootPid: childPid!,
               ownerMarkers: [],
               expectedRootIdentity: windowsProcessIdentity!,
-              timeoutMs: 5_000,
+              timeoutMs: 8_000,
             })
           : await terminateRuntimeServiceProcess(record);
       if (termination?.confirmedStopped !== true) {
