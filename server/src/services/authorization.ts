@@ -1758,6 +1758,19 @@ export function authorizationService(db: Db) {
         companyId,
         resource: input.resource,
       });
+    // Process adapters must be able to read the canonical task document on
+    // their direct parent issue while resolving the run envelope. Keep this
+    // exception narrow: it applies only to issue reads, only to the current
+    // run's direct parent, and only under the standard trust preset. Low-trust
+    // runs retain their explicit root boundary and sandbox requirements.
+    const directParentReadTarget =
+      input.action === "issue:read" &&
+      await isDirectParentReportTarget({
+        actor: input.actor,
+        actorAgentId,
+        companyId,
+        resource: input.resource,
+      });
     const lowTrustDecision = await decideLowTrustAccess({
       actorAgentId,
       action: input.action,
@@ -1789,6 +1802,17 @@ export function authorizationService(db: Db) {
       return allow({
         action: input.action,
         reason: "allow_direct_parent_report",
+        explanation: "Allowed because the target is the current run issue's direct parent under the standard trust preset.",
+      });
+    }
+
+    if (
+      trustResolution.kind === "standard" &&
+      directParentReadTarget
+    ) {
+      return allow({
+        action: input.action,
+        reason: "allow_direct_parent_read",
         explanation: "Allowed because the target is the current run issue's direct parent under the standard trust preset.",
       });
     }
