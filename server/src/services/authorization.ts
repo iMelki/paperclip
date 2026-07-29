@@ -801,6 +801,7 @@ export function authorizationService(db: Db) {
     actorAgentId: string;
     companyId: string;
     resource: AuthorizationResource;
+    requireCheckoutRun?: boolean;
   }) {
     if (input.resource.type !== "issue" || !input.resource.issueId) return false;
     const runIssueId = await loadRunIssueId(input.actor.runId, input.companyId, input.actorAgentId);
@@ -810,7 +811,7 @@ export function authorizationService(db: Db) {
       runIssue &&
       runIssue.companyId === input.companyId &&
       runIssue.assigneeAgentId === input.actorAgentId &&
-      runIssue.checkoutRunId === input.actor.runId &&
+      (input.requireCheckoutRun === false || runIssue.checkoutRunId === input.actor.runId) &&
       runIssue.parentId === input.resource.issueId,
     );
   }
@@ -1770,6 +1771,7 @@ export function authorizationService(db: Db) {
         actorAgentId,
         companyId,
         resource: input.resource,
+        requireCheckoutRun: false,
       });
     const lowTrustDecision = await decideLowTrustAccess({
       actorAgentId,
