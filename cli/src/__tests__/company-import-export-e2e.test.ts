@@ -6,6 +6,11 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
+import {
+  readWindowsTestProcessIdentity,
+  reapWindowsTestProcessTree,
+  type WindowsTestProcessIdentity,
+} from "@paperclipai/db";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   getEmbeddedPostgresTestSupport,
@@ -16,7 +21,6 @@ import { createStoredZipArchive } from "./helpers/zip.js";
 const execFileAsync = promisify(execFile);
 type ServerProcess = ReturnType<typeof spawn>;
 const paperclipCliEntryArgs = ["cli/node_modules/tsx/dist/cli.mjs", "cli/src/index.ts"];
-const taskkillCommand = path.join(process.env.SystemRoot ?? "C:\\Windows", "System32", "taskkill.exe");
 
 async function getAvailablePort(): Promise<number> {
   return await new Promise((resolve, reject) => {
@@ -189,8 +193,27 @@ function collectTextFiles(root: string, current: string, files: Record<string, s
   }
 }
 
-async function stopServerProcess(child: ServerProcess | null) {
-  if (!child || child.exitCode !== null) return;
+async function stopServerProcess(
+  child: ServerProcess | null,
+  ownerMarkers: string[],
+  expectedRootIdentity: WindowsTestProcessIdentity | null,
+) {
+  if (!child) return;
+  if (process.platform === "win32" && child.pid) {
+    const termination = await reapWindowsTestProcessTree({
+      rootPid: child.pid,
+      ownerMarkers,
+      expectedRootIdentity: expectedRootIdentity ?? undefined,
+      timeoutMs: 8_000,
+    });
+    if (!termination.confirmedStopped) {
+      throw new Error(
+        `CLI E2E server process tree cleanup failed (${termination.reason}); remaining PIDs: ${termination.remainingPids.join(",")}`,
+      );
+    }
+    return;
+  }
+  if (child.exitCode !== null) return;
   await new Promise<void>((resolve) => {
     let settled = false;
     const finish = () => {
@@ -206,12 +229,8 @@ async function stopServerProcess(child: ServerProcess | null) {
         finish();
         return;
       }
-      if (process.platform === "win32" && child.pid) {
-        execFile(taskkillCommand, ["/pid", String(child.pid), "/t", "/f"], () => finish());
-      } else {
-        child.kill("SIGKILL");
-        setTimeout(finish, 2_000);
-      }
+      child.kill("SIGKILL");
+      setTimeout(finish, 2_000);
     }, 5_000);
   });
 }
@@ -311,6 +330,7 @@ describeEmbeddedPostgres("paperclipai company import/export e2e", () => {
   let cliShellHome = "";
   let paperclipInstanceId = "";
   let serverProcess: ServerProcess | null = null;
+  let serverProcessIdentity: WindowsTestProcessIdentity | null = null;
   let tempDb: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>> | null = null;
 
   beforeAll(async () => {
@@ -345,6 +365,9 @@ describeEmbeddedPostgres("paperclipai company import/export e2e", () => {
       },
     );
     serverProcess = child;
+    serverProcessIdentity = child.pid
+      ? await readWindowsTestProcessIdentity(child.pid)
+      : null;
     child.stdout?.on("data", (chunk) => {
       output.stdout.push(String(chunk));
     });
@@ -356,7 +379,11 @@ describeEmbeddedPostgres("paperclipai company import/export e2e", () => {
   }, 60_000);
 
   afterAll(async () => {
-    await stopServerProcess(serverProcess);
+    await stopServerProcess(
+      serverProcess,
+      [configPath, tempRoot],
+      serverProcessIdentity,
+    );
     await tempDb?.cleanup();
     if (tempRoot) {
       await removeTempRootWithRetry(tempRoot);
@@ -649,5 +676,138 @@ describeEmbeddedPostgres("paperclipai company import/export e2e", () => {
 
     expect(importedFromZip.company.action).toBe("created");
     expect(importedFromZip.agents.some((agent) => agent.action === "created")).toBe(true);
+  }, 90_000);
+
+  it("preserves an explicitly exported Process adapter when requested", async () => {
+    expect(serverProcess).not.toBeNull();
+
+    const sourceCompany = await api<{ id: string; name: string }>(
+      apiBase,
+      "/api/companies",
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          name: `CLI Process Preserve ${Date.now()}`,
+        }),
+      },
+    );
+    await api(apiBase, `/api/companies/${sourceCompany.id}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ requireBoardApprovalForNewAgents: false }),
+    });
+    await api(apiBase, `/api/companies/${sourceCompany.id}/agents`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        name: "Deterministic Validator",
+        role: "engineer",
+        adapterType: "process",
+        adapterConfig: {
+          command: "node",
+          args: ["-e", "process.exit(0)"],
+        },
+      }),
+    });
+
+    const processExportDir = path.join(tempRoot, "process-adapter-export");
+    await runCliJson(
+      [
+        "company",
+        "export",
+        sourceCompany.id,
+        "--out",
+        processExportDir,
+        "--include",
+        "company,agents",
+      ],
+      {
+        apiBase,
+        configPath,
+        paperclipHome,
+        instanceId: paperclipInstanceId,
+        shellHome: cliShellHome,
+      },
+    );
+
+    const preview = await runCliJson<{
+      adapterImport: {
+        strategy: string;
+        preservedExecutableAgentSlugs: string[];
+        changes: unknown[];
+      };
+    }>(
+      [
+        "company",
+        "import",
+        processExportDir,
+        "--target",
+        "new",
+        "--adapter-strategy",
+        "preserve",
+        "--dry-run",
+      ],
+      {
+        apiBase,
+        configPath,
+        paperclipHome,
+        instanceId: paperclipInstanceId,
+        shellHome: cliShellHome,
+      },
+    );
+    expect(preview.adapterImport).toEqual({
+      strategy: "preserve",
+      preservedExecutableAgentSlugs: ["deterministic-validator"],
+      changes: [],
+    });
+
+    const imported = await runCliJson<{
+      company: { id: string };
+      adapterImport: {
+        strategy: string;
+        preservedExecutableAgentSlugs: string[];
+        changes: unknown[];
+      };
+    }>(
+      [
+        "company",
+        "import",
+        processExportDir,
+        "--target",
+        "new",
+        "--adapter-strategy",
+        "preserve",
+        "--yes",
+      ],
+      {
+        apiBase,
+        configPath,
+        paperclipHome,
+        instanceId: paperclipInstanceId,
+        shellHome: cliShellHome,
+      },
+    );
+    expect(imported.adapterImport).toEqual({
+      strategy: "preserve",
+      preservedExecutableAgentSlugs: ["deterministic-validator"],
+      changes: [],
+    });
+
+    const importedAgents = await api<
+      Array<{ name: string; adapterType: string; adapterConfig: unknown }>
+    >(apiBase, `/api/companies/${imported.company.id}/agents`);
+    expect(importedAgents).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          name: "Deterministic Validator",
+          adapterType: "process",
+          adapterConfig: expect.objectContaining({
+            command: "node",
+            args: ["-e", "process.exit(0)"],
+          }),
+        }),
+      ]),
+    );
   }, 90_000);
 });

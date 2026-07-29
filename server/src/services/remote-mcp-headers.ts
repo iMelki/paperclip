@@ -1,3 +1,9 @@
+import {
+  hasInvalidStaticHeaderValueCharacters,
+  isHighConfidenceStaticSecretValue,
+  normalizeStaticHeaderValueForInspection,
+} from "@paperclipai/shared";
+
 const HEADER_NAME_PATTERN = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
 
 const RESERVED_PROTOCOL_HEADERS = new Set([
@@ -101,13 +107,29 @@ function normalizedHeaderName(value: unknown): string {
 }
 
 function normalizedHeaderValue(value: unknown): string {
-  if (typeof value !== "string" || /[\r\n]/.test(value)) {
+  if (
+    typeof value !== "string"
+    || hasInvalidStaticHeaderValueCharacters(value)
+  ) {
     throw new RemoteMcpHeaderValidationError(
-      "Remote MCP header values must be strings without carriage returns or newlines.",
+      "Remote MCP header values must be strings without control characters.",
       "invalid_header_value",
     );
   }
   return value;
+}
+
+function normalizedStaticHeaderValue(value: unknown): string {
+  const normalized = normalizeStaticHeaderValueForInspection(
+    normalizedHeaderValue(value),
+  );
+  if (isHighConfidenceStaticSecretValue(normalized)) {
+    throw new RemoteMcpHeaderValidationError(
+      "Remote MCP static headers cannot contain credentials or other sensitive authority.",
+      "sensitive_static_header",
+    );
+  }
+  return normalized;
 }
 
 function isSensitivePassthroughHeader(name: string): boolean {
@@ -178,7 +200,7 @@ function readStaticHeaders(value: unknown): Array<{ name: string; value: string 
       }
       parsed.push({
         name: normalizedStaticHeaderName(record.name),
-        value: normalizedHeaderValue(record.value),
+        value: normalizedStaticHeaderValue(record.value),
       });
     }
     return parsed;
@@ -193,7 +215,7 @@ function readStaticHeaders(value: unknown): Array<{ name: string; value: string 
   for (const [name, headerValue] of Object.entries(record)) {
     parsed.push({
       name: normalizedStaticHeaderName(name),
-      value: normalizedHeaderValue(headerValue),
+      value: normalizedStaticHeaderValue(headerValue),
     });
   }
   return parsed;

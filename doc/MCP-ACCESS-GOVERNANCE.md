@@ -11,6 +11,7 @@ Operator guide for Paperclip's MCP tool access surface. Audience: board users an
 - [Quick start](#quick-start)
 - [Paperclip as MCP endpoint vs MCP gateway](#paperclip-as-mcp-endpoint-vs-mcp-gateway)
 - [Managed connections](#managed-connections)
+- [Install reachability versus authority](#install-reachability-versus-authority)
 - [Catalog and risk classification](#catalog-and-risk-classification)
 - [Profiles and bindings](#profiles-and-bindings)
 - [Policies](#policies)
@@ -211,6 +212,37 @@ curl -fsS -X PATCH -H "Authorization: Bearer $BOARD_API_KEY" -H "Content-Type: a
 
 Connection statuses: `draft`, `active`, `disabled`, `archived`. Health statuses: `ok`, `unchecked`, `degraded`, `failed`, `error`, `missing_secret`.
 
+## Install reachability versus authority
+
+Installing a connection for an agent makes that connection discoverable to the
+agent runtime. It does not grant tool authority unless an explicit profile is
+also bound. New automation should always send
+`"accessMode": "reachability_only"` and manage authority through versioned,
+default-deny profiles:
+
+```sh
+curl -fsS -X PUT \
+  -H "Authorization: Bearer $BOARD_API_KEY" \
+  -H "Content-Type: application/json" \
+  "$PAPERCLIP_URL/api/tool-connections/$CONNECTION_ID/installs" \
+  -d '{
+    "accessMode": "reachability_only",
+    "installs": [{"targetType": "agent", "targetId": "'"$AGENT_ID"'"}]
+  }' | jq '{accessMode, reachabilityOnly, installOwnedAccessBindingCount, nonInstallOwnedAppBindingCount}'
+```
+
+Read the same endpoint with `GET` after every install mutation and before every
+release receipt. It derives the current mode from persisted profile bindings;
+it does not repeat the last requested value. A partial install-owned binding
+set returns `409 install_access_state_inconsistent` instead of presenting a
+misleading access mode. A non-zero `nonInstallOwnedAppBindingCount` means an
+operator-owned `app:<connectionId>` binding still grants authority and must be
+reviewed separately.
+
+`extend_connection_access` exists only for backward-compatible attended
+operations. It creates install-owned app-profile bindings and should not be
+used by unattended factory roles.
+
 ## Catalog and risk classification
 
 Each tool discovered on a connection becomes a **catalog entry** with a risk level Paperclip infers from MCP annotations:
@@ -223,7 +255,10 @@ Each tool discovered on a connection becomes a **catalog entry** with a risk lev
 
 When a catalog refresh discovers a new write/destructive tool that did not exist on the prior schema, Paperclip sets `status: quarantined` and records the reason in `quarantineReason`. Quarantined entries are never returned to the agent's tool list until an operator reviews and re-enables them. This is the **changed-tool quarantine** rule and the primary defense against an upstream server silently adding a destructive verb.
 
-To inspect and re-enable a quarantined entry, use the UI Catalog view, or PATCH the entry's status via the catalog routes (see [Reference](#reference)).
+To inspect and re-enable quarantined entries, use the UI Catalog view or the
+company-scoped compare-and-set review route. Each decision supplies the
+catalog-entry id plus the exact current `versionHash` and `schemaHash`; changed
+hashes fail closed so a stale review cannot activate a different tool schema.
 
 ## Profiles and bindings
 
@@ -421,7 +456,10 @@ These are intentional gaps as of the MCP Access Governance v1 launch. Track or w
 
 - **Audit-write failures are production incidents.** `mcp_runtime_audit_write_failures` is backed by the durable runtime metric counter and fires when MCP audit-event persistence fails. Treat any firing alert as a control-plane incident — page CloudOps and freeze tool calls until audit durability is restored.
 - **No CLI surface for tool access yet.** Connections, profiles, policies, approvals, and trust rules are managed via the UI and the REST API only. There is no `paperclipai tool ...` subcommand.
-- **No bulk catalog review.** When an upstream server adds many new tools at once, you review each quarantined entry individually. Bulk operations are planned but not in v1.
+- **Catalog review is explicit compare-and-set.** The review endpoint accepts a
+  bounded decision batch, but every entry still needs an explicit
+  `activate` or `keep_quarantined` decision with its current version and schema
+  hashes. Paperclip does not infer operator trust from tool names.
 - **Trust rules match exact argument shapes only.** A trust rule built from one approval covers calls whose canonical argument hash matches and whose catalog schema hash is unchanged. Wildcards and structural filters across the rest of the schema are not supported in v1.
 - **Rate limits are per-policy.** Rate limit counters are scoped to the matching policy and counter key. There is no cross-policy aggregation (e.g. "300 requests/hour across all GitHub policies"). Operators who need that wire two `rate_limit` policies and accept the additive behavior.
 - **Action request expiry is fixed by policy.** The approval card carries a server-set expiry; the human approver cannot extend it from the UI. If a request expires before approval, the agent must retry the tool call.
@@ -439,6 +477,8 @@ These are intentional gaps as of the MCP Access Governance v1 launch. Track or w
 | Profiles | `GET\|POST /api/companies/:companyId/tools/profiles`, `PATCH /api/tool-profiles/:id` | Entries: `POST /api/tool-profiles/:id/entries`, `PATCH\|DELETE /api/tool-profile-entries/:id`. |
 | Bindings | `POST /api/companies/:companyId/tools/profiles/:id/bind` and `…/unbind` | Targets: `company`, `agent`, `project`, `routine`, `issue`. |
 | Effective profile | `GET /api/companies/:companyId/tools/profiles/effective/agents/:agentId` | Use for QA proofs and debugging selector misses. |
+| Installs | `GET\|PUT /api/tool-connections/:connectionId/installs` | Reachability is separate from profile authority; GET derives and verifies the persisted mode. |
+| Catalog review | `POST /api/companies/:companyId/tools/connections/:connectionId/catalog/review` | Bounded compare-and-set decisions using the current bare SHA-256 version and schema hashes. |
 | Policies | `GET\|POST /api/companies/:companyId/tools/policies`, `PATCH\|DELETE /api/companies/:companyId/tools/policies/:id` | Types: `allow`, `block`, `require_approval`, `rate_limit`, `trust_rule`. |
 | Policy dry-run | `POST /api/companies/:companyId/tools/policy/test` | Structured `{ companyId, actor, request, runContext? }` body; decision returned under `.decision`. |
 | Gateway sessions | `POST /api/tool-gateway/sessions`, `POST /api/tool-gateway/sessions/:sessionId/revoke` | Board callers must supply `companyId`, `agentId`, `runId` to create and `companyId` to revoke; agent JWTs auto-fill from the token. Revocation invalidates the session immediately and emits `tool_gateway.session_revoked` without logging the raw session token. |

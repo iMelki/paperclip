@@ -2512,6 +2512,119 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
     return rows.map(toConnectionInstall);
   }
 
+  async function getConnectionInstallSnapshot(
+    connectionId: string,
+    companyId?: string,
+  ): Promise<ToolConnectionInstallSnapshot> {
+    const connection = await getConnectionRow(connectionId, companyId);
+    const installs = await listConnectionInstalls(
+      connection.id,
+      connection.companyId,
+    );
+    const [appProfile] = await db
+      .select()
+      .from(toolProfiles)
+      .where(and(
+        eq(toolProfiles.companyId, connection.companyId),
+        eq(toolProfiles.profileKey, `app:${connection.id}`),
+      ))
+      .limit(1);
+    if (!appProfile) {
+      return {
+        connectionId: connection.id,
+        installs,
+        accessMode: "reachability_only",
+        reachabilityOnly: true,
+        installOwnedAccessBindingCount: 0,
+        nonInstallOwnedAppBindingCount: 0,
+      };
+    }
+
+    const [bindings, entries] = await Promise.all([
+      db
+        .select()
+        .from(toolProfileBindings)
+        .where(and(
+          eq(toolProfileBindings.companyId, connection.companyId),
+          eq(toolProfileBindings.profileId, appProfile.id),
+        )),
+      db
+        .select()
+        .from(toolProfileEntries)
+        .where(and(
+          eq(toolProfileEntries.companyId, connection.companyId),
+          eq(toolProfileEntries.profileId, appProfile.id),
+        )),
+    ]);
+    const installOwnedBindings = bindings.filter((binding) => {
+      const metadata = asRecord(binding.metadata);
+      return (
+        metadata.source === "tool_connection_install"
+        && metadata.connectionId === connection.id
+      );
+    });
+    const nonInstallOwnedAppBindingCount =
+      bindings.length - installOwnedBindings.length;
+    if (installOwnedBindings.length === 0) {
+      return {
+        connectionId: connection.id,
+        installs,
+        accessMode: "reachability_only",
+        reachabilityOnly: true,
+        installOwnedAccessBindingCount: 0,
+        nonInstallOwnedAppBindingCount,
+      };
+    }
+
+    const installKeys = new Set(
+      installs.map((install) => `${install.targetType}:${install.targetId}`),
+    );
+    const installOwnedAccessKeys = new Set(
+      installOwnedBindings.map(
+        (binding) => `${binding.targetType}:${binding.targetId}`,
+      ),
+    );
+    const exactBindingMatch =
+      installOwnedBindings.length === installOwnedAccessKeys.size
+      && installKeys.size === installOwnedAccessKeys.size
+      && [...installKeys].every((key) => installOwnedAccessKeys.has(key));
+    const connectionIncludeEntries = entries.filter((entry) =>
+      entry.selectorType === "connection"
+      && entry.effect === "include"
+      && entry.connectionId === connection.id
+    );
+    const profileShapeIsExact =
+      appProfile.status === "active"
+      && appProfile.defaultAction === "deny"
+      && entries.length === 1
+      && connectionIncludeEntries.length === 1;
+    if (!exactBindingMatch || !profileShapeIsExact) {
+      throw conflict(
+        "Tool connection install access state is inconsistent.",
+        {
+          code: "install_access_state_inconsistent",
+          connectionId: connection.id,
+          installCount: installs.length,
+          installOwnedAccessBindingCount: installOwnedBindings.length,
+          nonInstallOwnedAppBindingCount,
+          appProfileStatus: appProfile.status,
+          appProfileDefaultAction: appProfile.defaultAction,
+          appProfileEntryCount: entries.length,
+          connectionIncludeEntryCount: connectionIncludeEntries.length,
+        },
+      );
+    }
+
+    return {
+      connectionId: connection.id,
+      installs,
+      accessMode: "extend_connection_access",
+      reachabilityOnly: false,
+      installOwnedAccessBindingCount: installOwnedBindings.length,
+      nonInstallOwnedAppBindingCount,
+    };
+  }
+
   async function resolveInstalledConnectionsForAgent(companyId: string, agentId: string): Promise<ToolConnection[]> {
     await assertOptionalAgent(companyId, agentId, "Tool connection install agent");
     const installRows = await db
@@ -5932,6 +6045,7 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
     },
 
     listConnectionInstalls,
+    getConnectionInstallSnapshot,
 
     putConnectionInstalls: async (
       connectionId: string,
@@ -6047,10 +6161,10 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
         });
       }
       return {
-        connectionId: connection.id,
-        installs: await listConnectionInstalls(connection.id, connection.companyId),
-        accessMode,
-        reachabilityOnly: accessMode === "reachability_only",
+        ...await getConnectionInstallSnapshot(
+          connection.id,
+          connection.companyId,
+        ),
         removedLegacyAccessBindingCount,
       };
     },

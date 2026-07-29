@@ -102,6 +102,7 @@ paperclipai company import org/repo/companies/acme
 | `--include <values>` | Comma-separated set: `company`, `agents`, `projects`, `issues`, `tasks`, `skills` | auto-detected |
 | `--agents <list>` | Comma-separated agent slugs to import, or `all` | `all` |
 | `--collision <mode>` | How to handle name conflicts: `rename`, `skip`, or `replace` | `rename` |
+| `--adapter-strategy <mode>` | `portable-defaults` rewrites portable Process placeholders to the local default; `preserve` keeps every exported adapter type exactly | `portable-defaults` |
 | `--ref <value>` | Git ref for GitHub imports (branch, tag, or commit) | default branch |
 | `--dry-run` | Preview what would be imported without applying | `false` |
 | `--yes` | Skip the interactive confirmation prompt | `false` |
@@ -142,6 +143,19 @@ The preview shows:
 
 Imported agents always land with timer heartbeats disabled. Assignment/on-demand wake behavior from the package is preserved, but scheduled runs stay off until a board operator re-enables them.
 
+The default `portable-defaults` adapter strategy preserves historical CLI
+behavior: selected agents exported with the generic `process` adapter are
+changed to `claude_local`, and both text and JSON preview output list every
+change. Use `--adapter-strategy preserve` only when the package intentionally
+contains executable Process adapters and you have reviewed their commands.
+Preserve mode sends no adapter overrides, so the exported adapter type,
+executable `command`, and `args` remain Process adapter inputs. The server may
+still normalize other adapter fields and apply current defaults during import;
+preview and read back the imported agent before enabling it. JSON preview and
+result output record `preservedExecutableAgentSlugs`; text output lists the
+same slugs so a headless release receipt can prove exactly which executable
+agents used the opt-in path.
+
 ### Common Workflows
 
 **Clone a company template from GitHub:**
@@ -173,6 +187,7 @@ paperclipai company import org/repo --ref v2.0.0 --dry-run
 ```sh
 paperclipai company import ./package \
   --target new \
+  --adapter-strategy preserve \
   --yes \
   --json
 ```

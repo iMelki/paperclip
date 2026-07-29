@@ -189,8 +189,10 @@ export interface ToolConnectionInstall {
 export interface ToolConnectionInstallSnapshot {
   connectionId: string;
   installs: ToolConnectionInstall[];
-  accessMode?: ToolConnectionInstallAccessMode;
-  reachabilityOnly?: boolean;
+  accessMode: ToolConnectionInstallAccessMode;
+  reachabilityOnly: boolean;
+  installOwnedAccessBindingCount: number;
+  nonInstallOwnedAppBindingCount: number;
   removedLegacyAccessBindingCount?: number;
 }
 

@@ -196,6 +196,36 @@ describe("remote MCP header policy", () => {
     expect((caught as Error).message).not.toContain(sentinel);
   });
 
+  it.each([
+    "Bearer credential-sentinel",
+    " \tBearer credential-sentinel\t ",
+    "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJzZW50aW5lbCJ9.signature-sentinel",
+    "ghp_1234567890abcdefghijklmnopqrst",
+    "sk-proj-1234567890abcdefghijklmnopqrst",
+    "api_key=credential-sentinel",
+    "-----BEGIN PRIVATE KEY-----",
+  ])(
+    "rejects a high-confidence secret value under an otherwise benign static header",
+    (value) => {
+      let caught: unknown;
+      try {
+        readRemoteMcpHeaderPolicy({
+          config: {
+            headerPolicy: {
+              staticHeaders: [{ name: "X-MCP-Metadata", value }],
+            },
+          },
+        });
+      } catch (error) {
+        caught = error;
+      }
+
+      expect(caught).toBeInstanceOf(RemoteMcpHeaderValidationError);
+      expect(caught).toMatchObject({ reason: "sensitive_static_header" });
+      expect((caught as Error).message).not.toContain(value);
+    },
+  );
+
   it("rejects unsupported explicit policy versions while treating an omitted version as v1", () => {
     expect(readRemoteMcpHeaderPolicy({ config: { headerPolicy: {} } }).version).toBe(1);
     expect(() => readRemoteMcpHeaderPolicy({
@@ -227,6 +257,28 @@ describe("remote MCP header policy", () => {
         config: {
           headerPolicy: {
             staticHeaders: [{ name: "X-Good", value: "value-sentinel\r\nInjected: true" }],
+          },
+        },
+      },
+      sentinel: "value-sentinel",
+    },
+    {
+      label: "NUL-bearing static value",
+      connection: {
+        config: {
+          headerPolicy: {
+            staticHeaders: [{ name: "X-Good", value: "value-sentinel\u0000hidden" }],
+          },
+        },
+      },
+      sentinel: "value-sentinel",
+    },
+    {
+      label: "non-ByteString static value",
+      connection: {
+        config: {
+          headerPolicy: {
+            staticHeaders: [{ name: "X-Good", value: "value-sentinel-😃" }],
           },
         },
       },

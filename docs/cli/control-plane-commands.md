@@ -47,6 +47,7 @@ pnpm paperclipai company import \
   --company-id <company-id> \
   --ref main \
   --collision rename \
+  --adapter-strategy preserve \
   --dry-run
 
 # Apply import
@@ -54,8 +55,14 @@ pnpm paperclipai company import \
   ./exports/acme \
   --target new \
   --new-company-name "Acme Imported" \
-  --include company,agents
+  --include company,agents \
+  --adapter-strategy preserve
 ```
+
+`--adapter-strategy portable-defaults` remains the backwards-compatible
+default and reports each Process-to-Claude adapter change. Use
+`--adapter-strategy preserve` for reviewed packages whose deterministic
+Process adapters must remain exact.
 
 With agent authentication, use `company list` or `company current` to resolve
 the scoped company. `company list` first tries the board-wide list; if that is

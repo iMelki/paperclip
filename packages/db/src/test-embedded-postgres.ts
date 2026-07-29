@@ -1,13 +1,10 @@
-import { execFile } from "node:child_process";
 import fs from "node:fs";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
-import { promisify } from "node:util";
 import { applyPendingMigrations, ensurePostgresDatabase } from "./client.js";
 import { prepareEmbeddedPostgresNativeRuntime } from "./embedded-postgres-native.js";
-
-const execFileAsync = promisify(execFile);
+import { reapWindowsTestProcessTree } from "./test-windows-process-tree.js";
 
 type EmbeddedPostgresInstance = {
   initialise(): Promise<void>;
@@ -126,7 +123,6 @@ export const EMBEDDED_POSTGRES_TEST_SETUP_TIMEOUT_MS =
 // Upper bound (ms) on how long we wait for the embedded Postgres cluster to
 // stop gracefully before abandoning the wait and returning from the hook.
 const EMBEDDED_POSTGRES_STOP_TIMEOUT_MS = 5000;
-const EMBEDDED_POSTGRES_FORCE_STOP_TIMEOUT_MS = 2000;
 
 function readPostmasterPid(dataDir: string): number | null {
   try {
@@ -140,35 +136,15 @@ function readPostmasterPid(dataDir: string): number | null {
   }
 }
 
-function isProcessAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
 async function terminateWindowsPostgresProcessTree(dataDir: string): Promise<boolean> {
   if (process.platform !== "win32") return false;
   const pid = readPostmasterPid(dataDir);
-  if (!pid) return true;
-
-  const taskkill = path.join(
-    process.env.SystemRoot ?? "C:\\Windows",
-    "System32",
-    "taskkill.exe",
-  );
-  await execFileAsync(taskkill, ["/PID", String(pid), "/T", "/F"], {
-    windowsHide: true,
-  }).catch(() => {});
-
-  const deadline = Date.now() + EMBEDDED_POSTGRES_FORCE_STOP_TIMEOUT_MS;
-  while (Date.now() < deadline) {
-    if (!isProcessAlive(pid)) return true;
-    await new Promise((resolve) => setTimeout(resolve, 50));
-  }
-  return !isProcessAlive(pid);
+  const result = await reapWindowsTestProcessTree({
+    rootPid: pid ?? 0,
+    ownerMarkers: [dataDir],
+    timeoutMs: 5_000,
+  });
+  return result.confirmedStopped;
 }
 
 // `embedded-postgres@18.1.0-beta.16` exposes only `stop(): Promise<void>` — no

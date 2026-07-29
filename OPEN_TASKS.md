@@ -10,26 +10,34 @@ This file is the durable local index for active `paperclip` issues.
   - One fail-closed header policy now governs gallery discovery, health, and
     execution. Static non-secret headers are delivered without allowing caller
     config to override the gallery URL, quarantine, managed credentials, or
-    MCP protocol headers. Close after the complete matrix and a live GitHub MCP
-    read-only catalog probe succeed on the committed runtime.
+    MCP protocol headers. The final hardening also rejects secret-shaped values
+    hidden under benign names, non-ByteString values, unsupported versions, and
+    oversized streamed responses. Close after the complete matrix and a live
+    GitHub MCP read-only catalog probe succeed on the committed runtime.
 
 - [#21 - Allow company import to preserve explicit Process adapters](https://github.com/iMelki/paperclip/issues/21)
-  - Add an explicit preserve-adapters import mode so a portable company export
-    can retain deterministic Process validators. Until then, use the reviewed
-    high-level dry run followed by the raw import API without adapter overrides.
+  - `company import --adapter-strategy preserve` now retains reviewed,
+    explicitly exported Process validators and records their slugs in text and
+    JSON preview/apply evidence. Close after the focused E2E, CLI typecheck,
+    complete validation, commit, and remote-SHA readback are green.
 
 - [#20 - Reap Windows test process trees and remove load-order timeout flakes](https://github.com/iMelki/paperclip/issues/20)
   - All 125 embedded-PostgreSQL hooks that previously overrode setup with an
     explicit 20-second bound now use one shared 60-second Windows / 20-second
-    non-Windows constant, with an AST regression guard. Runtime-service teardown
-    has focused process-tree reaping coverage; keep this issue open until the
-    fresh complete-suite receipt is green with zero surviving fixtures.
+    non-Windows constant, with an AST regression guard. Windows teardown now
+    captures creation-time identities, reaps the complete exact tree, follows
+    reparented descendants, rejects reused PIDs, and fails closed when
+    ownership cannot be proved. Keep this issue open until the fresh
+    complete-suite receipt is green with zero surviving fixtures.
 
 - [#22 - Make complete validation and package builds Windows-portable](https://github.com/iMelki/paperclip/issues/22)
   - The portable Node filesystem helper, validated direct package-manager
     entrypoint, native path assertions, timezone-stable UI fixtures, dependency
-    scan boundary, and current package-build assertions are implemented.
-    Close after the fresh full matrix, typecheck, and build read back green.
+    scan boundary, and current package-build assertions are implemented. The
+    final audit also found remaining host-side bare npm/pnpm executions,
+    POSIX prepack/postpack pairs, and missing native-Windows CI coverage; finish
+    those canonical resolver/lifecycle consumers before the fresh full matrix,
+    typecheck, build, and representative pack readback.
 
 - [#19 - Make headless onboarding and doctor failures automation-safe](https://github.com/iMelki/paperclip/issues/19)
   - Implemented explicit config-only `onboard --yes --no-run` behavior and

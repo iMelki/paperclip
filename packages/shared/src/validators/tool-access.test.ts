@@ -179,6 +179,57 @@ describe("tool access validators", () => {
     expect(parsed.success).toBe(false);
   });
 
+  it.each([
+    {
+      label: "array-form bearer value under a benign name",
+      staticHeaders: [
+        { name: "X-MCP-Metadata", value: "Bearer must-not-persist" },
+      ],
+    },
+    {
+      label: "object-form provider token under a benign name",
+      staticHeaders: {
+        "X-MCP-Metadata": "ghp_1234567890abcdefghijklmnopqrst",
+      },
+    },
+    {
+      label: "array-form whitespace-padded bearer value",
+      staticHeaders: [
+        { name: "X-MCP-Metadata", value: " \tBearer must-not-persist\t " },
+      ],
+    },
+    {
+      label: "object-form NUL-bearing value",
+      staticHeaders: {
+        "X-MCP-Metadata": "must-not-persist\u0000hidden",
+      },
+    },
+    {
+      label: "array-form non-ByteString value",
+      staticHeaders: [
+        { name: "X-MCP-Metadata", value: "must-not-persist-😃" },
+      ],
+    },
+  ])("rejects $label", ({ staticHeaders }) => {
+    const parsed = connectToolAppSchema.safeParse({
+      galleryKey: "github",
+      configValues: {
+        headerPolicy: {
+          staticHeaders,
+        },
+      },
+    });
+    expect(parsed.success).toBe(false);
+    if (!parsed.success) {
+      expect(JSON.stringify(parsed.error.issues)).not.toContain(
+        "must-not-persist",
+      );
+      expect(JSON.stringify(parsed.error.issues)).not.toContain(
+        "ghp_1234567890abcdefghijklmnopqrst",
+      );
+    }
+  });
+
   it("keeps invocation payload summaries redacted and bounded", () => {
     const parsed = toolRedactedValueSummarySchema.parse({
       summary: "Redacted arguments: 2 fields omitted.",

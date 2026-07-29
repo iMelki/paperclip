@@ -632,7 +632,12 @@ export function toolAccessRoutes(
     const connection = await svc.getConnection(req.params.connectionId as string);
     if (!hasCompanyAccess(req, connection.companyId)) throw notFound("Tool connection not found");
     assertCompanyAccess(req, connection.companyId);
-    res.json({ connectionId: connection.id, installs: connection.installs ?? [] });
+    res.json(
+      await svc.getConnectionInstallSnapshot(
+        connection.id,
+        connection.companyId,
+      ),
+    );
   });
 
   router.put(

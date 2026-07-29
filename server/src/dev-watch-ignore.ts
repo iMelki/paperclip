@@ -19,7 +19,14 @@ function addIgnorePath(target: Set<string>, candidate: string): void {
 
 export function resolveServerDevWatchIgnorePaths(serverRoot: string): string[] {
   const ignorePaths = new Set<string>([
+    // Keep the brace form for watcher implementations that support it, but
+    // also emit explicit globs.  tsx's Windows watcher has historically
+    // treated the brace expression literally, which lets dependency churn
+    // restart a developer server during an active run.
     "**/{node_modules,bower_components,vendor}/**",
+    "**/node_modules/**",
+    "**/bower_components/**",
+    "**/vendor/**",
     "**/.vite-temp/**",
   ]);
 

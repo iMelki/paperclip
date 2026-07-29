@@ -4,6 +4,26 @@ All notable changes to this repository should be recorded here.
 
 ## Unreleased
 
+- Added an explicit `company import --adapter-strategy preserve` path for #21.
+  Preview and apply receipts enumerate preserved executable Process agents,
+  default imports retain the existing portable Process-to-Claude fallback, and
+  selected/skipped agent handling no longer creates silent adapter overrides.
+- Replaced Windows test cleanup's bare-PID assumptions with bounded,
+  creation-time-identified process-tree reaping for #20. Embedded PostgreSQL
+  fallback cleanup and CLI/runtime fixtures now prove exact ownership, retain
+  reparented descendants, reject PID reuse, fail closed when identity cannot
+  be established, and report before/after PID evidence without command lines.
+- Extended #23's static remote-MCP policy to reject high-confidence secret
+  values even under benign header names, control/non-ByteString values, and
+  unsupported policy versions before persistence. Tool Gateway response reads
+  are now streaming and bounded, including chunked responses and early
+  content-length aborts.
+- Made Tool Gateway install-mode readback authoritative for factory catalog
+  activation. `GET` and `PUT` install responses derive persisted
+  `reachability_only` versus install-owned access, report separately owned
+  app-profile bindings, and fail closed on partial or conflicting profile
+  state so factory roles do not need a broad extra `app:<connectionId>`
+  profile.
 - Unified remote-MCP header resolution across gallery connection discovery,
   health checks, and Tool Gateway execution under #23. Versioned non-secret
   static headers now reach every protocol path, credential and MCP protocol

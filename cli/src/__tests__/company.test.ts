@@ -10,6 +10,7 @@ import {
   renderCompanyImportPreview,
   renderCompanyImportResult,
   registerCompanyCommands,
+  resolveCompanyImportAdapterStrategy,
   resolveCompanyImportApplyConfirmationMode,
   resolveCompanyImportApiPath,
 } from "../commands/client/company.js";
@@ -879,5 +880,44 @@ describe("default adapter overrides", () => {
         adapterType: "claude_local",
       },
     });
+    expect(
+      buildDefaultImportAdapterOverrides(preview, "preserve"),
+    ).toBeUndefined();
+
+    expect(buildDefaultImportAdapterOverrides({
+      ...preview,
+      selectedAgentSlugs: [],
+    })).toBeUndefined();
+
+    expect(buildDefaultImportAdapterOverrides({
+      ...preview,
+      plan: {
+        ...preview.plan,
+        agentPlans: [{
+          slug: "legacy-agent",
+          action: "skip",
+          plannedName: "Legacy Agent",
+          existingAgentId: "existing-agent",
+          reason: "skip strategy",
+        }],
+      },
+    })).toBeUndefined();
+  });
+});
+
+describe("resolveCompanyImportAdapterStrategy", () => {
+  it("keeps portable defaults as the backwards-compatible default", () => {
+    expect(resolveCompanyImportAdapterStrategy(undefined)).toBe(
+      "portable-defaults",
+    );
+  });
+
+  it("accepts explicit adapter preservation", () => {
+    expect(resolveCompanyImportAdapterStrategy(" preserve ")).toBe("preserve");
+  });
+
+  it("rejects unsupported strategies before preview or apply", () => {
+    expect(() => resolveCompanyImportAdapterStrategy("rewrite-everything"))
+      .toThrow(/portable-defaults \| preserve/i);
   });
 });

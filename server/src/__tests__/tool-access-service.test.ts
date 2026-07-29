@@ -6574,6 +6574,17 @@ describeEmbeddedPostgres("tool access service", () => {
     expect(get.body.installs).toEqual(expect.arrayContaining([
       expect.objectContaining({ targetType: "agent", targetId: agent.id }),
     ]));
+    const installSnapshot = await request(app)
+      .get(`/api/tool-connections/${connection.id}/installs`);
+    expect(installSnapshot.status).toBe(200);
+    expect(installSnapshot.body).toMatchObject({
+      connectionId: connection.id,
+      accessMode: "reachability_only",
+      reachabilityOnly: true,
+      installOwnedAccessBindingCount: 0,
+      nonInstallOwnedAppBindingCount: 0,
+      installs: [{ targetType: "agent", targetId: agent.id }],
+    });
   });
 
   it("reviews quarantined catalog entries through the company-scoped compare-and-set route", async () => {
@@ -6644,6 +6655,8 @@ describeEmbeddedPostgres("tool access service", () => {
     expect(extended).toMatchObject({
       accessMode: "extend_connection_access",
       reachabilityOnly: false,
+      installOwnedAccessBindingCount: 1,
+      nonInstallOwnedAppBindingCount: 0,
     });
     const [profile] = await db
       .select()
@@ -6674,7 +6687,19 @@ describeEmbeddedPostgres("tool access service", () => {
     expect(narrowed).toMatchObject({
       accessMode: "reachability_only",
       reachabilityOnly: true,
+      installOwnedAccessBindingCount: 0,
+      nonInstallOwnedAppBindingCount: 1,
       removedLegacyAccessBindingCount: 1,
+    });
+    const readback = await service.getConnectionInstallSnapshot(
+      connection.id,
+      company.id,
+    );
+    expect(readback).toMatchObject({
+      accessMode: "reachability_only",
+      reachabilityOnly: true,
+      installOwnedAccessBindingCount: 0,
+      nonInstallOwnedAppBindingCount: 1,
     });
     const remaining = await db
       .select()
@@ -6691,6 +6716,92 @@ describeEmbeddedPostgres("tool access service", () => {
     expect(effective.installedConnections.map((item) => item.id))
       .toEqual([connection.id]);
     expect(effective.allowedTools).toHaveLength(1);
+  });
+
+  it("returns a conflict when install-owned access bindings no longer match the install set", async () => {
+    const company = await createCompany(db);
+    const firstAgent = await createAgent(db, company.id);
+    const secondAgent = await createAgent(db, company.id);
+    const { connection } = await createRemoteToolFixture(db, company.id);
+    const service = toolAccessService(db);
+    await service.putConnectionInstalls(connection.id, {
+      accessMode: "extend_connection_access",
+      installs: [{ targetType: "agent", targetId: firstAgent.id }],
+    });
+    await db.insert(toolConnectionInstalls).values({
+      companyId: company.id,
+      connectionId: connection.id,
+      targetType: "agent",
+      targetId: secondAgent.id,
+    });
+
+    const response = await request(createRouteApp(db))
+      .get(`/api/tool-connections/${connection.id}/installs`);
+
+    expect(response.status).toBe(409);
+    expect(response.body).toMatchObject({
+      error: "Tool connection install access state is inconsistent.",
+      details: {
+        code: "install_access_state_inconsistent",
+        connectionId: connection.id,
+        installCount: 2,
+        installOwnedAccessBindingCount: 1,
+      },
+    });
+  });
+
+  it("returns a conflict when the install-owned app profile is inactive or has conflicting entries", async () => {
+    const company = await createCompany(db);
+    const agent = await createAgent(db, company.id);
+    const { connection } = await createRemoteToolFixture(db, company.id);
+    const service = toolAccessService(db);
+    await service.putConnectionInstalls(connection.id, {
+      accessMode: "extend_connection_access",
+      installs: [{ targetType: "agent", targetId: agent.id }],
+    });
+    const [profile] = await db
+      .select()
+      .from(toolProfiles)
+      .where(eq(toolProfiles.profileKey, `app:${connection.id}`));
+    await db
+      .update(toolProfiles)
+      .set({ status: "archived" })
+      .where(eq(toolProfiles.id, profile!.id));
+
+    const inactive = await request(createRouteApp(db))
+      .get(`/api/tool-connections/${connection.id}/installs`);
+    expect(inactive.status).toBe(409);
+    expect(inactive.body).toMatchObject({
+      details: {
+        code: "install_access_state_inconsistent",
+        appProfileStatus: "archived",
+      },
+    });
+
+    await db
+      .update(toolProfiles)
+      .set({ status: "active" })
+      .where(eq(toolProfiles.id, profile!.id));
+    await db.insert(toolProfileEntries).values({
+      companyId: company.id,
+      profileId: profile!.id,
+      selectorType: "connection",
+      effect: "exclude",
+      connectionId: connection.id,
+    });
+
+    const conflicting = await request(createRouteApp(db))
+      .get(`/api/tool-connections/${connection.id}/installs`);
+    expect(conflicting.status).toBe(409);
+    expect(conflicting.body).toMatchObject({
+      details: {
+        code: "install_access_state_inconsistent",
+        appProfileStatus: "active",
+        appProfileDefaultAction: "deny",
+        appProfileEntryCount: 2,
+        connectionIncludeEntryCount: 1,
+      },
+    });
   });
 });
 

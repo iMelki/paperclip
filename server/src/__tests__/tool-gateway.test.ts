@@ -427,14 +427,19 @@ async function startFakeRemoteMcpServer(handler: (request: FakeMcpRequest) => Pr
   body?: unknown;
   rawBody?: string;
   delayMs?: number;
+  chunks?: string[];
+  chunkDelayMs?: number;
 }> | {
   status?: number;
   headers?: Record<string, string>;
   body?: unknown;
   rawBody?: string;
   delayMs?: number;
+  chunks?: string[];
+  chunkDelayMs?: number;
 }) {
   const requests: FakeMcpRequest[] = [];
+  const abortedResponses: FakeMcpRequest[] = [];
   const server = createServer(async (req, res) => {
     const chunks: Buffer[] = [];
     req.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
@@ -448,6 +453,9 @@ async function startFakeRemoteMcpServer(handler: (request: FakeMcpRequest) => Pr
       }
       const requestRecord = { headers: req.headers, body };
       requests.push(requestRecord);
+      res.once("close", () => {
+        if (!res.writableEnded) abortedResponses.push(requestRecord);
+      });
       const response = await handler(requestRecord);
       if (response.delayMs) {
         await new Promise((resolve) => setTimeout(resolve, response.delayMs));
@@ -456,7 +464,18 @@ async function startFakeRemoteMcpServer(handler: (request: FakeMcpRequest) => Pr
       for (const [key, value] of Object.entries(response.headers ?? {})) {
         res.setHeader(key, value);
       }
-      if (response.rawBody !== undefined) {
+      if (response.chunks) {
+        for (const chunk of response.chunks) {
+          if (res.destroyed) break;
+          res.write(chunk);
+          if (response.chunkDelayMs) {
+            await new Promise((resolve) =>
+              setTimeout(resolve, response.chunkDelayMs)
+            );
+          }
+        }
+        if (!res.destroyed) res.end();
+      } else if (response.rawBody !== undefined) {
         res.end(response.rawBody);
       } else {
         res.setHeader("content-type", "application/json");
@@ -474,6 +493,7 @@ async function startFakeRemoteMcpServer(handler: (request: FakeMcpRequest) => Pr
   return {
     url: `http://127.0.0.1:${address.port}/mcp`,
     requests,
+    abortedResponses,
     close: () => new Promise<void>((resolve, reject) => {
       server.close((error) => error ? reject(error) : resolve());
     }),
@@ -2640,9 +2660,20 @@ rl.on("line", (line) => {
       reasonCode: "mcp_remote_response_too_large",
       status: 502,
       response: () => {
-        const rawBody = "x".repeat(1_000_001);
-        return { rawBody, headers: { "content-length": String(Buffer.byteLength(rawBody)) } };
+        const contentLength = 1_000_001;
+        return {
+          chunks: ["x", "x".repeat(32)],
+          chunkDelayMs: 100,
+          headers: { "content-length": String(contentLength) },
+        };
       },
+      expectAbort: true,
+    },
+    {
+      name: "chunked response size",
+      reasonCode: "mcp_remote_response_too_large",
+      status: 502,
+      response: () => ({ rawBody: "x".repeat(1_000_001) }),
     },
     {
       name: "timeout abort",
@@ -2683,6 +2714,12 @@ rl.on("line", (line) => {
           },
           (error) => expectGatewayError(error, scenario.status, scenario.reasonCode),
         );
+        if ("expectAbort" in scenario && scenario.expectAbort) {
+          await expect.poll(
+            () => fake.abortedResponses.length,
+            { timeout: 2_000 },
+          ).toBe(1);
+        }
 
         const [invocation] = await db.select().from(toolInvocations);
         expect(invocation).toMatchObject({

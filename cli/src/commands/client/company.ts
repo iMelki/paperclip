@@ -43,6 +43,7 @@ interface AgentMeResponse {
 type CompanyDeleteSelectorMode = "auto" | "id" | "prefix";
 type CompanyImportTargetMode = "new" | "existing";
 type CompanyCollisionMode = "rename" | "skip" | "replace";
+export type CompanyImportAdapterStrategy = "portable-defaults" | "preserve";
 
 interface CompanyDeleteOptions extends BaseClientOptions {
   by?: CompanyDeleteSelectorMode;
@@ -84,6 +85,7 @@ interface CompanyImportOptions extends BaseClientOptions {
   collision?: CompanyCollisionMode;
   ref?: string;
   paperclipUrl?: string;
+  adapterStrategy?: CompanyImportAdapterStrategy;
   yes?: boolean;
   dryRun?: boolean;
 }
@@ -294,7 +296,7 @@ export function buildImportSelectionCatalog(preview: CompanyPortabilityPreviewRe
       files: collectEntityFiles(preview.files, normalizePortablePath(issue.path)),
     })),
     agents: preview.manifest.agents
-      .filter((agent) => selectedAgentSlugs.size === 0 || selectedAgentSlugs.has(agent.slug))
+      .filter((agent) => selectedAgentSlugs.has(agent.slug))
       .map((agent) => ({
         key: agent.slug,
         label: agent.name,
@@ -380,12 +382,23 @@ export function buildSelectedFilesFromImportSelection(
 }
 
 export function buildDefaultImportAdapterOverrides(
-  preview: Pick<CompanyPortabilityPreviewResult, "manifest" | "selectedAgentSlugs">,
+  preview: Pick<
+    CompanyPortabilityPreviewResult,
+    "manifest" | "plan" | "selectedAgentSlugs"
+  >,
+  adapterStrategy: CompanyImportAdapterStrategy = "portable-defaults",
 ): Record<string, { adapterType: string }> | undefined {
+  if (adapterStrategy === "preserve") return undefined;
   const selectedAgentSlugs = new Set(preview.selectedAgentSlugs);
+  const skippedAgentSlugs = new Set(
+    preview.plan.agentPlans
+      .filter((plan) => plan.action === "skip")
+      .map((plan) => plan.slug),
+  );
   const overrides = Object.fromEntries(
     preview.manifest.agents
-      .filter((agent) => selectedAgentSlugs.size === 0 || selectedAgentSlugs.has(agent.slug))
+      .filter((agent) => selectedAgentSlugs.has(agent.slug))
+      .filter((agent) => !skippedAgentSlugs.has(agent.slug))
       .filter((agent) => agent.adapterType === "process")
       .map((agent) => [
         agent.slug,
@@ -398,15 +411,94 @@ export function buildDefaultImportAdapterOverrides(
   return Object.keys(overrides).length > 0 ? overrides : undefined;
 }
 
-function buildDefaultImportAdapterMessages(
+export function resolveCompanyImportAdapterStrategy(
+  value: string | undefined,
+): CompanyImportAdapterStrategy {
+  const normalized = value?.trim().toLowerCase() || "portable-defaults";
+  if (normalized !== "portable-defaults" && normalized !== "preserve") {
+    throw new Error(
+      "Invalid --adapter-strategy value. Use: portable-defaults | preserve",
+    );
+  }
+  return normalized;
+}
+
+type CompanyImportAdapterPolicy = {
+  strategy: CompanyImportAdapterStrategy;
+  preservedExecutableAgentSlugs: string[];
+  changes: Array<{
+    agentSlug: string;
+    fromAdapterType: string;
+    toAdapterType: string;
+    reason: "portable_process_fallback";
+  }>;
+};
+
+function buildCompanyImportAdapterPolicy(
+  preview: Pick<
+    CompanyPortabilityPreviewResult,
+    "manifest" | "plan" | "selectedAgentSlugs"
+  >,
+  strategy: CompanyImportAdapterStrategy,
   overrides: Record<string, { adapterType: string }> | undefined,
+): CompanyImportAdapterPolicy {
+  const manifestAgentsBySlug = new Map(
+    preview.manifest.agents.map((agent) => [agent.slug, agent]),
+  );
+  const selectedAgentSlugs = new Set(preview.selectedAgentSlugs);
+  const skippedAgentSlugs = new Set(
+    preview.plan.agentPlans
+      .filter((plan) => plan.action === "skip")
+      .map((plan) => plan.slug),
+  );
+  return {
+    strategy,
+    preservedExecutableAgentSlugs:
+      strategy === "preserve"
+        ? preview.manifest.agents
+          .filter((agent) => selectedAgentSlugs.has(agent.slug))
+          .filter((agent) => !skippedAgentSlugs.has(agent.slug))
+          .filter((agent) => agent.adapterType === "process")
+          .map((agent) => agent.slug)
+          .sort((left, right) => left.localeCompare(right))
+        : [],
+    changes: Object.entries(overrides ?? {}).map(([agentSlug, override]) => ({
+      agentSlug,
+      fromAdapterType:
+        manifestAgentsBySlug.get(agentSlug)?.adapterType ?? "unknown",
+      toAdapterType: override.adapterType,
+      reason: "portable_process_fallback",
+    })),
+  };
+}
+
+function buildDefaultImportAdapterMessages(
+  policy: CompanyImportAdapterPolicy,
 ): string[] {
-  if (!overrides) return [];
-  const adapterTypes = Array.from(new Set(Object.values(overrides).map((override) => override.adapterType)))
+  if (policy.strategy === "preserve") {
+    return [
+      "Preserving explicitly exported adapter types. Review Process adapter commands before applying an untrusted package.",
+      policy.preservedExecutableAgentSlugs.length > 0
+        ? `Preserved executable Process agents: ${policy.preservedExecutableAgentSlugs.join(", ")}.`
+        : "No selected executable Process agents are being preserved.",
+    ];
+  }
+  if (policy.changes.length === 0) {
+    return ["Adapter strategy: portable-defaults (no adapter changes required)."];
+  }
+  const adapterTypes = Array.from(
+    new Set(policy.changes.map((change) => change.toAdapterType)),
+  )
     .map((adapterType) => adapterType.replace(/_/g, "-"));
-  const agentCount = Object.keys(overrides).length;
+  const agentCount = policy.changes.length;
+  const agentSlugs = policy.changes
+    .map((change) => change.agentSlug)
+    .sort((left, right) =>
+      left.localeCompare(right)
+    );
   return [
-    `Using ${adapterTypes.join(", ")} adapter${adapterTypes.length === 1 ? "" : "s"} for ${agentCount} imported ${pluralize(agentCount, "agent")} without an explicit adapter.`,
+    `Adapter strategy portable-defaults changes ${agentCount} imported ${pluralize(agentCount, "agent")} to ${adapterTypes.join(", ")}.`,
+    `Changed agents: ${agentSlugs.join(", ")}.`,
   ];
 }
 
@@ -1405,6 +1497,11 @@ export function registerCompanyCommands(program: Command): void {
       .option("--new-company-name <name>", "Name override for --target new")
       .option("--agents <list>", "Comma-separated agent slugs to import, or all", "all")
       .option("--collision <mode>", "Collision strategy: rename | skip | replace", "rename")
+      .option(
+        "--adapter-strategy <strategy>",
+        "Adapter handling: portable-defaults | preserve",
+        "portable-defaults",
+      )
       .option("--ref <value>", "Git ref to use for GitHub imports (branch, tag, or commit)")
       .option("--paperclip-url <url>", "Alias for --api-base on this command")
       .option("--yes", "Accept default selection and skip the pre-import confirmation prompt", false)
@@ -1427,6 +1524,9 @@ export function registerCompanyCommands(program: Command): void {
           if (!["rename", "skip", "replace"].includes(collision)) {
             throw new Error("Invalid --collision value. Use: rename, skip, replace");
           }
+          const adapterStrategy = resolveCompanyImportAdapterStrategy(
+            opts.adapterStrategy,
+          );
 
           const inferredTarget = opts.target ?? (opts.companyId || ctx.companyId ? "existing" : "new");
           const target = inferredTarget.toLowerCase() as CompanyImportTargetMode;
@@ -1512,12 +1612,28 @@ export function registerCompanyCommands(program: Command): void {
           if (!preview) {
             throw new Error("Import preview returned no data.");
           }
-          const adapterOverrides = buildDefaultImportAdapterOverrides(preview);
-          const adapterMessages = buildDefaultImportAdapterMessages(adapterOverrides);
+          const adapterOverrides = buildDefaultImportAdapterOverrides(
+            preview,
+            adapterStrategy,
+          );
+          const adapterPolicy = buildCompanyImportAdapterPolicy(
+            preview,
+            adapterStrategy,
+            adapterOverrides,
+          );
+          const adapterMessages = buildDefaultImportAdapterMessages(
+            adapterPolicy,
+          );
 
           if (opts.dryRun) {
             if (ctx.json) {
-              printOutput(preview, { json: true });
+              printOutput(
+                {
+                  ...preview,
+                  adapterImport: adapterPolicy,
+                },
+                { json: true },
+              );
             } else {
               printCompanyImportView(
                 "Import Preview",
@@ -1567,7 +1683,7 @@ export function registerCompanyCommands(program: Command): void {
           });
           const imported = await ctx.api.post<CompanyPortabilityImportResult>(importApiPath, {
             ...previewPayload,
-            adapterOverrides,
+            ...(adapterOverrides ? { adapterOverrides } : {}),
           });
           if (!imported) {
             throw new Error("Import request returned no data.");
@@ -1591,7 +1707,13 @@ export function registerCompanyCommands(program: Command): void {
             }
           }
           if (ctx.json) {
-            printOutput(imported, { json: true });
+            printOutput(
+              {
+                ...imported,
+                adapterImport: adapterPolicy,
+              },
+              { json: true },
+            );
           } else {
             printCompanyImportView(
               "Import Result",

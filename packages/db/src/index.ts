@@ -20,6 +20,14 @@ export {
   type EmbeddedPostgresTestSupport,
 } from "./test-embedded-postgres.js";
 export {
+  reapWindowsTestProcessTree,
+  readWindowsTestProcessIdentity,
+  selectOwnedWindowsTestProcessTree,
+  snapshotWindowsTestProcesses,
+  type ReapWindowsTestProcessTreeResult,
+  type WindowsTestProcessIdentity,
+} from "./test-windows-process-tree.js";
+export {
   runDatabaseBackup,
   runDatabaseRestore,
   formatDatabaseBackupResult,

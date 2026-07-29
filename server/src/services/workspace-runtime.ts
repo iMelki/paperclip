@@ -7,7 +7,15 @@ import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import type { AdapterRuntimeServiceReport } from "@paperclipai/adapter-utils";
 import type { Db } from "@paperclipai/db";
-import { executionWorkspaces, issueComments, issues, projectWorkspaces, workspaceRuntimeServices } from "@paperclipai/db";
+import {
+  executionWorkspaces,
+  issueComments,
+  issues,
+  projectWorkspaces,
+  readWindowsTestProcessIdentity,
+  reapWindowsTestProcessTree,
+  workspaceRuntimeServices,
+} from "@paperclipai/db";
 import {
   listWorkspaceServiceCommandDefinitions,
   type GitWorktreeBranchAncestryVerdict,
@@ -202,12 +210,41 @@ export async function resetRuntimeServicesForTests(options?: { preserveProcesses
     clearIdleTimer(record);
   }
   if (!options?.preserveProcesses) {
-    await Promise.all(
-      records.map(async (record) => {
-        await terminateRuntimeServiceProcess(record);
-        await removeLocalServiceRegistryRecord(record.serviceKey).catch(() => undefined);
-      }),
-    );
+    for (const record of records) {
+      const childPid = normalizeLocalServicePid(record.child?.pid);
+      const childIsLive =
+        childPid !== null
+        && record.child?.exitCode === null
+        && record.child?.signalCode === null;
+      const windowsProcessIdentity =
+        process.platform === "win32" && childIsLive
+          ? await readWindowsTestProcessIdentity(childPid!).catch(() => null)
+          : null;
+      if (process.platform === "win32" && childIsLive && !windowsProcessIdentity) {
+        throw new Error(
+          "Test runtime service process termination could not be verified (identity_unavailable); tracking was retained.",
+        );
+      }
+      const termination =
+        process.platform === "win32" && childIsLive
+          ? await reapWindowsTestProcessTree({
+              rootPid: childPid!,
+              ownerMarkers: [],
+              expectedRootIdentity: windowsProcessIdentity!,
+              timeoutMs: 5_000,
+            })
+          : await terminateRuntimeServiceProcess(record);
+      if (termination?.confirmedStopped !== true) {
+        const terminationReason =
+          termination && "reason" in termination
+            ? termination.reason
+            : termination?.outcome ?? "identity_unavailable";
+        throw new Error(
+          `Test runtime service process termination could not be verified (${terminationReason}); tracking was retained.`,
+        );
+      }
+      await removeLocalServiceRegistryRecord(record.serviceKey).catch(() => undefined);
+    }
   }
   runtimeServicesById.clear();
   runtimeServicesByReuseKey.clear();

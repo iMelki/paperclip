@@ -1,5 +1,9 @@
 import { z } from "zod";
 import {
+  hasInvalidStaticHeaderValueCharacters,
+  isHighConfidenceStaticSecretValue,
+} from "../static-header-safety.js";
+import {
   CONNECTION_TOKEN_ISSUANCE_PATHS,
   SECRET_PROJECTION_CLASSES,
   TOOL_ACTION_REQUEST_STATUSES,
@@ -80,7 +84,6 @@ const sensitiveStaticHeaderNames = new Set([
   "set-cookie",
   "x-paperclip-tool-gateway-token",
 ]);
-
 function rejectSensitiveConfigKeys(value: unknown, ctx: z.RefinementCtx, path: Array<string | number> = []) {
   if (!value || typeof value !== "object") return;
   if (Array.isArray(value)) {
@@ -133,7 +136,21 @@ function rejectUnsafeHeaderPolicies(
       if (Array.isArray(staticHeaders)) {
         staticHeaders.forEach((entry, index) => {
           if (!entry || typeof entry !== "object" || Array.isArray(entry)) return;
-          if (isSensitiveStaticHeaderName((entry as Record<string, unknown>).name)) {
+          const staticHeader = entry as Record<string, unknown>;
+          if (
+            typeof staticHeader.value === "string"
+            && hasInvalidStaticHeaderValueCharacters(staticHeader.value)
+          ) {
+            ctx.addIssue({
+              code: z.ZodIssueCode.custom,
+              path: [...path, key, "staticHeaders", index, "value"],
+              message: "Remote MCP static header values cannot contain control characters.",
+            });
+          }
+          if (
+            isSensitiveStaticHeaderName(staticHeader.name)
+            || isHighConfidenceStaticSecretValue(staticHeader.value)
+          ) {
             ctx.addIssue({
               code: z.ZodIssueCode.custom,
               path: [...path, key, "staticHeaders", index, "name"],
@@ -143,7 +160,22 @@ function rejectUnsafeHeaderPolicies(
         });
       } else if (staticHeaders && typeof staticHeaders === "object") {
         for (const staticHeaderName of Object.keys(staticHeaders)) {
-          if (isSensitiveStaticHeaderName(staticHeaderName)) {
+          const staticHeaderValue =
+            (staticHeaders as Record<string, unknown>)[staticHeaderName];
+          if (
+            typeof staticHeaderValue === "string"
+            && hasInvalidStaticHeaderValueCharacters(staticHeaderValue)
+          ) {
+            ctx.addIssue({
+              code: z.ZodIssueCode.custom,
+              path: [...path, key, "staticHeaders", staticHeaderName],
+              message: "Remote MCP static header values cannot contain control characters.",
+            });
+          }
+          if (
+            isSensitiveStaticHeaderName(staticHeaderName)
+            || isHighConfidenceStaticSecretValue(staticHeaderValue)
+          ) {
             ctx.addIssue({
               code: z.ZodIssueCode.custom,
               path: [...path, key, "staticHeaders", staticHeaderName],

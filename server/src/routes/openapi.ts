@@ -6256,11 +6256,37 @@ registerCurrentRoute({
   summary: "Get tool connection usage",
 });
 
+const toolConnectionInstallSnapshotResponseSchema = z.object({
+  connectionId: z.string().uuid(),
+  installs: z.array(z.object({
+    id: z.string().uuid(),
+    companyId: z.string().uuid(),
+    connectionId: z.string().uuid(),
+    targetType: z.enum(["company", "agent"]),
+    targetId: z.string(),
+    createdByAgentId: z.string().uuid().nullable(),
+    createdByUserId: z.string().nullable(),
+    createdAt: z.string(),
+  })),
+  accessMode: z.enum(["reachability_only", "extend_connection_access"]),
+  reachabilityOnly: z.boolean(),
+  installOwnedAccessBindingCount: z.number().int().nonnegative(),
+  nonInstallOwnedAppBindingCount: z.number().int().nonnegative(),
+  removedLegacyAccessBindingCount: z.number().int().nonnegative().optional(),
+});
+
 registerCurrentRoute({
   method: "get",
   path: "/api/tool-connections/{connectionId}/installs",
   tags: ["tool-access"],
-  summary: "List tool connection installs",
+  summary: "Read tool connection installs and their effective access mode",
+  responses: {
+    200: r.ok(toolConnectionInstallSnapshotResponseSchema),
+    401: r.unauthorized,
+    403: r.forbidden,
+    404: r.notFound,
+    409: r.conflict,
+  },
 });
 
 registerCurrentRoute({
@@ -6269,6 +6295,15 @@ registerCurrentRoute({
   tags: ["tool-access"],
   summary: "Sync tool connection installs",
   body: putToolConnectionInstallsSchema,
+  responses: {
+    200: r.ok(toolConnectionInstallSnapshotResponseSchema),
+    400: r.badRequest,
+    401: r.unauthorized,
+    403: r.forbidden,
+    404: r.notFound,
+    409: r.conflict,
+    422: r.unprocessable,
+  },
 });
 
 registerCurrentRoute({

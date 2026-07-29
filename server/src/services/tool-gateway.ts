@@ -2595,16 +2595,46 @@ export function createToolGatewayService(
     );
   }
 
-  async function readBoundedRemoteResponse(response: Response): Promise<string> {
+  async function readBoundedRemoteResponse(
+    response: Response,
+    abortRequest: () => void,
+  ): Promise<string> {
     const contentLength = response.headers.get("content-length");
     if (contentLength && Number(contentLength) > MAX_REMOTE_MCP_RESPONSE_BYTES) {
+      await response.body?.cancel().catch(() => undefined);
+      abortRequest();
       throw responseTooLargeError();
     }
-    const body = await response.text();
-    if (Buffer.byteLength(body, "utf8") > MAX_REMOTE_MCP_RESPONSE_BYTES) {
-      throw responseTooLargeError();
+
+    if (!response.body) {
+      const body = await response.text();
+      if (Buffer.byteLength(body, "utf8") > MAX_REMOTE_MCP_RESPONSE_BYTES) {
+        abortRequest();
+        throw responseTooLargeError();
+      }
+      return body;
     }
-    return body;
+
+    const reader = response.body.getReader();
+    const chunks: Buffer[] = [];
+    let totalBytes = 0;
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (!value) continue;
+        totalBytes += value.byteLength;
+        if (totalBytes > MAX_REMOTE_MCP_RESPONSE_BYTES) {
+          await reader.cancel().catch(() => undefined);
+          abortRequest();
+          throw responseTooLargeError();
+        }
+        chunks.push(Buffer.from(value));
+      }
+    } finally {
+      reader.releaseLock();
+    }
+    return Buffer.concat(chunks, totalBytes).toString("utf8");
   }
 
   function malformedRemoteMcpResponse(): ToolGatewayHttpError {
@@ -2855,7 +2885,10 @@ export function createToolGatewayService(
           },
         }),
       });
-      const body = await readBoundedRemoteResponse(response);
+      const body = await readBoundedRemoteResponse(
+        response,
+        () => controller.abort(),
+      );
       execution.response = {
         httpStatus: response.status,
         contentType: response.headers.get("content-type"),
