@@ -14,7 +14,10 @@ export function resolveTestShellCommand(command: string): string {
   const programFilesX86 = process.env["ProgramFiles(x86)"];
   const roots = [programFiles, programFilesX86].filter((root): root is string => Boolean(root));
   for (const root of roots) {
-    for (const binDir of ["usr/bin", "bin"]) {
+    // Git's launcher under bin/ seeds /usr/bin and /mingw64/bin for non-login
+    // shells. Invoking usr/bin/sh.exe directly inherits the Windows PATH as-is,
+    // which leaves core tools such as mkdir, rm, and base64 undiscoverable.
+    for (const binDir of ["bin", "usr/bin"]) {
       const candidate = path.join(root, "Git", binDir, `${command}.exe`);
       if (fs.existsSync(candidate)) {
         return candidate;
@@ -23,4 +26,11 @@ export function resolveTestShellCommand(command: string): string {
   }
 
   return command;
+}
+
+export function resolveTestScriptSpawn(command: string): { command: string; args: string[] } {
+  if (process.platform === "win32" && /\.(?:c|m)?js$/i.test(command)) {
+    return { command: process.execPath, args: [command] };
+  }
+  return { command, args: [] };
 }

@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import { applyPendingMigrations, ensurePostgresDatabase } from "./client.js";
+import { prepareEmbeddedPostgresNativeRuntime } from "./embedded-postgres-native.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -52,6 +53,7 @@ function getReservedTestPorts(): Set<number> {
 
 async function getEmbeddedPostgresCtor(): Promise<EmbeddedPostgresCtor> {
   const mod = await import("embedded-postgres");
+  await prepareEmbeddedPostgresNativeRuntime();
   return mod.default as EmbeddedPostgresCtor;
 }
 
@@ -104,39 +106,6 @@ async function createEmbeddedPostgresTestInstance(tempDirPrefix: string) {
   return { dataDir, port, instance };
 }
 
-function readPostmasterPid(dataDir: string): number | null {
-  try {
-    const firstLine = fs.readFileSync(path.join(dataDir, "postmaster.pid"), "utf8").split(/\r?\n/, 1)[0];
-    const pid = Number.parseInt(firstLine.trim(), 10);
-    return Number.isInteger(pid) && pid > 0 ? pid : null;
-  } catch {
-    return null;
-  }
-}
-
-async function terminateWindowsPostgresProcessTree(dataDir: string) {
-  if (process.platform !== "win32") return;
-  const pid = readPostmasterPid(dataDir);
-  if (!pid) return;
-  const taskkill = path.join(process.env.SystemRoot ?? "C:\\Windows", "System32", "taskkill.exe");
-  await execFileAsync(taskkill, ["/PID", String(pid), "/T", "/F"], {
-    windowsHide: true,
-  }).catch(() => {});
-}
-
-async function stopEmbeddedPostgresInstance(instance: EmbeddedPostgresInstance, dataDir: string) {
-  if (process.platform === "win32") {
-    await terminateWindowsPostgresProcessTree(dataDir);
-  }
-  await Promise.race([
-    instance.stop(),
-    new Promise((resolve) => setTimeout(resolve, 5_000)),
-  ]).catch(() => {});
-  if (process.platform === "win32") {
-    await terminateWindowsPostgresProcessTree(dataDir);
-  }
-}
-
 function cleanupEmbeddedPostgresTestDirs(dataDir: string) {
   fs.rmSync(dataDir, {
     recursive: true,
@@ -146,6 +115,121 @@ function cleanupEmbeddedPostgresTestDirs(dataDir: string) {
   });
 }
 
+// Upper bound (ms) on how long we wait for the embedded Postgres cluster to
+// stop gracefully before abandoning the wait and returning from the hook.
+const EMBEDDED_POSTGRES_STOP_TIMEOUT_MS = 5000;
+const EMBEDDED_POSTGRES_FORCE_STOP_TIMEOUT_MS = 2000;
+
+function readPostmasterPid(dataDir: string): number | null {
+  try {
+    const firstLine = fs
+      .readFileSync(path.join(dataDir, "postmaster.pid"), "utf8")
+      .split(/\r?\n/, 1)[0];
+    const pid = Number.parseInt(firstLine.trim(), 10);
+    return Number.isInteger(pid) && pid > 0 ? pid : null;
+  } catch {
+    return null;
+  }
+}
+
+function isProcessAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function terminateWindowsPostgresProcessTree(dataDir: string): Promise<boolean> {
+  if (process.platform !== "win32") return false;
+  const pid = readPostmasterPid(dataDir);
+  if (!pid) return true;
+
+  const taskkill = path.join(
+    process.env.SystemRoot ?? "C:\\Windows",
+    "System32",
+    "taskkill.exe",
+  );
+  await execFileAsync(taskkill, ["/PID", String(pid), "/T", "/F"], {
+    windowsHide: true,
+  }).catch(() => {});
+
+  const deadline = Date.now() + EMBEDDED_POSTGRES_FORCE_STOP_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    if (!isProcessAlive(pid)) return true;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  return !isProcessAlive(pid);
+}
+
+// `embedded-postgres@18.1.0-beta.16` exposes only `stop(): Promise<void>` — no
+// shutdown-mode argument. Internally it SIGINTs the postgres process (already
+// PostgreSQL "fast shutdown") and resolves *only* on the child's `exit` event,
+// with no time bound of its own. Under the loaded serial server shard a slow
+// shutdown checkpoint can push that past vitest's hookTimeout and hang the
+// afterAll hook. So we bound the graceful stop. On Windows, a timeout or failed
+// stop falls back to taskkill for the exact postmaster process tree; other
+// platforms keep waiting asynchronously for the graceful stop to settle.
+//
+// Data-dir reclaim happens only after graceful stop or confirmed forced
+// termination. Removing it on the timeout path would pull files out from under
+// a still-running cluster and provoke checkpoint / WAL I/O errors.
+async function stopEmbeddedPostgresBounded(
+  instance: EmbeddedPostgresInstance | null,
+  dataDir: string | null,
+  cleanupFn?: () => void,
+): Promise<void> {
+  if (!instance) {
+    cleanupFn?.();
+    return;
+  }
+  let cleaned = false;
+  const cleanupOnce = () => {
+    if (cleaned) return;
+    cleaned = true;
+    try {
+      cleanupFn?.();
+    } catch {
+      // Best-effort reclaim; ignore removal errors.
+    }
+  };
+  const stopped = instance.stop().then(
+    () => "stopped" as const,
+    () => "failed" as const,
+  );
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let outcome: "stopped" | "failed" | "timeout" = "timeout";
+  try {
+    outcome = await Promise.race([
+      stopped,
+      new Promise<"timeout">((resolve) => {
+        timer = setTimeout(() => resolve("timeout"), EMBEDDED_POSTGRES_STOP_TIMEOUT_MS);
+        timer.unref?.();
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+
+  if (outcome === "stopped") {
+    cleanupOnce();
+    return;
+  }
+
+  if (process.platform === "win32" && dataDir) {
+    const terminated = await terminateWindowsPostgresProcessTree(dataDir);
+    if (terminated) {
+      cleanupOnce();
+      return;
+    }
+  }
+
+  // Never remove the data directory under a process that may still be alive.
+  // The raw stop promise owns cleanup once it eventually settles.
+  void stopped.finally(cleanupOnce);
+}
+
 function formatEmbeddedPostgresError(error: unknown): string {
   if (error instanceof Error && error.message.length > 0) return error.message;
   if (typeof error === "string" && error.length > 0) return error;
@@ -153,11 +237,15 @@ function formatEmbeddedPostgresError(error: unknown): string {
 }
 
 async function probeEmbeddedPostgresSupport(): Promise<EmbeddedPostgresTestSupport> {
-  const { dataDir, instance } = await createEmbeddedPostgresTestInstance(
-    "paperclip-embedded-postgres-probe-",
-  );
+  let dataDir: string | null = null;
+  let instance: EmbeddedPostgresInstance | null = null;
 
   try {
+    const created = await createEmbeddedPostgresTestInstance(
+      "paperclip-embedded-postgres-probe-",
+    );
+    dataDir = created.dataDir;
+    instance = created.instance;
     await instance.initialise();
     await instance.start();
     return { supported: true };
@@ -167,8 +255,9 @@ async function probeEmbeddedPostgresSupport(): Promise<EmbeddedPostgresTestSuppo
       reason: formatEmbeddedPostgresError(error),
     };
   } finally {
-    await stopEmbeddedPostgresInstance(instance, dataDir);
-    cleanupEmbeddedPostgresTestDirs(dataDir);
+    await stopEmbeddedPostgresBounded(instance, dataDir, () => {
+      if (dataDir) cleanupEmbeddedPostgresTestDirs(dataDir);
+    });
   }
 }
 
@@ -182,9 +271,14 @@ export async function getEmbeddedPostgresTestSupport(): Promise<EmbeddedPostgres
 export async function startEmbeddedPostgresTestDatabase(
   tempDirPrefix: string,
 ): Promise<EmbeddedPostgresTestDatabase> {
-  const { dataDir, port, instance } = await createEmbeddedPostgresTestInstance(tempDirPrefix);
+  let dataDir: string | null = null;
+  let instance: EmbeddedPostgresInstance | null = null;
 
   try {
+    const created = await createEmbeddedPostgresTestInstance(tempDirPrefix);
+    dataDir = created.dataDir;
+    instance = created.instance;
+    const { port } = created;
     await instance.initialise();
     await instance.start();
 
@@ -196,13 +290,15 @@ export async function startEmbeddedPostgresTestDatabase(
     return {
       connectionString,
       cleanup: async () => {
-        await stopEmbeddedPostgresInstance(instance, dataDir);
-        cleanupEmbeddedPostgresTestDirs(dataDir);
+        await stopEmbeddedPostgresBounded(instance, dataDir, () => {
+          if (dataDir) cleanupEmbeddedPostgresTestDirs(dataDir);
+        });
       },
     };
   } catch (error) {
-    await stopEmbeddedPostgresInstance(instance, dataDir);
-    cleanupEmbeddedPostgresTestDirs(dataDir);
+    await stopEmbeddedPostgresBounded(instance, dataDir, () => {
+      if (dataDir) cleanupEmbeddedPostgresTestDirs(dataDir);
+    });
     throw new Error(
       `Failed to start embedded PostgreSQL test database: ${formatEmbeddedPostgresError(error)}`,
     );

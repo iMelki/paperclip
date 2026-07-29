@@ -3,6 +3,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { runChildProcess } from "@paperclipai/adapter-utils/server-utils";
+import { toShellPath } from "@paperclipai/adapter-utils/shell-path";
 import { execute } from "@paperclipai/adapter-cursor-local/server";
 
 async function writeFakeCursorCommand(commandPath: string): Promise<void> {
@@ -74,29 +75,15 @@ console.log(JSON.stringify({
   await fs.chmod(commandPath, 0o755);
 }
 
-function toShellPath(value: string): string {
-  if (process.platform !== "win32") return value;
-  const match = /^([A-Za-z]):[\\/](.*)$/.exec(value);
-  if (!match) return value.replace(/\\/g, "/");
-  const [, drive, rest] = match;
-  return `/${drive.toLowerCase()}/${rest.replace(/\\/g, "/")}`;
-}
-
-function fromShellPath(value: string): string {
-  if (process.platform !== "win32") return value;
-  const driveMatch = /^\/([A-Za-z])\/(.*)$/.exec(value);
-  if (driveMatch) {
-    const [, drive, rest] = driveMatch;
-    return `${drive.toUpperCase()}:\\${rest.replace(/\//g, "\\")}`;
-  }
-  if (value.startsWith("/tmp/")) {
-    return path.join(os.tmpdir(), value.slice("/tmp/".length).replace(/\//g, path.sep));
-  }
-  return value;
-}
-
-function createLocalSandboxRunner() {
+function createLocalSandboxRunner(pathMapping?: { remoteRoot: string; localRoot: string }) {
   let counter = 0;
+  const mapValue = (value: string, forShell: boolean) => {
+    if (!pathMapping || !value.includes(pathMapping.remoteRoot)) return value;
+    return value.replaceAll(
+      pathMapping.remoteRoot,
+      forShell ? toShellPath(pathMapping.localRoot) : pathMapping.localRoot,
+    );
+  };
   return {
     execute: async (input: {
       command: string;
@@ -109,11 +96,23 @@ function createLocalSandboxRunner() {
       onSpawn?: (meta: { pid: number; startedAt: string }) => Promise<void>;
     }) => {
       counter += 1;
-      const command = fromShellPath(input.command);
-      const cwd = fromShellPath(input.cwd ?? process.cwd());
-      return await runChildProcess(`cursor-sandbox-execute-${counter}`, command, input.args ?? [], {
-        cwd,
-        env: input.env ?? {},
+      const commandBasename = path.basename(input.command).toLowerCase();
+      const shellCommand = commandBasename === "sh" || commandBasename === "bash";
+      const localEnv = Object.fromEntries(
+        Object.entries(input.env ?? {}).map(([key, value]) => {
+          if (process.platform === "win32" && key.toUpperCase() === "PATH") {
+            const mappedRuntimeEntries = value
+              .split(":")
+              .filter((entry) => entry.startsWith(pathMapping?.remoteRoot ?? "\0"))
+              .map((entry) => mapValue(entry, false));
+            return [key, [...mappedRuntimeEntries, process.env.PATH].filter(Boolean).join(path.delimiter)];
+          }
+          return [key, mapValue(value, false)];
+        }),
+      );
+      return await runChildProcess(`cursor-sandbox-execute-${counter}`, mapValue(input.command, false), (input.args ?? []).map((arg) => mapValue(arg, shellCommand)), {
+        cwd: mapValue(input.cwd ?? process.cwd(), false),
+        env: localEnv,
         stdin: input.stdin,
         timeoutSec: Math.max(1, Math.ceil((input.timeoutMs ?? 30_000) / 1000)),
         graceSec: 5,
@@ -185,7 +184,7 @@ describe("cursor execute", () => {
         },
       });
 
-      expect(result.exitCode).toBe(0);
+      expect(result.exitCode, result.errorMessage ?? undefined).toBe(0);
       expect(result.errorMessage).toBeNull();
 
       const capture = JSON.parse(await fs.readFile(capturePath, "utf8")) as CapturePayload;
@@ -257,7 +256,7 @@ describe("cursor execute", () => {
         onLog: async () => {},
       });
 
-      expect(result.exitCode).toBe(0);
+      expect(result.exitCode, result.errorMessage ?? undefined).toBe(0);
       expect(result.errorMessage).toBeNull();
 
       const capture = JSON.parse(await fs.readFile(capturePath, "utf8")) as CapturePayload;
@@ -311,8 +310,6 @@ describe("cursor execute", () => {
             {
               name: "paperclip",
               source: paperclipDir,
-              required: true,
-              requiredReason: "Bundled Paperclip skills are always available for local adapters.",
             },
             {
               name: "ascii-heart",
@@ -350,16 +347,18 @@ describe("cursor execute", () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-cursor-sandbox-execute-"));
     const homeDir = path.join(root, "home");
     const workspace = path.join(root, "workspace");
-    const remoteWorkspaceLocal = path.join(root, "remote-workspace");
-    const remoteWorkspace = toShellPath(remoteWorkspaceLocal);
+    const remoteWorkspace = path.join(root, "remote-workspace");
+    const sandboxRoot = "/paperclip-test/cursor-default";
+    const sandboxHome = `${sandboxRoot}/home`;
+    const sandboxWorkspace = `${sandboxRoot}/workspace`;
     const capturePath = path.join(root, "capture.json");
     const cursorAgentPath = path.join(homeDir, ".local", "bin", "cursor-agent");
     await fs.mkdir(workspace, { recursive: true });
-    await fs.mkdir(remoteWorkspaceLocal, { recursive: true });
+    await fs.mkdir(remoteWorkspace, { recursive: true });
     await writeFakeSandboxCursorAgent(cursorAgentPath, capturePath);
 
     const previousHome = process.env.HOME;
-    process.env.HOME = homeDir;
+    process.env.HOME = sandboxHome;
 
     try {
       const result = await execute({
@@ -380,8 +379,11 @@ describe("cursor execute", () => {
         executionTarget: {
           kind: "remote",
           transport: "sandbox",
-          remoteCwd: remoteWorkspace,
-          runner: createLocalSandboxRunner(),
+          remoteCwd: sandboxWorkspace,
+          runner: createLocalSandboxRunner({
+            remoteRoot: sandboxRoot,
+            localRoot: root,
+          }),
           timeoutMs: 30_000,
         },
         config: {
@@ -394,7 +396,13 @@ describe("cursor execute", () => {
         onLog: async () => {},
       });
 
-      expect(result.exitCode).toBe(0);
+      expect(
+        result.exitCode,
+        JSON.stringify({
+          errorMessage: result.errorMessage,
+          result,
+        }, null, 2),
+      ).toBe(0);
       const capture = JSON.parse(await fs.readFile(capturePath, "utf8")) as {
         command: string;
         argv: string[];
@@ -402,34 +410,33 @@ describe("cursor execute", () => {
         path: string;
       };
       expect(capture.command).toBe(cursorAgentPath);
-      const expectedSandboxLocalBin = process.platform === "win32"
-        ? `/tmp/${path.basename(root)}/home/.local/bin`
-        : path.join(homeDir, ".local", "bin");
-      expect(capture.path).toContain(`${expectedSandboxLocalBin}:`);
+      expect(capture.path.split(path.delimiter)).toContain(path.join(homeDir, ".local", "bin"));
       expect(capture.prompt).toContain("Follow the paperclip heartbeat.");
     } finally {
       if (previousHome === undefined) delete process.env.HOME;
       else process.env.HOME = previousHome;
       await fs.rm(root, { recursive: true, force: true });
     }
-  }, 90_000);
+  }, 10_000);
 
   it("keeps explicit command overrides for remote sandbox execution", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-cursor-sandbox-explicit-"));
     const homeDir = path.join(root, "home");
     const workspace = path.join(root, "workspace");
-    const remoteWorkspaceLocal = path.join(root, "remote-workspace");
-    const remoteWorkspace = toShellPath(remoteWorkspaceLocal);
+    const remoteWorkspace = path.join(root, "remote-workspace");
+    const sandboxRoot = "/paperclip-test/cursor-explicit";
+    const sandboxHome = `${sandboxRoot}/home`;
+    const sandboxWorkspace = `${sandboxRoot}/workspace`;
     const capturePath = path.join(root, "capture.json");
     const cursorAgentPath = path.join(homeDir, ".local", "bin", "cursor-agent");
     const customCommandPath = path.join(root, "bin", "custom-cursor");
     await fs.mkdir(workspace, { recursive: true });
-    await fs.mkdir(remoteWorkspaceLocal, { recursive: true });
+    await fs.mkdir(remoteWorkspace, { recursive: true });
     await writeFakeSandboxCursorAgent(cursorAgentPath, path.join(root, "unused.json"));
     await writeFakeSandboxCursorAgent(customCommandPath, capturePath);
 
     const previousHome = process.env.HOME;
-    process.env.HOME = homeDir;
+    process.env.HOME = sandboxHome;
 
     try {
       const result = await execute({
@@ -450,12 +457,15 @@ describe("cursor execute", () => {
         executionTarget: {
           kind: "remote",
           transport: "sandbox",
-          remoteCwd: remoteWorkspace,
-          runner: createLocalSandboxRunner(),
+          remoteCwd: sandboxWorkspace,
+          runner: createLocalSandboxRunner({
+            remoteRoot: sandboxRoot,
+            localRoot: root,
+          }),
           timeoutMs: 30_000,
         },
         config: {
-          command: customCommandPath,
+          command: `${sandboxRoot}/bin/custom-cursor`,
           cwd: workspace,
           promptTemplate: "Follow the paperclip heartbeat.",
         },
@@ -464,7 +474,13 @@ describe("cursor execute", () => {
         onLog: async () => {},
       });
 
-      expect(result.exitCode).toBe(0);
+      expect(
+        result.exitCode,
+        JSON.stringify({
+          errorMessage: result.errorMessage,
+          result,
+        }, null, 2),
+      ).toBe(0);
       const capture = JSON.parse(await fs.readFile(capturePath, "utf8")) as { command: string };
       expect(capture.command).toBe(customCommandPath);
     } finally {
@@ -472,5 +488,5 @@ describe("cursor execute", () => {
       else process.env.HOME = previousHome;
       await fs.rm(root, { recursive: true, force: true });
     }
-  }, 90_000);
+  });
 });

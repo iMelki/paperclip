@@ -14,14 +14,19 @@ import {
 } from "@paperclipai/adapter-utils/server-utils";
 import {
   ensureAdapterExecutionTargetCommandResolvable,
+  maybeRunSandboxInstallCommand,
   ensureAdapterExecutionTargetDirectory,
   runAdapterExecutionTargetProcess,
   describeAdapterExecutionTarget,
   resolveAdapterExecutionTargetCwd,
 } from "@paperclipai/adapter-utils/execution-target";
-import { DEFAULT_GEMINI_LOCAL_MODEL } from "../index.js";
+import { DEFAULT_GEMINI_LOCAL_MODEL, SANDBOX_INSTALL_COMMAND } from "../index.js";
 import { detectGeminiAuthRequired, detectGeminiQuotaExhausted, parseGeminiJsonl } from "./parse.js";
 import { firstNonEmptyLine } from "./utils.js";
+import {
+  resolveGeminiExecutionEngineForRun,
+  testGeminiAcpEnvironment,
+} from "./acp.js";
 
 function summarizeStatus(checks: AdapterEnvironmentCheck[]): AdapterEnvironmentTestResult["status"] {
   if (checks.some((check) => check.level === "error")) return "fail";
@@ -49,14 +54,26 @@ function summarizeProbeDetail(stdout: string, stderr: string, parsedError: strin
 export async function testEnvironment(
   ctx: AdapterEnvironmentTestContext,
 ): Promise<AdapterEnvironmentTestResult> {
+  const engineSelection = await resolveGeminiExecutionEngineForRun({
+    config: parseObject(ctx.config),
+    executionTarget: ctx.executionTarget,
+  });
+  if (engineSelection.engine === "acp") {
+    return testGeminiAcpEnvironment(ctx);
+  }
+
   const checks: AdapterEnvironmentCheck[] = [];
+  if (!engineSelection.explicit && engineSelection.fallbackReason) {
+    checks.push({
+      code: "gemini_acp_default_fallback",
+      level: "warn",
+      message: "Gemini ACP default is unavailable; testing the Gemini CLI fallback lane.",
+      detail: engineSelection.fallbackReason,
+      hint: "Fix the ACP prerequisite to use the default ACP lane, or set engine=cli to pin the CLI lane.",
+    });
+  }
   const config = parseObject(ctx.config);
   const command = asString(config.command, "gemini");
-  const envConfig = parseObject(config.env);
-  const allowLegacyGeminiCli =
-    asBoolean(config.allowLegacyGeminiCli, false) ||
-    asBoolean(envConfig.PAPERCLIP_ALLOW_LEGACY_GEMINI_CLI, false) ||
-    process.env.PAPERCLIP_ALLOW_LEGACY_GEMINI_CLI === "true";
   const target = ctx.executionTarget ?? null;
   const targetIsRemote = target?.kind === "remote";
   const cwd = resolveAdapterExecutionTargetCwd(target, asString(config.cwd, ""), process.cwd());
@@ -71,21 +88,6 @@ export async function testEnvironment(
       level: "info",
       message: `Probing inside environment: ${targetLabel}`,
     });
-  }
-
-  if (!allowLegacyGeminiCli) {
-    checks.push({
-      code: "gemini_legacy_cli_blocked",
-      level: "error",
-      message: "gemini_local is a legacy Gemini CLI adapter and is blocked by default.",
-      hint: "Use Antigravity CLI (`agy`) for current Google account-backed CLI work. Set allowLegacyGeminiCli=true only for an explicit legacy inspection run.",
-    });
-    return {
-      adapterType: ctx.adapterType,
-      status: summarizeStatus(checks),
-      checks,
-      testedAt: new Date().toISOString(),
-    };
   }
 
   try {
@@ -108,11 +110,24 @@ export async function testEnvironment(
     });
   }
 
+  const envConfig = parseObject(config.env);
   const env: Record<string, string> = {};
   for (const [key, value] of Object.entries(envConfig)) {
     if (typeof value === "string") env[key] = value;
   }
+  if (targetIsRemote && typeof env.GEMINI_CLI_TRUST_WORKSPACE !== "string") {
+    env.GEMINI_CLI_TRUST_WORKSPACE = "true";
+  }
   const runtimeEnv = ensurePathInEnv({ ...process.env, ...env });
+  const installCheck = await maybeRunSandboxInstallCommand({
+    runId,
+    target,
+    adapterKey: "gemini",
+    installCommand: SANDBOX_INSTALL_COMMAND,
+    detectCommand: command,
+    env,
+  });
+  if (installCheck) checks.push(installCheck);
   try {
     await ensureAdapterExecutionTargetCommandResolvable(command, target, cwd, runtimeEnv);
     checks.push({
@@ -176,7 +191,7 @@ export async function testEnvironment(
       const model = asString(config.model, DEFAULT_GEMINI_LOCAL_MODEL).trim();
       const approvalMode = asString(config.approvalMode, asBoolean(config.yolo, false) ? "yolo" : "default");
       const sandbox = asBoolean(config.sandbox, false);
-      const helloProbeTimeoutSec = Math.max(1, asNumber(config.helloProbeTimeoutSec, 10));
+      const helloProbeTimeoutSec = Math.max(1, asNumber(config.helloProbeTimeoutSec, 60));
       const extraArgs = (() => {
         const fromExtraArgs = asStringArray(config.extraArgs);
         if (fromExtraArgs.length > 0) return fromExtraArgs;

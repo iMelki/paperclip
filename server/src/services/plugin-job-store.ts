@@ -30,7 +30,7 @@
  * @see PLUGIN_SPEC.md §21.3 — `plugin_jobs` / `plugin_job_runs` tables
  */
 
-import { and, desc, eq } from "drizzle-orm";
+import { and, desc, eq, isNull } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { plugins, pluginJobs, pluginJobRuns } from "@paperclipai/db";
 import type {
@@ -418,36 +418,56 @@ export function pluginJobStore(db: Db) {
     },
 
     /**
-     * List runs for a specific job, ordered by creation time descending.
+     * List runs for a specific job in one explicit company/instance scope,
+     * ordered by creation time descending.
      *
      * @param jobId - UUID of the job
+     * @param companyId - Exact tenant scope, or `null` for instance-level runs
      * @param limit - Maximum number of rows to return (default: 50)
      */
     async listRunsByJob(
       jobId: string,
+      companyId: string | null,
       limit = 50,
     ): Promise<(typeof pluginJobRuns.$inferSelect)[]> {
       return db
         .select()
         .from(pluginJobRuns)
-        .where(eq(pluginJobRuns.jobId, jobId))
+        .where(and(
+          eq(pluginJobRuns.jobId, jobId),
+          companyId === null
+            ? isNull(pluginJobRuns.companyId)
+            : eq(pluginJobRuns.companyId, companyId),
+        ))
         .orderBy(desc(pluginJobRuns.createdAt))
         .limit(limit);
     },
 
     /**
-     * List runs for a plugin, optionally filtered by status.
+     * List runs for a plugin within one explicit company/instance scope,
+     * optionally filtered by status.
+     *
+     * Requiring the caller to select a scope prevents company dashboards from
+     * accidentally returning another tenant's run errors or logs. Pass `null`
+     * only for an explicitly instance-scoped administrative view.
      *
      * @param pluginId - UUID of the owning plugin
+     * @param companyId - Exact tenant scope, or `null` for instance-level runs
      * @param status - Optional status filter
      * @param limit - Maximum number of rows to return (default: 50)
      */
     async listRunsByPlugin(
       pluginId: string,
+      companyId: string | null,
       status?: PluginJobRunStatus,
       limit = 50,
     ): Promise<(typeof pluginJobRuns.$inferSelect)[]> {
-      const conditions = [eq(pluginJobRuns.pluginId, pluginId)];
+      const conditions = [
+        eq(pluginJobRuns.pluginId, pluginId),
+        companyId === null
+          ? isNull(pluginJobRuns.companyId)
+          : eq(pluginJobRuns.companyId, companyId),
+      ];
       if (status) {
         conditions.push(eq(pluginJobRuns.status, status));
       }

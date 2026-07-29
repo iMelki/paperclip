@@ -1,14 +1,13 @@
 ---
-title: Gemini Local (Legacy)
-summary: Legacy Gemini CLI local adapter setup and configuration
+title: Gemini CLI
+summary: Gemini CLI local adapter setup and configuration
 ---
 
-The `gemini_local` adapter runs Google's legacy Gemini CLI locally. It is blocked by default and requires `allowLegacyGeminiCli=true` before it will execute. Use Antigravity CLI (`agy`) for current Google account-backed CLI work.
+The `gemini_local` adapter runs Google's Gemini CLI locally. It supports session persistence with `--resume`, skills injection, and structured `stream-json` output parsing.
 
 ## Prerequisites
 
 - Gemini CLI installed (`gemini` command available)
-- `allowLegacyGeminiCli=true` set deliberately in adapter config
 - `GEMINI_API_KEY` or `GOOGLE_API_KEY` set, or local Gemini CLI auth configured
 
 ## Configuration Fields
@@ -20,7 +19,6 @@ The `gemini_local` adapter runs Google's legacy Gemini CLI locally. It is blocke
 | `promptTemplate` | string | No | Prompt used for all runs |
 | `instructionsFilePath` | string | No | Markdown instructions file prepended to the prompt |
 | `env` | object | No | Environment variables (supports secret refs) |
-| `allowLegacyGeminiCli` | boolean | No | Must be `true` to run this legacy adapter |
 | `timeoutSec` | number | No | Process timeout (0 = no timeout) |
 | `graceSec` | number | No | Grace period before force-kill |
 | `yolo` | boolean | No | Pass `--approval-mode yolo` for unattended operation |
@@ -44,4 +42,4 @@ Use the "Test Environment" button in the UI to validate the adapter config. It c
 - Gemini CLI is installed and accessible
 - Working directory is absolute and available (auto-created if missing and permitted)
 - API key/auth hints (`GEMINI_API_KEY` or `GOOGLE_API_KEY`)
-- A legacy live hello probe (`gemini --output-format json "Respond with hello."`) to verify CLI readiness only when `allowLegacyGeminiCli=true`
+- A live hello probe (`gemini --output-format json "Respond with hello."`) to verify CLI readiness

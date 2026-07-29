@@ -5,9 +5,8 @@ import path from "node:path";
 import { testEnvironment } from "@paperclipai/adapter-gemini-local/server";
 
 async function writeFakeGeminiCommand(binDir: string, argsCapturePath: string): Promise<string> {
-  const commandPath = path.join(binDir, "gemini.cmd");
-  const scriptPath = `${commandPath}.cjs`;
-  const script = `
+  const commandPath = path.join(binDir, "gemini");
+  const script = `#!/usr/bin/env node
 const fs = require("node:fs");
 const outPath = process.env.PAPERCLIP_TEST_ARGS_PATH;
 if (outPath) {
@@ -23,41 +22,26 @@ console.log(JSON.stringify({
   result: "hello",
 }));
 `;
-  await fs.writeFile(scriptPath, script, "utf8");
-  await fs.writeFile(commandPath, `@echo off\r\n${JSON.stringify(process.execPath)} ${JSON.stringify(scriptPath)} %*\r\n`, "utf8");
+  await fs.writeFile(commandPath, script, "utf8");
+  await fs.chmod(commandPath, 0o755);
   return commandPath;
 }
 
 async function writeQuotaGeminiCommand(binDir: string): Promise<string> {
-  const commandPath = path.join(binDir, "gemini.cmd");
-  const scriptPath = `${commandPath}.cjs`;
-  const script = `
+  const commandPath = path.join(binDir, "gemini");
+  const script = `#!/usr/bin/env node
 if (process.argv.includes("--help")) {
   process.exit(0);
 }
 console.error("429 RESOURCE_EXHAUSTED: You exceeded your current quota and billing details.");
 process.exit(1);
 `;
-  await fs.writeFile(scriptPath, script, "utf8");
-  await fs.writeFile(commandPath, `@echo off\r\n${JSON.stringify(process.execPath)} ${JSON.stringify(scriptPath)} %*\r\n`, "utf8");
+  await fs.writeFile(commandPath, script, "utf8");
+  await fs.chmod(commandPath, 0o755);
   return commandPath;
 }
 
 describe("gemini_local environment diagnostics", () => {
-  it("blocks the legacy Gemini CLI probe unless explicitly allowed", async () => {
-    const result = await testEnvironment({
-      companyId: "company-1",
-      adapterType: "gemini_local",
-      config: {
-        command: "gemini",
-        cwd: process.cwd(),
-      },
-    });
-
-    expect(result.status).toBe("fail");
-    expect(result.checks.some((check) => check.code === "gemini_legacy_cli_blocked")).toBe(true);
-  });
-
   it("creates a missing working directory when cwd is absolute", async () => {
     const cwd = path.join(
       os.tmpdir(),
@@ -71,7 +55,7 @@ describe("gemini_local environment diagnostics", () => {
       companyId: "company-1",
       adapterType: "gemini_local",
       config: {
-        allowLegacyGeminiCli: true,
+        engine: "cli",
         command: process.execPath,
         cwd,
       },
@@ -99,7 +83,7 @@ describe("gemini_local environment diagnostics", () => {
       companyId: "company-1",
       adapterType: "gemini_local",
       config: {
-        allowLegacyGeminiCli: true,
+        engine: "cli",
         command: "gemini",
         cwd,
         model: "gemini-2.5-pro",
@@ -136,7 +120,7 @@ describe("gemini_local environment diagnostics", () => {
       companyId: "company-1",
       adapterType: "gemini_local",
       config: {
-        allowLegacyGeminiCli: true,
+        engine: "cli",
         command: "gemini",
         cwd,
         env: {
@@ -149,5 +133,59 @@ describe("gemini_local environment diagnostics", () => {
     expect(result.status).toBe("warn");
     expect(result.checks.some((check) => check.code === "gemini_hello_probe_quota_exhausted")).toBe(true);
     await fs.rm(root, { recursive: true, force: true });
+  });
+
+  it("trusts remote sandbox workspaces during the hello probe", async () => {
+    let probeEnv: Record<string, string> | undefined;
+
+    const result = await testEnvironment({
+      companyId: "company-1",
+      adapterType: "gemini_local",
+      config: {
+        engine: "cli",
+        command: "gemini",
+      },
+      executionTarget: {
+        kind: "remote",
+        transport: "sandbox",
+        providerKey: "cloudflare",
+        remoteCwd: "/workspace/paperclip",
+        runner: {
+          execute: async (input) => {
+            if (input.command === "gemini") {
+              probeEnv = input.env;
+              return {
+                exitCode: 0,
+                signal: null,
+                timedOut: false,
+                stdout: [
+                  JSON.stringify({
+                    type: "assistant",
+                    message: { content: [{ type: "output_text", text: "hello" }] },
+                  }),
+                  JSON.stringify({ type: "result", subtype: "success", result: "hello" }),
+                ].join("\n"),
+                stderr: "",
+                pid: null,
+                startedAt: new Date().toISOString(),
+              };
+            }
+            return {
+              exitCode: 0,
+              signal: null,
+              timedOut: false,
+              stdout: "",
+              stderr: "",
+              pid: null,
+              startedAt: new Date().toISOString(),
+            };
+          },
+        },
+      },
+      environmentName: "QA Cloudflare",
+    });
+
+    expect(result.checks.some((check) => check.code === "gemini_hello_probe_passed")).toBe(true);
+    expect(probeEnv?.GEMINI_CLI_TRUST_WORKSPACE).toBe("true");
   });
 });

@@ -3,6 +3,7 @@ import {
   Field,
   ToggleField,
   DraftInput,
+  DraftNumberInput,
   help,
 } from "../../components/agent-config-primitives";
 import { ChoosePathButton } from "../../components/PathInstructionsModal";
@@ -30,8 +31,32 @@ export function CodexLocalConfigFields({
   models,
   hideInstructionsFile,
 }: AdapterConfigFieldsProps) {
-  const bypassEnabled =
-    config.dangerouslyBypassApprovalsAndSandbox === true || config.dangerouslyBypassSandbox === true;
+  const rawEngine = isCreate
+    ? values!.codexEngine ?? "auto"
+    : eff("adapterConfig", "engine", String(config.engine ?? "auto"));
+  const engine = rawEngine === "acp" || rawEngine === "cli" ? rawEngine : "auto";
+  const acpSelected = engine === "acp";
+  const bypassEnabled = isCreate
+    ? Boolean(values!.dangerouslyBypassSandbox)
+    : config.dangerouslyBypassApprovalsAndSandbox === true ||
+      config.dangerouslyBypassSandbox === true;
+  const rawSandboxMode = isCreate
+    ? values!.codexSandboxMode ?? "workspace-write"
+    : eff("adapterConfig", "sandboxMode", String(config.sandboxMode ?? "workspace-write"));
+  const sandboxMode =
+    rawSandboxMode === "read-only" || rawSandboxMode === "danger-full-access"
+      ? rawSandboxMode
+      : "workspace-write";
+  const rawApprovalPolicy = isCreate
+    ? values!.codexApprovalPolicy ?? "never"
+    : eff("adapterConfig", "approvalPolicy", String(config.approvalPolicy ?? "never"));
+  const approvalPolicy =
+    rawApprovalPolicy === "untrusted" || rawApprovalPolicy === "on-request"
+      ? rawApprovalPolicy
+      : "never";
+  const ignoreUserConfig = isCreate
+    ? Boolean(values!.codexIgnoreUserConfig)
+    : eff("adapterConfig", "ignoreUserConfig", Boolean(config.ignoreUserConfig));
   const fastModeEnabled = isCreate
     ? Boolean(values!.fastMode)
     : eff("adapterConfig", "fastMode", Boolean(config.fastMode));
@@ -49,6 +74,134 @@ export function CodexLocalConfigFields({
 
   return (
     <>
+      <Field label="Execution engine" hint="Auto uses ACP when prerequisites pass and falls back to Codex CLI with diagnostics.">
+        <select
+          className={inputClass}
+          value={engine}
+          onChange={(e) => {
+            const value = e.target.value === "acp" ? "acp" : e.target.value === "cli" ? "cli" : "auto";
+            isCreate
+              ? set!({ codexEngine: value })
+              : mark("adapterConfig", "engine", value === "auto" ? undefined : value);
+          }}
+        >
+          <option value="auto">Auto (ACP preferred)</option>
+          <option value="cli">Codex CLI</option>
+          <option value="acp">ACP</option>
+        </select>
+      </Field>
+      {acpSelected && (
+        <>
+          <Field
+            label="ACP server command"
+            hint="Optional override for the Codex ACP server command. Defaults to the package-local codex-acp binary."
+          >
+            <DraftInput
+              value={
+                isCreate
+                  ? values!.codexAcpAgentCommand ?? ""
+                  : eff("adapterConfig", "agentCommand", String(config.agentCommand ?? ""))
+              }
+              onCommit={(v) =>
+                isCreate
+                  ? set!({ codexAcpAgentCommand: v })
+                  : mark("adapterConfig", "agentCommand", v || undefined)
+              }
+              immediate
+              className={inputClass}
+              placeholder="codex-acp"
+            />
+          </Field>
+          <Field label="ACP session mode" hint="Persistent keeps ACP session state between runs. One-shot starts fresh each run.">
+            <select
+              className={inputClass}
+              value={
+                isCreate
+                  ? values!.codexAcpMode ?? "persistent"
+                  : eff("adapterConfig", "mode", String(config.mode ?? "persistent"))
+              }
+              onChange={(e) => {
+                const value = e.target.value === "oneshot" ? "oneshot" : "persistent";
+                isCreate
+                  ? set!({ codexAcpMode: value })
+                  : mark("adapterConfig", "mode", value);
+              }}
+            >
+              <option value="persistent">Persistent</option>
+              <option value="oneshot">One-shot</option>
+            </select>
+          </Field>
+          <Field
+            label="ACP non-interactive permissions"
+            hint="Fallback if the ACP agent asks for input outside an interactive session."
+          >
+            <select
+              className={inputClass}
+              value={
+                isCreate
+                  ? values!.codexAcpNonInteractivePermissions ?? "deny"
+                  : eff("adapterConfig", "nonInteractivePermissions", String(config.nonInteractivePermissions ?? "deny"))
+              }
+              onChange={(e) => {
+                const value = e.target.value === "fail" ? "fail" : "deny";
+                isCreate
+                  ? set!({ codexAcpNonInteractivePermissions: value })
+                  : mark("adapterConfig", "nonInteractivePermissions", value);
+              }}
+            >
+              <option value="deny">Deny</option>
+              <option value="fail">Fail</option>
+            </select>
+          </Field>
+          <Field
+            label="ACP state directory"
+            hint="Optional ACP session state directory. Defaults to Paperclip-managed company/agent scoped storage."
+          >
+            <div className="flex items-center gap-2">
+              <DraftInput
+                value={
+                  isCreate
+                    ? values!.codexAcpStateDir ?? ""
+                    : eff("adapterConfig", "stateDir", String(config.stateDir ?? ""))
+                }
+                onCommit={(v) =>
+                  isCreate
+                    ? set!({ codexAcpStateDir: v })
+                    : mark("adapterConfig", "stateDir", v || undefined)
+                }
+                immediate
+                className={inputClass}
+                placeholder="/path/to/acp-state"
+              />
+              <ChoosePathButton />
+            </div>
+          </Field>
+          <Field
+            label="ACP warm process idle ms"
+            hint="Defaults to 0, which closes the ACP process after each run while retaining persistent session state."
+          >
+            {isCreate ? (
+              <input
+                type="number"
+                className={inputClass}
+                value={values!.codexAcpWarmHandleIdleMs ?? 0}
+                onChange={(e) => set!({ codexAcpWarmHandleIdleMs: Number(e.target.value) })}
+              />
+            ) : (
+              <DraftNumberInput
+                value={eff(
+                  "adapterConfig",
+                  "warmHandleIdleMs",
+                  Number(config.warmHandleIdleMs ?? 0),
+                )}
+                onCommit={(v) => mark("adapterConfig", "warmHandleIdleMs", v || 0)}
+                immediate
+                className={inputClass}
+              />
+            )}
+          </Field>
+        </>
+      )}
       {!hideInstructionsFile && (
         <Field label="Agent instructions file" hint={instructionsFileHint}>
           <div className="flex items-center gap-2">
@@ -74,6 +227,120 @@ export function CodexLocalConfigFields({
             <ChoosePathButton />
           </div>
         </Field>
+      )}
+      {!acpSelected && !bypassEnabled && (
+        <>
+          <Field
+            label="Codex sandbox mode"
+            hint="Structured Codex sandbox policy. Paperclip filesystemScope is a separate outer confinement boundary."
+          >
+            <select
+              className={inputClass}
+              value={sandboxMode}
+              onChange={(e) => {
+                const value =
+                  e.target.value === "read-only" || e.target.value === "danger-full-access"
+                    ? e.target.value
+                    : "workspace-write";
+                if (isCreate) {
+                  set!({
+                    codexSandboxMode: value,
+                    ...(value === "workspace-write" ? {} : { codexNetworkAccess: false }),
+                  });
+                  return;
+                }
+                mark("adapterConfig", "sandboxMode", value);
+                if (value !== "workspace-write") {
+                  mark("adapterConfig", "networkAccess", false);
+                }
+              }}
+            >
+              <option value="read-only">Read only</option>
+              <option value="workspace-write">Workspace write</option>
+              <option value="danger-full-access">Danger full access</option>
+            </select>
+          </Field>
+          <Field
+            label="Codex approval policy"
+            hint="Tool Gateway decisions remain independently governed even when Codex command approvals are set to Never."
+          >
+            <select
+              className={inputClass}
+              value={approvalPolicy}
+              onChange={(e) => {
+                const value =
+                  e.target.value === "untrusted" || e.target.value === "on-request"
+                    ? e.target.value
+                    : "never";
+                isCreate
+                  ? set!({ codexApprovalPolicy: value })
+                  : mark("adapterConfig", "approvalPolicy", value);
+              }}
+            >
+              <option value="untrusted">Untrusted commands ask</option>
+              <option value="on-request">Model asks when needed</option>
+              <option value="never">Never ask</option>
+            </select>
+          </Field>
+          {sandboxMode === "workspace-write" && (
+            <ToggleField
+              label="Codex workspace network access"
+              hint="Paperclip networkScope remains the outer network boundary."
+              checked={
+                isCreate
+                  ? Boolean(values!.codexNetworkAccess)
+                  : eff("adapterConfig", "networkAccess", Boolean(config.networkAccess))
+              }
+              onChange={(v) =>
+                isCreate
+                  ? set!({ codexNetworkAccess: v })
+                  : mark("adapterConfig", "networkAccess", v)
+              }
+            />
+          )}
+          <ToggleField
+            label="Ignore Codex user config"
+            hint="Reserved for sterile canaries and diagnostics. Normal roles retain their curated CODEX_HOME."
+            checked={ignoreUserConfig}
+            onChange={(v) => {
+              if (isCreate) {
+                set!({
+                  codexIgnoreUserConfig: v,
+                  ...(v ? { codexConfigProfile: "" } : {}),
+                });
+                return;
+              }
+              mark("adapterConfig", "ignoreUserConfig", v);
+              if (v) mark("adapterConfig", "configProfile", undefined);
+            }}
+          />
+          {!ignoreUserConfig && (
+            <Field
+              label="Codex config profile"
+              hint="Optional profile layered from this agent's curated CODEX_HOME."
+            >
+              <DraftInput
+                value={
+                  isCreate
+                    ? values!.codexConfigProfile ?? ""
+                    : eff(
+                        "adapterConfig",
+                        "configProfile",
+                        String(config.configProfile ?? ""),
+                      )
+                }
+                onCommit={(v) =>
+                  isCreate
+                    ? set!({ codexConfigProfile: v })
+                    : mark("adapterConfig", "configProfile", v || undefined)
+                }
+                immediate
+                className={inputClass}
+                placeholder="builder"
+              />
+            </Field>
+          )}
+        </>
       )}
       <ToggleField
         label="Bypass sandbox"

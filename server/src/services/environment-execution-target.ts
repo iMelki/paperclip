@@ -34,7 +34,6 @@ export async function resolveEnvironmentExecutionTarget(input: {
 
   if (input.environment.driver === "sandbox") {
     if (
-      input.adapterType !== "acpx_local" &&
       input.adapterType !== "codex_local" &&
       input.adapterType !== "claude_local" &&
       input.adapterType !== "gemini_local" &&
@@ -46,6 +45,7 @@ export async function resolveEnvironmentExecutionTarget(input: {
     }
 
     const parsed = await resolveEnvironmentDriverConfigForRuntime(input.db, input.companyId, {
+      id: input.environment.id,
       driver: input.environment.driver as "sandbox",
       config: parseObject(input.environment.config),
     });
@@ -63,6 +63,20 @@ export async function resolveEnvironmentExecutionTarget(input: {
         ? input.leaseMetadata.shellCommand
         : null;
 
+    // Per-lease-runner cumulative counters for startup-step attribution (Open
+    // Q1). Closed over by the `runner.execute` seam below and read back as
+    // deltas by `measureStartupStep`.
+    let execCount = 0;
+    let providerExecMs = 0;
+    let providerGetMs = 0;
+    const accumulateProviderDurations = (metadata: Record<string, unknown> | undefined): void => {
+      if (!metadata) return;
+      const exec = metadata.durationMs;
+      const get = metadata.getDurationMs;
+      if (typeof exec === "number" && Number.isFinite(exec)) providerExecMs += exec;
+      if (typeof get === "number" && Number.isFinite(get)) providerGetMs += get;
+    };
+
     return {
       kind: "remote",
       transport: "sandbox",
@@ -72,9 +86,28 @@ export async function resolveEnvironmentExecutionTarget(input: {
       environmentId: input.environment.id ?? null,
       leaseId: input.leaseId ?? null,
       timeoutMs,
+      // Run-log streaming defaults ON for sandbox environments so agent CLI
+      // output reaches the UI mid-run; `streamRunLogs: false` is an explicit
+      // opt-out back to batch-at-end delivery.
+      streamRunLogs: parsed.config.streamRunLogs !== false,
       runner: input.environmentRuntime && input.lease
         ? {
+            // Provider-backed sandbox RPCs do not surface bounded mid-stream
+            // progress for a single stdin upload, so keep the capability disabled
+            // here. The client falls back to the chunked upload path when this is
+            // false.
+            supportsSingleStreamStdinProgress: false,
+            // Round-trip counter + provider-duration accumulators on the single
+            // host→sandbox exec seam (Open Q1). `measureStartupStep` reads the
+            // per-step delta of each via the `() => number` closures below. The
+            // provider durations ride the exec result's free-form `metadata`
+            // (set by the Daytona plugin), so no protocol/schema change is
+            // needed and providers that omit them simply accumulate nothing.
+            execCount: () => execCount,
+            providerExecMs: () => providerExecMs,
+            providerGetMs: () => providerGetMs,
             execute: async (commandInput) => {
+              execCount += 1;
               const startedAt = new Date().toISOString();
               const result = await input.environmentRuntime!.execute({
                 environment: input.environment as Environment,
@@ -85,7 +118,9 @@ export async function resolveEnvironmentExecutionTarget(input: {
                 env: commandInput.env,
                 stdin: commandInput.stdin,
                 timeoutMs: commandInput.timeoutMs,
+                noProfile: commandInput.noProfile,
               });
+              accumulateProviderDurations(result.metadata);
               if (result.stdout) await commandInput.onLog?.("stdout", result.stdout);
               if (result.stderr) await commandInput.onLog?.("stderr", result.stderr);
               return {
@@ -98,6 +133,28 @@ export async function resolveEnvironmentExecutionTarget(input: {
                 startedAt,
               };
             },
+            // Expose the native file-sync capability only when the provider's
+            // worker advertises BOTH sync verbs; otherwise leave syncIn/syncOut
+            // undefined so the orchestrator keeps the byte-identical base64 path.
+            ...(input.environmentRuntime.supportsSync({
+              environment: input.environment as Environment,
+              lease: input.lease,
+            })
+              ? {
+                  syncIn: (operations) =>
+                    input.environmentRuntime!.syncIn({
+                      environment: input.environment as Environment,
+                      lease: input.lease!,
+                      operations,
+                    }),
+                  syncOut: (operations) =>
+                    input.environmentRuntime!.syncOut({
+                      environment: input.environment as Environment,
+                      lease: input.lease!,
+                      operations,
+                    }),
+                }
+              : {}),
           }
         : undefined,
     };
@@ -106,7 +163,6 @@ export async function resolveEnvironmentExecutionTarget(input: {
   if (
     (
       input.adapterType !== "codex_local" &&
-      input.adapterType !== "acpx_local" &&
       input.adapterType !== "claude_local" &&
       input.adapterType !== "gemini_local" &&
       input.adapterType !== "opencode_local" &&
@@ -119,6 +175,7 @@ export async function resolveEnvironmentExecutionTarget(input: {
   }
 
   const parsed = await resolveEnvironmentDriverConfigForRuntime(input.db, input.companyId, {
+    id: input.environment.id,
     driver: input.environment.driver as "ssh",
     config: parseObject(input.environment.config),
   });

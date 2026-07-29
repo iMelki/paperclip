@@ -1,9 +1,15 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import type { AdapterRuntimeMcpServer } from "@paperclipai/adapter-utils";
 import { runChildProcess } from "@paperclipai/adapter-utils/server-utils";
-import { execute } from "@paperclipai/adapter-claude-local/server";
+import {
+  claudeCommandSupportsEffortFlag,
+  claudeSessionCwdMatchesExecutionTarget,
+  execute,
+  resetClaudeCliCapabilitiesCacheForTests,
+} from "@paperclipai/adapter-claude-local/server";
 
 async function writeFailingClaudeCommand(
   commandPath: string,
@@ -40,44 +46,28 @@ process.exit(${exit});
 async function writeFakeClaudeCommand(commandPath: string): Promise<void> {
   const script = `#!/usr/bin/env node
 const fs = require("node:fs");
-const os = require("node:os");
 const path = require("node:path");
-
-function toLocalPath(value) {
-  if (process.platform !== "win32" || !value) return value;
-  const driveMatch = /^\\/([A-Za-z])\\/(.*)$/.exec(value);
-  if (driveMatch) {
-    const slash = String.fromCharCode(92);
-    const [, drive, rest] = driveMatch;
-    return drive.toUpperCase() + ":" + slash + rest.replace(/\\//g, slash);
-  }
-  if (value.startsWith("/tmp/")) {
-    return path.join(os.tmpdir(), value.slice("/tmp/".length).replace(/\\//g, path.sep));
-  }
-  return value;
-}
 
 const argv = process.argv.slice(2);
 const addDirIndex = argv.indexOf("--add-dir");
 const addDir = addDirIndex >= 0 ? argv[addDirIndex + 1] : null;
-const addDirPath = toLocalPath(addDir);
 const instructionsIndex = argv.indexOf("--append-system-prompt-file");
 const instructionsFilePath = instructionsIndex >= 0 ? argv[instructionsIndex + 1] : null;
-const instructionsFileFsPath = toLocalPath(instructionsFilePath);
+const mcpConfigIndex = argv.indexOf("--mcp-config");
+const mcpConfigPath = mcpConfigIndex >= 0 ? argv[mcpConfigIndex + 1] : null;
 const capturePath = process.env.PAPERCLIP_TEST_CAPTURE_PATH;
-const claudeConfigDirFsPath = toLocalPath(process.env.CLAUDE_CONFIG_DIR || null);
 const payload = {
   argv,
   prompt: fs.readFileSync(0, "utf8"),
   addDir,
   instructionsFilePath,
-  instructionsContents: instructionsFileFsPath ? fs.readFileSync(instructionsFileFsPath, "utf8") : null,
-  skillEntries: addDirPath && fs.existsSync(path.join(addDirPath, ".claude", "skills"))
-    ? fs.readdirSync(path.join(addDirPath, ".claude", "skills")).sort()
-    : [],
+  instructionsContents: instructionsFilePath ? fs.readFileSync(instructionsFilePath, "utf8") : null,
+  mcpConfigPath,
+  mcpConfigContents: mcpConfigPath ? fs.readFileSync(mcpConfigPath, "utf8") : null,
+  skillEntries: addDir ? fs.readdirSync(path.join(addDir, ".claude", "skills")).sort() : [],
   claudeConfigDir: process.env.CLAUDE_CONFIG_DIR || null,
-  claudeConfigEntries: claudeConfigDirFsPath && fs.existsSync(claudeConfigDirFsPath)
-    ? fs.readdirSync(claudeConfigDirFsPath).sort()
+  claudeConfigEntries: process.env.CLAUDE_CONFIG_DIR && fs.existsSync(process.env.CLAUDE_CONFIG_DIR)
+    ? fs.readdirSync(process.env.CLAUDE_CONFIG_DIR).sort()
     : [],
   paperclipApiUrl: process.env.PAPERCLIP_API_URL || null,
   paperclipApiKey: process.env.PAPERCLIP_API_KEY || null,
@@ -86,9 +76,86 @@ const payload = {
 if (capturePath) {
   fs.writeFileSync(capturePath, JSON.stringify(payload), "utf8");
 }
-console.log(JSON.stringify({ type: "system", subtype: "init", session_id: "claude-session-1", model: "claude-sonnet" }));
-console.log(JSON.stringify({ type: "assistant", session_id: "claude-session-1", message: { content: [{ type: "text", text: "hello" }] } }));
-console.log(JSON.stringify({ type: "result", session_id: "claude-session-1", result: "hello", usage: { input_tokens: 1, cache_read_input_tokens: 0, output_tokens: 1 } }));
+console.log(JSON.stringify({ type: "system", subtype: "init", session_id: "11111111-1111-4111-8111-111111111111", model: "claude-sonnet" }));
+console.log(JSON.stringify({ type: "assistant", session_id: "11111111-1111-4111-8111-111111111111", message: { content: [{ type: "text", text: "hello" }] } }));
+console.log(JSON.stringify({ type: "result", session_id: "11111111-1111-4111-8111-111111111111", result: "hello", usage: { input_tokens: 1, cache_read_input_tokens: 0, output_tokens: 1 } }));
+`;
+  await fs.writeFile(commandPath, script, "utf8");
+  await fs.chmod(commandPath, 0o755);
+}
+
+async function writeHelpWithoutEffortClaudeCommand(commandPath: string): Promise<void> {
+  const script = `#!/usr/bin/env node
+const fs = require("node:fs");
+const path = require("node:path");
+
+const argv = process.argv.slice(2);
+if (argv.includes("--help")) {
+  process.stdout.write("Usage: claude [options]\\n  --print\\n  --model <id>\\n");
+  process.exit(0);
+}
+if (argv.includes("--effort")) {
+  process.stderr.write("error: unknown option '--effort'\\n");
+  process.exit(1);
+}
+const addDirIndex = argv.indexOf("--add-dir");
+const addDir = addDirIndex >= 0 ? argv[addDirIndex + 1] : null;
+const instructionsIndex = argv.indexOf("--append-system-prompt-file");
+const instructionsFilePath = instructionsIndex >= 0 ? argv[instructionsIndex + 1] : null;
+const capturePath = process.env.PAPERCLIP_TEST_CAPTURE_PATH;
+const payload = {
+  argv,
+  prompt: fs.readFileSync(0, "utf8"),
+  addDir,
+  instructionsFilePath,
+  instructionsContents: instructionsFilePath ? fs.readFileSync(instructionsFilePath, "utf8") : null,
+  skillEntries: addDir ? fs.readdirSync(path.join(addDir, ".claude", "skills")).sort() : [],
+};
+if (capturePath) {
+  fs.writeFileSync(capturePath, JSON.stringify(payload), "utf8");
+}
+console.log(JSON.stringify({ type: "system", subtype: "init", session_id: "33333333-3333-4333-8333-333333333333", model: "claude-sonnet" }));
+console.log(JSON.stringify({ type: "assistant", session_id: "33333333-3333-4333-8333-333333333333", message: { content: [{ type: "text", text: "hello" }] } }));
+console.log(JSON.stringify({ type: "result", session_id: "33333333-3333-4333-8333-333333333333", result: "hello", usage: { input_tokens: 1, cache_read_input_tokens: 0, output_tokens: 1 } }));
+`;
+  await fs.writeFile(commandPath, script, "utf8");
+  await fs.chmod(commandPath, 0o755);
+}
+
+async function writeHelpWithEffortClaudeCommand(commandPath: string): Promise<void> {
+  const script = `#!/usr/bin/env node
+const fs = require("node:fs");
+const path = require("node:path");
+
+const argv = process.argv.slice(2);
+if (argv.includes("--help")) {
+  const helpCountPath = process.env.PAPERCLIP_TEST_HELP_COUNT_PATH;
+  if (helpCountPath) {
+    const current = fs.existsSync(helpCountPath) ? Number(fs.readFileSync(helpCountPath, "utf8")) || 0 : 0;
+    fs.writeFileSync(helpCountPath, String(current + 1), "utf8");
+  }
+  process.stdout.write("Usage: claude [options]\\n  --print\\n  --effort <level>\\n  --model <id>\\n");
+  process.exit(0);
+}
+const addDirIndex = argv.indexOf("--add-dir");
+const addDir = addDirIndex >= 0 ? argv[addDirIndex + 1] : null;
+const instructionsIndex = argv.indexOf("--append-system-prompt-file");
+const instructionsFilePath = instructionsIndex >= 0 ? argv[instructionsIndex + 1] : null;
+const capturePath = process.env.PAPERCLIP_TEST_CAPTURE_PATH;
+const payload = {
+  argv,
+  prompt: fs.readFileSync(0, "utf8"),
+  addDir,
+  instructionsFilePath,
+  instructionsContents: instructionsFilePath ? fs.readFileSync(instructionsFilePath, "utf8") : null,
+  skillEntries: addDir ? fs.readdirSync(path.join(addDir, ".claude", "skills")).sort() : [],
+};
+if (capturePath) {
+  fs.writeFileSync(capturePath, JSON.stringify(payload), "utf8");
+}
+console.log(JSON.stringify({ type: "system", subtype: "init", session_id: "44444444-4444-4444-8444-444444444444", model: "claude-sonnet" }));
+console.log(JSON.stringify({ type: "assistant", session_id: "44444444-4444-4444-8444-444444444444", message: { content: [{ type: "text", text: "hello" }] } }));
+console.log(JSON.stringify({ type: "result", session_id: "44444444-4444-4444-8444-444444444444", result: "hello", usage: { input_tokens: 1, cache_read_input_tokens: 0, output_tokens: 1 } }));
 `;
   await fs.writeFile(commandPath, script, "utf8");
   await fs.chmod(commandPath, 0o755);
@@ -109,6 +176,76 @@ type CapturePayload = {
   appendedSystemPromptFilePath?: string | null;
   appendedSystemPromptFileContents?: string | null;
 };
+
+afterEach(() => {
+  resetClaudeCliCapabilitiesCacheForTests();
+});
+
+async function writePoisonedMessageIdClaudeCommand(commandPath: string): Promise<void> {
+  const script = `#!/usr/bin/env node
+const fs = require("node:fs");
+
+const capturePath = process.env.PAPERCLIP_TEST_CAPTURE_PATH;
+const statePath = process.env.PAPERCLIP_TEST_STATE_PATH;
+const payload = {
+  argv: process.argv.slice(2),
+  prompt: fs.readFileSync(0, "utf8"),
+};
+if (capturePath) {
+  const entries = fs.existsSync(capturePath) ? JSON.parse(fs.readFileSync(capturePath, "utf8")) : [];
+  entries.push(payload);
+  fs.writeFileSync(capturePath, JSON.stringify(entries), "utf8");
+}
+const resumed = process.argv.includes("--resume");
+const shouldFailResume = resumed && statePath && !fs.existsSync(statePath);
+if (shouldFailResume) {
+  fs.writeFileSync(statePath, "retried", "utf8");
+  console.log(JSON.stringify({
+    type: "result",
+    subtype: "success",
+    session_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    is_error: true,
+    result: "API Error: 400 diagnostics.previous_message_id: must be the \`id\` from a prior /v1/messages response (starts with \`msg_\`)",
+  }));
+  process.exit(1);
+}
+console.log(JSON.stringify({ type: "system", subtype: "init", session_id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", model: "claude-sonnet" }));
+console.log(JSON.stringify({ type: "assistant", session_id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", message: { content: [{ type: "text", text: "hello" }] } }));
+console.log(JSON.stringify({ type: "result", session_id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", result: "hello", usage: { input_tokens: 1, cache_read_input_tokens: 0, output_tokens: 1 } }));
+`;
+  await fs.writeFile(commandPath, script, "utf8");
+  await fs.chmod(commandPath, 0o755);
+}
+
+async function writeAlwaysPoisonedMessageIdClaudeCommand(commandPath: string): Promise<void> {
+  const script = `#!/usr/bin/env node
+const fs = require("node:fs");
+
+const capturePath = process.env.PAPERCLIP_TEST_CAPTURE_PATH;
+const payload = {
+  argv: process.argv.slice(2),
+  prompt: fs.readFileSync(0, "utf8"),
+};
+if (capturePath) {
+  const entries = fs.existsSync(capturePath) ? JSON.parse(fs.readFileSync(capturePath, "utf8")) : [];
+  entries.push(payload);
+  fs.writeFileSync(capturePath, JSON.stringify(entries), "utf8");
+}
+// Both --resume and fresh attempts emit the poisoned previous_message_id result.
+// The fresh attempt still carries a session_id in the result; the adapter must
+// NOT persist it, otherwise the next continuation re-resumes a known-bad transcript.
+console.log(JSON.stringify({
+  type: "result",
+  subtype: "success",
+  session_id: "fffff111-0000-4000-8000-000000000003",
+  is_error: true,
+  result: "API Error: 400 diagnostics.previous_message_id: must be the \`id\` from a prior /v1/messages response (starts with \`msg_\`)",
+}));
+process.exit(1);
+`;
+  await fs.writeFile(commandPath, script, "utf8");
+  await fs.chmod(commandPath, 0o755);
+}
 
 async function writeRetryThenSucceedClaudeCommand(commandPath: string): Promise<void> {
   const script = `#!/usr/bin/env node
@@ -137,15 +274,15 @@ if (shouldFailResume) {
   console.log(JSON.stringify({
     type: "result",
     subtype: "error",
-    session_id: "claude-session-1",
-    result: "No conversation found with session id claude-session-1",
-    errors: ["No conversation found with session id claude-session-1"],
+    session_id: "11111111-1111-4111-8111-111111111111",
+    result: "No conversation found with session id 11111111-1111-4111-8111-111111111111",
+    errors: ["No conversation found with session id 11111111-1111-4111-8111-111111111111"],
   }));
   process.exit(1);
 }
-console.log(JSON.stringify({ type: "system", subtype: "init", session_id: "claude-session-2", model: "claude-sonnet" }));
-console.log(JSON.stringify({ type: "assistant", session_id: "claude-session-2", message: { content: [{ type: "text", text: "hello" }] } }));
-console.log(JSON.stringify({ type: "result", session_id: "claude-session-2", result: "hello", usage: { input_tokens: 1, cache_read_input_tokens: 0, output_tokens: 1 } }));
+console.log(JSON.stringify({ type: "system", subtype: "init", session_id: "22222222-2222-4222-8222-222222222222", model: "claude-sonnet" }));
+console.log(JSON.stringify({ type: "assistant", session_id: "22222222-2222-4222-8222-222222222222", message: { content: [{ type: "text", text: "hello" }] } }));
+console.log(JSON.stringify({ type: "result", session_id: "22222222-2222-4222-8222-222222222222", result: "hello", usage: { input_tokens: 1, cache_read_input_tokens: 0, output_tokens: 1 } }));
 `;
   await fs.writeFile(commandPath, script, "utf8");
   await fs.chmod(commandPath, 0o755);
@@ -178,27 +315,6 @@ async function setupExecuteEnv(
   };
 }
 
-function toShellPath(value: string): string {
-  if (process.platform !== "win32") return value;
-  const match = /^([A-Za-z]):[\\/](.*)$/.exec(value);
-  if (!match) return value.replace(/\\/g, "/");
-  const [, drive, rest] = match;
-  return `/${drive.toLowerCase()}/${rest.replace(/\\/g, "/")}`;
-}
-
-function fromShellPath(value: string): string {
-  if (process.platform !== "win32") return value;
-  const driveMatch = /^\/([A-Za-z])\/(.*)$/.exec(value);
-  if (driveMatch) {
-    const [, drive, rest] = driveMatch;
-    return `${drive.toUpperCase()}:\\${rest.replace(/\//g, "\\")}`;
-  }
-  if (value.startsWith("/tmp/")) {
-    return path.join(os.tmpdir(), value.slice("/tmp/".length).replace(/\//g, path.sep));
-  }
-  return value;
-}
-
 function createLocalSandboxRunner() {
   let counter = 0;
   return {
@@ -213,14 +329,12 @@ function createLocalSandboxRunner() {
       onSpawn?: (meta: { pid: number; startedAt: string }) => Promise<void>;
     }) => {
       counter += 1;
-      const command = fromShellPath(input.command);
-      const cwd = fromShellPath(input.cwd ?? process.cwd());
       return runChildProcess(
         `sandbox-run-${counter}`,
-        command,
+        input.command,
         input.args ?? [],
         {
-          cwd,
+          cwd: input.cwd ?? process.cwd(),
           env: input.env ?? {},
           stdin: input.stdin,
           timeoutSec: Math.max(1, Math.ceil((input.timeoutMs ?? 30_000) / 1000)),
@@ -236,6 +350,61 @@ function createLocalSandboxRunner() {
 }
 
 describe("claude execute", () => {
+  it("uses a strict per-agent MCP config only when managed servers are present", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-claude-mcp-config-"));
+    const { workspace, commandPath, capturePath, restore } = await setupExecuteEnv(root);
+    try {
+      const run = async (runId: string, agentId: string, servers: AdapterRuntimeMcpServer[]) => {
+        await execute({
+          runId,
+          agent: { id: agentId, companyId: "co-1", name: agentId, adapterType: "claude_local", adapterConfig: { engine: "cli" } },
+          runtime: { sessionId: null, sessionParams: null, sessionDisplayId: null, taskKey: null },
+          config: {
+            engine: "cli",
+            command: commandPath,
+            cwd: workspace,
+            env: { PAPERCLIP_TEST_CAPTURE_PATH: capturePath },
+            promptTemplate: "Do work.",
+          },
+          runtimeMcp: { getServers: () => servers },
+          context: {},
+          authToken: "tok",
+          onLog: async () => {},
+        });
+        return JSON.parse(await fs.readFile(capturePath, "utf8"));
+      };
+
+      const alpha = await run("run-alpha", "agent-alpha", [{
+        name: "alpha",
+        url: "https://paperclip.example/api/tool-gateway/gateways/alpha/mcp",
+        token: "alpha-token",
+        connectionId: "connection-alpha",
+      }]);
+      const zero = await run("run-zero", "agent-zero", []);
+
+      expect(alpha.argv).toEqual(expect.arrayContaining(["--strict-mcp-config", "--mcp-config"]));
+      expect(JSON.parse(alpha.mcpConfigContents)).toEqual({
+        mcpServers: {
+          alpha: {
+            type: "http",
+            url: "https://paperclip.example/api/tool-gateway/gateways/alpha/mcp",
+            headers: { Authorization: "Bearer alpha-token" },
+          },
+        },
+      });
+      expect(zero.argv).not.toContain("--mcp-config");
+      expect(zero.argv).not.toContain("--strict-mcp-config");
+      expect(zero.mcpConfigPath).toBeNull();
+      expect(zero.mcpConfigContents).toBeNull();
+      expect(alpha.mcpConfigPath).toContain(
+        `${path.sep}agents${path.sep}agent-alpha${path.sep}`,
+      );
+    } finally {
+      restore();
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
   /**
    * Regression tests for https://github.com/paperclipai/paperclip/issues/2848
    *
@@ -251,9 +420,10 @@ describe("claude execute", () => {
     try {
       await execute({
         runId: "run-fresh",
-        agent: { id: "agent-1", companyId: "co-1", name: "Test", adapterType: "claude_local", adapterConfig: {} },
+        agent: { id: "agent-1", companyId: "co-1", name: "Test", adapterType: "claude_local", adapterConfig: { engine: "cli" } },
         runtime: { sessionId: null, sessionParams: null, sessionDisplayId: null, taskKey: null },
         config: {
+          engine: "cli",
           command: commandPath,
           cwd: workspace,
           env: { PAPERCLIP_TEST_CAPTURE_PATH: capturePath },
@@ -281,9 +451,10 @@ describe("claude execute", () => {
     try {
       await execute({
         runId: "run-resume",
-        agent: { id: "agent-1", companyId: "co-1", name: "Test", adapterType: "claude_local", adapterConfig: {} },
-        runtime: { sessionId: "claude-session-1", sessionParams: null, sessionDisplayId: null, taskKey: null },
+        agent: { id: "agent-1", companyId: "co-1", name: "Test", adapterType: "claude_local", adapterConfig: { engine: "cli" } },
+        runtime: { sessionId: "11111111-1111-4111-8111-111111111111", sessionParams: null, sessionDisplayId: null, taskKey: null },
         config: {
+          engine: "cli",
           command: commandPath,
           cwd: workspace,
           env: { PAPERCLIP_TEST_CAPTURE_PATH: capturePath },
@@ -319,9 +490,10 @@ describe("claude execute", () => {
     try {
       await execute({
         runId: "run-notes-fresh",
-        agent: { id: "agent-1", companyId: "co-1", name: "Test", adapterType: "claude_local", adapterConfig: {} },
+        agent: { id: "agent-1", companyId: "co-1", name: "Test", adapterType: "claude_local", adapterConfig: { engine: "cli" } },
         runtime: { sessionId: null, sessionParams: null, sessionDisplayId: null, taskKey: null },
         config: {
+          engine: "cli",
           command: commandPath,
           cwd: workspace,
           env: {},
@@ -349,9 +521,10 @@ describe("claude execute", () => {
     try {
       await execute({
         runId: "run-notes-resume",
-        agent: { id: "agent-1", companyId: "co-1", name: "Test", adapterType: "claude_local", adapterConfig: {} },
-        runtime: { sessionId: "claude-session-1", sessionParams: null, sessionDisplayId: null, taskKey: null },
+        agent: { id: "agent-1", companyId: "co-1", name: "Test", adapterType: "claude_local", adapterConfig: { engine: "cli" } },
+        runtime: { sessionId: "11111111-1111-4111-8111-111111111111", sessionParams: null, sessionDisplayId: null, taskKey: null },
         config: {
+          engine: "cli",
           command: commandPath,
           cwd: workspace,
           env: {},
@@ -381,9 +554,10 @@ describe("claude execute", () => {
     try {
       const result = await execute({
         runId: "run-resume-fallback",
-        agent: { id: "agent-1", companyId: "co-1", name: "Test", adapterType: "claude_local", adapterConfig: {} },
-        runtime: { sessionId: "claude-session-1", sessionParams: null, sessionDisplayId: null, taskKey: null },
+        agent: { id: "agent-1", companyId: "co-1", name: "Test", adapterType: "claude_local", adapterConfig: { engine: "cli" } },
+        runtime: { sessionId: "11111111-1111-4111-8111-111111111111", sessionParams: null, sessionDisplayId: null, taskKey: null },
         config: {
+          engine: "cli",
           command: commandPath,
           cwd: workspace,
           env: {
@@ -425,7 +599,7 @@ describe("claude execute", () => {
       expect(metaEvents).toHaveLength(2);
       expect(metaEvents[0]?.commandNotes).toHaveLength(0);
       expect(metaEvents[1]?.commandNotes.some((note) => note.includes("--append-system-prompt-file"))).toBe(true);
-      expect(result.sessionId).toBe("claude-session-2");
+      expect(result.sessionId).toBe("22222222-2222-4222-8222-222222222222");
       expect(result.clearSession).toBe(false);
     } finally {
       restore();
@@ -438,7 +612,7 @@ describe("claude execute", () => {
     const resultEvent = {
       type: "result",
       subtype: "error_max_turns",
-      session_id: "claude-session-1",
+      session_id: "11111111-1111-4111-8111-111111111111",
       is_error: true,
       result: "Maximum turns reached.",
       usage: { input_tokens: 1, cache_read_input_tokens: 0, output_tokens: 1 },
@@ -450,9 +624,10 @@ describe("claude execute", () => {
     try {
       const result = await execute({
         runId: "run-max-turns",
-        agent: { id: "agent-1", companyId: "co-1", name: "Test", adapterType: "claude_local", adapterConfig: {} },
+        agent: { id: "agent-1", companyId: "co-1", name: "Test", adapterType: "claude_local", adapterConfig: { engine: "cli" } },
         runtime: { sessionId: null, sessionParams: null, sessionDisplayId: null, taskKey: null },
         config: {
+          engine: "cli",
           command: commandPath,
           cwd: workspace,
           promptTemplate: "Do work.",
@@ -478,7 +653,7 @@ describe("claude execute", () => {
     const resultEvent = {
       type: "result",
       subtype: "error",
-      session_id: "claude-session-1",
+      session_id: "11111111-1111-4111-8111-111111111111",
       is_error: true,
       result: "Tool output said: Maximum turns reached.",
     };
@@ -489,9 +664,10 @@ describe("claude execute", () => {
     try {
       const result = await execute({
         runId: "run-max-turns-text",
-        agent: { id: "agent-1", companyId: "co-1", name: "Test", adapterType: "claude_local", adapterConfig: {} },
+        agent: { id: "agent-1", companyId: "co-1", name: "Test", adapterType: "claude_local", adapterConfig: { engine: "cli" } },
         runtime: { sessionId: null, sessionParams: null, sessionDisplayId: null, taskKey: null },
         config: {
+          engine: "cli",
           command: commandPath,
           cwd: workspace,
           promptTemplate: "Do work.",
@@ -524,9 +700,10 @@ describe("claude execute", () => {
     try {
       const result = await execute({
         runId: "run-max-turns-fallback-text",
-        agent: { id: "agent-1", companyId: "co-1", name: "Test", adapterType: "claude_local", adapterConfig: {} },
+        agent: { id: "agent-1", companyId: "co-1", name: "Test", adapterType: "claude_local", adapterConfig: { engine: "cli" } },
         runtime: { sessionId: null, sessionParams: null, sessionDisplayId: null, taskKey: null },
         config: {
+          engine: "cli",
           command: commandPath,
           cwd: workspace,
           promptTemplate: "Do work.",
@@ -575,7 +752,7 @@ describe("claude execute", () => {
           companyId: "company-1",
           name: "Claude Coder",
           adapterType: "claude_local",
-          adapterConfig: {},
+          adapterConfig: { engine: "cli" },
         },
         runtime: {
           sessionId: null,
@@ -584,6 +761,7 @@ describe("claude execute", () => {
           taskKey: null,
         },
         config: {
+          engine: "cli",
           command: "claude",
           cwd: workspace,
           env: {
@@ -602,6 +780,9 @@ describe("claude execute", () => {
 
       expect(result.exitCode).toBe(0);
       expect(result.errorMessage).toBeNull();
+      expect(result.usage).toEqual({ inputTokens: 1, cachedInputTokens: 0, outputTokens: 1 });
+      expect(result.usageBasis).toBe("per_run");
+      expect(result.costUsd).toBeNull();
       expect(loggedCommand).toBe(commandPath);
       expect(loggedEnv.HOME).toBe(root);
       expect(loggedEnv.CLAUDE_CONFIG_DIR).toBe(claudeConfigDir);
@@ -620,17 +801,16 @@ describe("claude execute", () => {
   it("injects bridge env into sandbox-managed remote runs", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-claude-execute-sandbox-"));
     const localWorkspace = path.join(root, "workspace");
-    const remoteWorkspaceLocal = path.join(root, "sandbox");
-    const remoteWorkspace = toShellPath(remoteWorkspaceLocal);
+    const remoteWorkspace = path.join(root, "sandbox-$HOME");
     const binDir = path.join(root, "bin");
     const commandPath = path.join(binDir, "claude");
-    const capturePath = path.join(remoteWorkspaceLocal, "capture.json");
+    const capturePath1 = path.join(remoteWorkspace, "capture-1.json");
     const claudeRoot = path.join(root, ".claude");
     const previousHome = process.env.HOME;
     const previousPath = process.env.PATH;
 
     await fs.mkdir(localWorkspace, { recursive: true });
-    await fs.mkdir(remoteWorkspaceLocal, { recursive: true });
+    await fs.mkdir(remoteWorkspace, { recursive: true });
     await fs.mkdir(binDir, { recursive: true });
     await fs.mkdir(claudeRoot, { recursive: true });
     await fs.writeFile(path.join(claudeRoot, "settings.json"), JSON.stringify({ theme: "test" }), "utf8");
@@ -647,7 +827,7 @@ describe("claude execute", () => {
           companyId: "company-1",
           name: "Claude Coder",
           adapterType: "claude_local",
-          adapterConfig: {},
+          adapterConfig: { engine: "cli" },
         },
         runtime: {
           sessionId: null,
@@ -656,10 +836,11 @@ describe("claude execute", () => {
           taskKey: null,
         },
         config: {
+          engine: "cli",
           command: commandPath,
           cwd: localWorkspace,
           env: {
-            PAPERCLIP_TEST_CAPTURE_PATH: capturePath,
+            PAPERCLIP_TEST_CAPTURE_PATH: capturePath1,
           },
           promptTemplate: "Follow the paperclip heartbeat.",
         },
@@ -679,8 +860,23 @@ describe("claude execute", () => {
       });
 
       expect(result.exitCode).toBe(0);
-      const capture = JSON.parse(await fs.readFile(capturePath, "utf8")) as CapturePayload;
-      expect(capture.claudeConfigDir).toBe(path.posix.join(remoteWorkspace, ".paperclip-runtime", "claude", "config"));
+      expect(result.sessionParams).toMatchObject({
+        cwd: localWorkspace,
+        remoteExecution: {
+          transport: "sandbox",
+          providerKey: "e2b",
+          environmentId: "env-1",
+          leaseId: "lease-1",
+          remoteCwd: remoteWorkspace,
+        },
+      });
+      const capture = JSON.parse(await fs.readFile(capturePath1, "utf8")) as CapturePayload;
+      expect(capture.argv).toContain("--allowedTools");
+      expect(capture.argv).toContain(
+        "Task AskUserQuestion Bash CronCreate CronDelete CronList Edit EnterPlanMode EnterWorktree ExitPlanMode ExitWorktree Glob Grep Monitor NotebookEdit PushNotification Read RemoteTrigger ScheduleWakeup Skill TaskOutput TaskStop TodoWrite ToolSearch WebFetch WebSearch Write",
+      );
+      expect(capture.argv).not.toContain("--dangerously-skip-permissions");
+      expect(capture.claudeConfigDir).toBe(path.join(remoteWorkspace, ".paperclip-runtime", "claude", "config"));
       expect(capture.claudeConfigEntries).toContain("settings.json");
       expect(capture.paperclipApiUrl).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/);
       expect(capture.paperclipApiKey).not.toBe("run-jwt-token");
@@ -692,7 +888,195 @@ describe("claude execute", () => {
       else process.env.PATH = previousPath;
       await fs.rm(root, { recursive: true, force: true });
     }
-  }, 90_000);
+  }, 10_000);
+
+  it("omits --effort for sandbox-managed runs when the installed Claude CLI does not advertise it", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-claude-execute-sandbox-effort-"));
+    const { workspace, commandPath, capturePath, restore } = await setupExecuteEnv(root, {
+      commandWriter: writeHelpWithoutEffortClaudeCommand,
+    });
+    const remoteWorkspace = path.join(root, "sandbox-workspace");
+    await fs.mkdir(remoteWorkspace, { recursive: true });
+
+    try {
+      const result = await execute({
+        runId: "run-sandbox-effort-fallback",
+        agent: {
+          id: "agent-1",
+          companyId: "company-1",
+          name: "Claude Coder",
+          adapterType: "claude_local",
+          adapterConfig: { engine: "cli" },
+        },
+        runtime: {
+          sessionId: null,
+          sessionParams: null,
+          sessionDisplayId: null,
+          taskKey: null,
+        },
+        config: {
+          engine: "cli",
+          command: commandPath,
+          cwd: workspace,
+          effort: "low",
+          env: {
+            PAPERCLIP_TEST_CAPTURE_PATH: capturePath,
+          },
+          promptTemplate: "Fallback cleanly if the sandbox CLI is old.",
+        },
+        context: {},
+        executionTarget: {
+          kind: "remote",
+          transport: "sandbox",
+          providerKey: "daytona",
+          environmentId: "env-1",
+          leaseId: "lease-1",
+          remoteCwd: remoteWorkspace,
+          timeoutMs: 30_000,
+          runner: createLocalSandboxRunner(),
+        },
+        authToken: "run-jwt-token",
+        onLog: async () => {},
+      });
+
+      expect(result.exitCode).toBe(0);
+      const capture = JSON.parse(await fs.readFile(capturePath, "utf8")) as CapturePayload;
+      expect(capture.argv).not.toContain("--effort");
+    } finally {
+      restore();
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  }, 10_000);
+
+  it("passes through --effort and reuses the sandbox capability probe across sandbox leases when the installed Claude CLI advertises it", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-claude-execute-sandbox-effort-supported-"));
+    const { workspace, commandPath, capturePath, restore } = await setupExecuteEnv(root, {
+      commandWriter: writeHelpWithEffortClaudeCommand,
+    });
+    const helpCountPath = path.join(root, "help-count.txt");
+    const remoteWorkspace = path.join(root, "sandbox-workspace");
+    await fs.mkdir(remoteWorkspace, { recursive: true });
+
+    const baseInput = {
+      agent: {
+        id: "agent-1",
+        companyId: "company-1",
+        name: "Claude Coder",
+        adapterType: "claude_local",
+        adapterConfig: { engine: "cli" },
+      },
+      runtime: {
+        sessionId: null,
+        sessionParams: null,
+        sessionDisplayId: null,
+        taskKey: null,
+      },
+      config: {
+        engine: "cli",
+        command: commandPath,
+        cwd: workspace,
+        effort: "low",
+        env: {
+          PAPERCLIP_TEST_CAPTURE_PATH: capturePath,
+          PAPERCLIP_TEST_HELP_COUNT_PATH: helpCountPath,
+        },
+        promptTemplate: "Keep the requested effort when supported.",
+      },
+      context: {},
+      executionTarget: {
+        kind: "remote" as const,
+        transport: "sandbox" as const,
+        providerKey: "daytona",
+        environmentId: "env-1",
+        leaseId: "lease-1",
+        remoteCwd: remoteWorkspace,
+        timeoutMs: 30_000,
+        runner: createLocalSandboxRunner(),
+      },
+      authToken: "run-jwt-token",
+      onLog: async () => {},
+    };
+
+    try {
+      const first = await execute({
+        runId: "run-sandbox-effort-supported-1",
+        ...baseInput,
+      });
+      const second = await execute({
+        runId: "run-sandbox-effort-supported-2",
+        ...baseInput,
+        executionTarget: {
+          ...baseInput.executionTarget,
+          leaseId: "lease-2",
+        },
+      });
+
+      expect(first.exitCode).toBe(0);
+      expect(second.exitCode).toBe(0);
+      const capture = JSON.parse(await fs.readFile(capturePath, "utf8")) as CapturePayload;
+      expect(capture.argv).toContain("--effort");
+      expect(capture.argv).toContain("low");
+      expect(await fs.readFile(helpCountPath, "utf8")).toBe("1");
+    } finally {
+      restore();
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  }, 10_000);
+
+  it("degrades to the conservative fallback (returns null) when the sandbox probe throws, and retries on the next lease", async () => {
+    let calls = 0;
+    const throwingRunner = {
+      execute: async () => {
+        calls += 1;
+        throw new Error("sandbox connection error");
+      },
+    };
+    const target = {
+      kind: "remote" as const,
+      transport: "sandbox" as const,
+      providerKey: "daytona",
+      environmentId: "env-1",
+      leaseId: "lease-1",
+      remoteCwd: "/remote/workspace",
+      timeoutMs: 30_000,
+      runner: throwingRunner,
+    };
+    const probeInput = {
+      runId: "run-probe-throws",
+      command: "/usr/local/bin/claude",
+      cwd: "/host/workspace",
+      env: {},
+      timeoutSec: 20,
+      graceSec: 5,
+    };
+
+    // A thrown probe must resolve to null (unknown) rather than reject and kill the run.
+    await expect(
+      claudeCommandSupportsEffortFlag({ ...probeInput, target }),
+    ).resolves.toBeNull();
+
+    // The failed result is not cached: a second lease re-probes instead of reusing the rejection.
+    await expect(
+      claudeCommandSupportsEffortFlag({
+        ...probeInput,
+        target: { ...target, leaseId: "lease-2" },
+      }),
+    ).resolves.toBeNull();
+    expect(calls).toBe(2);
+  });
+
+  it("allows remote session resumes when saved cwd is the host workspace", () => {
+    expect(claudeSessionCwdMatchesExecutionTarget({
+      runtimeSessionCwd: "/host/workspace",
+      effectiveExecutionCwd: "/remote/workspace",
+      executionTargetIsRemote: true,
+    })).toBe(true);
+    expect(claudeSessionCwdMatchesExecutionTarget({
+      runtimeSessionCwd: "/host/workspace",
+      effectiveExecutionCwd: "/remote/workspace",
+      executionTargetIsRemote: false,
+    })).toBe(false);
+  });
 
   it("reuses a stable Paperclip-managed Claude prompt bundle across equivalent runs", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-claude-execute-bundle-"));
@@ -721,7 +1105,7 @@ describe("claude execute", () => {
           companyId: "company-1",
           name: "Claude Coder",
           adapterType: "claude_local",
-          adapterConfig: {},
+          adapterConfig: { engine: "cli" },
         },
         runtime: {
           sessionId: null,
@@ -730,6 +1114,7 @@ describe("claude execute", () => {
           taskKey: null,
         },
         config: {
+          engine: "cli",
           command: commandPath,
           cwd: workspace,
           instructionsFilePath: instructionsPath,
@@ -737,6 +1122,9 @@ describe("claude execute", () => {
             PAPERCLIP_TEST_CAPTURE_PATH: capturePath1,
           },
           promptTemplate: "Follow the paperclip heartbeat.",
+          paperclipSkillSync: {
+            desiredSkills: ["paperclip"],
+          },
         },
         context: {},
         authToken: "run-jwt-token",
@@ -746,7 +1134,7 @@ describe("claude execute", () => {
       expect(first.exitCode).toBe(0);
       expect(first.errorMessage).toBeNull();
       expect(first.sessionParams).toMatchObject({
-        sessionId: "claude-session-1",
+        sessionId: "11111111-1111-4111-8111-111111111111",
         cwd: workspace,
       });
       expect(typeof first.sessionParams?.promptBundleKey).toBe("string");
@@ -758,7 +1146,7 @@ describe("claude execute", () => {
           companyId: "company-1",
           name: "Claude Coder",
           adapterType: "claude_local",
-          adapterConfig: {},
+          adapterConfig: { engine: "cli" },
         },
         runtime: {
           sessionId: null,
@@ -767,6 +1155,7 @@ describe("claude execute", () => {
           taskKey: null,
         },
         config: {
+          engine: "cli",
           command: commandPath,
           cwd: workspace,
           instructionsFilePath: instructionsPath,
@@ -774,6 +1163,9 @@ describe("claude execute", () => {
             PAPERCLIP_TEST_CAPTURE_PATH: capturePath2,
           },
           promptTemplate: "Follow the paperclip heartbeat.",
+          paperclipSkillSync: {
+            desiredSkills: ["paperclip"],
+          },
         },
         context: {
           issueId: "issue-1",
@@ -838,7 +1230,7 @@ describe("claude execute", () => {
       expect(capture1.instructionsContents).toContain(`The above agent instructions were loaded from ${instructionsPath}.`);
       expect(capture1.skillEntries).toContain("paperclip");
       expect(capture2.argv).toContain("--resume");
-      expect(capture2.argv).toContain("claude-session-1");
+      expect(capture2.argv).toContain("11111111-1111-4111-8111-111111111111");
       expect(capture2.prompt).toContain("## Paperclip Resume Delta");
       expect(capture2.prompt).not.toContain("Follow the paperclip heartbeat.");
     } finally {
@@ -880,7 +1272,7 @@ describe("claude execute", () => {
           companyId: "company-1",
           name: "Claude Coder",
           adapterType: "claude_local",
-          adapterConfig: {},
+          adapterConfig: { engine: "cli" },
         },
         runtime: {
           sessionId: null,
@@ -889,6 +1281,7 @@ describe("claude execute", () => {
           taskKey: null,
         },
         config: {
+          engine: "cli",
           command: commandPath,
           cwd: workspace,
           instructionsFilePath: instructionsPath,
@@ -911,7 +1304,7 @@ describe("claude execute", () => {
           companyId: "company-1",
           name: "Claude Coder",
           adapterType: "claude_local",
-          adapterConfig: {},
+          adapterConfig: { engine: "cli" },
         },
         runtime: {
           sessionId: null,
@@ -920,6 +1313,7 @@ describe("claude execute", () => {
           taskKey: null,
         },
         config: {
+          engine: "cli",
           command: commandPath,
           cwd: workspace,
           instructionsFilePath: instructionsPath,
@@ -957,7 +1351,7 @@ describe("claude execute", () => {
     }
   }, 15_000);
 
-  it("classifies Claude 'out of extra usage' failures as transient upstream errors", async () => {
+  it("classifies Claude 'out of extra usage' failures as provider quota errors", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-claude-execute-transient-"));
     const workspace = path.join(root, "workspace");
     const commandPath = path.join(root, "claude");
@@ -966,7 +1360,7 @@ describe("claude execute", () => {
       resultEvent: {
         type: "result",
         subtype: "error",
-        session_id: "claude-session-extra",
+        session_id: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
         is_error: true,
         result: "You're out of extra usage · resets 4pm (America/Chicago)",
         errors: [{ type: "rate_limit_error", message: "You're out of extra usage" }],
@@ -986,7 +1380,7 @@ describe("claude execute", () => {
           companyId: "company-1",
           name: "Claude Coder",
           adapterType: "claude_local",
-          adapterConfig: {},
+          adapterConfig: { engine: "cli" },
         },
         runtime: {
           sessionId: null,
@@ -995,6 +1389,7 @@ describe("claude execute", () => {
           taskKey: null,
         },
         config: {
+          engine: "cli",
           command: commandPath,
           cwd: workspace,
           promptTemplate: "Follow the paperclip heartbeat.",
@@ -1005,17 +1400,76 @@ describe("claude execute", () => {
       });
 
       expect(result.exitCode).toBe(1);
-      expect(result.errorCode).toBe("claude_transient_upstream");
-      expect(result.errorFamily).toBe("transient_upstream");
+      expect(result.errorCode).toBe("provider_quota");
+      expect(result.errorFamily).toBe("provider_quota");
       const expectedRetryNotBefore = "2026-04-22T21:00:00.000Z";
       expect(result.retryNotBefore).toBe(expectedRetryNotBefore);
       expect(result.resultJson?.retryNotBefore).toBe(expectedRetryNotBefore);
+      expect(result.resultJson?.providerQuotaRetryNotBefore).toBe(expectedRetryNotBefore);
       expect(result.errorMessage ?? "").toContain("extra usage");
       expect(new Date(String(result.resultJson?.transientRetryNotBefore)).getTime()).toBe(
         new Date("2026-04-22T21:00:00.000Z").getTime(),
       );
     } finally {
       vi.useRealTimers();
+      if (previousHome === undefined) delete process.env.HOME;
+      else process.env.HOME = previousHome;
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("treats subtype=success results as successful even when the process exits nonzero", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-claude-execute-success-subtype-"));
+    const workspace = path.join(root, "workspace");
+    const commandPath = path.join(root, "claude");
+    await fs.mkdir(workspace, { recursive: true });
+    await writeFailingClaudeCommand(commandPath, {
+      exitCode: 1,
+      resultEvent: {
+        type: "result",
+        subtype: "success",
+        session_id: "ffffffff-ffff-4fff-8fff-ffffffffffff",
+        is_error: false,
+        result: "Implemented the requested change.",
+        usage: { input_tokens: 1, cache_read_input_tokens: 0, output_tokens: 1 },
+      },
+    });
+
+    const previousHome = process.env.HOME;
+    process.env.HOME = root;
+
+    try {
+      const result = await execute({
+        runId: "run-claude-success-subtype",
+        agent: {
+          id: "agent-1",
+          companyId: "company-1",
+          name: "Claude Coder",
+          adapterType: "claude_local",
+          adapterConfig: { engine: "cli" },
+        },
+        runtime: {
+          sessionId: null,
+          sessionParams: null,
+          sessionDisplayId: null,
+          taskKey: null,
+        },
+        config: {
+          engine: "cli",
+          command: commandPath,
+          cwd: workspace,
+          promptTemplate: "Follow the paperclip heartbeat.",
+        },
+        context: {},
+        authToken: "run-jwt-token",
+        onLog: async () => {},
+      });
+
+      expect(result.exitCode).toBe(1);
+      expect(result.errorMessage).toBeNull();
+      expect(result.errorCode).toBeNull();
+      expect(result.summary).toBe("Implemented the requested change.");
+    } finally {
       if (previousHome === undefined) delete process.env.HOME;
       else process.env.HOME = previousHome;
       await fs.rm(root, { recursive: true, force: true });
@@ -1031,7 +1485,7 @@ describe("claude execute", () => {
       resultEvent: {
         type: "result",
         subtype: "error",
-        session_id: "claude-session-overloaded",
+        session_id: "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
         is_error: true,
         result: "Overloaded",
         errors: [{ type: "overloaded_error", message: "Overloaded_error: API is overloaded." }],
@@ -1049,7 +1503,7 @@ describe("claude execute", () => {
           companyId: "company-1",
           name: "Claude Coder",
           adapterType: "claude_local",
-          adapterConfig: {},
+          adapterConfig: { engine: "cli" },
         },
         runtime: {
           sessionId: null,
@@ -1058,6 +1512,7 @@ describe("claude execute", () => {
           taskKey: null,
         },
         config: {
+          engine: "cli",
           command: commandPath,
           cwd: workspace,
           promptTemplate: "Follow the paperclip heartbeat.",
@@ -1089,7 +1544,7 @@ describe("claude execute", () => {
       resultEvent: {
         type: "result",
         subtype: "error_max_turns",
-        session_id: "claude-session-max-turns",
+        session_id: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
         is_error: true,
         result: "Maximum turns reached.",
       },
@@ -1106,7 +1561,7 @@ describe("claude execute", () => {
           companyId: "company-1",
           name: "Claude Coder",
           adapterType: "claude_local",
-          adapterConfig: {},
+          adapterConfig: { engine: "cli" },
         },
         runtime: {
           sessionId: null,
@@ -1115,6 +1570,7 @@ describe("claude execute", () => {
           taskKey: null,
         },
         config: {
+          engine: "cli",
           command: commandPath,
           cwd: workspace,
           promptTemplate: "Follow the paperclip heartbeat.",
@@ -1129,6 +1585,141 @@ describe("claude execute", () => {
     } finally {
       if (previousHome === undefined) delete process.env.HOME;
       else process.env.HOME = previousHome;
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("auto-rotates session on previous_message_id 400 (synthetic-msg poisoning) and succeeds on retry", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-claude-exec-poisoned-msgid-"));
+    const { workspace, commandPath, capturePath, statePath, restore } = await setupExecuteEnv(root, {
+      commandWriter: writePoisonedMessageIdClaudeCommand,
+    });
+    const logs: string[] = [];
+    try {
+      const result = await execute({
+        runId: "run-poisoned-msgid",
+        agent: { id: "agent-1", companyId: "co-1", name: "Test", adapterType: "claude_local", adapterConfig: { engine: "cli" } },
+        runtime: { sessionId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", sessionParams: null, sessionDisplayId: null, taskKey: null },
+        config: {
+          engine: "cli",
+          command: commandPath,
+          cwd: workspace,
+          env: {
+            PAPERCLIP_TEST_CAPTURE_PATH: capturePath,
+            PAPERCLIP_TEST_STATE_PATH: statePath,
+          },
+          promptTemplate: "Do work.",
+        },
+        context: {},
+        authToken: "tok",
+        onLog: async (_stream, chunk) => { logs.push(chunk); },
+      });
+
+      const captured: Array<{ argv: string[] }> = JSON.parse(await fs.readFile(capturePath, "utf-8"));
+      // First attempt resumes, second attempt starts fresh
+      expect(captured).toHaveLength(2);
+      expect(captured[0]?.argv).toContain("--resume");
+      expect(captured[1]?.argv).not.toContain("--resume");
+      // Result comes from the fresh retry
+      expect(result.sessionId).toBe("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb");
+      expect(result.errorCode).toBeNull();
+      // Adapter logged the fallback reason
+      expect(logs.some((l) => l.includes("poisoned message-id"))).toBe(true);
+    } finally {
+      restore();
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  /**
+   * Regression for RED-978: the adapter must not persist a sessionId from a
+   * run that ended with a poisoned previous_message_id error. Otherwise the
+   * next continuation auto-resumes a known-bad transcript and Anthropic
+   * /v1/messages returns 400 again, permanently stranding the issue.
+   */
+  it("drops sessionId and forces clearSession when a fresh run reports a poisoned previous_message_id", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-claude-exec-poisoned-fresh-"));
+    const { workspace, commandPath, capturePath, restore } = await setupExecuteEnv(root, {
+      commandWriter: writeAlwaysPoisonedMessageIdClaudeCommand,
+    });
+    try {
+      const result = await execute({
+        runId: "run-poisoned-fresh",
+        agent: { id: "agent-1", companyId: "co-1", name: "Test", adapterType: "claude_local", adapterConfig: { engine: "cli" } },
+        runtime: { sessionId: null, sessionParams: null, sessionDisplayId: null, taskKey: null },
+        config: {
+          engine: "cli",
+          command: commandPath,
+          cwd: workspace,
+          env: { PAPERCLIP_TEST_CAPTURE_PATH: capturePath },
+          promptTemplate: "Do work.",
+        },
+        context: {},
+        authToken: "tok",
+        onLog: async () => {},
+      });
+
+      // The fake CLI emits a session_id in its poisoned result; the adapter
+      // must not propagate it. The server uses clearSession=true to wipe
+      // any previously-persisted session state for this issue/task.
+      expect(result.sessionId).toBeNull();
+      expect(result.sessionParams).toBeNull();
+      expect(result.sessionDisplayId).toBeNull();
+      expect(result.clearSession).toBe(true);
+      expect(result.errorCode).toBe("claude_poisoned_previous_message_id");
+      expect(result.errorMessage ?? "").toContain("previous_message_id");
+    } finally {
+      restore();
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  /**
+   * Regression for RED-978: if the auto-retry after a poisoned resume *also*
+   * fails with a poisoned previous_message_id, the adapter must still emit
+   * clearSession=true so the next heartbeat starts from a clean transcript.
+   * Before this fix, the retry result's session_id ("fffff111-0000-4000-8000-000000000003")
+   * was persisted and every subsequent continuation hit the same 400 again.
+   */
+  it("forces clearSession when the recovery retry also reports a poisoned previous_message_id", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-claude-exec-poisoned-retry-"));
+    const { workspace, commandPath, capturePath, restore } = await setupExecuteEnv(root, {
+      commandWriter: writeAlwaysPoisonedMessageIdClaudeCommand,
+    });
+    try {
+      const result = await execute({
+        runId: "run-poisoned-retry",
+        agent: { id: "agent-1", companyId: "co-1", name: "Test", adapterType: "claude_local", adapterConfig: { engine: "cli" } },
+        runtime: {
+          sessionId: "aaaaaaaa-0000-4000-8000-000000000004",
+          sessionParams: null,
+          sessionDisplayId: null,
+          taskKey: null,
+        },
+        config: {
+          engine: "cli",
+          command: commandPath,
+          cwd: workspace,
+          env: { PAPERCLIP_TEST_CAPTURE_PATH: capturePath },
+          promptTemplate: "Do work.",
+        },
+        context: {},
+        authToken: "tok",
+        onLog: async () => {},
+      });
+
+      const captured: Array<{ argv: string[] }> = JSON.parse(await fs.readFile(capturePath, "utf-8"));
+      // Resume attempt + fresh recovery attempt, both poisoned.
+      expect(captured).toHaveLength(2);
+      expect(captured[0]?.argv).toContain("--resume");
+      expect(captured[1]?.argv).not.toContain("--resume");
+      // Crucially: do NOT persist the retry's reported sessionId.
+      expect(result.sessionId).toBeNull();
+      expect(result.sessionParams).toBeNull();
+      expect(result.clearSession).toBe(true);
+      expect(result.errorCode).toBe("claude_poisoned_previous_message_id");
+    } finally {
+      restore();
       await fs.rm(root, { recursive: true, force: true });
     }
   });

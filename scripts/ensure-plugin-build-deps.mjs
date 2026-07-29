@@ -46,36 +46,37 @@ if (!fs.existsSync(tscCliPath)) {
   throw new Error(`TypeScript CLI not found at ${tscCliPath}`);
 }
 
-function getNewestInputMtimeMs(inputPath) {
-  if (!fs.existsSync(inputPath)) {
-    return 0;
+function newestInputMtimeMs(inputPath) {
+  if (!fs.existsSync(inputPath)) return 0;
+  const inputStats = fs.statSync(inputPath);
+  if (!inputStats.isDirectory()) return inputStats.mtimeMs;
+
+  let newest = 0;
+
+  function visit(dir) {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const entryPath = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        visit(entryPath);
+        continue;
+      }
+      newest = Math.max(newest, fs.statSync(entryPath).mtimeMs);
+    }
   }
 
-  const stats = fs.statSync(inputPath);
-  if (!stats.isDirectory()) {
-    return stats.mtimeMs;
-  }
-
-  let newest = stats.mtimeMs;
-  for (const entry of fs.readdirSync(inputPath, { withFileTypes: true })) {
-    const entryPath = path.join(inputPath, entry.name);
-    newest = Math.max(newest, getNewestInputMtimeMs(entryPath));
-  }
-  return newest;
+  visit(inputPath);
+  return Math.max(newest, inputStats.mtimeMs);
 }
 
-function targetIsFresh(target) {
-  if (!target.outputs.every((output) => fs.existsSync(output))) {
-    return false;
-  }
-
-  const newestInput = Math.max(...target.inputs.map((input) => getNewestInputMtimeMs(input)));
+function needsBuild(target) {
+  if (!target.outputs.every((output) => fs.existsSync(output))) return true;
+  const newestInput = Math.max(...target.inputs.map((input) => newestInputMtimeMs(input)));
   const oldestOutput = Math.min(...target.outputs.map((output) => fs.statSync(output).mtimeMs));
-  return oldestOutput >= newestInput;
+  return newestInput > oldestOutput;
 }
 
-function allOutputsAreFresh() {
-  return buildTargets.every((target) => targetIsFresh(target));
+function allOutputsCurrent() {
+  return buildTargets.every((target) => !needsBuild(target));
 }
 
 function sleep(ms) {
@@ -88,7 +89,7 @@ function waitForLockRelease() {
     if (!fs.existsSync(lockDir)) {
       return;
     }
-    if (allOutputsAreFresh()) {
+    if (allOutputsCurrent()) {
       return;
     }
     sleep(lockPollMs);
@@ -97,7 +98,7 @@ function waitForLockRelease() {
   throw new Error(`Timed out waiting for plugin build dependency lock at ${lockDir}`);
 }
 
-if (allOutputsAreFresh()) {
+if (allOutputsCurrent()) {
   process.exit(0);
 }
 
@@ -112,7 +113,7 @@ try {
   } catch (error) {
     if (error && typeof error === "object" && "code" in error && error.code === "EEXIST") {
       waitForLockRelease();
-      if (!allOutputsAreFresh()) {
+      if (!allOutputsCurrent()) {
         throw new Error("Plugin build dependency lock released before all outputs were created");
       }
       process.exit(0);
@@ -121,7 +122,7 @@ try {
   }
 
   for (const target of buildTargets) {
-    if (targetIsFresh(target)) {
+    if (!needsBuild(target)) {
       continue;
     }
 
