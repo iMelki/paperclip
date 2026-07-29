@@ -12,14 +12,12 @@ import {
 } from "./command-managed-runtime.js";
 import type { SandboxSyncOperation } from "./sandbox-managed-runtime.js";
 import type { RunProcessResult } from "./server-utils.js";
-import { shellQuotePath, toShellPath } from "./shell-path.js";
-import { resolveTestShellCommand } from "./test-shell.js";
 
 const execFile = promisify(execFileCallback);
 
 interface SpawnRunnerHandle {
   runner: CommandManagedRuntimeRunner;
-  calls: Array<{ command: string; args?: string[]; cwd?: string; stdin?: string; noProfile?: boolean }>;
+  calls: Array<{ command: string; args?: string[]; cwd?: string; stdin?: string }>;
 }
 
 // A runner that actually executes the shell scripts (piping stdin through a real
@@ -29,7 +27,7 @@ function makeSpawnRunner(options: {
   supportsSingleStreamStdinProgress?: boolean;
   maxStdoutBytes?: number;
 } = {}): SpawnRunnerHandle {
-  const calls: Array<{ command: string; args?: string[]; cwd?: string; stdin?: string; noProfile?: boolean }> = [];
+  const calls: Array<{ command: string; args?: string[]; cwd?: string; stdin?: string }> = [];
   const runner: CommandManagedRuntimeRunner = {
     supportsSingleStreamStdinProgress: options.supportsSingleStreamStdinProgress,
     execute: async (input) =>
@@ -39,10 +37,10 @@ function makeSpawnRunner(options: {
           args: input.args,
           cwd: input.cwd,
           stdin: input.stdin,
-          noProfile: input.noProfile,
         });
         const startedAt = new Date().toISOString();
-        const command = resolveTestShellCommand(input.command);
+        const command =
+          input.command === "sh" ? "/bin/sh" : input.command === "bash" ? "/bin/bash" : input.command;
         const child = spawn(command, input.args ?? [], {
           cwd: input.cwd,
           env: { ...process.env, ...input.env },
@@ -102,7 +100,7 @@ function toArrayBuffer(buffer: Buffer): ArrayBuffer {
 }
 
 function shellQuoteForTest(value: string): string {
-  return shellQuotePath(value);
+  return `'${value.replace(/'/g, `'"'"'`)}'`;
 }
 
 async function withBase64StringByteLimit<T>(limitBytes: number, fn: () => Promise<T>): Promise<T> {
@@ -154,7 +152,6 @@ describe("command managed runtime", () => {
       env?: Record<string, string>;
       stdin?: string;
       timeoutMs?: number;
-      noProfile?: boolean;
     }> = [];
     const runner = {
       execute: async (input: {
@@ -164,7 +161,6 @@ describe("command managed runtime", () => {
         env?: Record<string, string>;
         stdin?: string;
         timeoutMs?: number;
-        noProfile?: boolean;
       }): Promise<RunProcessResult> => {
         calls.push({ ...input });
         const startedAt = new Date().toISOString();
@@ -172,7 +168,8 @@ describe("command managed runtime", () => {
           ...process.env,
           ...input.env,
         };
-        const command = resolveTestShellCommand(input.command);
+        const command =
+          input.command === "sh" ? "/bin/sh" : input.command === "bash" ? "/bin/bash" : input.command;
         const args = [...(input.args ?? [])];
         if (
           input.stdin != null &&
@@ -236,7 +233,6 @@ describe("command managed runtime", () => {
     // The single-stream upload pipes the tarball through exactly one stdin-backed
     // process (the speed fix); nothing else streams stdin.
     expect(calls.filter((call) => call.stdin != null).length).toBe(1);
-    expect(calls.some((call) => call.noProfile === true)).toBe(true);
 
     await mkdir(path.join(remoteWorkspaceDir, ".paperclip-runtime"), { recursive: true });
     await writeFile(path.join(remoteWorkspaceDir, "README.md"), "remote workspace\n", "utf8");
@@ -251,7 +247,6 @@ describe("command managed runtime", () => {
     // Restore streams the download through `base64`/onLog (no stdin), so the only
     // stdin-backed call remains the single upload from prepare.
     expect(calls.filter((call) => call.stdin != null).length).toBe(1);
-    expect(calls.some((call) => call.noProfile === true)).toBe(true);
   });
 
   it("stages runtime assets without replacing or restoring an in-place workspace", async () => {
@@ -330,10 +325,8 @@ describe("command managed runtime", () => {
       detectCommand: "sh",
     });
 
-    // The detection probe must be the first shell invocation and stay on the
-    // default profile-sourcing path (noProfile !== true) so a CLI provided by
-    // the login profile is discoverable before we decide whether to install.
-    expect(calls[0]?.noProfile).not.toBe(true);
+    // The detection probe must be the first shell invocation, so a CLI on the
+    // sandbox default PATH is discoverable before we decide whether to install.
     expect(calls[0]?.args?.join(" ")).toContain("command -v 'sh'");
     // Detection succeeds here, so the install command must be skipped entirely;
     // the remaining calls are workspace staging, never the install command.
@@ -418,7 +411,7 @@ describe("command managed runtime", () => {
     // Characterization guardrail: the legacy single-file transport must keep its
     // stage-then-atomic-rename shape (temp .paperclip-upload + `mv -f`).
     const script = (calls[0].args ?? []).join(" ");
-    expect(script).toContain(`${toShellPath(remotePath)}.paperclip-upload`);
+    expect(script).toContain(`${remotePath}.paperclip-upload`);
     expect(script).toContain(`trap cleanup EXIT`);
     expect(script).toContain(`mv -f`);
     expect(script.indexOf(".paperclip-upload")).toBeLessThan(script.indexOf("mv -f"));
@@ -474,7 +467,7 @@ describe("command managed runtime", () => {
     await client.writeFile(remotePath, toArrayBuffer(payload));
 
     const scripts = calls.map((call) => (call.args ?? []).join(" "));
-    expect(scripts.some((script) => script.includes(`${toShellPath(remotePath)}.paperclip-upload`))).toBe(true);
+    expect(scripts.some((script) => script.includes(`${remotePath}.paperclip-upload`))).toBe(true);
     expect(scripts.some((script) => script.includes(`mv -f`))).toBe(true);
     expect((await readFile(remotePath)).equals(payload)).toBe(true);
   });
@@ -581,22 +574,13 @@ describe("command managed runtime", () => {
     // single stdin-backed call; the untar and the two commands follow it in order.
     const scripts = calls.map((call) => (call.args ?? []).join("\n"));
     const uploadIdx = scripts.findIndex((s) => s.includes(".paperclip-syncin.tar") && s.includes("base64 -d"));
-    const untarIdx = scripts.findIndex((s) => s.includes("tar -xf") && s.includes(toShellPath(targetDir)));
+    const untarIdx = scripts.findIndex((s) => s.includes("tar -xf") && s.includes(targetDir));
     const cmd1Idx = scripts.findIndex((s) => s.includes("1-first"));
     const cmd2Idx = scripts.findIndex((s) => s.includes("2-second"));
     expect(uploadIdx).toBeGreaterThanOrEqual(0);
     expect(untarIdx).toBeGreaterThan(uploadIdx);
     expect(cmd1Idx).toBeGreaterThan(untarIdx);
     expect(cmd2Idx).toBeGreaterThan(cmd1Idx);
-
-    // Fast path: the fixed internal transport helpers (tar upload + untar) ride
-    // the no-profile shell — they are trusted, fixed commands that never need a
-    // login-shell profile. The opaque post-upload commands stay profile-backed
-    // (noProfile !== true) so any env a caller-supplied command relies on is present.
-    expect(calls[uploadIdx]?.noProfile).toBe(true);
-    expect(calls[untarIdx]?.noProfile).toBe(true);
-    expect(calls[cmd1Idx]?.noProfile).not.toBe(true);
-    expect(calls[cmd2Idx]?.noProfile).not.toBe(true);
   });
 
   it("fallback syncIn runs a post-upload command under its own timeout, not the sync-client default", async () => {
@@ -652,22 +636,17 @@ describe("command managed runtime", () => {
     expect(await readFile(targetFile, "utf8")).toBe("payload\n");
     const scripts = calls.map((call) => (call.args ?? []).join(" "));
     expect(scripts).toHaveLength(5);
-    expect(scripts[0]).toContain(toShellPath(targetFile) + ".paperclip-syncin.");
+    expect(scripts[0]).toContain(targetFile + ".paperclip-syncin.");
     expect(scripts[0]).toContain(".paperclip-upload.");
     expect(scripts[1]).toContain("rm -rf");
     expect(scripts[1]).toContain(".paperclip-upload.");
     expect(scripts[2]).toContain("chmod 640");
-    expect(scripts[2]).toContain(toShellPath(targetFile) + ".paperclip-syncin.");
+    expect(scripts[2]).toContain(targetFile + ".paperclip-syncin.");
     expect(scripts[3]).toContain("mv -f");
-    expect(scripts[3]).toContain(toShellPath(targetFile) + ".paperclip-syncin.");
-    expect(scripts[3]).toContain(toShellPath(targetFile));
+    expect(scripts[3]).toContain(targetFile + ".paperclip-syncin.");
+    expect(scripts[3]).toContain(targetFile);
     expect(scripts[4]).toContain("rm -rf");
-    expect(scripts[4]).toContain(toShellPath(targetFile) + ".paperclip-syncin.");
-
-    // Fast path: the staged-write helpers (chmod + rename) are fixed internal
-    // commands, so they ride the no-profile shell alongside the upload/staging.
-    expect(calls[2]?.noProfile).toBe(true); // chmod
-    expect(calls[3]?.noProfile).toBe(true); // mv (rename into place)
+    expect(scripts[4]).toContain(targetFile + ".paperclip-syncin.");
   });
 
   it("fallback syncIn cleans up a staged file when chmod fails before rename", async () => {

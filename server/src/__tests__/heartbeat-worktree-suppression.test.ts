@@ -23,6 +23,7 @@ import {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
+import { drainHeartbeatRunsToQuiescence } from "./helpers/drain-heartbeat-runs.js";
 import { heartbeatService, resolveHeartbeatSchedulingSuppression } from "../services/heartbeat.ts";
 import { instanceSettingsService } from "../services/instance-settings.ts";
 
@@ -67,6 +68,14 @@ describeEmbeddedPostgres("heartbeat worktree suppression", () => {
   }, EMBEDDED_POSTGRES_TEST_SETUP_TIMEOUT_MS);
 
   afterEach(async () => {
+    // Await every in-flight background heartbeat run to quiescence before the
+    // deletes below. A live wakeup claims a run and dispatches its execution
+    // fire-and-forget, so a run or wakeup can still write heartbeat_runs and
+    // issues rows when teardown starts and would race the deletes. The heartbeat
+    // service tracks in-flight run and wakeup promises in module state shared
+    // across service instances, so a fresh instance here drains the runs the
+    // per-test instances dispatched.
+    await drainHeartbeatRunsToQuiescence(db, heartbeatService(db));
     await db.delete(issueComments);
     await db.delete(issueDocuments);
     await db.delete(documentRevisions);

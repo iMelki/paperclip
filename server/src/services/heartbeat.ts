@@ -586,6 +586,16 @@ const activeRunExecutions = new Set<string>();
 // that must guarantee no run write is still in flight (graceful shutdown, and
 // tests tearing down a shared database) can await drainActiveRunExecutions().
 const activeRunExecutionPromises = new Set<Promise<void>>();
+// Routes dispatch a wakeup fire-and-forget (void heartbeat.wakeup(...)). The
+// wakeup promise stays pending through its asynchronous prologue, and it
+// resolves only after it inserts the queued run and registers the run
+// execution in activeRunExecutionPromises. Before that point neither
+// activeRunExecutionPromises nor the run table shows the pending run, so a
+// caller cannot observe the wake. Track each wakeup promise here — shared
+// across service instances like the two sets above — so drainActiveRunExecutions
+// can await a wake that is still before run registration. A caller that tears
+// down a shared database (a test afterEach) then cannot race a late wake.
+const activeWakeupPromises = new Set<Promise<unknown>>();
 const INLINE_BASE64_IMAGE_DATA_RE = /("type":"image","source":\{"type":"base64","data":")([A-Za-z0-9+/=]{1024,})(")/g;
 
 type RuntimeConfigSecretResolver = Pick<
@@ -1399,6 +1409,142 @@ async function ensureManagedProjectWorkspace(input: {
   }
 }
 
+/**
+ * Resolve one project workspace row to a usable cwd. The anchor path and each additional
+ * referenced project share this step: use the configured cwd when present, otherwise clone or
+ * create the managed checkout directory for the project. It throws only when the managed
+ * checkout cannot be prepared (for example, a clone failure).
+ */
+async function resolveConfiguredOrManagedProjectCwd(input: {
+  companyId: string;
+  projectId: string;
+  cwd: string | null;
+  repoUrl: string | null;
+}): Promise<{ cwd: string; warning: string | null }> {
+  const configuredCwd = readNonEmptyString(input.cwd);
+  if (configuredCwd && configuredCwd !== REPO_ONLY_CWD_SENTINEL) {
+    return { cwd: configuredCwd, warning: null };
+  }
+  return ensureManagedProjectWorkspace({
+    companyId: input.companyId,
+    projectId: input.projectId,
+    repoUrl: readNonEmptyString(input.repoUrl),
+  });
+}
+
+/**
+ * Side-effecting dependencies for {@link resolveAdditionalProjectWorkspace}. The caller injects
+ * the real database, filesystem, and managed-checkout helpers. A test injects fakes to exercise
+ * the resolution logic without a database or filesystem.
+ */
+export interface ResolveAdditionalProjectWorkspaceDeps {
+  loadProjectWorkspaceRows: (
+    companyId: string,
+    projectId: string,
+  ) => Promise<Array<typeof projectWorkspaces.$inferSelect>>;
+  resolveConfiguredOrManagedProjectCwd: typeof resolveConfiguredOrManagedProjectCwd;
+  ensureManagedProjectWorkspace: typeof ensureManagedProjectWorkspace;
+  directoryHasContents: (cwd: string) => Promise<boolean>;
+}
+
+/** Build the real dependencies for {@link resolveAdditionalProjectWorkspace}. */
+function defaultAdditionalProjectWorkspaceDeps(db: Db): ResolveAdditionalProjectWorkspaceDeps {
+  return {
+    loadProjectWorkspaceRows: (companyId, projectId) =>
+      db
+        .select()
+        .from(projectWorkspaces)
+        .where(and(eq(projectWorkspaces.companyId, companyId), eq(projectWorkspaces.projectId, projectId)))
+        .orderBy(asc(projectWorkspaces.createdAt), asc(projectWorkspaces.id)),
+    resolveConfiguredOrManagedProjectCwd,
+    ensureManagedProjectWorkspace,
+    // A realized workspace must hold real content. An empty directory gives the agent an empty
+    // referenced workspace, so treat an empty directory the same as a missing one.
+    directoryHasContents: async (cwd) => {
+      const stats = await fs.stat(cwd).catch(() => null);
+      if (!stats || !stats.isDirectory()) {
+        return false;
+      }
+      const entries = await fs.readdir(cwd).catch(() => [] as string[]);
+      return entries.length > 0;
+    },
+  };
+}
+
+/**
+ * Resolve one authorized referenced project to its own workspace cwd. Each additional project
+ * lands in its own managed checkout directory, never nested inside the anchor's worktree (the
+ * directory isolation invariant lives in {@link resolveManagedProjectWorkspaceDir}).
+ *
+ * A referenced project must resolve to a directory with real content. The function uses a
+ * configured checkout directory that exists, or clones a managed checkout from a workspace row
+ * that supplies a repository URL. When no row offers either, the function throws instead of
+ * creating an empty managed directory. An empty directory gives the agent an empty referenced
+ * workspace and hides the real cause. The caller catches the error and drops only that project.
+ * The function also throws when the managed checkout cannot be prepared (for example, a clone
+ * failure), so the caller can drop only that project.
+ */
+export async function resolveAdditionalProjectWorkspace(
+  input: {
+    companyId: string;
+    project: RunReferencedProject;
+  },
+  deps: ResolveAdditionalProjectWorkspaceDeps,
+): Promise<ResolvedAdditionalWorkspace> {
+  const { companyId } = input;
+  const projectId = input.project.projectId;
+  const workspaceRows = await deps.loadProjectWorkspaceRows(companyId, projectId);
+  for (const workspace of workspaceRows) {
+    // A row realizes real content only through a configured checkout directory or a repository URL
+    // to clone. A row with neither can produce only an empty managed directory, so skip it here.
+    const configuredCwd = readNonEmptyString(workspace.cwd);
+    const hasConfiguredCwd = Boolean(configuredCwd) && configuredCwd !== REPO_ONLY_CWD_SENTINEL;
+    if (!hasConfiguredCwd && !readNonEmptyString(workspace.repoUrl)) {
+      continue;
+    }
+    const { cwd } = await deps.resolveConfiguredOrManagedProjectCwd({
+      companyId,
+      projectId,
+      cwd: workspace.cwd,
+      repoUrl: workspace.repoUrl,
+    });
+    // A directory that exists but holds no content is not a realized workspace. Accept the row only
+    // when the resolved directory has real content, so an empty directory never masks a missing one.
+    if (await deps.directoryHasContents(cwd)) {
+      return {
+        cwd,
+        projectId,
+        workspaceId: workspace.id,
+        repoUrl: workspace.repoUrl,
+        repoRef: workspace.repoRef,
+      };
+    }
+  }
+  // No configured checkout resolved to a directory with content. Clone a managed checkout only from a
+  // real source: the first workspace row that supplies a repository URL. Without a real source, do
+  // not fabricate an empty managed directory and report success. Throw instead, so the caller drops
+  // only this referenced project and adds a clear warning.
+  const fallbackRow = workspaceRows.find((row) => readNonEmptyString(row.repoUrl)) ?? null;
+  const fallbackRepoUrl = fallbackRow ? readNonEmptyString(fallbackRow.repoUrl) : null;
+  if (!fallbackRow || !fallbackRepoUrl) {
+    throw new Error(
+      `Referenced project ${projectId} has no workspace checkout or repository URL to realize.`,
+    );
+  }
+  const managed = await deps.ensureManagedProjectWorkspace({
+    companyId,
+    projectId,
+    repoUrl: fallbackRepoUrl,
+  });
+  return {
+    cwd: managed.cwd,
+    projectId,
+    workspaceId: fallbackRow.id,
+    repoUrl: fallbackRow.repoUrl,
+    repoRef: fallbackRow.repoRef,
+  };
+}
+
 type WorkspaceValidationFailureLike = WorkspaceValidationFailure | {
   code: typeof WORKSPACE_VALIDATION_FAILURE_CODE;
   resultJson: Record<string, unknown>;
@@ -2099,6 +2245,19 @@ export interface ModelProfileApplication {
   adapterConfig: Record<string, unknown> | null;
 }
 
+/**
+ * A single read-only referenced (mentioned) project workspace resolved for a run.
+ * The run materializes one entry per authorized additional project, each in its own
+ * managed checkout directory. See {@link resolveAdditionalRunWorkspaces}.
+ */
+export type ResolvedAdditionalWorkspace = {
+  cwd: string;
+  projectId: string;
+  workspaceId: string | null;
+  repoUrl: string | null;
+  repoRef: string | null;
+};
+
 export type ResolvedWorkspaceForRun = {
   cwd: string;
   source: "project_primary" | "task_session" | "agent_home";
@@ -2113,7 +2272,44 @@ export type ResolvedWorkspaceForRun = {
     repoRef: string | null;
   }>;
   warnings: string[];
+  /**
+   * Read-only referenced (mentioned) project workspaces for this run, one per authorized
+   * additional project. The array is empty unless the multi-project workspace-sync flag is on
+   * ({@link isMultiProjectWorkspaceSyncEnabled}); with the flag off the run resolves the anchor
+   * workspace only, exactly as before.
+   */
+  additionalWorkspaces: ResolvedAdditionalWorkspace[];
 };
+
+/** The anchor workspace shape, before the additional referenced workspaces are attached. */
+type ResolvedAnchorWorkspaceForRun = Omit<ResolvedWorkspaceForRun, "additionalWorkspaces">;
+
+/**
+ * Build the plural workspace list that a run exposes to the agent through the
+ * `PAPERCLIP_WORKSPACES_JSON` environment variable. The list joins the anchor
+ * project's alternative workspace rows with the read-only referenced (mentioned)
+ * project workspaces, so every execution target receives the referenced project
+ * paths through the same channel the run already uses for the anchor project.
+ *
+ * Each referenced entry carries its `projectId` so the agent can tell which
+ * mentioned project a path belongs to. The referenced set is empty unless the
+ * multi-project workspace-sync flag is on, so the exposed list is byte-for-byte
+ * unchanged in the production default.
+ */
+export function buildRunWorkspaceHints(
+  resolved: Pick<ResolvedWorkspaceForRun, "workspaceHints" | "additionalWorkspaces">,
+): Array<Record<string, unknown>> {
+  return [
+    ...resolved.workspaceHints,
+    ...resolved.additionalWorkspaces.map((additional) => ({
+      workspaceId: additional.workspaceId,
+      cwd: additional.cwd,
+      repoUrl: additional.repoUrl,
+      repoRef: additional.repoRef,
+      projectId: additional.projectId,
+    })),
+  ];
+}
 
 type ProjectWorkspaceCandidate = {
   id: string;
@@ -2141,6 +2337,17 @@ export function isMultiProjectWorkspaceSyncEnabled(
   env: Record<string, string | undefined> = process.env,
 ): boolean {
   return isTruthyRuntimeEnvValue(env[MULTI_PROJECT_WORKSPACE_SYNC_ENV]);
+}
+
+/**
+ * True when an environment driver runs the workspace on a non-local target. The `ssh`, `sandbox`,
+ * and `plugin` drivers each realize the workspace off the host, so a host-local directory path is
+ * not present on the target. This mirrors the remote-transport classification in
+ * {@link buildWorkspaceRealizationRecord}. The `local` driver (and an unknown/absent driver) is
+ * treated as local.
+ */
+export function isRemoteExecutionEnvironmentDriver(driver: string | null | undefined): boolean {
+  return driver === "ssh" || driver === "sandbox" || driver === "plugin";
 }
 
 /**
@@ -2361,6 +2568,95 @@ export async function resolveRunReferencedProjects(
   }
 
   return { anchor, additional, warnings };
+}
+
+export interface ResolveAdditionalRunWorkspacesOptions {
+  /** Gate that mirrors {@link isMultiProjectWorkspaceSyncEnabled}. When false, the result is empty. */
+  enabled: boolean;
+  companyId: string;
+  /** The run actor; every additional project is authorized against this actor. */
+  actor: AuthorizationActor;
+  issues: Pick<ReturnType<typeof issueService>, "findMentionedProjectIds">;
+  projects: Pick<ReturnType<typeof projectService>, "listByIds">;
+  access: Pick<ReturnType<typeof authorizationService>, "decide">;
+  /** Resolve one authorized referenced project to its own workspace cwd (injectable for tests). */
+  resolveProjectWorkspace: (project: RunReferencedProject) => Promise<ResolvedAdditionalWorkspace>;
+  maxAdditionalProjects?: number;
+  maxCandidateEvaluations?: number;
+  /**
+   * True when the run executes on a non-local target (ssh, sandbox, or plugin). A referenced
+   * project realizes as a local directory only, and a remote target has no path yet to receive
+   * that tree, so a resolved cwd would not exist on the target. When true, the function skips
+   * referenced-project authorization and workspace work and returns no additional workspaces.
+   */
+  executionTargetIsRemote?: boolean;
+}
+
+/**
+ * Resolve the read-only referenced (mentioned) project workspaces for a run.
+ *
+ * The function is inert until the multi-project workspace-sync flag is on: when `enabled` is
+ * false (the production default) or there is no issue, it returns an empty result and performs
+ * no authorization or workspace work. When enabled, it authorizes the referenced set through
+ * {@link resolveRunReferencedProjects} and resolves each admitted project to its own cwd. Each
+ * project resolves in isolation: a per-project failure drops only that project and appends a
+ * warning, so one bad clone never aborts the run.
+ */
+export async function resolveAdditionalRunWorkspaces(
+  issueId: string | null,
+  anchorProjectId: string | null,
+  opts: ResolveAdditionalRunWorkspacesOptions,
+): Promise<{ additionalWorkspaces: ResolvedAdditionalWorkspace[]; warnings: string[] }> {
+  if (!opts.enabled || !issueId) {
+    return { additionalWorkspaces: [], warnings: [] };
+  }
+
+  // A referenced project realizes as a local directory only. A remote execution target (ssh,
+  // sandbox, or plugin) has no path yet to receive the referenced tree, so a resolved cwd would
+  // not exist on the target and the anchor-only remote sync never carries it across. Skip the
+  // referenced-project authorization and clone work on a remote target, so the run neither does
+  // work it must discard nor exposes an inaccessible referenced path to the agent. Warn only when
+  // the issue actually mentions a project, so a remote run without any referenced mention stays
+  // silent.
+  if (opts.executionTargetIsRemote) {
+    const mentionedIds = await opts.issues.findMentionedProjectIds(issueId, {
+      includeCommentBodies: true,
+    });
+    const hasReferencedMention = mentionedIds.some((projectId) => projectId !== anchorProjectId);
+    return {
+      additionalWorkspaces: [],
+      warnings: hasReferencedMention
+        ? [
+            "Referenced-project workspaces are available only on a local execution target. This run uses a remote execution target, so no referenced-project workspace was attached.",
+          ]
+        : [],
+    };
+  }
+
+  const referenced = await resolveRunReferencedProjects(issueId, anchorProjectId, {
+    companyId: opts.companyId,
+    actor: opts.actor,
+    issues: opts.issues,
+    projects: opts.projects,
+    access: opts.access,
+    maxAdditionalProjects: opts.maxAdditionalProjects,
+    maxCandidateEvaluations: opts.maxCandidateEvaluations,
+  });
+
+  const additionalWorkspaces: ResolvedAdditionalWorkspace[] = [];
+  const warnings = [...referenced.warnings];
+  for (const project of referenced.additional) {
+    try {
+      additionalWorkspaces.push(await opts.resolveProjectWorkspace(project));
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      warnings.push(
+        `Referenced project ${project.projectId} was skipped because its workspace could not be prepared: ${reason}`,
+      );
+    }
+  }
+
+  return { additionalWorkspaces, warnings };
 }
 
 function readNonEmptyString(value: unknown): string | null {
@@ -7587,12 +7883,12 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     };
   }
 
-  async function resolveWorkspaceForRun(
+  async function resolveAnchorWorkspaceForRun(
     agent: typeof agents.$inferSelect,
     context: Record<string, unknown>,
     previousSessionParams: Record<string, unknown> | null,
     opts?: { useProjectWorkspace?: boolean | null },
-  ): Promise<ResolvedWorkspaceForRun> {
+  ): Promise<ResolvedAnchorWorkspaceForRun> {
     const issueId = readNonEmptyString(context.issueId) ?? readNonEmptyString(context.taskId);
     const contextProjectId = readNonEmptyString(context.projectId);
     const contextProjectWorkspaceId = readNonEmptyString(context.projectWorkspaceId);
@@ -7649,23 +7945,22 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           `Selected project workspace "${preferredProjectWorkspaceId}" is not available on this project.`;
       }
       for (const workspace of projectWorkspaceRows) {
-        let projectCwd = readNonEmptyString(workspace.cwd);
+        let projectCwd: string;
         let managedWorkspaceWarning: string | null = null;
-        if (!projectCwd || projectCwd === REPO_ONLY_CWD_SENTINEL) {
-          try {
-            const managedWorkspace = await ensureManagedProjectWorkspace({
-              companyId: agent.companyId,
-              projectId: workspaceProjectId ?? resolvedProjectId ?? workspace.projectId,
-              repoUrl: readNonEmptyString(workspace.repoUrl),
-            });
-            projectCwd = managedWorkspace.cwd;
-            managedWorkspaceWarning = managedWorkspace.warning;
-          } catch (error) {
-            if (preferredWorkspace?.id === workspace.id) {
-              preferredWorkspaceWarning = error instanceof Error ? error.message : String(error);
-            }
-            continue;
+        try {
+          const resolvedCwd = await resolveConfiguredOrManagedProjectCwd({
+            companyId: agent.companyId,
+            projectId: workspaceProjectId ?? resolvedProjectId ?? workspace.projectId,
+            cwd: workspace.cwd,
+            repoUrl: workspace.repoUrl,
+          });
+          projectCwd = resolvedCwd.cwd;
+          managedWorkspaceWarning = resolvedCwd.warning;
+        } catch (error) {
+          if (preferredWorkspace?.id === workspace.id) {
+            preferredWorkspaceWarning = error instanceof Error ? error.message : String(error);
           }
+          continue;
         }
         hasConfiguredProjectCwd = true;
         const projectCwdExists = await fs
@@ -7792,6 +8087,54 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       repoRef: null,
       workspaceHints,
       warnings,
+    };
+  }
+
+  /**
+   * Resolve the run workspace: the anchor workspace plus, when the multi-project workspace-sync
+   * flag is on, the read-only referenced (mentioned) project workspaces. With the flag off (the
+   * production default) the anchor path is unchanged and `additionalWorkspaces` is empty.
+   */
+  async function resolveWorkspaceForRun(
+    agent: typeof agents.$inferSelect,
+    context: Record<string, unknown>,
+    previousSessionParams: Record<string, unknown> | null,
+    opts?: { useProjectWorkspace?: boolean | null; executionTargetIsRemote?: boolean },
+  ): Promise<ResolvedWorkspaceForRun> {
+    const anchor = await resolveAnchorWorkspaceForRun(agent, context, previousSessionParams, opts);
+    if (!isMultiProjectWorkspaceSyncEnabled()) {
+      return { ...anchor, additionalWorkspaces: [] };
+    }
+
+    const issueId = readNonEmptyString(context.issueId) ?? readNonEmptyString(context.taskId);
+    const { additionalWorkspaces, warnings } = await resolveAdditionalRunWorkspaces(
+      issueId,
+      anchor.projectId,
+      {
+        enabled: true,
+        executionTargetIsRemote: opts?.executionTargetIsRemote ?? false,
+        companyId: agent.companyId,
+        actor: {
+          type: "agent",
+          agentId: agent.id,
+          companyId: agent.companyId,
+          source: "agent_key",
+        },
+        issues: issueService(db),
+        projects: projectService(db),
+        access: authorizationService(db),
+        resolveProjectWorkspace: (project) =>
+          resolveAdditionalProjectWorkspace(
+            { companyId: agent.companyId, project },
+            defaultAdditionalProjectWorkspaceDeps(db),
+          ),
+      },
+    );
+
+    return {
+      ...anchor,
+      additionalWorkspaces,
+      warnings: warnings.length > 0 ? [...anchor.warnings, ...warnings] : anchor.warnings,
     };
   }
 
@@ -12189,10 +12532,35 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
   // before the parent promise settles, so we loop until the set is empty rather
   // than snapshotting once. Callers use this to guarantee no run is still
   // writing rows/events (graceful shutdown, deterministic test teardown).
+  //
+  // Await in-flight wakeup promises first. A wakeup resolves only after it
+  // registers its run execution, so a wake that is still before run registration
+  // is invisible to activeRunExecutionPromises alone. Awaiting the wakeup promise
+  // closes that window: once it settles, any run it dispatched is already in
+  // activeRunExecutionPromises, and the second await drains that run. A wakeup or
+  // a run can add more entries as it settles, so loop until both sets are empty.
   async function drainActiveRunExecutions() {
-    while (activeRunExecutionPromises.size > 0) {
+    while (activeWakeupPromises.size > 0 || activeRunExecutionPromises.size > 0) {
+      await Promise.allSettled([...activeWakeupPromises]);
       await Promise.all([...activeRunExecutionPromises]);
     }
+  }
+
+  // Public wakeup entry point. Callers dispatch it fire-and-forget, so register
+  // the promise in activeWakeupPromises before it starts its asynchronous
+  // prologue. drainActiveRunExecutions can then await a wake that is still before
+  // run registration. Internal callers reference enqueueWakeup directly and
+  // already await it, so they do not need this registration.
+  function trackWakeup(
+    agentId: string,
+    opts: WakeupOptions = {},
+  ): ReturnType<typeof enqueueWakeup> {
+    const promise = enqueueWakeup(agentId, opts);
+    activeWakeupPromises.add(promise);
+    void promise.catch(() => {}).finally(() => {
+      activeWakeupPromises.delete(promise);
+    });
+    return promise;
   }
 
   async function executeRun(runId: string) {
@@ -12864,7 +13232,15 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           agent,
           context,
           previousSessionParams,
-          { useProjectWorkspace: requestedExecutionWorkspaceMode !== "agent_default" },
+          {
+            useProjectWorkspace: requestedExecutionWorkspaceMode !== "agent_default",
+            // Referenced-project workspaces attach on a local execution target only. Gate their
+            // resolution on the selected environment driver so a remote run never resolves a
+            // referenced path it cannot reach. This never changes the anchor workspace.
+            executionTargetIsRemote: isRemoteExecutionEnvironmentDriver(
+              selectedEnvironmentForConfig?.driver,
+            ),
+          },
         ),
     });
     const hostExecutionWorkspaceConfig = stripHostWorkspaceProvisionForLowTrustSandbox({
@@ -12879,6 +13255,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       workspaceId: resolvedWorkspace.workspaceId,
       repoUrl: resolvedWorkspace.repoUrl,
       repoRef: resolvedWorkspace.repoRef,
+      additionalWorkspaces: resolvedWorkspace.additionalWorkspaces,
     } satisfies ExecutionWorkspaceInput;
     await assertGitWorktreeBaseWorkspaceReady({
       requestedExecutionWorkspaceMode,
@@ -13371,7 +13748,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         return home;
       })(),
     };
-    context.paperclipWorkspaces = resolvedWorkspace.workspaceHints;
+    context.paperclipWorkspaces = buildRunWorkspaceHints(resolvedWorkspace);
     // The wake payload is built before the execution workspace is resolved, so
     // attach the branch pin here; the shared wake-prompt renderer surfaces it as
     // a one-time "stay on this branch" hint on non-resumed sessions.
@@ -17393,7 +17770,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       triggerDetail: "manual" | "ping" | "callback" | "system" = "manual",
       actor?: { actorType?: "user" | "agent" | "system"; actorId?: string | null },
     ) =>
-      enqueueWakeup(agentId, {
+      trackWakeup(agentId, {
         source,
         triggerDetail,
         contextSnapshot,
@@ -17401,7 +17778,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         requestedByActorId: actor?.actorId ?? null,
       }),
 
-    wakeup: enqueueWakeup,
+    wakeup: trackWakeup,
     triggerIssueMonitor,
 
     reportRunActivity: clearDetachedRunWarning,

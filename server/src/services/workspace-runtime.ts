@@ -7,15 +7,7 @@ import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import type { AdapterRuntimeServiceReport } from "@paperclipai/adapter-utils";
 import type { Db } from "@paperclipai/db";
-import {
-  executionWorkspaces,
-  issueComments,
-  issues,
-  projectWorkspaces,
-  readWindowsTestProcessIdentity,
-  reapWindowsTestProcessTree,
-  workspaceRuntimeServices,
-} from "@paperclipai/db";
+import { executionWorkspaces, issueComments, issues, projectWorkspaces, workspaceRuntimeServices } from "@paperclipai/db";
 import {
   listWorkspaceServiceCommandDefinitions,
   type GitWorktreeBranchAncestryVerdict,
@@ -32,16 +24,13 @@ import {
   createLocalServiceKey,
   findLocalServiceRegistryRecordByRuntimeServiceId,
   findAdoptableLocalService,
-  isPidAlive as isLocalServicePidAlive,
   isLocalServiceProcessInWorkspace,
-  normalizeLocalServicePid,
   readLocalServiceProcessCwd,
   readLocalServicePortOwner,
   removeLocalServiceRegistryRecord,
   terminateLocalService,
   touchLocalServiceRegistryRecord,
   writeLocalServiceRegistryRecord,
-  type LocalServiceTerminationResult,
 } from "./local-service-supervisor.js";
 import type { WorkspaceOperationRecorder } from "./workspace-operations.js";
 import { executionWorkspaceService, readExecutionWorkspaceConfig } from "./execution-workspaces.js";
@@ -49,48 +38,24 @@ import { logActivity } from "./activity-log.js";
 import { readProjectWorkspaceRuntimeConfig } from "./project-workspace-runtime-config.js";
 
 export function resolveShell(): string {
-  const fallback = process.platform === "win32" ? resolveWindowsShell() : "/bin/sh";
+  const fallback = process.platform === "win32" ? "sh" : "/bin/sh";
   const shell = process.env.SHELL?.trim();
   if (!shell) return fallback;
   if (path.isAbsolute(shell) && !existsSync(shell)) return fallback;
-  if (process.platform === "win32" && !looksLikePosixShell(shell)) return fallback;
   return shell;
 }
 
-function resolveWindowsShell(): string {
-  const candidates = [
-    "C:\\Program Files\\Git\\usr\\bin\\bash.exe",
-    "C:\\Program Files\\Git\\bin\\bash.exe",
-    "C:\\Program Files (x86)\\Git\\usr\\bin\\bash.exe",
-    "C:\\Program Files (x86)\\Git\\bin\\bash.exe",
-    "sh",
-  ];
-  return candidates.find((candidate) => candidate === "sh" || existsSync(candidate)) ?? "sh";
-}
-
-function looksLikePosixShell(shell: string) {
-  const normalized = path.basename(shell).toLowerCase();
-  return normalized === "sh" || normalized === "sh.exe" || normalized === "bash" || normalized === "bash.exe" || normalized === "zsh" || normalized === "zsh.exe";
-}
-
-function getWindowsPosixShellPathDirs(shell: string) {
-  if (process.platform !== "win32" || !path.isAbsolute(shell)) return [];
-  const shellDir = path.dirname(shell);
-  const candidates = [shellDir];
-  if (path.basename(shellDir).toLowerCase() === "bin") {
-    candidates.push(path.resolve(shellDir, "..", "usr", "bin"));
-  }
-  return [...new Set(candidates)].filter((candidate) => existsSync(candidate));
-}
-
-function buildShellEnv(env: NodeJS.ProcessEnv, shell: string): NodeJS.ProcessEnv {
-  const pathDirs = getWindowsPosixShellPathDirs(shell);
-  if (pathDirs.length === 0) return env;
-
-  const currentPath = env.PATH ?? env.Path ?? process.env.PATH ?? process.env.Path ?? "";
-  const nextEnv = { ...env };
-  nextEnv.PATH = [...pathDirs, currentPath].filter(Boolean).join(path.delimiter);
-  return nextEnv;
+/**
+ * A read-only referenced (mentioned) project workspace carried alongside the anchor. Additive and
+ * backward-compatible: it defaults to an empty array. Additional workspaces never get git-worktree
+ * realization; the anchor keeps the single scalar realization path.
+ */
+export interface ExecutionWorkspaceAdditionalInput {
+  cwd: string;
+  projectId: string;
+  workspaceId: string | null;
+  repoUrl: string | null;
+  repoRef: string | null;
 }
 
 export interface ExecutionWorkspaceInput {
@@ -100,6 +65,7 @@ export interface ExecutionWorkspaceInput {
   workspaceId: string | null;
   repoUrl: string | null;
   repoRef: string | null;
+  additionalWorkspaces?: ExecutionWorkspaceAdditionalInput[];
 }
 
 export interface ExecutionWorkspaceIssueRef {
@@ -169,7 +135,6 @@ export interface RuntimeServiceRef {
 interface RuntimeServiceRecord extends RuntimeServiceRef {
   db?: Db;
   child: ChildProcess | null;
-  stopRequested?: boolean;
   leaseRunIds: Set<string>;
   idleTimer: ReturnType<typeof globalThis.setTimeout> | null;
   envFingerprint: string;
@@ -204,47 +169,9 @@ type ProcessOutputAccumulator = {
   finish(): ProcessOutputCapture;
 };
 
-export async function resetRuntimeServicesForTests(options?: { preserveProcesses?: boolean }) {
-  const records = [...runtimeServicesById.values()];
-  for (const record of records) {
+export async function resetRuntimeServicesForTests() {
+  for (const record of runtimeServicesById.values()) {
     clearIdleTimer(record);
-  }
-  if (!options?.preserveProcesses) {
-    for (const record of records) {
-      const childPid = normalizeLocalServicePid(record.child?.pid);
-      const childIsLive =
-        childPid !== null
-        && record.child?.exitCode === null
-        && record.child?.signalCode === null;
-      const windowsProcessIdentity =
-        process.platform === "win32" && childIsLive
-          ? await readWindowsTestProcessIdentity(childPid!, 5_000).catch(() => null)
-          : null;
-      if (process.platform === "win32" && childIsLive && !windowsProcessIdentity) {
-        throw new Error(
-          "Test runtime service process termination could not be verified (identity_unavailable); tracking was retained.",
-        );
-      }
-      const termination =
-        process.platform === "win32" && childIsLive
-          ? await reapWindowsTestProcessTree({
-              rootPid: childPid!,
-              ownerMarkers: [],
-              expectedRootIdentity: windowsProcessIdentity!,
-              timeoutMs: 8_000,
-            })
-          : await terminateRuntimeServiceProcess(record);
-      if (termination?.confirmedStopped !== true) {
-        const terminationReason =
-          termination && "reason" in termination
-            ? termination.reason
-            : termination?.outcome ?? "identity_unavailable";
-        throw new Error(
-          `Test runtime service process termination could not be verified (${terminationReason}); tracking was retained.`,
-        );
-      }
-      await removeLocalServiceRegistryRecord(record.serviceKey).catch(() => undefined);
-    }
   }
   runtimeServicesById.clear();
   runtimeServicesByReuseKey.clear();
@@ -2410,6 +2337,21 @@ export function formatManagedGitWorktreeBranchInspection(input: ManagedGitWorktr
   };
 }
 
+function terminateChildProcess(child: ChildProcess) {
+  if (!child.pid) return;
+  if (process.platform !== "win32") {
+    try {
+      process.kill(-child.pid, "SIGTERM");
+      return;
+    } catch {
+      // Fall through to the direct child kill.
+    }
+  }
+  if (!child.killed) {
+    child.kill("SIGTERM");
+  }
+}
+
 function buildWorkspaceCommandEnv(input: {
   base: ExecutionWorkspaceInput;
   repoRoot: string;
@@ -2446,13 +2388,6 @@ function quoteShellArg(value: string) {
   return `'${value.replace(/'/g, `'\\''`)}'`;
 }
 
-function toShellPath(value: string) {
-  const match = /^([A-Za-z]):[\\/](.*)$/.exec(value);
-  if (!match) return value;
-  const [, drive, rest] = match;
-  return `/${drive.toLowerCase()}/${rest.replace(/\\/g, "/")}`;
-}
-
 function resolveRepoManagedWorkspaceCommand(command: string, repoRoot: string) {
   const patterns = [
     /^(?<prefix>(?:bash|sh|zsh)\s+)(?<quote>["']?)(?<relative>\.\/[^"'\s]+)\k<quote>(?<suffix>(?:\s.*)?)$/s,
@@ -2467,12 +2402,9 @@ function resolveRepoManagedWorkspaceCommand(command: string, repoRoot: string) {
     const repoManagedPath = path.join(repoRoot, relativePath.slice(2));
     if (!existsSync(repoManagedPath)) continue;
 
-    let prefix = match.groups.prefix ?? "";
+    const prefix = match.groups.prefix ?? "";
     const suffix = match.groups.suffix ?? "";
-    if (process.platform === "win32" && prefix) {
-      prefix = `${quoteShellArg(toShellPath(resolveShell()))} `;
-    }
-    return `${prefix}${quoteShellArg(toShellPath(repoManagedPath))}${suffix}`;
+    return `${prefix}${quoteShellArg(repoManagedPath)}${suffix}`;
   }
 
   return command;
@@ -2486,12 +2418,11 @@ async function runWorkspaceCommand(input: {
   label: string;
 }) {
   const shell = resolveShell();
-  const env = buildShellEnv(input.env, shell);
   const proc = await executeProcess({
     command: shell,
     args: ["-c", input.resolvedCommand ?? input.command],
     cwd: input.cwd,
-    env,
+    env: input.env,
   });
   if (proc.code === 0) return;
 
@@ -3015,6 +2946,7 @@ export async function ensurePersistedExecutionWorkspaceAvailable(input: {
     workspaceId: input.workspace.projectWorkspaceId ?? input.base.workspaceId,
     repoUrl: input.workspace.repoUrl ?? input.base.repoUrl,
     repoRef: input.workspace.baseRef ?? input.base.repoRef,
+    additionalWorkspaces: input.base.additionalWorkspaces ?? [],
     strategy,
     cwd,
     branchName: input.workspace.branchName ?? null,
@@ -4029,12 +3961,7 @@ async function spawnLocalRuntimeService(input: StartLocalRuntimeServiceInput): P
   if (adoptedRecord) {
     const adoptedUrl = adoptedRecord.url ?? url;
     if (!(await isRuntimeServiceUrlHealthy(adoptedUrl, { serviceName, command }))) {
-      const termination = await terminateLocalService(adoptedRecord, { trustedPid: true });
-      if (!termination.confirmedStopped) {
-        throw new Error(
-          `Existing runtime service "${serviceName}" is unhealthy and process termination could not be verified (${termination.outcome}); registry ownership was retained.`,
-        );
-      }
+      await terminateLocalService(adoptedRecord);
       await removeLocalServiceRegistryRecord(adoptedRecord.serviceKey);
     } else {
       return {
@@ -4102,10 +4029,9 @@ async function spawnLocalRuntimeService(input: StartLocalRuntimeServiceInput): P
   });
 
   const shell = resolveShell();
-  const serviceEnv = buildShellEnv(env, shell);
   const child = spawn(shell, ["-lc", command], {
     cwd: serviceCwd,
-    env: serviceEnv,
+    env,
     detached: process.platform !== "win32",
     stdio: ["ignore", "pipe", "pipe"],
   });
@@ -4207,17 +4133,12 @@ async function spawnLocalRuntimeService(input: StartLocalRuntimeServiceInput): P
       lastSeenAt: record.lastUsedAt,
     });
   }).catch(async (err) => {
-    const termination = await terminateRuntimeServiceProcess(record);
-    record.status = termination?.confirmedStopped === true ? "stopped" : "failed";
+    terminateChildProcess(child);
+    record.status = "stopped";
     record.healthStatus = "unhealthy";
     record.lastUsedAt = new Date().toISOString();
-    record.stoppedAt = termination?.confirmedStopped === true
-      ? new Date().toISOString()
-      : null;
-    if (termination?.confirmedStopped === true) {
-      await removeLocalServiceRegistryRecord(record.serviceKey).catch(() => undefined);
-    }
-    await persistRuntimeServiceRecord(record.db, record).catch(() => undefined);
+    record.stoppedAt = new Date().toISOString();
+    await removeLocalServiceRegistryRecord(record.serviceKey).catch(() => undefined);
     throw new Error(
       `Failed to start runtime service "${serviceName}": ${err instanceof Error ? err.message : String(err)}${stderrExcerpt ? ` | stderr: ${stderrExcerpt.trim()}` : ""}`,
     );
@@ -4242,97 +4163,10 @@ function scheduleIdleStop(record: RuntimeServiceRecord) {
   }, idleSeconds * 1000);
 }
 
-async function terminateRuntimeServiceProcess(
-  record: RuntimeServiceRecord,
-): Promise<LocalServiceTerminationResult | null> {
-  const childPid = normalizeLocalServicePid(record.child?.pid);
-  const childIsLive =
-    childPid !== null &&
-    record.child?.exitCode === null &&
-    record.child?.signalCode === null;
-  const registryRecord = childIsLive
-    ? null
-    : await findLocalServiceRegistryRecordByRuntimeServiceId({
-        runtimeServiceId: record.id,
-        profileKind: record.profileKind,
-      }).catch(() => null);
-  const registryPid = normalizeLocalServicePid(registryRecord?.pid);
-  if (!childIsLive && !registryRecord && record.child) {
-    const ownerPid = record.port
-      ? await readLocalServicePortOwner(record.port)
-      : null;
-    if (ownerPid || process.platform === "win32") {
-      return {
-        pid: ownerPid ?? childPid,
-        attempted: false,
-        confirmedStopped: false,
-        outcome: "untrusted_identity",
-        error: "runtime_service_registry_identity_missing",
-      };
-    }
-  }
-  const pid = childIsLive
-    ? childPid
-    : registryPid ?? childPid;
-  if (pid === null || pid === process.pid) {
-    if (record.port) {
-      const ownerPid = await readLocalServicePortOwner(record.port);
-      if (!ownerPid) {
-        return {
-          pid,
-          attempted: false,
-          confirmedStopped: true,
-          outcome: "not_running",
-        };
-      }
-    }
-    return null;
-  }
-  const processGroupId = childIsLive
-    ? normalizeLocalServicePid(record.processGroupId)
-    : normalizeLocalServicePid(registryRecord?.processGroupId)
-      ?? normalizeLocalServicePid(record.processGroupId);
-  if (!registryRecord && !record.child) return null;
-  if (!registryRecord && !childIsLive && processGroupId === null) {
-    if (record.port && !(await readLocalServicePortOwner(record.port))) {
-      return {
-        pid,
-        attempted: false,
-        confirmedStopped: true,
-        outcome: "not_running",
-      };
-    }
-    return null;
-  }
-
-  return await terminateLocalService(
-    {
-      pid,
-      processGroupId,
-    },
-    {
-      trustedPid: registryRecord !== null || childIsLive,
-      trustedProcessGroup: record.child !== null,
-    },
-  );
-}
-
 async function stopRuntimeService(serviceId: string) {
   const record = runtimeServicesById.get(serviceId);
   if (!record) return;
   clearIdleTimer(record);
-  record.stopRequested = true;
-  const termination = await terminateRuntimeServiceProcess(record);
-  if (termination?.confirmedStopped !== true) {
-    record.status = "failed";
-    record.healthStatus = "unhealthy";
-    record.lastUsedAt = new Date().toISOString();
-    record.stoppedAt = null;
-    await persistRuntimeServiceRecord(record.db, record);
-    throw new Error(
-      `Runtime service process termination could not be verified (${termination?.outcome ?? "identity_unavailable"}); tracking and registry were retained.`,
-    );
-  }
   record.status = "stopped";
   record.healthStatus = "unknown";
   record.lastUsedAt = new Date().toISOString();
@@ -4341,194 +4175,44 @@ async function stopRuntimeService(serviceId: string) {
   if (record.reuseKey && runtimeServicesByReuseKey.get(record.reuseKey) === record.id) {
     runtimeServicesByReuseKey.delete(record.reuseKey);
   }
+  if (record.child && record.child.pid) {
+    await terminateLocalService({
+      pid: record.child.pid,
+      processGroupId: record.processGroupId ?? record.child.pid,
+    });
+  } else if (record.providerRef) {
+    const pid = Number.parseInt(record.providerRef, 10);
+    if (Number.isInteger(pid) && pid > 0) {
+      await terminateLocalService({
+        pid,
+        processGroupId: record.processGroupId,
+      });
+    }
+  }
   await removeLocalServiceRegistryRecord(record.serviceKey);
   await persistRuntimeServiceRecord(record.db, record);
 }
 
-type PersistedRuntimeServiceRow = typeof workspaceRuntimeServices.$inferSelect;
-
-function persistedRuntimeServiceNotRunningResult(pid: number | null): LocalServiceTerminationResult {
-  return {
-    pid,
-    attempted: false,
-    confirmedStopped: true,
-    outcome: "not_running",
-  };
-}
-
-function persistedRuntimeServiceUntrustedResult(
-  pid: number | null,
-  error: string,
-): LocalServiceTerminationResult {
-  return {
-    pid,
-    attempted: false,
-    confirmedStopped: false,
-    outcome: "untrusted_identity",
-    error,
-  };
-}
-
-async function resolvePersistedRuntimeServiceRegistryRecord(
-  row: PersistedRuntimeServiceRow,
-) {
-  let registryRecord = await findLocalServiceRegistryRecordByRuntimeServiceId({
-    runtimeServiceId: row.id,
-    profileKind: "workspace-runtime",
-  }).catch(() => null);
-  if (registryRecord || !row.command || !row.cwd) return registryRecord;
-
-  registryRecord = await findAdoptableLocalService({
-    serviceKey: createLocalServiceKey({
-      profileKind: "workspace-runtime",
-      serviceName: row.serviceName,
-      cwd: row.cwd,
-      command: row.command,
-      envFingerprint: row.reuseKey ?? "",
-      port: row.port ?? null,
-      scope: {
-        scopeType: row.scopeType,
-        scopeId: row.scopeId ?? null,
-        executionWorkspaceId: row.executionWorkspaceId ?? null,
-        reuseKey: row.reuseKey ?? null,
-      },
-    }),
-    profileKind: "workspace-runtime",
-    serviceName: row.serviceName,
-    command: row.command,
-    cwd: row.cwd,
-    envFingerprint: row.reuseKey ?? "",
-    port: row.port ?? null,
-    url: row.url ?? null,
-    expectedPid: normalizeLocalServicePid(row.providerRef),
-    expectedStartedAt: row.startedAt,
-  }).catch(() => null);
-  if (registryRecord) {
-    await touchLocalServiceRegistryRecord(registryRecord.serviceKey, {
-      runtimeServiceId: row.id,
-      lastSeenAt: new Date().toISOString(),
-    });
-  }
-  return registryRecord;
-}
-
-async function terminatePersistedRuntimeServiceRow(
-  row: PersistedRuntimeServiceRow,
-): Promise<{
-  registryServiceKey: string | null;
-  termination: LocalServiceTerminationResult;
-}> {
-  if (row.provider !== "local_process") {
-    return {
-      registryServiceKey: null,
-      termination: persistedRuntimeServiceNotRunningResult(null),
-    };
-  }
-
-  const registryRecord = await resolvePersistedRuntimeServiceRegistryRecord(row);
-  if (registryRecord) {
-    return {
-      registryServiceKey: registryRecord.serviceKey,
-      termination: await terminateLocalService(registryRecord, {
-        trustedPid: true,
-      }),
-    };
-  }
-
-  const persistedPid = normalizeLocalServicePid(row.providerRef);
-  const ownerPid = row.port
-    ? await readLocalServicePortOwner(row.port)
-    : null;
-  const persistedPidAlive =
-    persistedPid !== null && isLocalServicePidAlive(persistedPid);
-  if (!ownerPid && !persistedPidAlive) {
-    return {
-      registryServiceKey: null,
-      termination: persistedRuntimeServiceNotRunningResult(persistedPid),
-    };
-  }
-
-  if (
-    process.platform === "win32"
-    && persistedPid !== null
-    && ownerPid === null
-  ) {
-    return {
-      registryServiceKey: null,
-      termination: await terminateLocalService(
-        {
-          pid: persistedPid,
-          processGroupId: persistedPid,
-        },
-        {
-          expectedStartedAt: row.startedAt,
-        },
-      ),
-    };
-  }
-
-  return {
-    registryServiceKey: null,
-    termination: persistedRuntimeServiceUntrustedResult(
-      ownerPid ?? persistedPid,
-      "persisted_runtime_service_identity_unverified",
-    ),
-  };
-}
-
-async function stopPersistedRuntimeServiceRows(input: {
+async function markPersistedRuntimeServicesStoppedForExecutionWorkspace(input: {
   db: Db;
-  rows: PersistedRuntimeServiceRow[];
+  executionWorkspaceId: string;
 }) {
   const now = new Date();
-  const unverified: Array<{
-    id: string;
-    serviceName: string;
-    outcome: LocalServiceTerminationResult["outcome"];
-  }> = [];
-
-  for (const row of input.rows) {
-    const { registryServiceKey, termination } =
-      await terminatePersistedRuntimeServiceRow(row);
-    if (termination.confirmedStopped) {
-      await input.db
-        .update(workspaceRuntimeServices)
-        .set({
-          status: "stopped",
-          healthStatus: "unknown",
-          stoppedAt: now,
-          lastUsedAt: now,
-          updatedAt: now,
-        })
-        .where(eq(workspaceRuntimeServices.id, row.id));
-      if (registryServiceKey) {
-        await removeLocalServiceRegistryRecord(registryServiceKey);
-      }
-      continue;
-    }
-
-    await input.db
-      .update(workspaceRuntimeServices)
-      .set({
-        status: row.status,
-        healthStatus: "unhealthy",
-        stoppedAt: null,
-        lastUsedAt: now,
-        updatedAt: now,
-      })
-      .where(eq(workspaceRuntimeServices.id, row.id));
-    unverified.push({
-      id: row.id,
-      serviceName: row.serviceName,
-      outcome: termination.outcome,
-    });
-  }
-
-  if (unverified.length > 0) {
-    throw new Error(
-      `Runtime service termination could not be verified for ${unverified.map((item) => `${item.serviceName} (${item.id}: ${item.outcome})`).join(", ")}; active rows and ownership evidence were retained for human review.`,
+  await input.db
+    .update(workspaceRuntimeServices)
+    .set({
+      status: "stopped",
+      healthStatus: "unknown",
+      stoppedAt: now,
+      lastUsedAt: now,
+      updatedAt: now,
+    })
+    .where(
+      and(
+        eq(workspaceRuntimeServices.executionWorkspaceId, input.executionWorkspaceId),
+        inArray(workspaceRuntimeServices.status, ["starting", "running"]),
+      ),
     );
-  }
 }
 
 function registerRuntimeService(db: Db | undefined, record: RuntimeServiceRecord) {
@@ -4540,33 +4224,18 @@ function registerRuntimeService(db: Db | undefined, record: RuntimeServiceRecord
 
   record.child?.on("exit", (code, signal) => {
     const current = runtimeServicesById.get(record.id);
-    if (!current || current.stopRequested) return;
-    void (async () => {
-      clearIdleTimer(current);
-      const termination = await terminateRuntimeServiceProcess(current);
-      current.lastUsedAt = new Date().toISOString();
-      if (termination?.confirmedStopped !== true) {
-        current.status = "failed";
-        current.healthStatus = "unhealthy";
-        current.stoppedAt = null;
-        await persistRuntimeServiceRecord(db, current);
-        return;
-      }
-      current.status = code === 0 || signal === "SIGTERM" ? "stopped" : "failed";
-      current.healthStatus = current.status === "failed" ? "unhealthy" : "unknown";
-      current.stoppedAt = new Date().toISOString();
-      runtimeServicesById.delete(current.id);
-      if (current.reuseKey && runtimeServicesByReuseKey.get(current.reuseKey) === current.id) {
-        runtimeServicesByReuseKey.delete(current.reuseKey);
-      }
-      await removeLocalServiceRegistryRecord(current.serviceKey);
-      await persistRuntimeServiceRecord(db, current);
-    })().catch(async () => {
-      current.status = "failed";
-      current.healthStatus = "unhealthy";
-      current.stoppedAt = null;
-      await persistRuntimeServiceRecord(db, current).catch(() => undefined);
-    });
+    if (!current) return;
+    clearIdleTimer(current);
+    current.status = code === 0 || signal === "SIGTERM" ? "stopped" : "failed";
+    current.healthStatus = current.status === "failed" ? "unhealthy" : "unknown";
+    current.lastUsedAt = new Date().toISOString();
+    current.stoppedAt = new Date().toISOString();
+    runtimeServicesById.delete(current.id);
+    if (current.reuseKey && runtimeServicesByReuseKey.get(current.reuseKey) === current.id) {
+      runtimeServicesByReuseKey.delete(current.reuseKey);
+    }
+    void removeLocalServiceRegistryRecord(current.serviceKey);
+    void persistRuntimeServiceRecord(db, current);
   });
 }
 
@@ -4990,21 +4659,24 @@ export async function stopRuntimeServicesForExecutionWorkspace(input: {
   }
 
   if (input.db) {
-    const persistedRows = await input.db
-      .select()
-      .from(workspaceRuntimeServices)
-      .where(
-        and(
-          input.runtimeServiceId
-            ? eq(workspaceRuntimeServices.id, input.runtimeServiceId)
-            : eq(workspaceRuntimeServices.executionWorkspaceId, input.executionWorkspaceId),
-          inArray(workspaceRuntimeServices.status, ["starting", "running"]),
-        ),
-      );
-    await stopPersistedRuntimeServiceRows({
-      db: input.db,
-      rows: persistedRows,
-    });
+    if (input.runtimeServiceId) {
+      const now = new Date();
+      await input.db
+        .update(workspaceRuntimeServices)
+        .set({
+          status: "stopped",
+          healthStatus: "unknown",
+          stoppedAt: now,
+          lastUsedAt: now,
+          updatedAt: now,
+        })
+        .where(eq(workspaceRuntimeServices.id, input.runtimeServiceId));
+    } else {
+      await markPersistedRuntimeServicesStoppedForExecutionWorkspace({
+        db: input.db,
+        executionWorkspaceId: input.executionWorkspaceId,
+      });
+    }
   }
 }
 
@@ -5025,9 +4697,16 @@ export async function stopRuntimeServicesForProjectWorkspace(input: {
   }
 
   if (input.db) {
-    const persistedRows = await input.db
-      .select()
-      .from(workspaceRuntimeServices)
+    const now = new Date();
+    await input.db
+      .update(workspaceRuntimeServices)
+      .set({
+        status: "stopped",
+        healthStatus: "unknown",
+        stoppedAt: now,
+        lastUsedAt: now,
+        updatedAt: now,
+      })
       .where(
         input.runtimeServiceId
           ? eq(workspaceRuntimeServices.id, input.runtimeServiceId)
@@ -5037,12 +4716,6 @@ export async function stopRuntimeServicesForProjectWorkspace(input: {
               inArray(workspaceRuntimeServices.status, ["starting", "running"]),
             ),
       );
-    await stopPersistedRuntimeServiceRows({
-      db: input.db,
-      rows: persistedRows.filter((row) =>
-        row.status === "starting" || row.status === "running"
-      ),
-    });
   }
 }
 
@@ -5085,17 +4758,11 @@ export async function reconcilePersistedRuntimeServicesOnStartup(db: Db) {
       ),
     );
 
-  if (rows.length === 0) return {
-    reconciled: 0,
-    adopted: 0,
-    stopped: 0,
-    needsHuman: 0,
-  };
+  if (rows.length === 0) return { reconciled: 0, adopted: 0, stopped: 0 };
 
   let reconciled = 0;
   let adopted = 0;
   let stopped = 0;
-  let needsHuman = 0;
   for (const row of rows) {
     let adoptedRecord = await findLocalServiceRegistryRecordByRuntimeServiceId({
       runtimeServiceId: row.id,
@@ -5122,7 +4789,7 @@ export async function reconcilePersistedRuntimeServicesOnStartup(db: Db) {
           cwd: row.cwd,
           command: row.command,
           envFingerprint: row.reuseKey ?? "",
-          port: row.port ?? null,
+          port: null,
           scope: {
             scopeType: row.scopeType as RuntimeServiceRecord["scopeType"],
             scopeId: row.scopeId ?? null,
@@ -5137,14 +4804,12 @@ export async function reconcilePersistedRuntimeServicesOnStartup(db: Db) {
         envFingerprint: row.reuseKey ?? "",
         port: row.port ?? null,
         url: row.url ?? null,
-        expectedPid: normalizeLocalServicePid(row.providerRef),
-        expectedStartedAt: row.startedAt,
       });
     }
     if (adoptedRecord) {
       const adoptedUrl = adoptedRecord.url ?? row.url ?? null;
       if (!(await isRuntimeServiceUrlHealthy(adoptedUrl, { serviceName: row.serviceName, command: row.command }))) {
-        adoptedRecord = null;
+        await removeLocalServiceRegistryRecord(adoptedRecord.serviceKey);
       } else {
         const record: RuntimeServiceRecord = {
           id: row.id,
@@ -5198,30 +4863,6 @@ export async function reconcilePersistedRuntimeServicesOnStartup(db: Db) {
       continue;
     }
 
-    const persistedPid = normalizeLocalServicePid(row.providerRef);
-    const liveOwnerPid = row.port
-      ? await readLocalServicePortOwner(row.port)
-      : persistedPid && isLocalServicePidAlive(persistedPid)
-        ? persistedPid
-        : null;
-    if (liveOwnerPid) {
-      const now = new Date();
-      await db
-        .update(workspaceRuntimeServices)
-        .set({
-          status: "running",
-          healthStatus: "unhealthy",
-          providerRef: String(liveOwnerPid),
-          stoppedAt: null,
-          lastUsedAt: now,
-          updatedAt: now,
-        })
-        .where(eq(workspaceRuntimeServices.id, row.id));
-      reconciled += 1;
-      needsHuman += 1;
-      continue;
-    }
-
     const now = new Date();
     await db
       .update(workspaceRuntimeServices)
@@ -5244,7 +4885,7 @@ export async function reconcilePersistedRuntimeServicesOnStartup(db: Db) {
     stopped += 1;
   }
 
-  return { reconciled, adopted, stopped, needsHuman };
+  return { reconciled, adopted, stopped };
 }
 
 export async function restartDesiredRuntimeServicesOnStartup(db: Db) {
