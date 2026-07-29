@@ -30,7 +30,11 @@ import { runningProcesses } from "../../adapters/index.js";
 import { visibleIssueCondition } from "../issue-visibility.js";
 import { forbidden, notFound } from "../../errors.js";
 import { logger } from "../../middleware/logger.js";
-import { isPidAlive, isProcessGroupAlive, terminateLocalService } from "../local-service-supervisor.js";
+import {
+  isPidAlive,
+  isProcessGroupAlive,
+  terminateLocalService,
+} from "../local-service-supervisor.js";
 import { redactCurrentUserText } from "../../log-redaction.js";
 import { redactSensitiveText } from "../../redaction.js";
 import { logActivity } from "../activity-log.js";
@@ -1502,7 +1506,10 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
     }
 
     try {
-      await terminateLocalService(
+      const runningChildIsLive = running
+        ? (running.child.exitCode == null && running.child.signalCode == null)
+        : false;
+      const termination = await terminateLocalService(
         {
           pid: typeof pid === "number" && Number.isInteger(pid) && pid > 0
             ? pid
@@ -1511,15 +1518,28 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
             ? processGroupId
             : null,
         },
-        running ? { forceAfterMs: Math.max(1, running.graceSec) * 1000 } : undefined,
+        running
+          ? {
+              forceAfterMs: Math.max(1, running.graceSec) * 1000,
+              ...(runningChildIsLive ? { trustedPid: true, trustedProcessGroup: true } : {}),
+            }
+          : {
+              expectedStartedAt: input.run.processStartedAt,
+            },
       );
-      runningProcesses.delete(input.run.id);
+      if (termination.confirmedStopped) {
+        runningProcesses.delete(input.run.id);
+      }
       const stillAlive =
         (typeof pid === "number" && isPidAlive(pid)) ||
         (typeof processGroupId === "number" && isProcessGroupAlive(processGroupId));
       return {
         attempted: true,
-        outcome: stillAlive ? "termination_sent_still_running" : "terminated",
+        outcome: termination.confirmedStopped && !stillAlive
+          ? "terminated"
+          : "termination_unverified_needs_human",
+        terminationOutcome: termination.outcome,
+        needsHuman: !termination.confirmedStopped || stillAlive,
         adapterType: input.runningAgent.adapterType,
         pid,
         processGroupId,
@@ -1565,6 +1585,39 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
   }) {
     if (!input.evidence) return { kind: "skipped" as const };
     const cleanup = await cleanupSourceResolvedRunProcess({ run: input.run, runningAgent: input.runningAgent });
+    if (cleanup.outcome === "termination_unverified_needs_human" || cleanup.outcome === "failed") {
+      const message = [
+        "Source issue reached a terminal state, but the associated process could not be verified as stopped.",
+        "The heartbeat run and issue execution lock were retained to prevent overlapping mutation; operator review is required.",
+      ].join(" ");
+      const [retained] = await db
+        .update(heartbeatRuns)
+        .set({
+          error: message,
+          errorCode: "process_termination_unverified_needs_human",
+          updatedAt: input.now,
+        })
+        .where(and(
+          eq(heartbeatRuns.id, input.run.id),
+          eq(heartbeatRuns.companyId, input.run.companyId),
+          eq(heartbeatRuns.status, "running"),
+        ))
+        .returning();
+      await appendRecoveryRunEvent(retained ?? input.run, {
+        level: "error",
+        message,
+        payload: {
+          needsHuman: true,
+          cleanup,
+          sourceIssueId: input.sourceIssue.id,
+          sourceIssueStatus: input.sourceIssue.status,
+        },
+      });
+      return {
+        kind: "needs_human" as const,
+        evaluationIssueId: input.existingEvaluation?.id ?? null,
+      };
+    }
     const finalRunStatus = input.sourceIssue.status === "cancelled" ? "cancelled" : "succeeded";
     const resultJson = {
       ...parseObject(input.run.resultJson),

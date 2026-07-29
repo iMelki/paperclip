@@ -64,7 +64,6 @@ import {
   toolMcpGateways,
   toolMcpGatewayTokens,
   toolConnections,
-  toolProfiles,
   workspaceOperations,
 } from "@paperclipai/db";
 import { conflict, HttpError, notFound } from "../errors.js";
@@ -135,6 +134,10 @@ import {
 import { issueService } from "./issues.js";
 import { createToolGatewayService } from "./tool-gateway.js";
 import { toolAccessService } from "./tool-access.js";
+import {
+  ensureExactRuntimeMcpGateway,
+  isGeneratedRuntimeMcpGateway,
+} from "./runtime-mcp-gateway.js";
 import { visibleIssueCondition } from "./issue-visibility.js";
 import { ISSUE_BLOCKERS_RESOLVED_WAKE_REASON } from "./issue-dependency-wakeups.js";
 import {
@@ -156,7 +159,11 @@ import {
 import { buildPlanReviewContext } from "./plan-review-context.js";
 import { executionWorkspaceService, mergeExecutionWorkspaceConfig } from "./execution-workspaces.js";
 import { workspaceOperationService, type WorkspaceOperationRecorder } from "./workspace-operations.js";
-import { isProcessGroupAlive, terminateLocalService } from "./local-service-supervisor.js";
+import {
+  isProcessGroupAlive,
+  terminateLocalService,
+  type LocalServiceTerminationResult,
+} from "./local-service-supervisor.js";
 import {
   HEARTBEAT_RUN_SCRATCH_MARKER,
   buildHeartbeatRunScratchEnv,
@@ -2172,17 +2179,25 @@ export async function buildPaperclipRuntimeMcpServers(input: {
   db: Db;
   agent: Pick<typeof agents.$inferSelect, "id" | "companyId" | "name">;
   runId: string;
+  issueId?: string | null;
+  projectId?: string | null;
+  routineId?: string | null;
+  taskRevisionHash?: string | null;
+  runtimeConfig?: Record<string, unknown>;
+  contextSnapshot?: Record<string, unknown>;
 }): Promise<AdapterRuntimeMcpServer[]> {
   const effective = await toolAccessService(input.db).getEffectiveProfilesForAgent(
     input.agent.companyId,
     input.agent.id,
+    {
+      issueId: input.issueId ?? null,
+      projectId: input.projectId ?? null,
+      routineId: input.routineId ?? null,
+    },
   );
-  const permittedConnectionIds = new Set([
-    ...effective.entries
-      .filter((entry) => entry.effect === "include" && entry.connectionId)
-      .map((entry) => entry.connectionId!),
-    ...effective.allowedTools.map((tool) => tool.connectionId),
-  ]);
+  const permittedConnectionIds = new Set(
+    effective.allowedTools.map((tool) => tool.connectionId),
+  );
   const installedConnectionIds = new Set(effective.installedConnections.map((connection) => connection.id));
   const permittedConnections = permittedConnectionIds.size > 0
     ? await input.db
@@ -2219,54 +2234,49 @@ export async function buildPaperclipRuntimeMcpServers(input: {
   }
   const servers: AdapterRuntimeMcpServer[] = [];
   for (const connection of uniqueConnections) {
-    const profileKey = `app:${connection.id}`;
-    const [profile] = await input.db
-      .select()
-      .from(toolProfiles)
-      .where(and(eq(toolProfiles.companyId, connection.companyId), eq(toolProfiles.profileKey, profileKey)))
-      .limit(1);
-    if (!profile) continue;
-    const existingGateways = await input.db
-      .select()
-      .from(toolMcpGateways)
-      .where(and(
-        eq(toolMcpGateways.companyId, connection.companyId),
-        eq(toolMcpGateways.status, "active"),
-        isNull(toolMcpGateways.archivedAt),
-      ));
-    let gateway = existingGateways.find((candidate) =>
-      candidate.metadata?.managedRuntimeConnectionId === connection.id
+    const expectedTools = effective.allowedTools.filter(
+      (tool) => tool.connectionId === connection.id,
     );
-    if (!gateway) {
-      const slug = `runtime-${connection.id.replaceAll("-", "")}`;
-      try {
-        const created = await service.createNamedGateway({
-          companyId: connection.companyId,
-          body: {
-            name: `Runtime ${connection.name} ${connection.id.slice(0, 8)}`,
-            slug,
-            description: `Paperclip-managed runtime gateway for ${connection.name}.`,
-            profileId: profile.id,
-            defaultProfileMode: "gateway_only",
-            metadata: { managedRuntimeConnectionId: connection.id },
-          },
-          actor: { agentId: input.agent.id },
-        });
-        gateway = await input.db
-          .select()
-          .from(toolMcpGateways)
-          .where(eq(toolMcpGateways.id, created.id))
-          .then((rows) => rows[0]);
-      } catch (error) {
-        [gateway] = await input.db
-          .select()
-          .from(toolMcpGateways)
-          .where(and(eq(toolMcpGateways.companyId, connection.companyId), eq(toolMcpGateways.slug, slug)))
-          .limit(1);
-        if (!gateway) throw error;
-      }
-    }
-    if (!gateway) continue;
+    if (expectedTools.length === 0) continue;
+    const installHash = createHash("sha256")
+      .update(stableStringifyForFingerprint(
+        (connection.installs ?? []).map((install) => ({
+          id: install.id,
+          targetType: install.targetType,
+          targetId: install.targetId,
+          createdAt:
+            install.createdAt instanceof Date
+              ? install.createdAt.toISOString()
+              : install.createdAt,
+        })),
+      ))
+      .digest("hex");
+    const configHash = createHash("sha256")
+      .update(stableStringifyForFingerprint(input.runtimeConfig ?? {}))
+      .digest("hex");
+    const contextHash = createHash("sha256")
+      .update(stableStringifyForFingerprint(input.contextSnapshot ?? {}))
+      .digest("hex");
+    const exact = await ensureExactRuntimeMcpGateway({
+      db: input.db,
+      companyId: connection.companyId,
+      agentId: input.agent.id,
+      connection,
+      runContext: {
+        issueId: input.issueId ?? null,
+        projectId: input.projectId ?? null,
+        routineId: input.routineId ?? null,
+        taskRevisionHash: input.taskRevisionHash ?? contextHash,
+        configHash,
+        installHash,
+      },
+      sourceProfiles: effective.profiles.map((profile) => ({
+        id: profile.id,
+        updatedAt: profile.updatedAt,
+      })),
+      expectedTools,
+    });
+    const gateway = exact.gateway;
     const token = await service.createNamedGatewayToken({
       companyId: connection.companyId,
       gatewayId: gateway.id,
@@ -2282,7 +2292,7 @@ export async function buildPaperclipRuntimeMcpServers(input: {
       actor: { agentId: input.agent.id },
     });
     servers.push({
-      name: connection.name,
+      name: gateway.name,
       url: `${paperclipApiBaseUrl()}/api/tool-gateway/gateways/${gateway.id}/mcp`,
       token: token.token,
       connectionId: connection.id,
@@ -2357,7 +2367,10 @@ async function createManagedMcpRunConfig(input: {
     agentId: input.agent.id,
     projectId: input.projectId,
     issueId: input.issueId,
-  }));
+  })).filter((gateway) =>
+    !isGeneratedRuntimeMcpGateway(gateway.metadata)
+    && typeof gateway.metadata?.managedRuntimeConnectionId !== "string"
+  );
   if (gateways.length === 0) return null;
 
   const service = createToolGatewayService(input.db);
@@ -5149,13 +5162,16 @@ function isProcessAlive(pid: number | null | undefined) {
 async function terminateHeartbeatRunProcess(input: {
   pid: number | null | undefined;
   processGroupId: number | null | undefined;
+  expectedStartedAt?: Date | string | null;
   graceMs?: number;
-}) {
+  trustedPid?: boolean;
+  trustedProcessGroup?: boolean;
+}): Promise<LocalServiceTerminationResult | null> {
   const pid = input.pid ?? null;
   const processGroupId = input.processGroupId ?? null;
-  if (typeof pid !== "number" && typeof processGroupId !== "number") return;
+  if (typeof pid !== "number" && typeof processGroupId !== "number") return null;
 
-  await terminateLocalService(
+  return await terminateLocalService(
     {
       pid:
         typeof pid === "number" && Number.isInteger(pid) && pid > 0
@@ -5166,7 +5182,14 @@ async function terminateHeartbeatRunProcess(input: {
           ? processGroupId
           : null,
     },
-    input.graceMs ? { forceAfterMs: input.graceMs } : undefined,
+    input.graceMs || input.trustedPid || input.trustedProcessGroup || input.expectedStartedAt
+      ? {
+          ...(input.graceMs ? { forceAfterMs: input.graceMs } : {}),
+          ...(input.trustedPid ? { trustedPid: true } : {}),
+          ...(input.trustedProcessGroup ? { trustedProcessGroup: true } : {}),
+          ...(input.expectedStartedAt ? { expectedStartedAt: input.expectedStartedAt } : {}),
+        }
+      : undefined,
   );
 }
 
@@ -8344,6 +8367,43 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     return Number(row?.maxSeq ?? 0) + 1;
   }
 
+  async function retainRunForUnverifiedTermination(input: {
+    run: typeof heartbeatRuns.$inferSelect;
+    result: LocalServiceTerminationResult;
+    operation: "cancel" | "agent_pause" | "shutdown";
+  }) {
+    const message = [
+      `Process termination could not be verified during ${input.operation}.`,
+      `Outcome: ${input.result.outcome}.`,
+      "The run and issue execution lock were retained to prevent another mutating run from starting; operator review is required.",
+    ].join(" ");
+    const [updated] = await db
+      .update(heartbeatRuns)
+      .set({
+        error: message,
+        errorCode: "process_termination_unverified_needs_human",
+        updatedAt: new Date(),
+      })
+      .where(and(eq(heartbeatRuns.id, input.run.id), eq(heartbeatRuns.status, "running")))
+      .returning();
+    if (updated) {
+      await appendRunEvent(updated, await nextRunEventSeq(updated.id), {
+        eventType: "lifecycle",
+        stream: "system",
+        level: "error",
+        message,
+        payload: {
+          needsHuman: true,
+          operation: input.operation,
+          terminationOutcome: input.result.outcome,
+          terminationAttempted: input.result.attempted,
+          processPid: input.result.pid,
+        },
+      });
+    }
+    return updated ?? input.run;
+  }
+
   async function persistRunProcessMetadata(
     runId: string,
     meta: { pid: number; processGroupId: number | null; startedAt: string },
@@ -9133,23 +9193,38 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
 
     const interruptedRunIds: string[] = [];
     const retryRunIds: string[] = [];
+    const needsHumanRunIds: string[] = [];
 
     for (const { run, agent } of activeRuns) {
       const running = runningProcesses.get(run.id);
-      try {
-        if (running) {
-          await terminateHeartbeatRunProcess({
+      const runningChildIsLive = running
+        ? (running.child.exitCode == null && running.child.signalCode == null)
+        : false;
+      const termination = running
+        ? await terminateHeartbeatRunProcess({
             pid: running.child.pid ?? run.processPid,
             processGroupId: running.processGroupId ?? run.processGroupId,
+            expectedStartedAt: run.processStartedAt,
             graceMs: Math.max(1, running.graceSec) * 1000,
-          });
-        } else if (run.processPid || run.processGroupId) {
-          await terminateHeartbeatRunProcess({
-            pid: run.processPid,
-            processGroupId: run.processGroupId,
-          });
-        }
-      } finally {
+            ...(runningChildIsLive ? { trustedPid: true, trustedProcessGroup: true } : {}),
+          })
+        : run.processPid || run.processGroupId
+          ? await terminateHeartbeatRunProcess({
+              pid: run.processPid,
+              processGroupId: run.processGroupId,
+              expectedStartedAt: run.processStartedAt,
+            })
+          : null;
+      if (termination?.confirmedStopped === false) {
+        await retainRunForUnverifiedTermination({
+          run,
+          result: termination,
+          operation: "shutdown",
+        });
+        needsHumanRunIds.push(run.id);
+        continue;
+      }
+      if (running) {
         runningProcesses.delete(run.id);
       }
 
@@ -9205,9 +9280,15 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       interruptedRunIds.push(interrupted.id);
     }
 
-    if (interruptedRunIds.length > 0) {
+    if (interruptedRunIds.length > 0 || needsHumanRunIds.length > 0) {
       logger.warn(
-        { signal, interrupted: interruptedRunIds.length, interruptedRunIds, retryRunIds },
+        {
+          signal,
+          interrupted: interruptedRunIds.length,
+          interruptedRunIds,
+          retryRunIds,
+          needsHumanRunIds,
+        },
         "interrupted running heartbeat runs for graceful shutdown",
       );
     }
@@ -9216,6 +9297,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       interrupted: interruptedRunIds.length,
       interruptedRunIds,
       retryRunIds,
+      needsHumanRunIds,
     };
   }
 
@@ -11510,11 +11592,23 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
 
       let descendantOnlyCleanup = false;
       if (processGroupAlive) {
-        descendantOnlyCleanup = true;
-        await terminateHeartbeatRunProcess({
+        const termination = await terminateHeartbeatRunProcess({
           pid: run.processPid,
           processGroupId: run.processGroupId,
+          // A historical process-group id may have been reused after the
+          // leader exited. Without a live child handle or creation identity,
+          // fail closed and leave the run for operator recovery.
+          expectedStartedAt: run.processStartedAt,
         });
+        if (termination?.confirmedStopped === false) {
+          await retainRunForUnverifiedTermination({
+            run,
+            result: termination,
+            operation: "shutdown",
+          });
+          continue;
+        }
+        descendantOnlyCleanup = termination?.confirmedStopped === true;
       }
 
       const runContext = parseObject(run.contextSnapshot);
@@ -13681,6 +13775,16 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           db,
           agent,
           runId: run.id,
+          issueId: issueRef?.id ?? null,
+          projectId: issueRef?.projectId ?? null,
+          routineId: routineEnvContext.routineId,
+          taskRevisionHash:
+            readNonEmptyString(context.taskRevisionHash)
+            ?? readNonEmptyString(
+              parseObject(context.factoryContract).taskRevisionHash,
+            ),
+          runtimeConfig,
+          contextSnapshot: context,
         });
         const runtimeMcp = createAdapterRuntimeMcpAccess(runtimeMcpServers);
         const managedMcpConfig = await createManagedMcpRunConfig({
@@ -16607,20 +16711,37 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       : options.resultJson;
 
     const running = runningProcesses.get(run.id);
-    try {
-      if (running) {
-        await terminateHeartbeatRunProcess({
+    const runningChildIsLive = running
+      ? (running.child.exitCode == null && running.child.signalCode == null)
+      : false;
+    const termination = running
+      ? await terminateHeartbeatRunProcess({
           pid: running.child.pid ?? run.processPid,
           processGroupId: running.processGroupId ?? run.processGroupId,
+          expectedStartedAt: run.processStartedAt,
           graceMs: Math.max(1, running.graceSec) * 1000,
-        });
-      } else if (run.processPid || run.processGroupId) {
-        await terminateHeartbeatRunProcess({
-          pid: run.processPid,
-          processGroupId: run.processGroupId,
-        });
-      }
-    } finally {
+          ...(runningChildIsLive ? { trustedPid: true, trustedProcessGroup: true } : {}),
+        })
+      : run.processPid || run.processGroupId
+        ? await terminateHeartbeatRunProcess({
+            pid: run.processPid,
+            processGroupId: run.processGroupId,
+            expectedStartedAt: run.processStartedAt,
+          })
+        : null;
+    if (termination?.confirmedStopped === false) {
+      await retainRunForUnverifiedTermination({
+        run,
+        result: termination,
+        operation: "cancel",
+      });
+      throw conflict("Run process termination could not be verified; the run and issue lock were retained", {
+        code: "process_termination_unverified_needs_human",
+        needsHuman: true,
+        terminationOutcome: termination.outcome,
+      });
+    }
+    if (running) {
       runningProcesses.delete(run.id);
     }
 
@@ -16660,7 +16781,39 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       .from(heartbeatRuns)
       .where(and(eq(heartbeatRuns.agentId, agentId), inArray(heartbeatRuns.status, [...CANCELLABLE_HEARTBEAT_RUN_STATUSES])));
 
+    let cancelledCount = 0;
     for (const run of runs) {
+      const running = runningProcesses.get(run.id);
+      const runningChildIsLive = running
+        ? (running.child.exitCode == null && running.child.signalCode == null)
+        : false;
+      const termination = running
+        ? await terminateHeartbeatRunProcess({
+            pid: running.child.pid ?? run.processPid,
+            processGroupId: running.processGroupId ?? run.processGroupId,
+            expectedStartedAt: run.processStartedAt,
+            graceMs: Math.max(1, running.graceSec) * 1000,
+            ...(runningChildIsLive ? { trustedPid: true, trustedProcessGroup: true } : {}),
+          })
+        : run.processPid || run.processGroupId
+          ? await terminateHeartbeatRunProcess({
+              pid: run.processPid,
+              processGroupId: run.processGroupId,
+              expectedStartedAt: run.processStartedAt,
+            })
+          : null;
+      if (termination?.confirmedStopped === false) {
+        await retainRunForUnverifiedTermination({
+          run,
+          result: termination,
+          operation: "agent_pause",
+        });
+        continue;
+      }
+      if (running) {
+        runningProcesses.delete(run.id);
+      }
+
       await setRunStatus(run.id, "cancelled", {
         finishedAt: new Date(),
         error: reason,
@@ -16678,25 +16831,11 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         finishedAt: new Date(),
         error: reason,
       });
-
-      const running = runningProcesses.get(run.id);
-      if (running) {
-        await terminateHeartbeatRunProcess({
-          pid: running.child.pid ?? run.processPid,
-          processGroupId: running.processGroupId ?? run.processGroupId,
-          graceMs: Math.max(1, running.graceSec) * 1000,
-        });
-        runningProcesses.delete(run.id);
-      } else if (run.processPid || run.processGroupId) {
-        await terminateHeartbeatRunProcess({
-          pid: run.processPid,
-          processGroupId: run.processGroupId,
-        });
-      }
       await releaseIssueExecutionAndPromote(run);
+      cancelledCount += 1;
     }
 
-    return runs.length;
+    return cancelledCount;
   }
 
   async function cancelPendingWakeupsForAgentsInternal(agentIds: string[], reason: string) {

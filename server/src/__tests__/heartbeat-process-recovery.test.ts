@@ -42,6 +42,7 @@ import {
   workspaceOperations,
 } from "@paperclipai/db";
 import {
+  EMBEDDED_POSTGRES_TEST_SETUP_TIMEOUT_MS,
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
@@ -303,7 +304,7 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
   beforeAll(async () => {
     tempDb = await startEmbeddedPostgresTestDatabase("paperclip-heartbeat-recovery-");
     db = createDb(tempDb.connectionString);
-  }, 20_000);
+  }, EMBEDDED_POSTGRES_TEST_SETUP_TIMEOUT_MS);
 
   afterEach(async () => {
     vi.clearAllMocks();
@@ -3443,7 +3444,11 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
       await expect(heartbeat.cancelRun(runId)).rejects.toThrow("db update unavailable");
       expect(mockTerminateLocalService).toHaveBeenCalledWith(
         expect.objectContaining({ pid: 12345, processGroupId: null }),
-        { forceAfterMs: 1000 },
+        {
+          forceAfterMs: 1000,
+          trustedPid: true,
+          trustedProcessGroup: true,
+        },
       );
       expect(runningProcesses.has(runId)).toBe(false);
     } finally {
