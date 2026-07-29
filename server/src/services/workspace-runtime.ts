@@ -39,9 +39,21 @@ import { readProjectWorkspaceRuntimeConfig } from "./project-workspace-runtime-c
 
 export function resolveShell(): string {
   const fallback = process.platform === "win32" ? "sh" : "/bin/sh";
+  const resolveFallback = () => {
+    if (process.platform === "win32") {
+      const gitShellCandidates = [
+        process.env.GIT_INSTALL_ROOT ? path.join(process.env.GIT_INSTALL_ROOT, "usr", "bin", "bash.exe") : "",
+        "C:\\Program Files\\Git\\usr\\bin\\bash.exe",
+        "C:\\Program Files\\Git\\bin\\bash.exe",
+      ].filter(Boolean);
+      const gitShell = gitShellCandidates.find((candidate) => existsSync(candidate));
+      if (gitShell) return gitShell;
+    }
+    return fallback;
+  };
   const shell = process.env.SHELL?.trim();
-  if (!shell) return fallback;
-  if (path.isAbsolute(shell) && !existsSync(shell)) return fallback;
+  if (!shell) return resolveFallback();
+  if (path.isAbsolute(shell) && !existsSync(shell)) return resolveFallback();
   return shell;
 }
 
