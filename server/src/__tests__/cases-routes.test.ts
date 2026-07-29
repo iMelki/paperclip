@@ -26,6 +26,7 @@ import {
   projects,
 } from "@paperclipai/db";
 import {
+  EMBEDDED_POSTGRES_TEST_SETUP_TIMEOUT_MS,
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
@@ -87,7 +88,7 @@ describeEmbeddedPostgres("cases routes", () => {
     process.env.PAPERCLIP_AGENT_JWT_SECRET = "cases-routes-test-secret";
     tempDb = await startEmbeddedPostgresTestDatabase("paperclip-cases-routes-");
     db = createDb(tempDb.connectionString);
-  }, 20_000);
+  }, EMBEDDED_POSTGRES_TEST_SETUP_TIMEOUT_MS);
 
   afterEach(async () => {
     await db.delete(activityLog);

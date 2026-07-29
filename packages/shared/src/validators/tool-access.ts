@@ -71,6 +71,15 @@ export const toolRateLimitWindowKindSchema = z.enum(TOOL_RATE_LIMIT_WINDOW_KINDS
 const safeKeyPattern = /^[a-z0-9][a-z0-9._:-]*$/i;
 const sensitiveConfigKeyPattern =
   /^(access[-_]?key([-_]?id)?|api[-_]?key|authorization|bearer|client[-_]?secret|credential|credentials|jwt|password|passwd|private[-_]?key|refresh[-_]?token|secret|secret[-_]?access[-_]?key|secret[-_]?key|session[-_]?token|token)$/i;
+const sensitiveStaticHeaderPattern =
+  /(^|[-_])(access[-_]?key([-_]?id)?|api[-_]?key|auth|authorization|bearer|client[-_]?secret|cookie|credential(s)?|jwt|password|passwd|private[-_]?key|refresh[-_]?token|secret([-_]?access[-_]?key|[-_]?key)?|session([-_]?token)?|token)([-_]|$)/i;
+const sensitiveStaticHeaderNames = new Set([
+  "authorization",
+  "cookie",
+  "proxy-authorization",
+  "set-cookie",
+  "x-paperclip-tool-gateway-token",
+]);
 
 function rejectSensitiveConfigKeys(value: unknown, ctx: z.RefinementCtx, path: Array<string | number> = []) {
   if (!value || typeof value !== "object") return;
@@ -88,6 +97,69 @@ function rejectSensitiveConfigKeys(value: unknown, ctx: z.RefinementCtx, path: A
     }
     rejectSensitiveConfigKeys(nested, ctx, [...path, key]);
   }
+}
+
+function isSensitiveStaticHeaderName(value: unknown): boolean {
+  if (typeof value !== "string") return false;
+  const name = value.trim().toLowerCase();
+  return name.startsWith("x-paperclip-")
+    || sensitiveStaticHeaderNames.has(name)
+    || sensitiveStaticHeaderPattern.test(name);
+}
+
+function rejectUnsafeHeaderPolicies(
+  value: unknown,
+  ctx: z.RefinementCtx,
+  path: Array<string | number> = [],
+) {
+  if (!value || typeof value !== "object") return;
+  if (Array.isArray(value)) {
+    value.forEach((entry, index) => rejectUnsafeHeaderPolicies(entry, ctx, [...path, index]));
+    return;
+  }
+
+  for (const [key, nested] of Object.entries(value)) {
+    if (key.toLowerCase() === "headerpolicy" && nested && typeof nested === "object" && !Array.isArray(nested)) {
+      const policy = nested as Record<string, unknown>;
+      if (Object.hasOwn(policy, "version") && policy.version !== 1) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: [...path, key, "version"],
+          message: "Remote MCP header policy uses an unsupported version.",
+        });
+      }
+
+      const staticHeaders = policy.staticHeaders;
+      if (Array.isArray(staticHeaders)) {
+        staticHeaders.forEach((entry, index) => {
+          if (!entry || typeof entry !== "object" || Array.isArray(entry)) return;
+          if (isSensitiveStaticHeaderName((entry as Record<string, unknown>).name)) {
+            ctx.addIssue({
+              code: z.ZodIssueCode.custom,
+              path: [...path, key, "staticHeaders", index, "name"],
+              message: "Remote MCP static headers cannot persist credentials or other sensitive authority. Use credentialSecretRefs instead.",
+            });
+          }
+        });
+      } else if (staticHeaders && typeof staticHeaders === "object") {
+        for (const staticHeaderName of Object.keys(staticHeaders)) {
+          if (isSensitiveStaticHeaderName(staticHeaderName)) {
+            ctx.addIssue({
+              code: z.ZodIssueCode.custom,
+              path: [...path, key, "staticHeaders", staticHeaderName],
+              message: "Remote MCP static headers cannot persist credentials or other sensitive authority. Use credentialSecretRefs instead.",
+            });
+          }
+        }
+      }
+    }
+    rejectUnsafeHeaderPolicies(nested, ctx, [...path, key]);
+  }
+}
+
+function rejectUnsafeToolConfig(value: unknown, ctx: z.RefinementCtx) {
+  rejectSensitiveConfigKeys(value, ctx);
+  rejectUnsafeHeaderPolicies(value, ctx);
 }
 
 export const toolCredentialSecretRefSchema = z.object({
@@ -111,7 +183,10 @@ export const mcpConnectionCredentialRefSchema = z.object({
   prefix: z.string().max(120).nullable().optional(),
 });
 
-export const toolTransportConfigSchema = z.record(z.string(), z.unknown()).superRefine(rejectSensitiveConfigKeys);
+export const toolTransportConfigSchema = z.record(z.string(), z.unknown()).superRefine(rejectUnsafeToolConfig);
+const toolAppConfigValuesSchema = z
+  .record(z.string().trim().min(1).max(200), z.unknown())
+  .superRefine(rejectUnsafeToolConfig);
 
 export const toolRedactedValueSummarySchema = z.object({
   summary: z.string().max(4000),
@@ -195,6 +270,7 @@ export const connectionGrantSchema = z.object({
 });
 
 export const putToolConnectionInstallsSchema = z.object({
+  accessMode: z.enum(["reachability_only", "extend_connection_access"]).optional(),
   installs: z.array(z.object({
     targetType: toolConnectionInstallTargetTypeSchema,
     targetId: z.string().trim().min(1).max(200),
@@ -202,6 +278,34 @@ export const putToolConnectionInstallsSchema = z.object({
 }).strict();
 
 export type PutToolConnectionInstalls = z.infer<typeof putToolConnectionInstallsSchema>;
+
+const toolCatalogDigestSchema = z.string().regex(
+  /^[a-f0-9]{64}$/,
+  "Expected a lowercase bare SHA-256 digest",
+);
+
+export const reviewToolConnectionCatalogSchema = z.object({
+  decisions: z.array(z.object({
+    catalogEntryId: z.string().uuid(),
+    decision: z.enum(["activate", "keep_quarantined"]),
+    expectedVersionHash: toolCatalogDigestSchema,
+    expectedSchemaHash: toolCatalogDigestSchema,
+  }).strict()).min(1).max(500),
+}).strict().superRefine((value, ctx) => {
+  const seen = new Set<string>();
+  value.decisions.forEach((decision, index) => {
+    if (seen.has(decision.catalogEntryId)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["decisions", index, "catalogEntryId"],
+        message: "Catalog review decisions must not contain duplicate catalogEntryId values",
+      });
+    }
+    seen.add(decision.catalogEntryId);
+  });
+});
+
+export type ReviewToolConnectionCatalog = z.infer<typeof reviewToolConnectionCatalogSchema>;
 
 export const connectionTokenIssuancePathSchema = z.enum(CONNECTION_TOKEN_ISSUANCE_PATHS);
 
@@ -263,7 +367,7 @@ export const connectToolAppSchema = z.object({
   link: z.string().trim().url().max(2000).optional(),
   name: z.string().trim().min(1).max(160).optional(),
   credentialValues: z.record(z.string().trim().min(1).max(200), z.string().min(1)).optional(),
-  configValues: z.record(z.string().trim().min(1).max(200), z.unknown()).optional(),
+  configValues: toolAppConfigValuesSchema.optional(),
   applicationId: z.string().uuid().optional(),
 }).refine(
   (value) => Boolean(value.galleryKey) !== Boolean(value.link),

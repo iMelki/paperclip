@@ -25,6 +25,7 @@ import {
   routines,
 } from "@paperclipai/db";
 import {
+  EMBEDDED_POSTGRES_TEST_SETUP_TIMEOUT_MS,
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
@@ -57,7 +58,7 @@ describeEmbeddedPostgres("pipelineService", () => {
     tempDb = await startEmbeddedPostgresTestDatabase("paperclip-pipelines-service-");
     db = createDb(tempDb.connectionString);
     svc = pipelineService(db, { heartbeat: noopHeartbeat });
-  }, 20_000);
+  }, EMBEDDED_POSTGRES_TEST_SETUP_TIMEOUT_MS);
 
   afterEach(async () => {
     await db.delete(pipelineAutomationExecutions);

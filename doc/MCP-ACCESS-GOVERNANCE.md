@@ -161,6 +161,30 @@ curl -fsS -X POST \
 
 Connections are created `enabled: false`. Run a health check and a catalog refresh before flipping `enabled: true`.
 
+Some hosted MCPs use non-secret selection headers in addition to credentials.
+Declare those once under `config.headerPolicy.staticHeaders` (or the equivalent
+`transportConfig` policy) so health checks, catalog discovery, and live Gateway
+execution all use the same values:
+
+```json
+{
+  "headerPolicy": {
+    "staticHeaders": [
+      { "name": "X-MCP-Toolsets", "value": "repositories,projects" },
+      { "name": "X-MCP-Readonly", "value": "true" },
+      { "name": "X-MCP-Lockdown", "value": "true" }
+    ]
+  }
+}
+```
+
+Keep secrets in `credentialRefs` / `credentialSecretRefs`, never in
+`staticHeaders`. Header names and values are validated before connection
+persistence; malformed or newline-bearing values fail closed. Managed
+credentials override a colliding static or caller header, and the MCP
+`Accept`/`Content-Type` protocol headers cannot be overridden. Audit evidence
+records header names and collision decisions, not header values.
+
 ### Connection lifecycle
 
 ```sh

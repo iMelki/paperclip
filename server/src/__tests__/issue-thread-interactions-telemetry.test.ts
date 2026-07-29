@@ -14,6 +14,7 @@ import {
   issues,
 } from "@paperclipai/db";
 import {
+  EMBEDDED_POSTGRES_TEST_SETUP_TIMEOUT_MS,
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
@@ -40,7 +41,7 @@ describeEmbeddedPostgres("issueThreadInteractionService telemetry", () => {
     tempDb = await startEmbeddedPostgresTestDatabase("paperclip-issue-interaction-telemetry-");
     db = createDb(tempDb.connectionString);
     interactionsSvc = issueThreadInteractionService(db);
-  }, 20_000);
+  }, EMBEDDED_POSTGRES_TEST_SETUP_TIMEOUT_MS);
 
   beforeEach(() => {
     telemetryMocks.track.mockClear();

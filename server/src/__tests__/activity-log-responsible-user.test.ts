@@ -17,6 +17,7 @@ import {
   type LogActivityInput,
 } from "../services/activity-log.js";
 import {
+  EMBEDDED_POSTGRES_TEST_SETUP_TIMEOUT_MS,
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
@@ -176,7 +177,7 @@ describeEmbeddedPostgres("logActivity responsible-user stamping", () => {
   beforeAll(async () => {
     tempDb = await startEmbeddedPostgresTestDatabase("paperclip-activity-responsible-user-");
     db = createDb(tempDb.connectionString);
-  }, 20_000);
+  }, EMBEDDED_POSTGRES_TEST_SETUP_TIMEOUT_MS);
 
   afterAll(async () => {
     await tempDb?.cleanup();

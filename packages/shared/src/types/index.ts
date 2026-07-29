@@ -492,6 +492,7 @@ export type {
   McpConnectionCredentialRef,
   ToolConnectionHealthCheckResult,
   ToolCatalogRefreshResult,
+  ToolCatalogReviewResult,
   ToolExampleInstallResult,
   ToolExampleSmokeCheck,
   ToolExampleSmokeResult,

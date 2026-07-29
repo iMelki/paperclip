@@ -115,6 +115,14 @@ function cleanupEmbeddedPostgresTestDirs(dataDir: string) {
   });
 }
 
+// Native Windows can take materially longer to initialize a fresh embedded
+// cluster when real-time scanning or another serial shard is still releasing
+// PostgreSQL children. A timed-out beforeAll cannot retain the cleanup handle,
+// so every test that explicitly used the former 20-second setup bound shares
+// this platform-aware value.
+export const EMBEDDED_POSTGRES_TEST_SETUP_TIMEOUT_MS =
+  process.platform === "win32" ? 60_000 : 20_000;
+
 // Upper bound (ms) on how long we wait for the embedded Postgres cluster to
 // stop gracefully before abandoning the wait and returning from the hook.
 const EMBEDDED_POSTGRES_STOP_TIMEOUT_MS = 5000;

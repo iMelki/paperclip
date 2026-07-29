@@ -23,6 +23,7 @@ import {
   duplicateToolProfileSchema,
   finishToolAppSchema,
   reconnectToolAppSchema,
+  reviewToolConnectionCatalogSchema,
   reviewToolProfileNewToolsSchema,
   createToolTrustRuleFromActionRequestSchema,
   importMcpJsonSchema,
@@ -45,6 +46,7 @@ import { getActorInfo, assertBoard, assertCompanyAccess, hasCompanyAccess } from
 import { badRequest, forbidden, notFound, unprocessable } from "../errors.js";
 import { accessService, googleSheetsRobotEmailFromEnv, logActivity, toolAccessPolicyService, toolAccessService } from "../services/index.js";
 import { ToolGatewayHttpError, type ToolGatewayService } from "../services/tool-gateway.js";
+import { toolCatalogReviewService } from "../services/tool-catalog-review.js";
 
 /** Allowlist (e.g. Google Sheets allowed spreadsheet ids) lives in connection config. */
 function allowlistIds(config: Record<string, unknown> | null | undefined): string[] {
@@ -89,6 +91,7 @@ export function toolAccessRoutes(
 ) {
   const router = Router();
   const svc = toolAccessService(db, options);
+  const catalogReview = toolCatalogReviewService(db);
   const policySvc = toolAccessPolicyService(db);
 
   function configuredPublicBaseUrl() {
@@ -649,6 +652,10 @@ export function toolAccessRoutes(
         entityId: connection.id,
         details: {
           installs: snapshot.installs.map((install) => ({ targetType: install.targetType, targetId: install.targetId })),
+          accessMode: snapshot.accessMode ?? "reachability_only",
+          reachabilityOnly: snapshot.reachabilityOnly ?? true,
+          removedLegacyAccessBindingCount:
+            snapshot.removedLegacyAccessBindingCount ?? 0,
         },
       });
       res.json(snapshot);
@@ -844,6 +851,48 @@ export function toolAccessRoutes(
     assertToolAppMutationAccess(req, existing.companyId);
     res.json(await svc.refreshCatalog(existing.id, getActorInfo(req)));
   });
+
+  router.post(
+    "/companies/:companyId/tools/connections/:connectionId/catalog/review",
+    validate(reviewToolConnectionCatalogSchema),
+    async (req, res) => {
+      assertBoard(req);
+      const companyId = req.params.companyId as string;
+      assertCompanyAccess(req, companyId);
+      const existing = await svc.getConnection(
+        req.params.connectionId as string,
+      );
+      if (existing.companyId !== companyId) {
+        throw notFound("Tool connection not found");
+      }
+      await assertBoardToolPermission(
+        req,
+        companyId,
+        "tools:manage_connections",
+      );
+      const result = await catalogReview.reviewConnectionCatalog({
+        companyId,
+        connectionId: existing.id,
+        body: req.body,
+        actor: getActorInfo(req),
+      });
+      await logActivity(db, {
+        companyId,
+        actorType: "user",
+        actorId: req.actor.userId ?? "board",
+        action: "tool_connection.catalog_reviewed",
+        entityType: "tool_connection",
+        entityId: existing.id,
+        details: {
+          activatedCount: result.activatedCount,
+          keptQuarantinedCount: result.keptQuarantinedCount,
+          unchangedCount: result.unchangedCount,
+          catalogEntryIds: result.catalog.map((entry) => entry.id),
+        },
+      });
+      res.json(result);
+    },
+  );
 
   router.get("/tool-connections/:connectionId/catalog", async (req, res) => {
     assertBoard(req);

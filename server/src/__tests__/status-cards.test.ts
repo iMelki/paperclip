@@ -32,6 +32,7 @@ import type { IssueAssignmentWakeupDeps } from "../services/issue-assignment-wak
 import { issueService } from "../services/issues.js";
 import { statusCardService } from "../services/status-cards.js";
 import {
+  EMBEDDED_POSTGRES_TEST_SETUP_TIMEOUT_MS,
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
@@ -79,7 +80,7 @@ describeEmbeddedPostgres("status card routes", () => {
   beforeAll(async () => {
     tempDb = await startEmbeddedPostgresTestDatabase("paperclip-status-cards-");
     db = createDb(tempDb.connectionString);
-  }, 20_000);
+  }, EMBEDDED_POSTGRES_TEST_SETUP_TIMEOUT_MS);
 
   afterEach(async () => {
     await db.delete(costEvents);

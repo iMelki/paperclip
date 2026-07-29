@@ -14,6 +14,7 @@ import {
   companySearchExtractQuerySchema,
 } from "@paperclipai/shared";
 import {
+  EMBEDDED_POSTGRES_TEST_SETUP_TIMEOUT_MS,
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
@@ -66,7 +67,7 @@ describeEmbeddedPostgres("companySearchExtractService", () => {
     tempDb = await startEmbeddedPostgresTestDatabase("paperclip-company-search-extract-");
     db = createDb(tempDb.connectionString);
     svc = companySearchExtractService(db);
-  }, 20_000);
+  }, EMBEDDED_POSTGRES_TEST_SETUP_TIMEOUT_MS);
 
   afterEach(async () => {
     await db.delete(issueDocuments);

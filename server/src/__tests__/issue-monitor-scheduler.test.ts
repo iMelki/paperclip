@@ -21,6 +21,7 @@ import {
   workspaceRuntimeServices,
 } from "@paperclipai/db";
 import {
+  EMBEDDED_POSTGRES_TEST_SETUP_TIMEOUT_MS,
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
@@ -44,7 +45,7 @@ describeEmbeddedPostgres("issue monitor scheduler", () => {
   beforeAll(async () => {
     tempDb = await startEmbeddedPostgresTestDatabase("paperclip-issue-monitor-");
     db = createDb(tempDb.connectionString);
-  }, 20_000);
+  }, EMBEDDED_POSTGRES_TEST_SETUP_TIMEOUT_MS);
 
   async function waitForHeartbeatIdle(timeoutMs = 3_000) {
     const deadline = Date.now() + timeoutMs;

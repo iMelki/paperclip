@@ -13,6 +13,7 @@ import {
 } from "@paperclipai/db";
 import { companySearchQuerySchema } from "@paperclipai/shared";
 import {
+  EMBEDDED_POSTGRES_TEST_SETUP_TIMEOUT_MS,
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
@@ -41,7 +42,7 @@ describeEmbeddedPostgres("deleted issue comment redaction", () => {
     tempDb = await startEmbeddedPostgresTestDatabase("paperclip-comment-redaction-");
     db = createDb(tempDb.connectionString);
     await db.execute(sql.raw("CREATE EXTENSION IF NOT EXISTS pg_trgm"));
-  }, 20_000);
+  }, EMBEDDED_POSTGRES_TEST_SETUP_TIMEOUT_MS);
 
   afterEach(async () => {
     await db.delete(issueReferenceMentions);

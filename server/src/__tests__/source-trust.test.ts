@@ -12,6 +12,7 @@ import {
   sanitizeQuarantinedCommentForHigherTrust,
 } from "../services/source-trust.js";
 import {
+  EMBEDDED_POSTGRES_TEST_SETUP_TIMEOUT_MS,
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
@@ -98,7 +99,7 @@ describeEmbeddedPostgres("resolveActorSourceTrustForIssue", () => {
   beforeAll(async () => {
     tempDb = await startEmbeddedPostgresTestDatabase("paperclip-source-trust-");
     db = createDb(tempDb.connectionString);
-  }, 20_000);
+  }, EMBEDDED_POSTGRES_TEST_SETUP_TIMEOUT_MS);
 
   afterEach(async () => {
     await db.delete(heartbeatRuns);

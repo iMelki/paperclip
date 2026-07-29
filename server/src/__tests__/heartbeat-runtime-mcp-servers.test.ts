@@ -9,6 +9,7 @@ import {
   heartbeatRuns,
   toolAccessAuditEvents,
   toolApplications,
+  toolCatalogEntries,
   toolConnectionInstalls,
   toolConnections,
   toolMcpGateways,
@@ -18,6 +19,7 @@ import {
   toolProfiles,
 } from "@paperclipai/db";
 import {
+  EMBEDDED_POSTGRES_TEST_SETUP_TIMEOUT_MS,
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
@@ -34,7 +36,7 @@ describeEmbeddedPostgres("heartbeat runtime MCP servers", () => {
   beforeAll(async () => {
     tempDb = await startEmbeddedPostgresTestDatabase("paperclip-heartbeat-runtime-mcp-");
     db = createDb(tempDb.connectionString);
-  }, 20_000);
+  }, EMBEDDED_POSTGRES_TEST_SETUP_TIMEOUT_MS);
 
   afterEach(async () => {
     if (originalApiUrl === undefined) delete process.env.PAPERCLIP_API_URL;
@@ -48,6 +50,7 @@ describeEmbeddedPostgres("heartbeat runtime MCP servers", () => {
     await db.delete(toolProfileBindings);
     await db.delete(toolProfileEntries);
     await db.delete(toolProfiles);
+    await db.delete(toolCatalogEntries);
     await db.delete(toolConnections);
     await db.delete(toolApplications);
     await db.delete(agents);
@@ -87,6 +90,7 @@ describeEmbeddedPostgres("heartbeat runtime MCP servers", () => {
         transport: "mcp_remote",
         status: "active",
         enabled: true,
+        healthStatus: "ok",
         config: { url: "https://installed.example.test/mcp" },
       },
       {
@@ -97,22 +101,51 @@ describeEmbeddedPostgres("heartbeat runtime MCP servers", () => {
         transport: "mcp_remote",
         status: "active",
         enabled: true,
+        healthStatus: "ok",
         config: { url: "https://uninstalled.example.test/mcp" },
       },
     ]).returning();
+    const [installedCatalog, uninstalledCatalog] = await db.insert(toolCatalogEntries).values([
+      {
+        companyId: company!.id,
+        applicationId: application!.id,
+        connectionId: installedConnection!.id,
+        name: "issues_read",
+        toolName: "issues_read",
+        entryKind: "tool",
+        status: "active",
+        versionHash: "a".repeat(64),
+        schemaHash: "b".repeat(64),
+        reviewedAt: new Date(),
+      },
+      {
+        companyId: company!.id,
+        applicationId: application!.id,
+        connectionId: uninstalledConnection!.id,
+        name: "projects_read",
+        toolName: "projects_read",
+        entryKind: "tool",
+        status: "active",
+        versionHash: "c".repeat(64),
+        schemaHash: "d".repeat(64),
+        reviewedAt: new Date(),
+      },
+    ]).returning();
+    expect(uninstalledCatalog).toBeTruthy();
     const [profile] = await db.insert(toolProfiles).values({
       companyId: company!.id,
-      profileKey: `app:${installedConnection!.id}`,
-      name: "Installed MCP",
+      profileKey: `role:runtime-${agent!.id}`,
+      name: "Runtime Agent Read",
       defaultAction: "deny",
     }).returning();
     await db.insert(toolProfileEntries).values({
       companyId: company!.id,
       profileId: profile!.id,
-      selectorType: "connection",
+      selectorType: "catalog_entry",
       effect: "include",
       applicationId: application!.id,
       connectionId: installedConnection!.id,
+      catalogEntryId: installedCatalog!.id,
     });
     await db.insert(toolProfileBindings).values({
       companyId: company!.id,
@@ -133,7 +166,7 @@ describeEmbeddedPostgres("heartbeat runtime MCP servers", () => {
 
     expect(first).toHaveLength(1);
     expect(first[0]).toMatchObject({
-      name: "Installed MCP",
+      name: expect.stringMatching(/^Runtime Installed MCP /),
       connectionId: installedConnection!.id,
       url: expect.stringMatching(/^https:\/\/paperclip\.example\.test\/api\/tool-gateway\/gateways\/.+\/mcp$/),
       token: expect.stringMatching(/^pcgw_/),
@@ -143,7 +176,18 @@ describeEmbeddedPostgres("heartbeat runtime MCP servers", () => {
 
     const gateways = await db.select().from(toolMcpGateways);
     expect(gateways).toHaveLength(1);
-    expect(gateways[0]!.metadata).toMatchObject({ managedRuntimeConnectionId: installedConnection!.id });
+    expect(gateways[0]!.metadata).toMatchObject({
+      source: "managed_runtime_exact",
+      managedRuntimeAgentId: agent!.id,
+      managedRuntimeConnectionId: installedConnection!.id,
+      catalogEntryIds: [installedCatalog!.id],
+    });
+    expect(gateways[0]!.agentId).toBe(agent!.id);
+    const appProfiles = await db
+      .select()
+      .from(toolProfiles)
+      .where(eq(toolProfiles.profileKey, `app:${installedConnection!.id}`));
+    expect(appProfiles).toHaveLength(0);
     const tokens = await db.select().from(toolMcpGatewayTokens);
     expect(tokens).toHaveLength(2);
     for (const token of tokens) {
@@ -182,21 +226,35 @@ describeEmbeddedPostgres("heartbeat runtime MCP servers", () => {
       transport: "mcp_remote",
       status: "active",
       enabled: true,
+      healthStatus: "ok",
       config: { url: "https://zapier.example.test/mcp" },
+    }).returning();
+    const [catalog] = await db.insert(toolCatalogEntries).values({
+      companyId: company!.id,
+      applicationId: application!.id,
+      connectionId: connection!.id,
+      name: "zapier_read",
+      toolName: "zapier_read",
+      entryKind: "tool",
+      status: "active",
+      versionHash: "e".repeat(64),
+      schemaHash: "f".repeat(64),
+      reviewedAt: new Date(),
     }).returning();
     const [profile] = await db.insert(toolProfiles).values({
       companyId: company!.id,
-      profileKey: `app:${connection!.id}`,
-      name: "Zapier",
+      profileKey: `role:zapier-${agent!.id}`,
+      name: "Zapier read",
       defaultAction: "deny",
     }).returning();
     await db.insert(toolProfileEntries).values({
       companyId: company!.id,
       profileId: profile!.id,
-      selectorType: "connection",
+      selectorType: "catalog_entry",
       effect: "include",
       applicationId: application!.id,
       connectionId: connection!.id,
+      catalogEntryId: catalog!.id,
     });
     await db.insert(toolProfileBindings).values({
       companyId: company!.id,

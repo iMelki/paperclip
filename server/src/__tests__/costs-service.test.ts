@@ -18,6 +18,7 @@ import {
 import { costService } from "../services/costs.ts";
 import { financeService } from "../services/finance.ts";
 import {
+  EMBEDDED_POSTGRES_TEST_SETUP_TIMEOUT_MS,
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
@@ -417,7 +418,7 @@ describeEmbeddedPostgres("cost and finance aggregate overflow handling", () => {
     db = createDb(tempDb.connectionString);
     costs = costService(db);
     finance = financeService(db);
-  }, 20_000);
+  }, EMBEDDED_POSTGRES_TEST_SETUP_TIMEOUT_MS);
 
   afterEach(async () => {
     await db.delete(financeEvents);

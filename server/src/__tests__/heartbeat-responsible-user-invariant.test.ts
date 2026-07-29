@@ -16,6 +16,7 @@ import {
   issues,
 } from "@paperclipai/db";
 import {
+  EMBEDDED_POSTGRES_TEST_SETUP_TIMEOUT_MS,
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
@@ -86,7 +87,7 @@ describeEmbeddedPostgres("heartbeat responsible-user invariant", () => {
     tempDb = await startEmbeddedPostgresTestDatabase("paperclip-heartbeat-responsible-user-");
     db = createDb(tempDb.connectionString);
     heartbeat = heartbeatService(db);
-  }, 20_000);
+  }, EMBEDDED_POSTGRES_TEST_SETUP_TIMEOUT_MS);
 
   afterEach(async () => {
     mockAdapterExecute.mockClear();

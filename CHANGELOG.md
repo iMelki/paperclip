@@ -4,6 +4,37 @@ All notable changes to this repository should be recorded here.
 
 ## Unreleased
 
+- Unified remote-MCP header resolution across gallery connection discovery,
+  health checks, and Tool Gateway execution under #23. Versioned non-secret
+  static headers now reach every protocol path, credential and MCP protocol
+  headers remain authoritative, malformed policies fail before persistence,
+  and audit/catalog evidence records names and collision decisions without
+  storing header or credential values.
+- Hardened native-Windows test lifecycle cleanup: all 125 embedded-PostgreSQL
+  `beforeAll` hooks that carried the former explicit 20-second setup bound now
+  use one shared, AST-guarded 60-second Windows / 20-second non-Windows policy.
+  Failed or reset runtime services terminate their registered process trees,
+  restart-adoption tests opt into process preservation explicitly, and
+  stale-port fixtures reap the real listener PID. The workspace-runtime suite
+  now records 100 passing tests (5 skipped) and exits with no surviving
+  runtime-service fixtures; complete-suite proof remains under #20.
+- Made the observed complete-validation paths Windows-portable under #22:
+  a cwd-contained Node filesystem helper replaces POSIX `cp`, `rm`, and
+  `chmod` across database, server, sandbox-provider, CLI, and Codex-adapter
+  builds; packaged-artifact tests invoke validated JavaScript package-manager
+  entrypoints through Node without shell interpolation, including
+  metacharacter paths; path assertions use native separators; and
+  local-calendar UI fixtures no longer assume the host runs in UTC. Stale
+  package-build assertions now verify the portable helper, catalog scans skip
+  dependency trees, Cases route tests cache their expensive application import,
+  and workspace reconciliation accepts the observable `starting` to `running`
+  service transition while preserving the 422 safety gate.
+- Documented the current company-import adapter rewrite and the reviewed raw
+  import API workaround that preserves deterministic Process adapters while
+  issue #21 tracks a first-class preserve-adapters mode.
+- Added `onboard --yes --no-run` for non-interactive config-only bootstrap and
+  made failed `doctor` diagnostics return a nonzero process status, with
+  focused regression coverage and automation guidance.
 - Isolated Vitest children from Git hook-local repository state so nested
   temporary repositories and linked worktrees cannot inherit the committing
   repository's index. Added a foreign-worktree regression test and line-scoped

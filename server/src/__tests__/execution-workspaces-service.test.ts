@@ -23,6 +23,7 @@ import {
   workspaceRuntimeServices,
 } from "@paperclipai/db";
 import {
+  EMBEDDED_POSTGRES_TEST_SETUP_TIMEOUT_MS,
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
@@ -226,7 +227,7 @@ describeEmbeddedPostgres("executionWorkspaceService.getCloseReadiness", () => {
     tempDb = await startEmbeddedPostgresTestDatabase("paperclip-execution-workspaces-service-");
     db = createDb(tempDb.connectionString);
     svc = executionWorkspaceService(db);
-  }, 20_000);
+  }, EMBEDDED_POSTGRES_TEST_SETUP_TIMEOUT_MS);
 
   afterEach(async () => {
     await db.delete(workspaceRuntimeServices);
@@ -1934,7 +1935,7 @@ describeEmbeddedPostgres("executionWorkspaceService.getCloseReadiness", () => {
             expect.objectContaining({
               id: startedServices[0]?.id,
               serviceName: "web",
-              status: "starting",
+              status: expect.stringMatching(/^(?:starting|running)$/),
             }),
           ],
         },

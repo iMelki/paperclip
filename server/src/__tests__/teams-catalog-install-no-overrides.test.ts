@@ -6,6 +6,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { eq } from "drizzle-orm";
 import { agents, companies, createDb } from "@paperclipai/db";
 import {
+  EMBEDDED_POSTGRES_TEST_SETUP_TIMEOUT_MS,
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
@@ -32,7 +33,7 @@ describeEmbeddedPostgres("teams catalog install with no caller adapter overrides
     process.env.PAPERCLIP_HOME = tempHome;
     tempDb = await startEmbeddedPostgresTestDatabase("paperclip-teams-catalog-no-overrides-");
     db = createDb(tempDb.connectionString);
-  }, 20_000);
+  }, EMBEDDED_POSTGRES_TEST_SETUP_TIMEOUT_MS);
 
   afterAll(async () => {
     if (oldPaperclipHome === undefined) delete process.env.PAPERCLIP_HOME;

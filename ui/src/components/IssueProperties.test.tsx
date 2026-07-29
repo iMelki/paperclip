@@ -2055,6 +2055,11 @@ describe("IssueProperties", () => {
 
   it("renders scheduled, retrying, due, overdue, cleared, and empty monitor row states", async () => {
     const dateNowSpy = vi.spyOn(Date, "now").mockReturnValue(new Date("2026-07-17T13:56:00.000Z").getTime());
+    const formatLocalTime = (timestamp: string) =>
+      new Intl.DateTimeFormat(undefined, {
+        hour: "numeric",
+        minute: "2-digit",
+      }).format(new Date(timestamp));
     const baseMonitorState = {
       status: "scheduled" as const,
       nextCheckAt: "2026-07-17T16:08:00.000Z",
@@ -2085,7 +2090,9 @@ describe("IssueProperties", () => {
     }));
     await flush();
     expect(monitorRowText()).toContain("In 2h 12m");
-    expect(monitorRowText()).toContain("Today, 4:08 PM · Attempt 1");
+    expect(monitorRowText()).toContain(
+      `Today, ${formatLocalTime(baseMonitorState.nextCheckAt)} · Attempt 1`,
+    );
 
     renderMonitor(createIssue({
       executionPolicy: createExecutionPolicy({ monitor: { ...baseMonitorState, nextCheckAt: "2026-07-17T18:08:00.000Z" } }),
@@ -2094,7 +2101,9 @@ describe("IssueProperties", () => {
     }));
     await flush();
     expect(monitorRowText()).toContain("In 2h 12m");
-    expect(monitorRowText()).toContain("Today, 4:08 PM");
+    expect(monitorRowText()).toContain(
+      `Today, ${formatLocalTime(baseMonitorState.nextCheckAt)}`,
+    );
 
     renderMonitor(createIssue({
       executionPolicy: createExecutionPolicy({ monitor: { ...baseMonitorState, serviceName: "vercel-deploy" } }),
@@ -2118,7 +2127,9 @@ describe("IssueProperties", () => {
     }));
     await flush();
     expect(monitorRowText()).toContain("Overdue by 18m");
-    expect(monitorRowText()).toContain("Today, 1:38 PM · fires on next tick");
+    expect(monitorRowText()).toContain(
+      `Today, ${formatLocalTime("2026-07-17T13:38:00.000Z")} · fires on next tick`,
+    );
 
     renderMonitor(createIssue({
       executionPolicy: createExecutionPolicy(),

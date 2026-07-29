@@ -56,6 +56,25 @@ type OnboardOptions = {
 
 type OnboardDefaults = Pick<PaperclipConfig, "database" | "logging" | "server" | "auth" | "storage" | "secrets">;
 
+export function shouldStartAfterOnboard(opts: Pick<OnboardOptions, "run" | "yes">): boolean {
+  return opts.run ?? (opts.yes === true);
+}
+
+export function shouldPromptToStartAfterOnboard(
+  opts: Pick<OnboardOptions, "run" | "invokedByRun">,
+  shouldRunNow: boolean,
+  stdinIsTTY = process.stdin.isTTY,
+  stdoutIsTTY = process.stdout.isTTY,
+): boolean {
+  return (
+    opts.run === undefined &&
+    !shouldRunNow &&
+    !opts.invokedByRun &&
+    stdinIsTTY === true &&
+    stdoutIsTTY === true
+  );
+}
+
 const TAILNET_BIND_WARNING =
   "No Tailscale address was detected during setup. The saved config will stay on loopback until Tailscale is available or PAPERCLIP_TAILNET_BIND_HOST is set.";
 
@@ -400,8 +419,8 @@ export async function onboard(opts: OnboardOptions): Promise<void> {
       "Next commands",
     );
 
-    let shouldRunNow = opts.run === true || opts.yes === true;
-    if (!shouldRunNow && !opts.invokedByRun && process.stdin.isTTY && process.stdout.isTTY) {
+    let shouldRunNow = shouldStartAfterOnboard(opts);
+    if (shouldPromptToStartAfterOnboard(opts, shouldRunNow)) {
       const answer = await p.confirm({
         message: "Start Paperclip now?",
         initialValue: true,
@@ -660,8 +679,8 @@ export async function onboard(opts: OnboardOptions): Promise<void> {
     await bootstrapCeoInvite({ config: configPath });
   }
 
-  let shouldRunNow = opts.run === true || opts.yes === true;
-  if (!shouldRunNow && !opts.invokedByRun && process.stdin.isTTY && process.stdout.isTTY) {
+  let shouldRunNow = shouldStartAfterOnboard(opts);
+  if (shouldPromptToStartAfterOnboard(opts, shouldRunNow)) {
     const answer = await p.confirm({
       message: "Start Paperclip now?",
       initialValue: true,

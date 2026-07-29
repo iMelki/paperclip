@@ -71,7 +71,8 @@ program
   .option("-d, --data-dir <path>", DATA_DIR_OPTION_HELP)
   .option("--bind <mode>", "Quickstart reachability preset (loopback, lan, tailnet)")
   .option("-y, --yes", "Accept quickstart defaults (trusted local loopback unless --bind is set) and start immediately", false)
-  .option("--run", "Start Paperclip immediately after saving config", false)
+  .option("--run", "Start Paperclip immediately after saving config")
+  .option("--no-run", "Save configuration without starting Paperclip")
   .action(onboard);
 
 program

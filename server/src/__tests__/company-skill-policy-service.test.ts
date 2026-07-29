@@ -8,7 +8,7 @@ import {
   createDb,
   principalPermissionGrants,
 } from "@paperclipai/db";
-import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
+import { EMBEDDED_POSTGRES_TEST_SETUP_TIMEOUT_MS, getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 import { companySkillPolicyService } from "../services/company-skill-policy.js";
 
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
@@ -21,7 +21,7 @@ describeEmbeddedPostgres("companySkillPolicyService", () => {
   beforeAll(async () => {
     tempDb = await startEmbeddedPostgresTestDatabase("paperclip-skill-policy-");
     db = createDb(tempDb.connectionString);
-  }, 20_000);
+  }, EMBEDDED_POSTGRES_TEST_SETUP_TIMEOUT_MS);
 
   afterEach(async () => {
     await db.delete(activityLog);

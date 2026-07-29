@@ -21,7 +21,7 @@ import {
   toolProfiles,
 } from "@paperclipai/db";
 import { eq } from "drizzle-orm";
-import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
+import { EMBEDDED_POSTGRES_TEST_SETUP_TIMEOUT_MS, getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 import { smokeLabRoutes } from "../routes/smoke-lab.js";
 import { SMOKE_LAB_OAUTH_SCOPE } from "../services/smoke-lab.js";
 import { errorHandler } from "../middleware/index.js";
@@ -105,7 +105,7 @@ describeEmbeddedPostgres("smoke lab service pack and results API", () => {
   beforeAll(async () => {
     tempDb = await startEmbeddedPostgresTestDatabase("paperclip-smoke-lab-");
     db = createDb(tempDb.connectionString);
-  }, 20_000);
+  }, EMBEDDED_POSTGRES_TEST_SETUP_TIMEOUT_MS);
 
   afterEach(async () => {
     vi.unstubAllEnvs();

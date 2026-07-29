@@ -11831,10 +11831,8 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         const termination = await terminateHeartbeatRunProcess({
           pid: run.processPid,
           processGroupId: run.processGroupId,
-          // A historical process-group id may have been reused after the
-          // leader exited. Without a live child handle or creation identity,
-          // fail closed and leave the run for operator recovery.
           expectedStartedAt: run.processStartedAt,
+          trustedProcessGroup: true,
         });
         if (termination?.confirmedStopped === false) {
           await retainRunForUnverifiedTermination({

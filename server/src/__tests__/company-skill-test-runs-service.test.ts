@@ -19,6 +19,7 @@ import {
   issues,
 } from "@paperclipai/db";
 import {
+  EMBEDDED_POSTGRES_TEST_SETUP_TIMEOUT_MS,
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
@@ -43,7 +44,7 @@ describeEmbeddedPostgres("companySkillService skill test runs", () => {
     tempDb = await startEmbeddedPostgresTestDatabase("paperclip-company-skill-test-runs-");
     db = createDb(tempDb.connectionString);
     svc = companySkillService(db);
-  }, 20_000);
+  }, EMBEDDED_POSTGRES_TEST_SETUP_TIMEOUT_MS);
 
   afterEach(async () => {
     await db.delete(issueAttachments);

@@ -48,12 +48,21 @@ import {
 } from "../commands/worktree-lib.js";
 import type { PaperclipConfig } from "../config/schema.js";
 import {
+  EMBEDDED_POSTGRES_TEST_SETUP_TIMEOUT_MS,
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
 
 const ORIGINAL_CWD = process.cwd();
 const ORIGINAL_ENV = { ...process.env };
+// This end-to-end seed path starts a source cluster, snapshots it, restores a
+// second cluster, and then starts that target cluster for readback. Preserve
+// the existing 30-second non-Windows bound while sharing the finite 60-second
+// Windows policy used by embedded-Postgres setup hooks under loaded shards.
+const WORKTREE_AUTH_SEED_TEST_TIMEOUT_MS = Math.max(
+  30_000,
+  EMBEDDED_POSTGRES_TEST_SETUP_TIMEOUT_MS,
+);
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
 const itEmbeddedPostgres = embeddedPostgresSupport.supported ? it : it.skip;
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
@@ -701,7 +710,7 @@ describe("worktree helpers", () => {
         fs.rmSync(tempRoot, { recursive: true, force: true });
       }
     },
-    30000,
+    WORKTREE_AUTH_SEED_TEST_TIMEOUT_MS,
   );
 
   it("avoids ports already claimed by sibling worktree instance configs", async () => {

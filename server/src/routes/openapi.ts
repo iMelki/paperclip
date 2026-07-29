@@ -185,6 +185,7 @@ import {
   disableToolStdioCommandTemplateSchema,
   finishToolAppSchema,
   reconnectToolAppSchema,
+  reviewToolConnectionCatalogSchema,
   updateToolConnectionSchema,
   putToolConnectionInstallsSchema,
   toolConnectionTestCallSchema,
@@ -816,6 +817,7 @@ const BOARD_ONLY_OPERATIONS = new Set([
   "POST /api/tool-connections/{connectionId}/reconnect",
   "POST /api/tool-connections/{connectionId}/catalog/refresh",
   "GET /api/tool-connections/{connectionId}/catalog",
+  "POST /api/companies/{companyId}/tools/connections/{connectionId}/catalog/review",
   "GET /api/tool-connections/{connectionId}/activity",
   "GET /api/tool-connections/{connectionId}/test-agents",
   "POST /api/tool-connections/{connectionId}/test-calls",
@@ -6312,6 +6314,22 @@ registerCurrentRoute({
   path: "/api/tool-connections/{connectionId}/catalog",
   tags: ["tool-access"],
   summary: "List a tool connection catalog",
+});
+
+registerCurrentRoute({
+  method: "post",
+  path: "/api/companies/{companyId}/tools/connections/{connectionId}/catalog/review",
+  tags: ["tool-access"],
+  summary: "Review quarantined tool catalog entries with hash preconditions",
+  body: reviewToolConnectionCatalogSchema,
+  responses: {
+    200: r.ok(),
+    400: r.badRequest,
+    401: r.unauthorized,
+    403: r.forbidden,
+    404: r.notFound,
+    409: r.conflict,
+  },
 });
 
 registerCurrentRoute({

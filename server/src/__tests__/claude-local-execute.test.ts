@@ -11,6 +11,12 @@ import {
   resetClaudeCliCapabilitiesCacheForTests,
 } from "@paperclipai/adapter-claude-local/server";
 
+// Sandbox-managed execution starts a short-lived API bridge plus one or more
+// child CLI processes. Loaded Windows shards can legitimately cross the old
+// 10-second per-test override, while the stable full-suite runner already uses
+// a 30-second test bound. Keep these focused tests on that same finite policy.
+const SANDBOX_EXECUTION_TEST_TIMEOUT_MS = 30_000;
+
 async function writeFailingClaudeCommand(
   commandPath: string,
   options: { resultEvent: Record<string, unknown>; exitCode?: number },
@@ -888,7 +894,7 @@ describe("claude execute", () => {
       else process.env.PATH = previousPath;
       await fs.rm(root, { recursive: true, force: true });
     }
-  }, 10_000);
+  }, SANDBOX_EXECUTION_TEST_TIMEOUT_MS);
 
   it("omits --effort for sandbox-managed runs when the installed Claude CLI does not advertise it", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-claude-execute-sandbox-effort-"));
@@ -946,7 +952,7 @@ describe("claude execute", () => {
       restore();
       await fs.rm(root, { recursive: true, force: true });
     }
-  }, 10_000);
+  }, SANDBOX_EXECUTION_TEST_TIMEOUT_MS);
 
   it("passes through --effort and reuses the sandbox capability probe across sandbox leases when the installed Claude CLI advertises it", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-claude-execute-sandbox-effort-supported-"));
@@ -1021,7 +1027,7 @@ describe("claude execute", () => {
       restore();
       await fs.rm(root, { recursive: true, force: true });
     }
-  }, 10_000);
+  }, SANDBOX_EXECUTION_TEST_TIMEOUT_MS);
 
   it("degrades to the conservative fallback (returns null) when the sandbox probe throws, and retries on the next lease", async () => {
     let calls = 0;

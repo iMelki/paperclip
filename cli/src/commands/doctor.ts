@@ -192,6 +192,7 @@ function printSummary(results: CheckResult[]): { passed: number; warned: number;
   p.note(parts.join(", "), "Summary");
 
   if (failed > 0) {
+    process.exitCode = 1;
     p.outro(pc.red("Some checks failed. Fix the issues above and re-run doctor."));
   } else if (warned > 0) {
     p.outro(pc.yellow("All critical checks passed with some warnings."));

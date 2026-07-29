@@ -17,12 +17,12 @@ export const MCP_HTTP_ACCEPT = "application/json, text/event-stream";
 /**
  * Default headers for an MCP Streamable HTTP JSON-RPC POST. Caller-supplied
  * headers (e.g. resolved credentials) are preserved, while the required
- * Streamable HTTP Accept value is kept authoritative.
+ * JSON content type and Streamable HTTP Accept value stay authoritative.
  */
 export function mcpHttpRequestHeaders(extra?: Record<string, string>): Record<string, string> {
   return {
-    "content-type": "application/json",
     ...extra,
+    "content-type": "application/json",
     accept: MCP_HTTP_ACCEPT,
   };
 }

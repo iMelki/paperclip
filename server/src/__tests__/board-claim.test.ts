@@ -16,6 +16,7 @@ import {
   inspectBoardClaimChallenge,
 } from "../board-claim.js";
 import {
+  EMBEDDED_POSTGRES_TEST_SETUP_TIMEOUT_MS,
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
@@ -30,7 +31,7 @@ describeEmbeddedPostgres("board claim", () => {
   beforeAll(async () => {
     tempDb = await startEmbeddedPostgresTestDatabase("paperclip-board-claim-");
     db = createDb(tempDb.connectionString);
-  }, 20_000);
+  }, EMBEDDED_POSTGRES_TEST_SETUP_TIMEOUT_MS);
 
   afterEach(async () => {
     await initializeBoardClaimChallenge(db, { deploymentMode: "local_trusted" });

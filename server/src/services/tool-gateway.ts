@@ -54,6 +54,11 @@ import type { AgentToolDescriptor, PluginToolDispatcher } from "./plugin-tool-di
 import { logActivity, type LogActivityInput } from "./activity-log.js";
 import { secretService } from "./secrets.js";
 import { mcpHttpRequestHeaders, parseMcpHttpResponseBody } from "./mcp-http.js";
+import {
+  buildRemoteMcpHeaders,
+  RemoteMcpHeaderValidationError,
+  type RemoteMcpHeaderSummary,
+} from "./remote-mcp-headers.js";
 import { assertPublicRemoteHttpEndpoint, parseRemoteHttpEndpoint } from "./remote-http-endpoint-guard.js";
 import { toolAccessPolicyService } from "./tool-access-policy.js";
 import { issueThreadInteractionService } from "./issue-thread-interactions.js";
@@ -212,24 +217,9 @@ interface ExecutePluginToolInput {
   runContext: ToolRunContext;
 }
 
-type HeaderPolicyConfig = {
-  staticHeaders: Array<{ name: string; value: string }>;
-  passthroughAllowlist: string[];
-  metadataHeaders: Array<"company_id" | "agent_id" | "issue_id" | "project_id" | "run_id" | "gateway_session_id" | "correlation_id">;
-};
-
-type HeaderPolicySummary = {
-  staticHeaderNames: string[];
-  credentialHeaderNames: string[];
-  passthroughHeaderNames: string[];
-  droppedPassthroughHeaderNames: string[];
-  metadataHeaderNames: string[];
-  collisionRules: Array<{ header: string; source: string; action: string }>;
-};
-
 type RemoteHttpExecutionResult = {
   result: unknown;
-  headerSummary?: HeaderPolicySummary;
+  headerSummary?: RemoteMcpHeaderSummary;
   execution?: RemoteHttpExecutionAudit;
 };
 
@@ -284,21 +274,6 @@ const BUILTIN_LOCAL_STDIO_RUNTIME_TEMPLATES: Record<string, Omit<LocalStdioRunti
 function asRecord(value: unknown): Record<string, unknown> | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   return value as Record<string, unknown>;
-}
-
-const sensitivePassthroughHeaderPattern = /(^|[-_])(auth|authorization|cookie|secret|session|token)([-_]|$)|(^|[-_])api[-_]?key([-_]|$)/i;
-const sensitivePassthroughHeaderNames = new Set([
-  "authorization",
-  "proxy-authorization",
-  "cookie",
-  "set-cookie",
-  "x-paperclip-tool-gateway-token",
-]);
-
-function isSensitivePassthroughHeader(name: string) {
-  return name.startsWith("x-paperclip-")
-    || sensitivePassthroughHeaderNames.has(name)
-    || sensitivePassthroughHeaderPattern.test(name);
 }
 
 function stringValue(value: unknown): string | null {
@@ -2110,84 +2085,6 @@ export function createToolGatewayService(
     return endpoint.toString();
   }
 
-  function headerName(value: unknown): string | null {
-    if (typeof value !== "string") return null;
-    const trimmed = value.trim();
-    if (!/^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/.test(trimmed)) return null;
-    return trimmed.toLowerCase();
-  }
-
-  function headerValue(value: unknown): string | null {
-    if (typeof value !== "string") return null;
-    if (/[\r\n]/.test(value)) return null;
-    return value;
-  }
-
-  function stringArray(value: unknown): string[] {
-    if (!Array.isArray(value)) return [];
-    return value.filter((entry): entry is string => typeof entry === "string");
-  }
-
-  function readHeaderPolicy(connection: typeof toolConnections.$inferSelect): HeaderPolicyConfig {
-    const config = asRecord(connection.config) ?? {};
-    const transportConfig = asRecord(connection.transportConfig) ?? {};
-    const rawPolicy =
-      asRecord(config.headerPolicy)
-      ?? asRecord(transportConfig.headerPolicy)
-      ?? {};
-    const passthrough = asRecord(rawPolicy.passthrough) ?? {};
-    const staticHeaders = rawPolicy.staticHeaders;
-    const parsedStaticHeaders: Array<{ name: string; value: string }> = [];
-
-    if (Array.isArray(staticHeaders)) {
-      for (const entry of staticHeaders) {
-        const record = asRecord(entry);
-        const name = headerName(record?.name);
-        const value = headerValue(record?.value);
-        if (name && value !== null) parsedStaticHeaders.push({ name, value });
-      }
-    } else {
-      const record = asRecord(staticHeaders);
-      if (record) {
-        for (const [rawName, rawValue] of Object.entries(record)) {
-          const name = headerName(rawName);
-          const value = headerValue(rawValue);
-          if (name && value !== null) parsedStaticHeaders.push({ name, value });
-        }
-      }
-    }
-
-    const passthroughAllowlist = [
-      ...stringArray(passthrough.allow),
-      ...stringArray(passthrough.allowedHeaders),
-      ...stringArray(rawPolicy.allowedPassthroughHeaders),
-    ]
-      .map(headerName)
-      .filter((name): name is string => Boolean(name))
-      .filter((name) => !isSensitivePassthroughHeader(name));
-
-    const metadata = asRecord(rawPolicy.metadata) ?? {};
-    const metadataHeaders = [
-      ...stringArray(metadata.forward),
-      ...stringArray(metadata.headers),
-      ...stringArray(rawPolicy.forwardContextHeaders),
-    ].filter((value): value is HeaderPolicyConfig["metadataHeaders"][number] =>
-      value === "company_id"
-      || value === "agent_id"
-      || value === "issue_id"
-      || value === "project_id"
-      || value === "run_id"
-      || value === "gateway_session_id"
-      || value === "correlation_id",
-    );
-
-    return {
-      staticHeaders: parsedStaticHeaders,
-      passthroughAllowlist: [...new Set(passthroughAllowlist)],
-      metadataHeaders: [...new Set(metadataHeaders)],
-    };
-  }
-
   function readOnDemandToolsEnabled(connectionOrConfig: typeof toolConnections.$inferSelect | Record<string, unknown>): boolean {
     const config = "config" in connectionOrConfig ? asRecord(connectionOrConfig.config) ?? {} : connectionOrConfig;
     const raw = asRecord(config.onDemandTools) ?? asRecord(config.loadToolsOnDemand);
@@ -2199,127 +2096,33 @@ export function createToolGatewayService(
     return tool.providerType === "mcp_remote_http" && metadata?.onDemandTools === true;
   }
 
-  function normalizeCallerHeaders(input: ExecuteGatewayToolInput["callerHeaders"]): Record<string, string> {
-    const headers: Record<string, string> = {};
-    for (const [rawName, rawValue] of Object.entries(input ?? {})) {
-      const name = headerName(rawName);
-      if (!name) continue;
-      const value = Array.isArray(rawValue) ? rawValue.join(", ") : rawValue;
-      const normalizedValue = headerValue(value);
-      if (normalizedValue !== null) headers[name] = normalizedValue;
-    }
-    return headers;
-  }
-
-  function metadataHeadersForSession(session: ToolGatewaySession, policy: HeaderPolicyConfig): Record<string, string> {
-    const headers: Record<string, string> = {};
-    const values: Record<HeaderPolicyConfig["metadataHeaders"][number], string | null> = {
-      company_id: session.companyId,
-      agent_id: session.agentId,
-      issue_id: session.issueId,
-      project_id: session.projectId,
-      run_id: session.runId,
-      gateway_session_id: session.id,
-      correlation_id: randomUUID(),
-    };
-    for (const key of policy.metadataHeaders) {
-      const value = values[key];
-      if (value) headers[`x-paperclip-${key.replace(/_/g, "-")}`] = value;
-    }
-    return headers;
-  }
-
   function buildRemoteHeaders(input: {
     session: ToolGatewaySession;
     connection: typeof toolConnections.$inferSelect;
     credentialHeaders: Record<string, string>;
     callerHeaders?: ExecuteGatewayToolInput["callerHeaders"];
-  }): { headers: Record<string, string>; summary: HeaderPolicySummary } {
-    const policy = readHeaderPolicy(input.connection);
-    const caller = normalizeCallerHeaders(input.callerHeaders);
-    const credentialHeaders: Record<string, string> = {};
-    for (const [name, value] of Object.entries(input.credentialHeaders)) {
-      const normalized = headerName(name);
-      if (normalized) credentialHeaders[normalized] = value;
+  }): { headers: Record<string, string>; summary: RemoteMcpHeaderSummary } {
+    try {
+      return buildRemoteMcpHeaders({
+        connection: input.connection,
+        credentialHeaders: input.credentialHeaders,
+        callerHeaders: input.callerHeaders,
+        metadataValues: {
+          company_id: input.session.companyId,
+          agent_id: input.session.agentId,
+          issue_id: input.session.issueId,
+          project_id: input.session.projectId,
+          run_id: input.session.runId,
+          gateway_session_id: input.session.id,
+          correlation_id: randomUUID(),
+        },
+      });
+    } catch (error) {
+      if (error instanceof RemoteMcpHeaderValidationError) {
+        throw new ToolGatewayHttpError(422, error.message, error.code, { reason: error.reason });
+      }
+      throw error;
     }
-    const reservedHeaders = new Set(["accept", "content-type", "content-length", "host", "connection"]);
-    const managedCredentialHeaders = new Set(Object.keys(credentialHeaders));
-    const headers: Record<string, string> = {};
-    const summary: HeaderPolicySummary = {
-      staticHeaderNames: [],
-      credentialHeaderNames: Object.keys(credentialHeaders).sort(),
-      passthroughHeaderNames: [],
-      droppedPassthroughHeaderNames: [],
-      metadataHeaderNames: [],
-      collisionRules: [],
-    };
-
-    for (const [name, value] of Object.entries(caller)) {
-      if (reservedHeaders.has(name)) {
-        summary.droppedPassthroughHeaderNames.push(name);
-        summary.collisionRules.push({ header: name, source: "caller", action: "dropped_reserved_header" });
-        continue;
-      }
-      if (managedCredentialHeaders.has(name)) {
-        summary.droppedPassthroughHeaderNames.push(name);
-        summary.collisionRules.push({ header: name, source: "caller", action: "kept_managed_credential" });
-        continue;
-      }
-      if (isSensitivePassthroughHeader(name)) {
-        summary.droppedPassthroughHeaderNames.push(name);
-        summary.collisionRules.push({ header: name, source: "caller", action: "dropped_sensitive_header" });
-        continue;
-      }
-      if (!policy.passthroughAllowlist.includes(name)) {
-        summary.droppedPassthroughHeaderNames.push(name);
-        continue;
-      }
-      headers[name] = value;
-      summary.passthroughHeaderNames.push(name);
-    }
-
-    for (const { name, value } of policy.staticHeaders) {
-      if (reservedHeaders.has(name)) {
-        summary.collisionRules.push({ header: name, source: "static", action: "dropped_reserved_header" });
-        continue;
-      }
-      if (managedCredentialHeaders.has(name)) {
-        summary.collisionRules.push({ header: name, source: "static", action: "kept_managed_credential" });
-        continue;
-      }
-      if (headers[name] !== undefined) {
-        summary.collisionRules.push({ header: name, source: "static", action: "overrode_passthrough" });
-      }
-      headers[name] = value;
-      summary.staticHeaderNames.push(name);
-    }
-
-    const metadataHeaders = metadataHeadersForSession(input.session, policy);
-    for (const [name, value] of Object.entries(metadataHeaders)) {
-      if (reservedHeaders.has(name)) continue;
-      if (managedCredentialHeaders.has(name)) {
-        summary.collisionRules.push({ header: name, source: "metadata", action: "kept_managed_credential" });
-        continue;
-      }
-      if (headers[name] !== undefined) {
-        summary.collisionRules.push({ header: name, source: "metadata", action: "overrode_previous_header" });
-      }
-      headers[name] = value;
-      summary.metadataHeaderNames.push(name);
-    }
-
-    for (const [name, value] of Object.entries(credentialHeaders)) {
-      if (headers[name] !== undefined) {
-        summary.collisionRules.push({ header: name, source: "credential", action: "overrode_previous_header" });
-      }
-      headers[name] = value;
-    }
-
-    summary.staticHeaderNames.sort();
-    summary.passthroughHeaderNames.sort();
-    summary.droppedPassthroughHeaderNames = [...new Set(summary.droppedPassthroughHeaderNames)].sort();
-    summary.metadataHeaderNames.sort();
-    return { headers, summary };
   }
 
   async function markRemoteConnectionHealth(
@@ -4645,44 +4448,55 @@ export function createToolGatewayService(
         projectId: input.body.projectId === undefined ? existing.projectId : input.body.projectId,
         issueId: input.body.issueId === undefined ? existing.issueId : input.body.issueId,
       });
-      const [updated] = await db
-        .update(toolMcpGateways)
-        .set({
-          ...(input.body.name !== undefined ? { name: input.body.name } : {}),
-          ...(input.body.slug !== undefined || input.body.displaySlug !== undefined ? { slug: input.body.displaySlug ?? input.body.slug } : {}),
-          ...(input.body.slug !== undefined || input.body.displaySlug !== undefined ? { displaySlug: input.body.displaySlug ?? input.body.slug } : {}),
-          ...(input.body.description !== undefined ? { description: input.body.description ?? null } : {}),
-          ...(input.body.status !== undefined ? { status: input.body.status } : {}),
-          ...(input.body.profileId !== undefined ? { profileId: input.body.profileId } : {}),
-          ...(input.body.defaultProfileMode !== undefined ? { defaultProfileMode: input.body.defaultProfileMode } : {}),
-          ...(input.body.contextScopeType !== undefined ? { contextScopeType: input.body.contextScopeType } : {}),
-          ...(input.body.contextScopeId !== undefined ? { contextScopeId: input.body.contextScopeId ?? null } : {}),
-          ...(input.body.agentId !== undefined ? { agentId: input.body.agentId ?? null } : {}),
-          ...(input.body.projectId !== undefined ? { projectId: input.body.projectId ?? null } : {}),
-          ...(input.body.issueId !== undefined ? { issueId: input.body.issueId ?? null } : {}),
-          ...(input.body.approvalIssueId !== undefined ? { approvalIssueId: input.body.approvalIssueId ?? null } : {}),
-          ...(input.body.authConfig !== undefined ? { authConfig: input.body.authConfig } : {}),
-          ...(input.body.headerPolicy !== undefined ? { headerPolicy: input.body.headerPolicy } : {}),
-          ...(input.body.metadataPolicy !== undefined ? { metadataPolicy: input.body.metadataPolicy } : {}),
-          ...(input.body.onDemandToolsConfig !== undefined ? { onDemandToolsConfig: input.body.onDemandToolsConfig } : {}),
-          ...(input.body.metadata !== undefined ? { metadata: input.body.metadata ?? {} } : {}),
-          updatedAt: new Date(),
-        })
-        .where(and(eq(toolMcpGateways.companyId, input.companyId), eq(toolMcpGateways.id, input.gatewayId)))
-        .returning();
-      if (input.body.profileId && input.body.profileId !== existing.profileId) {
-        await db
-          .insert(toolProfileBindings)
-          .values({
-            companyId: input.companyId,
-            profileId: input.body.profileId,
-            targetType: "gateway",
-            targetId: input.gatewayId,
-            priority: 10,
-            metadata: { source: "named_mcp_gateway" },
+      const updated = await db.transaction(async (tx) => {
+        const [next] = await tx
+          .update(toolMcpGateways)
+          .set({
+            ...(input.body.name !== undefined ? { name: input.body.name } : {}),
+            ...(input.body.slug !== undefined || input.body.displaySlug !== undefined ? { slug: input.body.displaySlug ?? input.body.slug } : {}),
+            ...(input.body.slug !== undefined || input.body.displaySlug !== undefined ? { displaySlug: input.body.displaySlug ?? input.body.slug } : {}),
+            ...(input.body.description !== undefined ? { description: input.body.description ?? null } : {}),
+            ...(input.body.status !== undefined ? { status: input.body.status } : {}),
+            ...(input.body.profileId !== undefined ? { profileId: input.body.profileId } : {}),
+            ...(input.body.defaultProfileMode !== undefined ? { defaultProfileMode: input.body.defaultProfileMode } : {}),
+            ...(input.body.contextScopeType !== undefined ? { contextScopeType: input.body.contextScopeType } : {}),
+            ...(input.body.contextScopeId !== undefined ? { contextScopeId: input.body.contextScopeId ?? null } : {}),
+            ...(input.body.agentId !== undefined ? { agentId: input.body.agentId ?? null } : {}),
+            ...(input.body.projectId !== undefined ? { projectId: input.body.projectId ?? null } : {}),
+            ...(input.body.issueId !== undefined ? { issueId: input.body.issueId ?? null } : {}),
+            ...(input.body.approvalIssueId !== undefined ? { approvalIssueId: input.body.approvalIssueId ?? null } : {}),
+            ...(input.body.authConfig !== undefined ? { authConfig: input.body.authConfig } : {}),
+            ...(input.body.headerPolicy !== undefined ? { headerPolicy: input.body.headerPolicy } : {}),
+            ...(input.body.metadataPolicy !== undefined ? { metadataPolicy: input.body.metadataPolicy } : {}),
+            ...(input.body.onDemandToolsConfig !== undefined ? { onDemandToolsConfig: input.body.onDemandToolsConfig } : {}),
+            ...(input.body.metadata !== undefined ? { metadata: input.body.metadata ?? {} } : {}),
+            updatedAt: new Date(),
           })
-          .onConflictDoNothing();
-      }
+          .where(and(eq(toolMcpGateways.companyId, input.companyId), eq(toolMcpGateways.id, input.gatewayId)))
+          .returning();
+        if (input.body.profileId && input.body.profileId !== existing.profileId) {
+          await tx
+            .delete(toolProfileBindings)
+            .where(and(
+              eq(toolProfileBindings.companyId, input.companyId),
+              eq(toolProfileBindings.profileId, existing.profileId),
+              eq(toolProfileBindings.targetType, "gateway"),
+              eq(toolProfileBindings.targetId, input.gatewayId),
+            ));
+          await tx
+            .insert(toolProfileBindings)
+            .values({
+              companyId: input.companyId,
+              profileId: input.body.profileId,
+              targetType: "gateway",
+              targetId: input.gatewayId,
+              priority: 10,
+              metadata: { source: "named_mcp_gateway" },
+            })
+            .onConflictDoNothing();
+        }
+        return next;
+      });
       return getGatewayWithTokens(input.companyId, updated.id);
     },
 

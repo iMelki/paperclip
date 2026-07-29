@@ -27,6 +27,7 @@ import {
   projects,
 } from "@paperclipai/db";
 import {
+  EMBEDDED_POSTGRES_TEST_SETUP_TIMEOUT_MS,
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
@@ -64,7 +65,7 @@ describeEmbeddedPostgres("plugin orchestration APIs", () => {
   beforeAll(async () => {
     tempDb = await startEmbeddedPostgresTestDatabase("paperclip-plugin-orchestration-");
     db = createDb(tempDb.connectionString);
-  }, 20_000);
+  }, EMBEDDED_POSTGRES_TEST_SETUP_TIMEOUT_MS);
 
   function isHeartbeatRunDependentFkError(error: unknown) {
     const message = error instanceof Error ? `${error.message} ${String(error.cause ?? "")}` : String(error);

@@ -1,11 +1,29 @@
 import { describe, expect, it } from "vitest";
-import { assertPublicRemoteHttpEndpoint } from "../services/remote-http-endpoint-guard.js";
+import { assertPublicRemoteHttpEndpoint, parseRemoteHttpEndpoint } from "../services/remote-http-endpoint-guard.js";
 
 function guardError(message: string, code: string) {
   return Object.assign(new Error(message), { code });
 }
 
 describe("remote HTTP endpoint guard", () => {
+  it.each([
+    "https://user:password@public.example/mcp",
+    "https://public.example/mcp?api_key=secret",
+    "https://public.example/mcp?access_token=secret",
+    "https://public.example/mcp?X-Amz-Signature=secret",
+  ])("rejects credential authority embedded in endpoint URL %s", (url) => {
+    expect(() => parseRemoteHttpEndpoint(url, guardError)).toThrowError(
+      expect.objectContaining({ code: "mcp_remote_url_sensitive_authority" }),
+    );
+  });
+
+  it("allows non-sensitive endpoint query configuration", () => {
+    expect(parseRemoteHttpEndpoint(
+      "https://public.example/mcp?region=eu&version=2",
+      guardError,
+    ).toString()).toBe("https://public.example/mcp?region=eu&version=2");
+  });
+
   it("blocks hostnames that resolve to private network addresses", async () => {
     await expect(assertPublicRemoteHttpEndpoint(
       new URL("https://metadata.example/mcp"),

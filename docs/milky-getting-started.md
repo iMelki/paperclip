@@ -38,6 +38,10 @@ npx paperclipai onboard --yes
 # Follow the prompts. Starts the server at http://localhost:3100
 ```
 
+For Command Center or another service manager, use
+`npx paperclipai onboard --yes --no-run` to write configuration and key
+material without starting a competing foreground server.
+
 To restart later:
 
 ```powershell

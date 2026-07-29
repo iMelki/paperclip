@@ -52,7 +52,14 @@ Non-interactive defaults + immediate start (opens browser on server listen):
 pnpm paperclipai onboard --yes
 ```
 
+Non-interactive config and key material without starting a server:
+
+```sh
+pnpm paperclipai onboard --yes --no-run
+```
+
 On an existing install, `--yes` now preserves the current config and just starts Paperclip with that setup.
+Add `--no-run` when a service manager owns process startup.
 
 ## `paperclipai doctor`
 
@@ -62,6 +69,9 @@ Health checks with optional auto-repair:
 pnpm paperclipai doctor
 pnpm paperclipai doctor --repair
 ```
+
+The command exits nonzero whenever a critical check fails, so automation can
+use its process status as the blocking-health result.
 
 Validates:
 

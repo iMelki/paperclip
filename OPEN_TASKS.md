@@ -6,17 +6,35 @@ This file is the durable local index for active `paperclip` issues.
 
 ## Active Issues
 
-- [#18 - Isolate nested Git tests from hook-local index state](https://github.com/iMelki/paperclip/issues/18)
-  - The stable Vitest runner now removes `git rev-parse --local-env-vars`
-    values only from isolated test children, preserving the real commit index
-    for staged checks. The six affected worktree suites pass 254/254 tests and
-    the pinned staged Gitleaks scan is clean; close after the complete hook and
-    pushed merge SHA are read back.
+- [#23 - Tool Gateway catalog and health omit configured static headers](https://github.com/iMelki/paperclip/issues/23)
+  - One fail-closed header policy now governs gallery discovery, health, and
+    execution. Static non-secret headers are delivered without allowing caller
+    config to override the gallery URL, quarantine, managed credentials, or
+    MCP protocol headers. Close after the complete matrix and a live GitHub MCP
+    read-only catalog probe succeed on the committed runtime.
 
-- [#17 - Make the custom-image terminal WebSocket readiness wait deterministic](https://github.com/iMelki/paperclip/issues/17)
-  - Replace the fixed 20-event-loop-turn test wait with a bounded elapsed-time
-    wait, prove the focused test repeatedly on native Windows, and close only
-    after the final upstream-assimilation suite is green.
+- [#21 - Allow company import to preserve explicit Process adapters](https://github.com/iMelki/paperclip/issues/21)
+  - Add an explicit preserve-adapters import mode so a portable company export
+    can retain deterministic Process validators. Until then, use the reviewed
+    high-level dry run followed by the raw import API without adapter overrides.
+
+- [#20 - Reap Windows test process trees and remove load-order timeout flakes](https://github.com/iMelki/paperclip/issues/20)
+  - All 125 embedded-PostgreSQL hooks that previously overrode setup with an
+    explicit 20-second bound now use one shared 60-second Windows / 20-second
+    non-Windows constant, with an AST regression guard. Runtime-service teardown
+    has focused process-tree reaping coverage; keep this issue open until the
+    fresh complete-suite receipt is green with zero surviving fixtures.
+
+- [#22 - Make complete validation and package builds Windows-portable](https://github.com/iMelki/paperclip/issues/22)
+  - The portable Node filesystem helper, validated direct package-manager
+    entrypoint, native path assertions, timezone-stable UI fixtures, dependency
+    scan boundary, and current package-build assertions are implemented.
+    Close after the fresh full matrix, typecheck, and build read back green.
+
+- [#19 - Make headless onboarding and doctor failures automation-safe](https://github.com/iMelki/paperclip/issues/19)
+  - Implemented explicit config-only `onboard --yes --no-run` behavior and
+    nonzero failed-doctor process status. Close after the committed CLI is used
+    to materialize and diagnose the loopback-only factory instance.
 
 - [#16 - Configure the Assistants day-0 software factory](https://github.com/iMelki/paperclip/issues/16)
   - Configure the local company, goals, budgets, role agents, execution policy,
@@ -26,13 +44,6 @@ This file is the durable local index for active `paperclip` issues.
 - [#15 - Provision native and WSL Paperclip factory runtimes](https://github.com/iMelki/paperclip/issues/15)
   - Prove the loopback-only Windows instance first, then the Ubuntu 24.04
     Bubblewrap shadow instance with pinned Node, pnpm, and Codex versions.
-
-- [#14 - Assimilate current upstream and harden Codex execution](https://github.com/iMelki/paperclip/issues/14)
-  - Merge current upstream into `dev`, retain the intentional fork policy and
-    Windows runtime fixes, keep Codex bypass opt-in, expose structured execution
-    settings, enforce company-scoped plugin diagnostics and host-owned
-    trusted-loopback policy, and validate the current Tool Gateway/ACP/runtime
-    architecture.
 
 - [#13 - Replace inert secrets-filter attributes with enforced secret scanning](https://github.com/iMelki/paperclip/issues/13)
   - 2026-07-14: selected explicit scanning-only policy, removed the six inert
@@ -47,11 +58,6 @@ This file is the durable local index for active `paperclip` issues.
     no branch protection or ruleset, so keep #13 open until the scanner check
     has a capacity-approved GitHub run and can be made a required status check.
 
-- [#12 - Reconcile preserved Windows runtime and OpenAPI worktree batch](https://github.com/iMelki/paperclip/issues/12)
-  - The preserved batch is split into four exact-path commits on `origin/dev`.
-    Closure waits on the upstream merge validation and confirmation that the
-    prototype OpenAPI files were superseded by upstream's schema-backed route.
-
 - [#10 - Add native Antigravity adapter and retire legacy gemini_local path](https://github.com/iMelki/paperclip/issues/10)
   - Current upstream added a native Gemini ACP lane, so `gemini_local` is no
     longer legacy-only. Reassess the remaining Antigravity-specific value
@@ -65,6 +71,18 @@ This file is the durable local index for active `paperclip` issues.
 
 ## Recently Completed
 
+- [#18 - Isolate nested Git tests from hook-local index state](https://github.com/iMelki/paperclip/issues/18)
+  - Completed after the stable runner isolated hook-local Git state, all six
+    affected worktree suites passed, and the exact pushed merge was read back.
+- [#17 - Make the custom-image terminal WebSocket readiness wait deterministic](https://github.com/iMelki/paperclip/issues/17)
+  - Completed with bounded asynchronous readiness polling and native-Windows
+    regression coverage.
+- [#14 - Assimilate current upstream and harden Codex execution](https://github.com/iMelki/paperclip/issues/14)
+  - Completed by merging the reviewed upstream SHA and shipping the current
+    Tool Gateway, plugin tenancy, Codex execution, and recovery hardening.
+- [#12 - Reconcile preserved Windows runtime and OpenAPI worktree batch](https://github.com/iMelki/paperclip/issues/12)
+  - Completed after the preserved Windows/runtime batch was split, validated,
+    pushed, and reconciled with upstream's schema-backed OpenAPI surface.
 - [#11 - Default new UI-created agents to permission prompts enabled](https://github.com/iMelki/paperclip/issues/11)
   - 2026-07-11: new UI-created Claude and OpenCode agents now default permission bypass off; focused regression coverage and adapter documentation preserve the legacy omitted-config fallback and explicit unattended onboarding path.
 

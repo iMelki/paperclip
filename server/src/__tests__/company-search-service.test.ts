@@ -15,6 +15,7 @@ import {
 } from "@paperclipai/db";
 import { companySearchQuerySchema, COMPANY_SEARCH_MAX_QUERY_LENGTH } from "@paperclipai/shared";
 import {
+  EMBEDDED_POSTGRES_TEST_SETUP_TIMEOUT_MS,
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
@@ -80,7 +81,7 @@ describeEmbeddedPostgres("companySearchService", () => {
     db = createDb(tempDb.connectionString);
     svc = companySearchService(db);
     await db.execute(sql.raw("CREATE EXTENSION IF NOT EXISTS pg_trgm"));
-  }, 20_000);
+  }, EMBEDDED_POSTGRES_TEST_SETUP_TIMEOUT_MS);
 
   afterEach(async () => {
     await db.delete(issueDocuments);

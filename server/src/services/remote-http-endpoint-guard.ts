@@ -2,6 +2,8 @@ import { lookup as dnsLookup } from "node:dns/promises";
 import { isIP } from "node:net";
 
 const DEFAULT_DNS_TIMEOUT_MS = 5_000;
+const SENSITIVE_QUERY_KEY_PATTERN =
+  /(^|[-_.])(access[-_.]?key([-_.]?id)?|access[-_.]?token|api[-_.]?key|auth|authorization|bearer|client[-_.]?secret|credential(s)?|jwt|password|passwd|private[-_.]?key|refresh[-_.]?token|secret([-_.]?access[-_.]?key|[-_.]?key)?|session([-_.]?token)?|signature|sig|token)([-_.]|$)/i;
 
 type LookupResult = { address: string; family: number };
 
@@ -30,6 +32,20 @@ export function parseRemoteHttpEndpoint(
   }
   if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
     throw error("Remote MCP connection URL must use http or https", "mcp_remote_url_invalid");
+  }
+  if (parsed.username.length > 0 || parsed.password.length > 0) {
+    throw error(
+      "Remote MCP connection URL must not contain credentials; use Paperclip secret references instead",
+      "mcp_remote_url_sensitive_authority",
+    );
+  }
+  for (const key of parsed.searchParams.keys()) {
+    if (SENSITIVE_QUERY_KEY_PATTERN.test(key)) {
+      throw error(
+        "Remote MCP connection URL must not contain credential-like query parameters; use Paperclip secret references instead",
+        "mcp_remote_url_sensitive_authority",
+      );
+    }
   }
   return parsed;
 }

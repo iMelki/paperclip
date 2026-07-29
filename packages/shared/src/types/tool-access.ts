@@ -72,6 +72,7 @@ export type ToolConnectionAuthKind = "oauth" | "api_key" | "none";
 export type ToolConnectionOwnership = "platform_shared" | "platform_provisioned" | "customer" | "dcr";
 export type ToolConnectionStatus = "draft" | "active" | "disabled" | "archived";
 export type ToolConnectionInstallTargetType = "company" | "agent";
+export type ToolConnectionInstallAccessMode = "reachability_only" | "extend_connection_access";
 export type ConnectionGrantKind = "workspace" | "user";
 export type ConnectionGrantStatus = "active" | "revoked" | "expired" | "needs_reauthorization";
 export type ToolCredentialPlacement = "header" | "env";
@@ -188,6 +189,17 @@ export interface ToolConnectionInstall {
 export interface ToolConnectionInstallSnapshot {
   connectionId: string;
   installs: ToolConnectionInstall[];
+  accessMode?: ToolConnectionInstallAccessMode;
+  reachabilityOnly?: boolean;
+  removedLegacyAccessBindingCount?: number;
+}
+
+export interface ToolCatalogReviewResult {
+  connectionId: string;
+  activatedCount: number;
+  keptQuarantinedCount: number;
+  unchangedCount: number;
+  catalog: ToolCatalogEntry[];
 }
 
 export type ConnectionTokenScope = string | string[];

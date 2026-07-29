@@ -15,6 +15,7 @@ import {
   projectWorkspaces,
 } from "@paperclipai/db";
 import {
+  EMBEDDED_POSTGRES_TEST_SETUP_TIMEOUT_MS,
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
@@ -65,7 +66,7 @@ describeEmbeddedPostgres("heartbeat plugin environments", () => {
     const started = await startEmbeddedPostgresTestDatabase("heartbeat-plugin-environment");
     stopDb = started.stop;
     db = createDb(started.connectionString);
-  }, 20_000);
+  }, EMBEDDED_POSTGRES_TEST_SETUP_TIMEOUT_MS);
 
   afterEach(async () => {
     adapterExecute.mockClear();

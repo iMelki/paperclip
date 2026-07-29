@@ -38,6 +38,7 @@ import {
 } from "@paperclipai/db";
 import { and, eq } from "drizzle-orm";
 import {
+  EMBEDDED_POSTGRES_TEST_SETUP_TIMEOUT_MS,
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
@@ -426,7 +427,7 @@ describeEmbeddedPostgres("tool access service", () => {
   beforeAll(async () => {
     tempDb = await startEmbeddedPostgresTestDatabase("paperclip-tool-access-service-");
     db = createDb(tempDb.connectionString);
-  }, 20_000);
+  }, EMBEDDED_POSTGRES_TEST_SETUP_TIMEOUT_MS);
 
   afterEach(async () => {
     vi.restoreAllMocks();
@@ -1183,6 +1184,30 @@ describeEmbeddedPostgres("tool access service", () => {
       status: 400,
       details: { code: "remote_http_private_endpoint" },
     });
+  });
+
+  it.each([
+    "https://user:password@public.example/mcp",
+    "https://public.example/mcp?api_key=secret",
+    "https://public.example/mcp?access_token=secret",
+    "https://public.example/mcp?X-Amz-Signature=secret",
+  ])("rejects credential authority embedded in remote URL before persistence: %s", async (url) => {
+    const company = await createCompany(db);
+    const service = toolAccessService(db);
+
+    await expect(service.createConnection(company.id, {
+      name: "Rejected URL authority",
+      transport: "mcp_remote",
+      config: { url },
+      enabled: true,
+      status: "active",
+    })).rejects.toMatchObject({
+      status: 400,
+      details: { code: "mcp_remote_url_sensitive_authority" },
+    });
+    await expect(
+      db.select().from(toolConnections).where(eq(toolConnections.companyId, company.id)),
+    ).resolves.toHaveLength(0);
   });
 
   it("creates profiles with entries, binds them to agents, and resolves effective allowed tools", async () => {
@@ -4510,19 +4535,40 @@ describeEmbeddedPostgres("tool access service", () => {
       galleryKey: "zapier",
       name: "Zapier workspace",
       credentialValues: { "credentials.authorization": "zap-secret" },
+      configValues: {
+        url: "https://caller-must-not-override.example.test/mcp",
+        quarantineNewEntries: false,
+        headerPolicy: {
+          staticHeaders: [
+            { name: "X-MCP-Toolsets", value: "repositories,projects" },
+            { name: "X-MCP-Readonly", value: "true" },
+            { name: "X-MCP-Lockdown", value: "true" },
+            { name: "Accept", value: "text/plain" },
+            { name: "Content-Type", value: "text/plain" },
+          ],
+        },
+      },
     }, { actorType: "user", actorId: "board" });
 
     expect(fetchMock).toHaveBeenCalledTimes(2);
-    expect(fetchMock).toHaveBeenCalledWith(
-      "https://mcp.zapier.com/api/mcp",
-      expect.objectContaining({
-        headers: expect.objectContaining({ Authorization: "Bearer zap-secret" }),
-      }),
-    );
+    for (const [url, init] of fetchMock.mock.calls) {
+      expect(String(url)).toBe("https://mcp.zapier.com/api/mcp");
+      const headers = new Headers(init?.headers);
+      expect(headers.get("authorization")).toBe("Bearer zap-secret");
+      expect(headers.get("x-mcp-toolsets")).toBe("repositories,projects");
+      expect(headers.get("x-mcp-readonly")).toBe("true");
+      expect(headers.get("x-mcp-lockdown")).toBe("true");
+      expect(headers.get("accept")).toBe("application/json, text/event-stream");
+      expect(headers.get("content-type")).toBe("application/json");
+    }
     expect(connect.connection).toMatchObject({
       status: "draft",
       enabled: false,
-      config: expect.objectContaining({ sourceTemplateKey: "zapier", quarantineNewEntries: true }),
+      config: expect.objectContaining({
+        url: "https://mcp.zapier.com/api/mcp",
+        sourceTemplateKey: "zapier",
+        quarantineNewEntries: true,
+      }),
       credentialSecretRefs: [
         expect.objectContaining({
           configPath: "credentials.authorization",
@@ -4530,6 +4576,35 @@ describeEmbeddedPostgres("tool access service", () => {
         }),
       ],
     });
+    const persistedDiscoveryEvidence = JSON.stringify({
+      catalog: await db.select().from(toolCatalogEntries),
+      audit: await db.select().from(toolAccessAuditEvents),
+    });
+    const discoveryAudits = await db
+      .select()
+      .from(toolAccessAuditEvents)
+      .where(eq(toolAccessAuditEvents.connectionId, connect.connectionId));
+    for (const action of ["tool_connection.health_check", "tool_connection.catalog_refresh"]) {
+      const event = discoveryAudits.find((candidate) => candidate.action === action);
+      expect(event).toMatchObject({
+        outcome: "success",
+        details: {
+          remoteMcpHeaderSummary: {
+            staticHeaderNames: ["x-mcp-lockdown", "x-mcp-readonly", "x-mcp-toolsets"],
+            credentialHeaderNames: ["authorization"],
+            passthroughHeaderNames: [],
+            droppedPassthroughHeaderNames: [],
+            metadataHeaderNames: [],
+            collisionRules: expect.arrayContaining([
+              { header: "accept", source: "static", action: "dropped_reserved_header" },
+              { header: "content-type", source: "static", action: "dropped_reserved_header" },
+            ]),
+          },
+        },
+      });
+    }
+    expect(persistedDiscoveryEvidence).not.toContain("zap-secret");
+    expect(persistedDiscoveryEvidence).not.toContain("repositories,projects");
     expect(connect.actions.readOnly).toEqual([
       expect.objectContaining({ toolName: "list_zaps", riskLevel: "read" }),
     ]);
@@ -4648,6 +4723,210 @@ describeEmbeddedPostgres("tool access service", () => {
         catalogEntryId: updateEntry.id,
       }),
     });
+  });
+
+  it("rejects malformed gallery header policy before creating apps, connections, or secrets", async () => {
+    const company = await createCompany(db);
+    const service = toolAccessService(db);
+    const sentinel = "gallery-header-value-sentinel";
+
+    let caught: unknown;
+    try {
+      await service.connectGalleryApp(company.id, {
+        galleryKey: "zapier",
+        credentialValues: { "credentials.authorization": "must-not-be-persisted" },
+        configValues: {
+          headerPolicy: {
+            staticHeaders: [
+              { name: "X-MCP-Toolsets", value: `${sentinel}\r\nInjected: true` },
+            ],
+          },
+        },
+      }, { actorType: "user", actorId: "board" });
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(caught).toMatchObject({
+      status: 400,
+      details: {
+        code: "remote_mcp_header_policy_invalid",
+        reason: "invalid_header_value",
+      },
+    });
+    expect((caught as Error).message).not.toContain(sentinel);
+    await expect(
+      db.select().from(toolApplications).where(eq(toolApplications.companyId, company.id)),
+    ).resolves.toHaveLength(0);
+    await expect(
+      db.select().from(toolConnections).where(eq(toolConnections.companyId, company.id)),
+    ).resolves.toHaveLength(0);
+    await expect(
+      db.select().from(companySecrets).where(eq(companySecrets.companyId, company.id)),
+    ).resolves.toHaveLength(0);
+  });
+
+  it("rejects secret-bearing static gallery headers before creating apps, connections, or secrets", async () => {
+    const company = await createCompany(db);
+    const service = toolAccessService(db);
+    const sentinel = "static-authorization-sentinel";
+
+    let caught: unknown;
+    try {
+      await service.connectGalleryApp(company.id, {
+        galleryKey: "zapier",
+        configValues: {
+          headerPolicy: {
+            staticHeaders: [
+              { name: "Authorization", value: `Bearer ${sentinel}` },
+            ],
+          },
+        },
+      }, { actorType: "user", actorId: "board" });
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(caught).toMatchObject({
+      status: 400,
+      details: {
+        code: "remote_mcp_header_policy_invalid",
+        reason: "sensitive_static_header",
+      },
+    });
+    expect((caught as Error).message).not.toContain(sentinel);
+    await expect(
+      db.select().from(toolApplications).where(eq(toolApplications.companyId, company.id)),
+    ).resolves.toHaveLength(0);
+    await expect(
+      db.select().from(toolConnections).where(eq(toolConnections.companyId, company.id)),
+    ).resolves.toHaveLength(0);
+    await expect(
+      db.select().from(companySecrets).where(eq(companySecrets.companyId, company.id)),
+    ).resolves.toHaveLength(0);
+  });
+
+  it("rejects remote MCP discovery redirects without following a private target", async () => {
+    const company = await createCompany(db);
+    const service = toolAccessService(db);
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue({
+      ok: false,
+      status: 302,
+      headers: {
+        get: (name: string) => name.toLowerCase() === "location"
+          ? "http://127.0.0.1/private-mcp"
+          : null,
+      },
+    } as unknown as Response);
+
+    let caught: unknown;
+    try {
+      await service.connectGalleryApp(company.id, {
+        galleryKey: "zapier",
+        credentialValues: { "credentials.authorization": "must-be-cleaned-up" },
+      }, { actorType: "user", actorId: "board" });
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(caught).toMatchObject({
+      status: 502,
+      details: { code: "mcp_remote_redirect_rejected", status: 302 },
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls[0]?.[1]).toMatchObject({ redirect: "manual" });
+    await expect(
+      db.select().from(toolApplications).where(eq(toolApplications.companyId, company.id)),
+    ).resolves.toHaveLength(0);
+    await expect(
+      db.select().from(toolConnections).where(eq(toolConnections.companyId, company.id)),
+    ).resolves.toHaveLength(0);
+    await expect(
+      db.select().from(companySecrets).where(eq(companySecrets.companyId, company.id)),
+    ).resolves.toHaveLength(0);
+  });
+
+  it("times out stalled remote MCP discovery and cleans up provisional records", async () => {
+    const company = await createCompany(db);
+    const service = toolAccessService(db, { remoteMcpRequestTimeoutMs: 25 });
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (_url, init) => {
+      return await new Promise<Response>((_resolve, reject) => {
+        const abort = () => {
+          const error = new Error("aborted");
+          error.name = "AbortError";
+          reject(error);
+        };
+        if (init?.signal?.aborted) abort();
+        else init?.signal?.addEventListener("abort", abort, { once: true });
+      });
+    });
+
+    let caught: unknown;
+    try {
+      await service.connectGalleryApp(company.id, {
+        galleryKey: "zapier",
+        credentialValues: { "credentials.authorization": "must-be-cleaned-up" },
+      }, { actorType: "user", actorId: "board" });
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(caught).toMatchObject({
+      status: 504,
+      details: { code: "mcp_remote_timeout" },
+    });
+    await expect(
+      db.select().from(toolApplications).where(eq(toolApplications.companyId, company.id)),
+    ).resolves.toHaveLength(0);
+    await expect(
+      db.select().from(toolConnections).where(eq(toolConnections.companyId, company.id)),
+    ).resolves.toHaveLength(0);
+    await expect(
+      db.select().from(companySecrets).where(eq(companySecrets.companyId, company.id)),
+    ).resolves.toHaveLength(0);
+  });
+
+  it("rejects oversized remote MCP discovery responses before parsing the body", async () => {
+    const company = await createCompany(db);
+    const service = toolAccessService(db, { remoteMcpResponseMaxBytes: 64 });
+    const text = vi.fn(async () => "x".repeat(65));
+    vi.spyOn(globalThis, "fetch").mockResolvedValue({
+      ok: true,
+      status: 200,
+      headers: {
+        get: (name: string) => {
+          if (name.toLowerCase() === "content-length") return "65";
+          if (name.toLowerCase() === "content-type") return "application/json";
+          return null;
+        },
+      },
+      text,
+    } as unknown as Response);
+
+    let caught: unknown;
+    try {
+      await service.connectGalleryApp(company.id, {
+        galleryKey: "zapier",
+        credentialValues: { "credentials.authorization": "must-be-cleaned-up" },
+      }, { actorType: "user", actorId: "board" });
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(caught).toMatchObject({
+      status: 502,
+      details: { code: "mcp_remote_response_too_large", maxBytes: 64 },
+    });
+    expect(text).not.toHaveBeenCalled();
+    await expect(
+      db.select().from(toolApplications).where(eq(toolApplications.companyId, company.id)),
+    ).resolves.toHaveLength(0);
+    await expect(
+      db.select().from(toolConnections).where(eq(toolConnections.companyId, company.id)),
+    ).resolves.toHaveLength(0);
+    await expect(
+      db.select().from(companySecrets).where(eq(companySecrets.companyId, company.id)),
+    ).resolves.toHaveLength(0);
   });
 
   it("rolls back gallery app finish when a later write fails after clearing profile state", async () => {
@@ -6260,7 +6539,7 @@ describeEmbeddedPostgres("tool access service", () => {
     expect(unusedRow!.lastUsedAt).toBeNull();
   });
 
-  it("syncs installs, auto-extends agent access, and exposes install state", async () => {
+  it("syncs installs as reachability-only by default without extending agent access", async () => {
     const company = await createCompany(db);
     const agent = await createAgent(db, company.id);
     const { connection } = await createRemoteToolFixture(db, company.id);
@@ -6273,31 +6552,145 @@ describeEmbeddedPostgres("tool access service", () => {
     expect(put.status).toBe(200);
     expect(put.body).toMatchObject({
       connectionId: connection.id,
+      accessMode: "reachability_only",
+      reachabilityOnly: true,
+      removedLegacyAccessBindingCount: 0,
       installs: [{ targetType: "agent", targetId: agent.id }],
     });
 
     const [install] = await db.select().from(toolConnectionInstalls);
     expect(install).toMatchObject({ companyId: company.id, connectionId: connection.id, targetId: agent.id });
     const profile = await db.select().from(toolProfiles).where(eq(toolProfiles.profileKey, `app:${connection.id}`));
-    expect(profile).toHaveLength(1);
-    const binding = await db.select().from(toolProfileBindings).where(and(
-      eq(toolProfileBindings.profileId, profile[0]!.id),
-      eq(toolProfileBindings.targetType, "agent"),
-      eq(toolProfileBindings.targetId, agent.id),
-    ));
-    expect(binding).toHaveLength(1);
+    expect(profile).toHaveLength(0);
     const events = await db.select().from(activityLog).where(eq(activityLog.action, "tool_connection.install_access_extended"));
-    expect(events).toHaveLength(1);
+    expect(events).toHaveLength(0);
 
     const effective = await toolAccessService(db).getEffectiveProfilesForAgent(company.id, agent.id);
     expect(effective.installedConnections.map((item) => item.id)).toEqual([connection.id]);
-    expect(effective.allowedTools.some((tool) => tool.connectionId === connection.id)).toBe(true);
+    expect(effective.allowedTools.some((tool) => tool.connectionId === connection.id)).toBe(false);
 
     const get = await request(app).get(`/api/tool-connections/${connection.id}`);
     expect(get.status).toBe(200);
     expect(get.body.installs).toEqual(expect.arrayContaining([
       expect.objectContaining({ targetType: "agent", targetId: agent.id }),
     ]));
+  });
+
+  it("reviews quarantined catalog entries through the company-scoped compare-and-set route", async () => {
+    const company = await createCompany(db);
+    const { connection, catalogEntry } = await createRemoteToolFixture(
+      db,
+      company.id,
+      { quarantined: true },
+    );
+    const versionHash = "a".repeat(64);
+    const schemaHash = "b".repeat(64);
+    await db
+      .update(toolCatalogEntries)
+      .set({
+        status: "quarantined",
+        versionHash,
+        schemaHash,
+        quarantinedAt: new Date(),
+        quarantineReason: "pending_review",
+      })
+      .where(eq(toolCatalogEntries.id, catalogEntry.id));
+
+    const response = await request(createRouteApp(db))
+      .post(
+        `/api/companies/${company.id}/tools/connections/${connection.id}/catalog/review`,
+      )
+      .send({
+        decisions: [{
+          catalogEntryId: catalogEntry.id,
+          decision: "activate",
+          expectedVersionHash: versionHash,
+          expectedSchemaHash: schemaHash,
+        }],
+      });
+
+    expect(response.status).toBe(200);
+    expect(response.body).toMatchObject({
+      connectionId: connection.id,
+      activatedCount: 1,
+      keptQuarantinedCount: 0,
+      unchangedCount: 0,
+      catalog: [{
+        id: catalogEntry.id,
+        status: "active",
+        versionHash,
+        schemaHash,
+      }],
+    });
+    const persisted = await db
+      .select()
+      .from(toolCatalogEntries)
+      .where(eq(toolCatalogEntries.id, catalogEntry.id))
+      .then((rows) => rows[0]!);
+    expect(persisted.status).toBe("active");
+    expect(persisted.reviewedByUserId).toBe("board-user");
+  });
+
+  it("supports explicit legacy access extension and detaches only install-owned bindings when returned to reachability-only", async () => {
+    const company = await createCompany(db);
+    const agent = await createAgent(db, company.id);
+    const { connection } = await createRemoteToolFixture(db, company.id);
+    const service = toolAccessService(db);
+
+    const extended = await service.putConnectionInstalls(connection.id, {
+      accessMode: "extend_connection_access",
+      installs: [{ targetType: "agent", targetId: agent.id }],
+    });
+    expect(extended).toMatchObject({
+      accessMode: "extend_connection_access",
+      reachabilityOnly: false,
+    });
+    const [profile] = await db
+      .select()
+      .from(toolProfiles)
+      .where(eq(toolProfiles.profileKey, `app:${connection.id}`));
+    expect(profile).toBeTruthy();
+    const installOwned = await db
+      .select()
+      .from(toolProfileBindings)
+      .where(and(
+        eq(toolProfileBindings.profileId, profile!.id),
+        eq(toolProfileBindings.targetType, "agent"),
+        eq(toolProfileBindings.targetId, agent.id),
+      ));
+    expect(installOwned).toHaveLength(1);
+
+    await db.insert(toolProfileBindings).values({
+      companyId: company.id,
+      profileId: profile!.id,
+      targetType: "company",
+      targetId: company.id,
+      metadata: { source: "operator_explicit" },
+    });
+    const narrowed = await service.putConnectionInstalls(connection.id, {
+      accessMode: "reachability_only",
+      installs: [{ targetType: "agent", targetId: agent.id }],
+    });
+    expect(narrowed).toMatchObject({
+      accessMode: "reachability_only",
+      reachabilityOnly: true,
+      removedLegacyAccessBindingCount: 1,
+    });
+    const remaining = await db
+      .select()
+      .from(toolProfileBindings)
+      .where(eq(toolProfileBindings.profileId, profile!.id));
+    expect(remaining).toHaveLength(1);
+    expect(remaining[0]?.metadata).toMatchObject({
+      source: "operator_explicit",
+    });
+    const effective = await service.getEffectiveProfilesForAgent(
+      company.id,
+      agent.id,
+    );
+    expect(effective.installedConnections.map((item) => item.id))
+      .toEqual([connection.id]);
+    expect(effective.allowedTools).toHaveLength(1);
   });
 });
 

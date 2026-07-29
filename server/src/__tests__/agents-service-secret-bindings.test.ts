@@ -14,6 +14,7 @@ import {
   createDb,
 } from "@paperclipai/db";
 import {
+  EMBEDDED_POSTGRES_TEST_SETUP_TIMEOUT_MS,
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
@@ -41,7 +42,7 @@ describeEmbeddedPostgres("agent service secret binding sync", () => {
     const started = await startEmbeddedPostgresTestDatabase("agent-secret-bindings");
     stopDb = started.cleanup;
     db = createDb(started.connectionString);
-  }, 20_000);
+  }, EMBEDDED_POSTGRES_TEST_SETUP_TIMEOUT_MS);
 
   afterEach(async () => {
     await db.delete(companySecretBindings);

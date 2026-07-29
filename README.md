@@ -330,6 +330,13 @@ npx paperclipai onboard --yes --bind tailnet
 
 If you already have Paperclip configured, rerunning `onboard` keeps the existing config in place. Use `paperclipai configure` to edit settings.
 
+For service managers and other headless automation that must materialize the
+config and key files without launching a foreground server, use:
+
+```bash
+npx paperclipai onboard --yes --no-run
+```
+
 Or manually:
 
 ```bash

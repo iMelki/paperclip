@@ -111,6 +111,12 @@ import { CLASS3_STATIC_LEASE_ALLOWLIST, credentialConfigPath, getAvailableConnec
 import { badRequest, conflict, forbidden, HttpError, notFound, unprocessable } from "../errors.js";
 import { logActivity } from "./activity-log.js";
 import { mcpHttpRequestHeaders, parseMcpHttpResponseBody } from "./mcp-http.js";
+import {
+  buildRemoteMcpHeaders,
+  readRemoteMcpHeaderPolicy,
+  RemoteMcpHeaderValidationError,
+} from "./remote-mcp-headers.js";
+import type { RemoteMcpHeaderSummary } from "./remote-mcp-headers.js";
 import { assertPublicRemoteHttpEndpoint, parseRemoteHttpEndpoint } from "./remote-http-endpoint-guard.js";
 import { secretService } from "./secrets.js";
 import { toolAccessPolicyService } from "./tool-access-policy.js";
@@ -128,6 +134,8 @@ type ActorInfo = {
 const ACTIVE_BROKER_RUN_STATUSES = new Set(["running"]);
 const REMOTE_HTTP_REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
 const MAX_REMOTE_HTTP_REDIRECTS = 5;
+const DEFAULT_REMOTE_MCP_REQUEST_TIMEOUT_MS = 10_000;
+const DEFAULT_REMOTE_MCP_RESPONSE_MAX_BYTES = 1_000_000;
 
 type OAuthProviderEndpoints = {
   provider: string;
@@ -143,6 +151,8 @@ type ToolAccessServiceOptions = {
   deploymentExposure?: DeploymentExposure;
   trustedLocalStdioRuntimeHost?: string | null;
   now?: () => Date;
+  remoteMcpRequestTimeoutMs?: number;
+  remoteMcpResponseMaxBytes?: number;
 };
 
 type DbTransaction = Parameters<Parameters<Db["transaction"]>[0]>[0];
@@ -154,6 +164,11 @@ export type McpToolDescriptor = {
   description?: string | null;
   inputSchema?: Record<string, unknown>;
   annotations?: Record<string, unknown>;
+};
+
+type ToolDiscoveryResult = {
+  descriptors: McpToolDescriptor[];
+  remoteMcpHeaderSummary: RemoteMcpHeaderSummary | null;
 };
 
 const GOOGLE_SHEETS_SPREADSHEET_SCHEMA = {
@@ -1230,7 +1245,13 @@ function descriptorHash(tool: McpToolDescriptor): string {
   });
 }
 
-function sanitizeHttpFailure(error: unknown): { status: ToolConnectionHealthStatus; message: string; code: string } {
+function sanitizeHttpFailure(error: unknown): {
+  status: ToolConnectionHealthStatus;
+  message: string;
+  code: string;
+  httpStatus?: number;
+  details?: Record<string, unknown>;
+} {
   if (error instanceof HttpError) {
     const code = asRecord(error.details).code;
     if (code === "oauth_challenge") {
@@ -1259,6 +1280,22 @@ function sanitizeHttpFailure(error: unknown): { status: ToolConnectionHealthStat
         status: "missing_secret",
         message: "A configured credential secret could not be resolved.",
         code: "secret_missing",
+      };
+    }
+    if (
+      typeof code === "string"
+      && (
+        code.startsWith("mcp_remote_")
+        || code.startsWith("remote_http_")
+        || code.startsWith("remote_mcp_")
+      )
+    ) {
+      return {
+        status: "error",
+        message: error.message,
+        code,
+        httpStatus: error.status,
+        details: asRecord(error.details),
       };
     }
     return { status: "error", message: error.message, code: "paperclip_error" };
@@ -1308,7 +1345,10 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
     const method = (init.method ?? "GET").toUpperCase();
     for (let redirectCount = 0; redirectCount <= MAX_REMOTE_HTTP_REDIRECTS; redirectCount += 1) {
       const safeUrl = await assertRemoteHttpUrlAllowed(currentUrl);
-      const response = await fetch(safeUrl, { ...init, redirect: "manual" });
+      // Resolve and validate immediately before connecting as a second
+      // defense against DNS rebinding between URL validation and fetch.
+      const validatedUrl = await assertRemoteHttpUrlAllowed(safeUrl);
+      const response = await fetch(validatedUrl, { ...init, redirect: "manual" });
       const location = REMOTE_HTTP_REDIRECT_STATUSES.has(response.status)
         ? response.headers?.get?.("location") ?? null
         : null;
@@ -1319,13 +1359,105 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
       if (redirectCount >= MAX_REMOTE_HTTP_REDIRECTS) {
         throw new HttpError(502, "Remote OAuth endpoint redirected too many times", { code: "oauth_redirect_limit" });
       }
-      currentUrl = new URL(location, safeUrl).toString();
+      currentUrl = new URL(location, validatedUrl).toString();
     }
     throw new HttpError(502, "Remote OAuth endpoint redirected too many times", { code: "oauth_redirect_limit" });
   }
 
   async function assertRemoteEndpointAllowed(config: Record<string, unknown>): Promise<string> {
     return assertRemoteHttpUrlAllowed(remoteEndpoint(config));
+  }
+
+  function assertRemoteMcpHeaderPolicy(
+    config: Record<string, unknown>,
+    transportConfig: Record<string, unknown> = config,
+  ): void {
+    try {
+      readRemoteMcpHeaderPolicy({ config, transportConfig });
+    } catch (error) {
+      if (error instanceof RemoteMcpHeaderValidationError) {
+        throw badRequest(error.message, { code: error.code, reason: error.reason });
+      }
+      throw error;
+    }
+  }
+
+  function remoteMcpHeaders(
+    connection: typeof toolConnections.$inferSelect,
+    credentialHeaders: Record<string, string>,
+  ): ReturnType<typeof buildRemoteMcpHeaders> {
+    try {
+      return buildRemoteMcpHeaders({
+        connection,
+        credentialHeaders,
+        preserveCredentialHeaderCase: true,
+      });
+    } catch (error) {
+      if (error instanceof RemoteMcpHeaderValidationError) {
+        throw badRequest(error.message, { code: error.code, reason: error.reason });
+      }
+      throw error;
+    }
+  }
+
+  function remoteMcpRequestTimeoutMs() {
+    const value = options.remoteMcpRequestTimeoutMs;
+    return typeof value === "number" && Number.isFinite(value) && value > 0
+      ? Math.floor(value)
+      : DEFAULT_REMOTE_MCP_REQUEST_TIMEOUT_MS;
+  }
+
+  function remoteMcpResponseMaxBytes() {
+    const value = options.remoteMcpResponseMaxBytes;
+    return typeof value === "number" && Number.isFinite(value) && value > 0
+      ? Math.floor(value)
+      : DEFAULT_REMOTE_MCP_RESPONSE_MAX_BYTES;
+  }
+
+  function remoteMcpResponseTooLarge(maxBytes: number) {
+    return new HttpError(502, "Remote app response exceeded the size limit", {
+      code: "mcp_remote_response_too_large",
+      maxBytes,
+    });
+  }
+
+  async function readBoundedRemoteMcpResponse(response: Response): Promise<string> {
+    const maxBytes = remoteMcpResponseMaxBytes();
+    const contentLength = response.headers.get("content-length");
+    if (contentLength !== null) {
+      const parsedContentLength = Number(contentLength);
+      if (Number.isFinite(parsedContentLength) && parsedContentLength > maxBytes) {
+        throw remoteMcpResponseTooLarge(maxBytes);
+      }
+    }
+
+    if (!response.body) {
+      const text = await response.text();
+      if (Buffer.byteLength(text, "utf8") > maxBytes) {
+        throw remoteMcpResponseTooLarge(maxBytes);
+      }
+      return text;
+    }
+
+    const reader = response.body.getReader();
+    const chunks: Buffer[] = [];
+    let totalBytes = 0;
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (!value) continue;
+        totalBytes += value.byteLength;
+        if (totalBytes > maxBytes) {
+          await reader.cancel().catch(() => undefined);
+          throw remoteMcpResponseTooLarge(maxBytes);
+        }
+        chunks.push(Buffer.from(value));
+      }
+    } finally {
+      reader.releaseLock();
+    }
+    return Buffer.concat(chunks, totalBytes).toString("utf8");
   }
 
   function trustedRuntimeHost() {
@@ -2771,22 +2903,49 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
     return headers;
   }
 
-  async function remoteTools(connection: typeof toolConnections.$inferSelect): Promise<McpToolDescriptor[]> {
-    const headers = await resolveCredentialHeaders(connection);
+  async function remoteTools(connection: typeof toolConnections.$inferSelect): Promise<ToolDiscoveryResult> {
+    assertRemoteMcpHeaderPolicy(connection.config, connection.transportConfig);
+    const credentialHeaders = await resolveCredentialHeaders(connection);
+    const { headers, summary } = remoteMcpHeaders(connection, credentialHeaders);
     const endpoint = await assertRemoteEndpointAllowed(connection.config);
-    const response = await fetch(endpoint, {
-      method: "POST",
-      // MCP Streamable HTTP requires advertising that we accept both a JSON body
-      // and an SSE stream; spec-compliant servers 406 without it (see mcp-http.ts).
-      headers: mcpHttpRequestHeaders(headers),
-      body: JSON.stringify({
-        jsonrpc: "2.0",
-        id: "paperclip-catalog-refresh",
-        method: "tools/list",
-        params: {},
-      }),
-    });
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), remoteMcpRequestTimeoutMs());
+    timer.unref?.();
+    let response: Response;
+    try {
+      // Revalidate immediately before connecting to reduce DNS-rebinding
+      // exposure while preserving MCP-specific redirect diagnostics below.
+      await assertRemoteEndpointAllowed(connection.config);
+      response = await fetch(endpoint, {
+        method: "POST",
+        redirect: "manual",
+        // MCP Streamable HTTP requires advertising that we accept both a JSON body
+        // and an SSE stream; spec-compliant servers 406 without it (see mcp-http.ts).
+        headers: mcpHttpRequestHeaders(headers),
+        signal: controller.signal,
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: "paperclip-catalog-refresh",
+          method: "tools/list",
+          params: {},
+        }),
+      });
+    } catch (error) {
+      clearTimeout(timer);
+      if (error instanceof Error && error.name === "AbortError") {
+        throw new HttpError(504, "Remote app timed out", { code: "mcp_remote_timeout" });
+      }
+      throw error;
+    }
+    if (REMOTE_HTTP_REDIRECT_STATUSES.has(response.status)) {
+      clearTimeout(timer);
+      throw new HttpError(502, "Remote app redirected unexpectedly", {
+        code: "mcp_remote_redirect_rejected",
+        status: response.status,
+      });
+    }
     if (!response.ok) {
+      clearTimeout(timer);
       const authenticate = response.headers.get("www-authenticate") ?? "";
       if (response.status === 401 && /bearer|oauth|authorization/i.test(authenticate)) {
         const endpoints = await discoverOAuthEndpoints(connection, authenticate);
@@ -2819,11 +2978,27 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
       }
       throw new HttpError(502, "Remote app returned an error", { status: response.status });
     }
-    const payload = parseMcpHttpResponseBody(await response.text(), response.headers.get("content-type"));
+    let body: string;
+    try {
+      body = await readBoundedRemoteMcpResponse(response);
+    } catch (error) {
+      if (error instanceof Error && error.name === "AbortError") {
+        throw new HttpError(504, "Remote app timed out", { code: "mcp_remote_timeout" });
+      }
+      throw error;
+    } finally {
+      clearTimeout(timer);
+    }
+    const payload = parseMcpHttpResponseBody(body, response.headers.get("content-type"));
     const result = asRecord(asRecord(payload).result);
     const payloadTools = asRecord(payload).tools;
     const tools: unknown[] = Array.isArray(result.tools) ? result.tools : Array.isArray(payloadTools) ? payloadTools : [];
-    return tools.map((tool) => normalizeToolDescriptor(tool)).filter((tool): tool is McpToolDescriptor => Boolean(tool));
+    return {
+      descriptors: tools
+        .map((tool) => normalizeToolDescriptor(tool))
+        .filter((tool): tool is McpToolDescriptor => Boolean(tool)),
+      remoteMcpHeaderSummary: summary,
+    };
   }
 
   async function localTools(connection: typeof toolConnections.$inferSelect): Promise<McpToolDescriptor[]> {
@@ -2837,10 +3012,13 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
     }));
   }
 
-  async function discoverTools(connection: typeof toolConnections.$inferSelect): Promise<McpToolDescriptor[]> {
+  async function discoverTools(connection: typeof toolConnections.$inferSelect): Promise<ToolDiscoveryResult> {
     if (connection.transport === "mcp_remote") return remoteTools(connection);
     await resolveCredentialHeaders(connection);
-    return localTools(connection);
+    return {
+      descriptors: await localTools(connection),
+      remoteMcpHeaderSummary: null,
+    };
   }
 
   async function updateConnectionHealth(
@@ -2873,8 +3051,9 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
   async function checkConnectionHealth(connectionId: string, actor?: ActorInfo): Promise<ToolConnectionHealthCheckResult> {
     const connection = await getConnectionRow(connectionId);
     try {
+      let remoteMcpHeaderSummary: RemoteMcpHeaderSummary | null = null;
       if (connection.transport === "mcp_remote") {
-        await remoteTools(connection);
+        remoteMcpHeaderSummary = (await remoteTools(connection)).remoteMcpHeaderSummary;
       } else {
         await resolveCredentialHeaders(connection);
         await stdioTemplateId(connection.companyId, connection.config);
@@ -2889,7 +3068,10 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
         action: "tool_connection.health_check",
         outcome: "success",
         actor,
-        details: { transport: connection.transport },
+        details: {
+          transport: connection.transport,
+          ...(remoteMcpHeaderSummary ? { remoteMcpHeaderSummary } : {}),
+        },
       });
       return { connection: toConnection(updated), runtimeSlot };
     } catch (error) {
@@ -2905,13 +3087,18 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
         actor,
         details: { status: failure.status, transport: connection.transport },
       });
-      throw new HttpError(failure.status === "missing_secret" ? 422 : 502, failure.message, {
+      throw new HttpError(
+        failure.httpStatus ?? (failure.status === "missing_secret" ? 422 : 502),
+        failure.message,
+        {
+        ...(failure.details ?? {}),
         code: failure.code,
         connection: toConnection(updated),
         runtimeSlot,
         setupUrl: connectionSetupUrl(connection),
         reconnectUrl: connectionReconnectUrl(connection),
-      });
+        },
+      );
     }
   }
 
@@ -2919,8 +3106,11 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
     const connection = await getConnectionRow(connectionId);
     const now = new Date();
     let descriptors: McpToolDescriptor[];
+    let remoteMcpHeaderSummary: RemoteMcpHeaderSummary | null = null;
     try {
-      descriptors = await discoverTools(connection);
+      const discovery = await discoverTools(connection);
+      descriptors = discovery.descriptors;
+      remoteMcpHeaderSummary = discovery.remoteMcpHeaderSummary;
     } catch (error) {
       const failure = sanitizeHttpFailure(error);
       const updated = await updateConnectionHealth(connection, failure.status, failure.message);
@@ -2933,19 +3123,23 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
         details: { status: failure.status },
         actor,
       });
-      throw new HttpError(failure.status === "missing_secret" ? 422 : 502, failure.message, {
+      throw new HttpError(
+        failure.httpStatus ?? (failure.status === "missing_secret" ? 422 : 502),
+        failure.message,
+        {
+        ...(failure.details ?? {}),
         code: failure.code,
         setupUrl: connectionSetupUrl(connection),
         reconnectUrl: connectionReconnectUrl(connection),
-      });
+        },
+      );
     }
 
     const existingRows = await db.select().from(toolCatalogEntries).where(eq(toolCatalogEntries.connectionId, connection.id));
     const existingByName = new Map(existingRows.map((entry) => [entry.toolName, entry]));
     const updatedEntries: ToolCatalogEntry[] = [];
     let quarantinedCount = 0;
-    const quarantineOnRefresh = shouldQuarantineNewEntries(connection) && connection.status === "active";
-    const safeDefault = asRecord(connection.config).safeDefault === true;
+    const quarantineOnRefresh = shouldQuarantineNewEntries(connection);
     for (const descriptor of descriptors) {
       const riskLevel = classifyRisk(descriptor);
       const hash = descriptorHash(descriptor);
@@ -2955,8 +3149,7 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
       const shouldQuarantine =
         quarantineOnRefresh
         && (!existing || changed)
-        && existing?.status !== "disabled"
-        && (!safeDefault || riskLevel !== "read");
+        && existing?.status !== "disabled";
       const status = shouldQuarantine
         ? "quarantined"
         : existing?.status === "disabled"
@@ -3044,7 +3237,11 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
       connectionId: connection.id,
       action: "tool_connection.catalog_refresh",
       outcome: "success",
-      details: { discoveredCount: descriptors.length, quarantinedCount },
+      details: {
+        discoveredCount: descriptors.length,
+        quarantinedCount,
+        ...(remoteMcpHeaderSummary ? { remoteMcpHeaderSummary } : {}),
+      },
       actor,
     });
 
@@ -4162,9 +4359,10 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
     const baseConfig = transport === "mcp_remote"
       ? { url: method?.defaults?.serverUrl ?? input.link ?? "" }
       : { templateId: method?.defaults?.templateKey };
+    const suppliedConfig = input.configValues ?? {};
     let config: Record<string, unknown> = galleryEntry
-      ? { ...baseConfig, sourceTemplateKey: galleryEntry.slug, quarantineNewEntries: true }
-      : { ...baseConfig, quarantineNewEntries: true };
+      ? { ...suppliedConfig, ...baseConfig, sourceTemplateKey: galleryEntry.slug, quarantineNewEntries: true }
+      : { ...suppliedConfig, ...baseConfig, quarantineNewEntries: true };
     if (galleryEntry?.slug === GOOGLE_SHEETS_GALLERY_KEY) {
       const availability = googleSheetsRobotEmailFromEnv();
       if (!availability.available) {
@@ -4182,7 +4380,10 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
       config = normalizeGoogleSheetsConnectionConfig(config);
       await assertGoogleSheetsSpreadsheetOwnership(companyId, config);
     }
-    if (transport === "mcp_remote") await assertRemoteEndpointAllowed(config);
+    if (transport === "mcp_remote") {
+      assertRemoteMcpHeaderPolicy(config);
+      await assertRemoteEndpointAllowed(config);
+    }
     if (transport === "local_stdio") await stdioTemplateId(companyId, config);
     assertLocalStdioCanBeEnabled(transport, false);
 
@@ -5569,7 +5770,11 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
       const transport = input.transport;
       if (!transport) throw badRequest("Tool connection transport is required");
       const config = normalizeGoogleSheetsConnectionConfig(input.config ?? input.transportConfig ?? {});
-      if (transport === "mcp_remote") await assertRemoteEndpointAllowed(config);
+      const transportConfig = isGoogleSheetsConnectionConfig(config) ? config : input.transportConfig ?? config;
+      if (transport === "mcp_remote") {
+        assertRemoteMcpHeaderPolicy(config, transportConfig);
+        await assertRemoteEndpointAllowed(config);
+      }
       if (transport === "local_stdio") await stdioTemplateId(companyId, config);
       assertLocalStdioCanBeEnabled(transport, input.enabled ?? false);
       await assertGoogleSheetsSpreadsheetOwnership(companyId, config);
@@ -5605,7 +5810,7 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
         status: input.status ?? "draft",
         enabled: input.enabled ?? false,
         config,
-        transportConfig: isGoogleSheetsConnectionConfig(config) ? config : input.transportConfig ?? config,
+        transportConfig,
         credentialRefs: input.credentialRefs ?? [],
         credentialSecretRefs: input.credentialSecretRefs ?? [],
       }).returning();
@@ -5734,6 +5939,7 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
       actor?: ActorInfo,
     ): Promise<ToolConnectionInstallSnapshot> => {
       const connection = await getConnectionRow(connectionId);
+      const accessMode = input.accessMode ?? "reachability_only";
       const requested = new Map(input.installs.map((install) => [`${install.targetType}:${install.targetId}`, install]));
       for (const install of requested.values()) {
         if (install.targetType === "company") {
@@ -5743,6 +5949,7 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
         }
       }
       const accessExtensions: Array<{ targetType: "company" | "agent"; targetId: string; profileId: string }> = [];
+      let removedLegacyAccessBindingCount = 0;
       await db.transaction(async (tx) => {
         const existing = await tx
           .select()
@@ -5767,7 +5974,47 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
             createdByUserId: actor?.actorType === "user" ? actor.actorId ?? null : null,
           })));
         }
-        if (requested.size > 0) {
+
+        const profileKey = `app:${connection.id}`;
+        const [legacyInstallProfile] = await tx
+          .select()
+          .from(toolProfiles)
+          .where(and(
+            eq(toolProfiles.companyId, connection.companyId),
+            eq(toolProfiles.profileKey, profileKey),
+          ))
+          .limit(1);
+        if (legacyInstallProfile) {
+          const candidateBindings = await tx
+            .select()
+            .from(toolProfileBindings)
+            .where(and(
+              eq(toolProfileBindings.companyId, connection.companyId),
+              eq(toolProfileBindings.profileId, legacyInstallProfile.id),
+            ));
+          const retainedAccessKeys = accessMode === "extend_connection_access"
+            ? new Set(requested.keys())
+            : new Set<string>();
+          const removableBindingIds = candidateBindings
+            .filter((binding) => {
+              const metadata = asRecord(binding.metadata);
+              return (
+                metadata.source === "tool_connection_install"
+                && metadata.connectionId === connection.id
+                && !retainedAccessKeys.has(`${binding.targetType}:${binding.targetId}`)
+              );
+            })
+            .map((binding) => binding.id);
+          if (removableBindingIds.length > 0) {
+            const removed = await tx
+              .delete(toolProfileBindings)
+              .where(inArray(toolProfileBindings.id, removableBindingIds))
+              .returning({ id: toolProfileBindings.id });
+            removedLegacyAccessBindingCount += removed.length;
+          }
+        }
+
+        if (accessMode === "extend_connection_access" && requested.size > 0) {
           const profile = await appProfileForConnection(tx, connection);
           for (const install of requested.values()) {
             const [binding] = await tx
@@ -5799,13 +6046,23 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
           details: extension,
         });
       }
-      return { connectionId: connection.id, installs: await listConnectionInstalls(connection.id, connection.companyId) };
+      return {
+        connectionId: connection.id,
+        installs: await listConnectionInstalls(connection.id, connection.companyId),
+        accessMode,
+        reachabilityOnly: accessMode === "reachability_only",
+        removedLegacyAccessBindingCount,
+      };
     },
 
     updateConnection: async (connectionId: string, input: UpdateToolConnection): Promise<ToolConnection> => {
       const existing = await getConnectionRow(connectionId);
       const config = normalizeGoogleSheetsConnectionConfig(input.config ?? input.transportConfig ?? existing.config);
-      if (existing.transport === "mcp_remote") await assertRemoteEndpointAllowed(config);
+      const transportConfig = isGoogleSheetsConnectionConfig(config) ? config : input.transportConfig ?? config;
+      if (existing.transport === "mcp_remote") {
+        assertRemoteMcpHeaderPolicy(config, transportConfig);
+        await assertRemoteEndpointAllowed(config);
+      }
       if (existing.transport === "local_stdio") await stdioTemplateId(existing.companyId, config);
       assertLocalStdioCanBeEnabled(existing.transport, input.enabled ?? existing.enabled);
       await assertGoogleSheetsSpreadsheetOwnership(existing.companyId, config, { excludeConnectionId: existing.id });
@@ -5817,7 +6074,7 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
           status: input.status ?? existing.status,
           enabled: input.enabled ?? existing.enabled,
           config,
-          transportConfig: isGoogleSheetsConnectionConfig(config) ? config : input.transportConfig ?? config,
+          transportConfig,
           credentialRefs: input.credentialRefs ?? existing.credentialRefs,
           credentialSecretRefs: input.credentialSecretRefs ?? existing.credentialSecretRefs,
           updatedAt: new Date(),
@@ -6409,7 +6666,15 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
       return { unbound: rows.length };
     },
 
-    getEffectiveProfilesForAgent: async (companyId: string, agentId: string): Promise<ToolProfileEffectiveSummary> => {
+    getEffectiveProfilesForAgent: async (
+      companyId: string,
+      agentId: string,
+      context?: {
+        issueId?: string | null;
+        projectId?: string | null;
+        routineId?: string | null;
+      },
+    ): Promise<ToolProfileEffectiveSummary> => {
       await assertOptionalAgent(companyId, agentId, "Tool profile effective agent");
       const allBindings = await db
         .select()
@@ -6419,6 +6684,21 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
       const bindings = narrowestScopeBindings(allBindings.filter((binding) =>
         (binding.targetType === "company" && binding.targetId === companyId)
         || (binding.targetType === "agent" && binding.targetId === agentId)
+        || (
+          binding.targetType === "project"
+          && Boolean(context?.projectId)
+          && binding.targetId === context?.projectId
+        )
+        || (
+          binding.targetType === "routine"
+          && Boolean(context?.routineId)
+          && binding.targetId === context?.routineId
+        )
+        || (
+          binding.targetType === "issue"
+          && Boolean(context?.issueId)
+          && binding.targetId === context?.issueId
+        )
       ));
       if (bindings.length === 0) {
         return {

@@ -15,6 +15,7 @@ import {
 import { errorHandler } from "../middleware/index.js";
 import { inboxAgentPolicyRoutes } from "../routes/inbox-agent-policy.js";
 import {
+  EMBEDDED_POSTGRES_TEST_SETUP_TIMEOUT_MS,
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
@@ -29,7 +30,7 @@ describeEmbeddedPostgres("inbox agent policy routes", () => {
   beforeAll(async () => {
     tempDb = await startEmbeddedPostgresTestDatabase("paperclip-inbox-agent-policy-routes-");
     db = createDb(tempDb.connectionString);
-  }, 20_000);
+  }, EMBEDDED_POSTGRES_TEST_SETUP_TIMEOUT_MS);
 
   afterEach(async () => {
     await db.delete(activityLog);

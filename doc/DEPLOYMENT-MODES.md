@@ -87,9 +87,15 @@ Examples:
 
 ```sh
 pnpm paperclipai onboard --yes
+pnpm paperclipai onboard --yes --no-run
 pnpm paperclipai onboard --yes --bind lan
 pnpm paperclipai run --bind tailnet
 ```
+
+`--no-run` is the explicit headless service-manager path: it keeps `--yes`
+non-interactive, writes the resolved config and local key material, and returns
+without launching the server. Without `--no-run`, `--yes` retains the
+quickstart behavior of starting immediately.
 
 `configure --section server` follows the same interactive behavior.
 
@@ -100,6 +106,9 @@ Default doctor remains flagless:
 ```sh
 pnpm paperclipai doctor
 ```
+
+Any failed critical check produces a nonzero process exit status so schedulers
+and service managers cannot mistake a printed failure summary for success.
 
 Doctor reads configured mode/exposure and applies mode-aware checks. Optional override flags are secondary.
 

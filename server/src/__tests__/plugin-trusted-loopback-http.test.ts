@@ -10,6 +10,7 @@ import {
   type TrustedLoopbackHttpRule,
 } from "../services/plugin-trusted-loopback-policy.js";
 import {
+  EMBEDDED_POSTGRES_TEST_SETUP_TIMEOUT_MS,
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
@@ -106,7 +107,7 @@ describeEmbeddedPostgres("plugin host trusted loopback HTTP", () => {
       settingsJson: { pluginOwned: true },
     });
     await registry.setCompanyTrustedLoopbackHttpRules(pluginId, companyA, rules);
-  }, 20_000);
+  }, EMBEDDED_POSTGRES_TEST_SETUP_TIMEOUT_MS);
 
   afterAll(async () => {
     if (server) {

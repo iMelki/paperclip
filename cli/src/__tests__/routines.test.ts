@@ -12,6 +12,7 @@ import {
   routines,
 } from "@paperclipai/db";
 import {
+  EMBEDDED_POSTGRES_TEST_SETUP_TIMEOUT_MS,
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
@@ -98,7 +99,7 @@ describeEmbeddedPostgres("disableAllRoutinesInConfig", () => {
     tempRoot = mkdtempSync(path.join(os.tmpdir(), "paperclip-routines-cli-config-"));
     configPath = path.join(tempRoot, "config.json");
     writeTestConfig(configPath, tempRoot, tempDb.connectionString);
-  }, 20_000);
+  }, EMBEDDED_POSTGRES_TEST_SETUP_TIMEOUT_MS);
 
   afterEach(async () => {
     await db.delete(routines);

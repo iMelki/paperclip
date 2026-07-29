@@ -100,6 +100,9 @@ jobs:
       - name: Test standalone package build concurrency
         run: node --test ./scripts/__tests__/build-standalone-concurrency.test.mjs
 
+      - name: Test cross-platform build filesystem helper
+        run: node --test ./scripts/__tests__/build-filesystem.test.mjs
+
       - name: Validate release package manifest
         run: node ./scripts/release-package-map.mjs check
 

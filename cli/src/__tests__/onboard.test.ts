@@ -2,7 +2,11 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { onboard } from "../commands/onboard.js";
+import {
+  onboard,
+  shouldPromptToStartAfterOnboard,
+  shouldStartAfterOnboard,
+} from "../commands/onboard.js";
 import type { PaperclipConfig } from "../config/schema.js";
 
 const ORIGINAL_ENV = { ...process.env };
@@ -127,6 +131,39 @@ describe("onboard", () => {
     expect(fs.readFileSync(fixture.configPath, "utf8")).toBe(fixture.configText);
     expect(fs.existsSync(`${fixture.configPath}.backup`)).toBe(false);
     expect(fs.existsSync(path.join(path.dirname(fixture.configPath), ".env"))).toBe(true);
+  });
+
+  it("lets an explicit --no-run override --yes without changing the default quickstart start behavior", () => {
+    expect(shouldStartAfterOnboard({ yes: true })).toBe(true);
+    expect(shouldStartAfterOnboard({ yes: true, run: false })).toBe(false);
+    expect(shouldStartAfterOnboard({ yes: true, run: true })).toBe(true);
+    expect(shouldStartAfterOnboard({})).toBe(false);
+  });
+
+  it("never offers the interactive start prompt after explicit --no-run", () => {
+    expect(
+      shouldPromptToStartAfterOnboard({ run: false, invokedByRun: false }, false, true, true),
+    ).toBe(false);
+    expect(
+      shouldPromptToStartAfterOnboard({ run: undefined, invokedByRun: false }, false, true, true),
+    ).toBe(true);
+    expect(
+      shouldPromptToStartAfterOnboard({ run: undefined, invokedByRun: true }, false, true, true),
+    ).toBe(false);
+  });
+
+  it("writes a fresh --yes config without launching when --no-run is explicit", async () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), "paperclip-onboard-no-run-"));
+    process.env.PAPERCLIP_HOME = home;
+    const configPath = path.join(home, "instances", "default", "config.json");
+
+    await onboard({ yes: true, run: false });
+
+    const raw = JSON.parse(fs.readFileSync(configPath, "utf8")) as PaperclipConfig;
+    expect(raw.server.deploymentMode).toBe("local_trusted");
+    expect(raw.server.bind).toBe("loopback");
+    expect(fs.existsSync(path.join(path.dirname(configPath), ".env"))).toBe(true);
+    expect(fs.existsSync(raw.secrets.localEncrypted.keyFilePath)).toBe(true);
   });
 
   it("keeps --yes onboarding on local trusted loopback defaults", async () => {
