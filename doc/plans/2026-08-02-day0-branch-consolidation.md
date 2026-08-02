@@ -190,8 +190,12 @@ The board fallback was completed in a separate clean clone rather than
 staging the active dirty MCK checkout. The exact receipt-declared 59-path
 snapshot is pushed as MCK PR
 [#119](https://github.com/iMelki/mission-control-kanban/pull/119), branch
-`factory/bridge-consolidation-20260802`, commit
-`a05ca7c22fd18fbad8983e6b5f4a999703f4ba43`, targeting `dev`. The root
+`factory/bridge-consolidation-20260802`, candidate commit
+`a05ca7c22fd18fbad8983e6b5f4a999703f4ba43`, targeting `dev`. Dependent PR
+[#120](https://github.com/iMelki/mission-control-kanban/pull/120) added the
+one-file root TypeScript build boundary and merged into the PR branch as
+`4d9552d34a2d6be7fddcd38d2354db6745ebb65c`; PR #119 now points at that head.
+The root
 `package-lock.json` and the nine ASS-23 owner-mapped MCK #48/#75 paths were
 excluded; the active MCK index remains untouched.
 
@@ -214,12 +218,18 @@ Docker-backed PostgreSQL migration scenarios with cleanup verification, root
 typecheck/full tests/lint/production build, and staged Gitleaks protection all
 pass. The two deterministic SDK-provenance scanner findings use exact inline
 `gitleaks:allow` annotations, matching the existing Paperclip fixture policy;
-no blanket ignore or scanner bypass was added.
+no blanket ignore or scanner bypass was added. Final GitHub checks for PR #119
+(Paperclip bridge, Gitleaks, pre-commit, runtime regression, and Turbopack
+inventory) are green. The bridge migration job had one transient Docker
+administrator-termination failure and passed on the single bounded failed-job
+rerun; no code waiver was made.
 
 ASS-25 remains `blocked`/`needs_review` and ASS-11 remains paused. No direct
 MCK `dev` commit, release, callback, or merge was performed. The next control
-plane gate is GitHub CI plus independent review of PR #119; only after a green
-merge into MCK `dev` may ASS-11 run once against clean `dev`.
+plane gate is the active independent Paperclip review of PR #119; only after
+that acceptance may the PR merge into MCK `dev`, followed by one deterministic
+Validator run on clean `dev` and an Integrator release/readback. The active
+dirty MCK checkout remains untouched.
 
 ## Promotion PR secret-scan gate (2026-08-02)
 
