@@ -1,6 +1,8 @@
 # Day-0 factory branch and worktree consolidation
 
-Status: active; implementation remains on `dev`.
+Status: active; implementation remains on `dev`; bridge promotion is blocked on
+deterministic validation, independent review, release evidence, and the
+separate Paperclip history secret-scan gate.
 
 ## Rules
 
@@ -126,3 +128,55 @@ for dirty/foreign-branch repair, shared-workspace corruption, cleanup data loss,
 review self-approval, Windows process-group cleanup, wake coalescing, and plugin
 hot-reload event delivery. These are tracked as gates, not silently assumed to
 be fixed by an upstream merge.
+
+## Latest Builder disposition (2026-08-02)
+
+Builder run `d07e5b06-3bf5-458d-9e8b-fa9db5acc8d3` finished `succeeded` at
+`2026-08-02T11:15:49.167Z`, but its declared outcome is `needs_human` rather
+than completion. The run verified the revision-8 envelope, manifest
+`sha256:375d980e84d324d9efab58f44e0ac3f7f9bcb6828c7cf078b2ab6c2a0470bad7`,
+base/HEAD/origin-dev `820a90582af8a86a62050727beeab7efe7cb4598`, the exact
+59-path candidate, and stable snapshot
+`sha256:b90e681ad7a9fea57e9dd5617cd197e24912943e6d80de61e84adc9fa6a6e7dd`.
+All nine ASS-23 owner-mapped paths remained unchanged. No candidate file,
+index, commit, push, release, callback, or Validator command was performed.
+
+The run's receipt preparation failed twice before any Paperclip PUT:
+
+1. PowerShell parser error (`Missing expression after ','`) while building the
+   owner-mapped array.
+2. Tool JavaScript parser error (`Invalid or unexpected token`) while preparing
+   the repaired payload.
+
+The run correctly stopped at the two-attempt repair ceiling and recorded the
+evidence in Paperclip comment
+`2fe9b39c-279c-472f-85a1-34135e425622`. Readback confirms that
+`builder-run-receipt-5` does not exist. The local board then applied the valid
+blocked disposition with `unblockDescriptor.owner=board`; adding that comment
+also woke a fresh run automatically, so exact run
+`2a240462-05bc-41d9-8525-0a44a9063818` was cancelled and read back as
+`status=cancelled`, `errorCode=cancelled`. ASS-19 is now `blocked` with no
+active run. This is a control-plane wake side effect to account for in future
+operator comments: status-only PATCHes must be used when a wake is not wanted.
+
+The next authorized action is to create a syntactically validated receipt from
+the recorded evidence, re-wake ASS-19 for readback-only verification, and then
+run ASS-11 once with the exact manifest. Do not retry the failed payload inline,
+change the 59-path envelope, or call completion early.
+
+## Promotion PR secret-scan gate (2026-08-02)
+
+Paperclip PR [#26](https://github.com/iMelki/paperclip/pull/26) remains draft
+and review-only. Required run
+[`30744851893`](https://github.com/iMelki/paperclip/actions/runs/30744851893)
+failed `secret-scan` while scanning complete history with pinned Gitleaks 8.30.1.
+The findings are pre-existing token-shaped synthetic values in historical test
+fixtures (for example `remote-mcp-headers.test.ts`, `TokensPanel.test.tsx`, and
+Google Sheets MCP test files); `verify` and `e2e` were skipped downstream and
+are not independent failures. Issue
+[#13](https://github.com/iMelki/paperclip/issues/13) now contains the exact
+read-back evidence and classification plan. No blanket allowlist, scanner
+bypass, history rewrite, or branch merge is allowed until each finding is
+classified, inert fixtures are made unmistakably inert where practical, the
+current and complete-history scans pass (or alerts are explicitly resolved),
+and PR checks rerun green.
