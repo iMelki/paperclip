@@ -334,7 +334,8 @@ available. WSL remains unstarted.
 
 Paperclip CLI doctor and API health were rerun on `dev`: 7 critical checks
 passed, loopback/private mode and database backup were healthy, and the server
-read back `11608ae12`. Doctor reported two non-fatal warnings: the intentional
+read back `639054c0d` after the documented topology-evidence commit. Doctor
+reported two non-fatal warnings: the intentional
 use of port 5113 by the running service and a Unix-style `666` mode warning on
 the Windows local-encrypted key file; the service bootstrap's Windows ACL
 readback remains owner-private. The factory preview still fails closed on the
