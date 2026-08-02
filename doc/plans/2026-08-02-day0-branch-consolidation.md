@@ -343,3 +343,26 @@ canonical MCK checkout's `core.bare=true`/populated-worktree contradiction.
 That topology defect is now tracked as MCK issue
 [#127](https://github.com/iMelki/mission-control-kanban/issues/127), with no
 Git config or worktree mutation performed.
+
+## Final continuation checkpoint (2026-08-02 18:05 UTC)
+
+MCK CI exposed and tracked a separate readiness race as issue
+[#128](https://github.com/iMelki/mission-control-kanban/issues/128). The fix is
+isolated correctly from `origin/dev` in PR
+[#130](https://github.com/iMelki/mission-control-kanban/pull/130), commit
+`867d568`; the superseded feature-based PR #129 was closed before merge. The
+fix adds a page-owned workspace-ready marker, waits on it in the production
+smoke, and emits bounded DOM diagnostics on timeout. Three consecutive local
+production runs on the exact fix all returned `ok: true`; GitHub checks remain
+the promotion gate. MCK bridge PR #119 remains open and unmerged because the
+independent Paperclip evidence chain is still `needs_human` and the canonical
+checkout topology issue #127 is unresolved.
+
+The Windows Paperclip service was subsequently restarted from local `dev` at
+`081c8a33d47488ff9971b4234e4b5194b225d873` (short SHA `081c8a33`) after the
+docs-only runtime readback commit. The final health readback must show this
+exact `serverVersion`, `branchName=dev`, `deploymentExposure=private`,
+`authReady=true`, `bootstrapStatus=ready`, and a fresh database backup. The
+tracked `ui/src/pages/Auth.tsx` change and untracked `.local-logs/` remain
+untouched as unrelated user work. No WSL service, MCK merge, release callback,
+or `dev→main/master` promotion was started.
