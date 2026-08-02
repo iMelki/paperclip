@@ -45,6 +45,24 @@ is review-only until every factory gate is green.
 7. Prepare repository-specific `dev` to `main` PRs; merge only the explicitly
    authorized promotion after review and natural-run evidence.
 
+## Safe consolidation sequence
+
+1. Freeze each dirty or locked worktree. Capture status, HEAD, binary diff,
+   untracked-file manifest, and lock metadata.
+2. Map every path to an owner, issue, or PR. Classify generated logs as retain
+   or ignore. Do not bulk-clean them.
+3. For uncommitted work, create a clean copy from current `origin/dev`, apply
+   only a hash-verified patch, run focused and full checks, commit with issue
+   trailers, push, and open a PR into `dev`.
+4. Read back the PR body, checks, review, and merge SHA before merging.
+5. Only after clean-state and owner confirmation, unlock or remove a linked
+   worktree with Git's worktree commands. Never remove a dirty tree by force.
+6. Delete a remote branch only after its PR is merged and the merge SHA is
+   read back.
+7. After `dev` settles, refresh the promotion PR (`master` for Paperclip,
+   `main` elsewhere), require checks and human review, merge with a commit,
+   and fast-forward `dev` only when it has not advanced independently.
+
 ## Current live drift
 
 The 2026-08-02 Validator retry `540a4c3f-99e3-4b04-b952-4b8b9314a76a`
