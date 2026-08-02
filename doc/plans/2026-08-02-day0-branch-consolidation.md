@@ -90,6 +90,12 @@ Paperclip's stale local database-backup warning was repaired by a manual backup
 at `2026-08-02T10:35:00Z`; health readback now reports
 `databaseBackup.status=ok`.
 
+Builder run `e297d7bb-3046-4bc3-8ad1-4579d73618ef` is currently still running
+at `startup step: acp.handshake` without a Paperclip process PID or candidate
+output. Paperclip issue #24 records the observation. Do not restart the factory
+while this run is active; use the bounded timeout or an explicit stop/recovery
+path before retrying.
+
 ## Upstream risk watch
 
 Before enabling isolated worktrees broadly, recheck current upstream behavior
