@@ -19,3 +19,66 @@ c19197581b2ec7f9e94acf2aa586c3807c8bb4fa:ui/storybook-static/assets/MarkdownEdit
 c19197581b2ec7f9e94acf2aa586c3807c8bb4fa:ui/storybook-static/assets/iframe-aoIC7NDi.js:generic-api-key:1046
 09d2ef1a37c9097b983a9705ff30f5c2225fc880:docs/deploy/secrets.md:generic-api-key:76
 02dc46e78214083acebba040e9b57833596add9d:docs/deploy/secrets.md:generic-api-key:78
+
+# Historical review 2026-08-02: exact fingerprints below are synthetic test
+# fixtures, documentation examples, or intentionally redacted smoke-test
+# placeholders. They are not broad path/rule suppressions; new values,
+# locations, and commits remain detectable. Classification and evidence:
+# doc/security/gitleaks-history-inventory-2026-08-02.md
+055ec653e8bb96cfe923bef953400c7749d8fd87:server/src/__tests__/redact-sensitive.test.ts:generic-api-key:6
+0eb2e109d9a7f2aa863089ff5de9d51a128c1e54:docs/superpowers/plans/2026-05-09-paperclip-cloud-adapter-m2-plan.md:generic-api-key:2169
+1c956387e92c17b19f121bdbc19988286b128d29:server/src/__tests__/plugin-telemetry-bridge.test.ts:jwt:144
+1d136fea5ed62051e2a13530753257c15e35ee0b:server/src/__tests__/subscription-credentials-service.test.ts:generic-api-key:111
+4693d770aab4ec8342833cfed78dd4ac43c49f7a:server/src/__tests__/company-artifacts-service.test.ts:generic-api-key:232
+4a7a45f96080a702a76b1efefd6c42edb7a3335c:docs/superpowers/plans/2026-05-09-paperclip-cloud-adapter-m2-plan.md:generic-api-key:2169
+70b1a9109d756818fb448beafa67af27babb52de:doc/logs/2026-05-24-cli-api-parity-e2e-log.md:generic-api-key:34
+70b1a9109d756818fb448beafa67af27babb52de:doc/logs/2026-05-24-cli-api-parity-e2e-log.md:generic-api-key:35
+738f9b28e18286792ea3ac4007cf12e1230bea2e:scripts/smoke/hermes-gateway-e2e.sh:curl-auth-header:439
+7b35de65aaabbd53c2393cdf10c2223e36af1c23:packages/google-sheets-mcp-server/src/http.test.ts:private-key:26
+7b35de65aaabbd53c2393cdf10c2223e36af1c23:packages/google-sheets-mcp-server/src/server.test.ts:private-key:25
+7db1980c5a9855ea569531c9ad28d4dcd5354bab:packages/adapters/kubernetes-execution/test/unit/redaction.test.ts:generic-api-key:7
+8d9f9fd24086a3ae8ee7edc83f8368084be81277:server/src/__tests__/environment-custom-images-service.test.ts:generic-api-key:456
+931eec3fbf83dc425b5381ba5823125162cd13e7:server/src/__tests__/tool-gateway.test.ts:generic-api-key:2072
+98df214917bc8f8a70b63b58105a1deea7cd73b0:doc/logs/2026-05-24-cli-api-parity-e2e-log.md:generic-api-key:34
+98df214917bc8f8a70b63b58105a1deea7cd73b0:doc/logs/2026-05-24-cli-api-parity-e2e-log.md:generic-api-key:35
+98df214917bc8f8a70b63b58105a1deea7cd73b0:docs/deploy/secrets.md:generic-api-key:507
+98df214917bc8f8a70b63b58105a1deea7cd73b0:packages/plugins/sandbox-providers/exe-dev/src/plugin.test.ts:private-key:170
+98df214917bc8f8a70b63b58105a1deea7cd73b0:packages/plugins/sandbox-providers/exe-dev/src/plugin.test.ts:private-key:179
+98df214917bc8f8a70b63b58105a1deea7cd73b0:packages/plugins/sandbox-providers/exe-dev/src/plugin.test.ts:private-key:246
+98df214917bc8f8a70b63b58105a1deea7cd73b0:packages/plugins/sandbox-providers/exe-dev/src/plugin.ts:private-key:170
+98df214917bc8f8a70b63b58105a1deea7cd73b0:scripts/smoke/hermes-gateway-e2e.sh:curl-auth-header:610
+98df214917bc8f8a70b63b58105a1deea7cd73b0:server/src/__tests__/company-artifacts-service.test.ts:generic-api-key:233
+98df214917bc8f8a70b63b58105a1deea7cd73b0:server/src/__tests__/environment-custom-images-service.test.ts:generic-api-key:543
+98df214917bc8f8a70b63b58105a1deea7cd73b0:server/src/__tests__/heartbeat-active-run-output-watchdog.test.ts:jwt:293
+98df214917bc8f8a70b63b58105a1deea7cd73b0:server/src/__tests__/invite-accept-gateway-defaults.test.ts:generic-api-key:155
+98df214917bc8f8a70b63b58105a1deea7cd73b0:server/src/__tests__/invite-accept-gateway-defaults.test.ts:generic-api-key:178
+98df214917bc8f8a70b63b58105a1deea7cd73b0:server/src/__tests__/invite-accept-gateway-defaults.test.ts:generic-api-key:203
+98df214917bc8f8a70b63b58105a1deea7cd73b0:server/src/__tests__/invite-accept-gateway-defaults.test.ts:generic-api-key:233
+98df214917bc8f8a70b63b58105a1deea7cd73b0:server/src/__tests__/redact-sensitive.test.ts:generic-api-key:6
+98df214917bc8f8a70b63b58105a1deea7cd73b0:server/src/__tests__/redaction.test.ts:jwt:68
+98df214917bc8f8a70b63b58105a1deea7cd73b0:server/src/__tests__/secrets-service.test.ts:generic-api-key:2089
+98df214917bc8f8a70b63b58105a1deea7cd73b0:server/src/__tests__/secrets-service.test.ts:generic-api-key:2440
+9c1f8e788732c2cff971d8f2b0c69499bde0fac7:server/src/__tests__/decisions-service.test.ts:generic-api-key:44
+9c1f8e788732c2cff971d8f2b0c69499bde0fac7:server/src/__tests__/server-startup-feedback-export.test.ts:generic-api-key:289
+9c1f8e788732c2cff971d8f2b0c69499bde0fac7:server/src/__tests__/server-startup-feedback-export.test.ts:generic-api-key:290
+9c1f8e788732c2cff971d8f2b0c69499bde0fac7:server/src/__tests__/server-startup-feedback-export.test.ts:generic-api-key:406
+9c1f8e788732c2cff971d8f2b0c69499bde0fac7:server/src/__tests__/server-startup-feedback-export.test.ts:generic-api-key:453
+aea35fe695672061918af10e5493c9d890e44d13:packages/plugins/sandbox-providers/exe-dev/src/plugin.test.ts:private-key:170
+aea35fe695672061918af10e5493c9d890e44d13:packages/plugins/sandbox-providers/exe-dev/src/plugin.test.ts:private-key:179
+aea35fe695672061918af10e5493c9d890e44d13:packages/plugins/sandbox-providers/exe-dev/src/plugin.test.ts:private-key:246
+aea35fe695672061918af10e5493c9d890e44d13:packages/plugins/sandbox-providers/exe-dev/src/plugin.ts:private-key:170
+bb7978327ed568bf012f6efe16fd200e8baa3a5c:server/src/__tests__/redact-sensitive.test.ts:generic-api-key:6
+bf8a7c98ea46644c6a3f921299141dab2c48af0e:packages/plugins/sandbox-providers/exe-dev/src/plugin.test.ts:private-key:235
+bf8a7c98ea46644c6a3f921299141dab2c48af0e:packages/plugins/sandbox-providers/exe-dev/src/plugin.ts:private-key:165
+c8e4d581722918e8f8084700eb70c19c546a7e55:scripts/smoke/hermes-gateway-e2e.sh:curl-auth-header:529
+d5402928376422040dbb3cda19233c2e3d4b019c:server/src/__tests__/remote-mcp-headers.test.ts:jwt:202
+d77fab6aae3146ab5957c4d4d54d634f22545707:server/src/__tests__/invite-accept-gateway-defaults.test.ts:generic-api-key:203
+d77fab6aae3146ab5957c4d4d54d634f22545707:server/src/__tests__/invite-accept-gateway-defaults.test.ts:generic-api-key:233
+eae089aa2e1bc71b968d2c1a4a9d09f2fe209a1b:server/src/__tests__/company-artifacts-service.test.ts:generic-api-key:223
+f0e2bffe4229f650c1dc3db657ef18bc96e9d831:server/src/__tests__/invite-accept-gateway-defaults.test.ts:generic-api-key:127
+f0e2bffe4229f650c1dc3db657ef18bc96e9d831:server/src/__tests__/invite-accept-gateway-defaults.test.ts:generic-api-key:150
+f712cedbc2e0c86ffa606018609831167641766a:ui/src/pages/apps/gateways/gateway-helpers.test.ts:generic-api-key:112
+f712cedbc2e0c86ffa606018609831167641766a:ui/src/pages/apps/gateways/panels/TokensPanel.test.tsx:generic-api-key:52
+fd2f82ac5bba6ce2db0c5d17c573733af5f2bbb8:scripts/smoke/hermes-gateway-e2e.sh:curl-auth-header:610
+fd2f82ac5bba6ce2db0c5d17c573733af5f2bbb8:server/src/__tests__/invite-accept-gateway-defaults.test.ts:generic-api-key:155
+fd2f82ac5bba6ce2db0c5d17c573733af5f2bbb8:server/src/__tests__/invite-accept-gateway-defaults.test.ts:generic-api-key:178
