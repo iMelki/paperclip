@@ -358,11 +358,11 @@ the promotion gate. MCK bridge PR #119 remains open and unmerged because the
 independent Paperclip evidence chain is still `needs_human` and the canonical
 checkout topology issue #127 is unresolved.
 
-The Windows Paperclip service was subsequently restarted from local `dev` at
-`081c8a33d47488ff9971b4234e4b5194b225d873` (short SHA `081c8a33`) after the
-docs-only runtime readback commit. The final health readback must show this
-exact `serverVersion`, `branchName=dev`, `deploymentExposure=private`,
-`authReady=true`, `bootstrapStatus=ready`, and a fresh database backup. The
+The Windows Paperclip service was subsequently restarted from local `dev` after
+this checkpoint. The authoritative health readback is recorded in the local
+factory service log and must show the current `dev` SHA,
+`branchName=dev`, `deploymentExposure=private`, `authReady=true`,
+`bootstrapStatus=ready`, and a fresh database backup. The
 tracked `ui/src/pages/Auth.tsx` change and untracked `.local-logs/` remain
 untouched as unrelated user work. No WSL service, MCK merge, release callback,
 or `dev→main/master` promotion was started.
