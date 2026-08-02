@@ -390,3 +390,39 @@ reports a populated checkout with `core.bare=true`, and Paperclip PR #26's
 historical secret-scan gate remains unresolved. No MCK `main` or Paperclip
 `master` promotion, release callback, or protected dirty-worktree mutation
 occurred.
+
+## Security scan and promotion-policy checkpoint (2026-08-02 19:52 UTC)
+
+The historical Gitleaks review expanded from the earlier 20 findings to 57
+after the current fork history was scanned (7,054 commits, Gitleaks 8.30.1).
+All findings were classified as synthetic tests, redacted examples, revoked
+IDs, or smoke-test placeholders; no active credential was found. Exact
+fingerprints and the review method are recorded in
+`doc/security/gitleaks-history-inventory-2026-08-02.md`. The fail-closed
+history scan now passes with zero leaks, and PR #26's secret-scan check is
+green.
+
+PR #26's policy check then exposed an inherited 12k-line `pnpm-lock.yaml`
+delta. The repository policy gives lockfile ownership to GitHub Actions, so a
+clean isolated worktree restored only that generated file to the promotion
+base, verified `pnpm install --lockfile-only --ignore-scripts
+--no-frozen-lockfile` succeeds, and pushed exact commit `838ca62d9` to
+`origin/dev`. This was not a bypass or history rewrite; CI regenerates the
+ephemeral lockfile for downstream jobs. At the new head, policy and
+secret-scan are green and the remaining typecheck/build/test/E2E matrix is
+running.
+
+The same clean worktree ran 66 focused CLI/remote-MCP tests across onboarding,
+doctor, company import/export, and remote-MCP header policy; all 66 passed in
+69.70 seconds. The live Windows service remains intentionally unrestarted
+because the main checkout has another contributor's staged coordination batch;
+current runtime provenance therefore remains a separate controlled-restart
+gate.
+
+Branch consolidation uses four states: retain active PR heads; merge/read back
+then cleanly delete merged temporary heads; preserve closed-unmerged branches
+for recovery; and retain unowned historical Paperclip/upstream branches until
+individual reachability/ownership review. Dirty or locked worktrees are never
+reset, stashed, rebound, or removed. This matches GitHub's documented branch
+deletion guidance and applies across the additional content-factory,
+policy-gateway, stream-deck-agent, Memory, and search-api repositories.
