@@ -161,10 +161,28 @@ operator comments: status-only PATCHes must be used when a wake is not wanted.
 The incident is tracked in Paperclip [#25](https://github.com/iMelki/paperclip/issues/25)
 comment `5157477304` as a recovery-loop/wake-policy defect.
 
-The next authorized action is to create a syntactically validated receipt from
-the recorded evidence, re-wake ASS-19 for readback-only verification, and then
-run ASS-11 once with the exact manifest. Do not retry the failed payload inline,
-change the 59-path envelope, or call completion early.
+The board created and locked `builder-run-receipt-5` from the recorded evidence;
+its Markdown fence was then corrected in locked `builder-run-receipt-5-corrected`.
+ASS-23's owner map exposed a contract mismatch in the original revision-8
+envelope: the live validator sees nine owner-mapped paths, but only the bounded
+request-body helper was declared preserved. The board therefore unlocked and
+revised the canonical envelope to revision 9, locked at
+`2026-08-02T11:26:32.484Z`, with 12 preserved path patterns and unchanged 59-path
+Builder scope. The revision-9 receipt is locked as `builder-run-receipt-6` with
+raw body hash `sha256:49e79132508ef30a1b629ffef4660e3fed86084b57f8f4e700e78a09096ca187`
+and canonical JSON hash
+`sha256:fc39298a09985739e4594378b11ddb6d61abbc698cc32281962c45b93f75cb2a`.
+
+The first revision-9 Validator run `0044b707-e3ea-4ec0-a16b-e22c30a8f03b`
+passed four exact commands, then failed only
+`paperclip-host-migration-policy`: the bridge package pins host commit
+`c5a4ba433...` while the owned Paperclip `dev` checkout is
+`8221d2c03...`. No mutation occurred. Paperclip recovery then emitted repeated
+exit-2 continuations for the same failure fingerprint, so the Validator agent
+was paused and ASS-11 blocked. Child ASS-25 now owns a narrow Builder repair of
+the host compatibility sentinel; it must not touch MCK #48's UI/dependency paths
+or release/push. Do not start another Validator run until ASS-25's receipt and
+focused host-migration test pass are read back.
 
 ## Promotion PR secret-scan gate (2026-08-02)
 
