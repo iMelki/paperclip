@@ -331,3 +331,14 @@ transport; do not restore the older backup containing the obsolete
 `-PaperclipHostPath` argument. Reconfigure only after a fresh canonical
 envelope/Builder receipt and a board-authorized effective-agent readback are
 available. WSL remains unstarted.
+
+Paperclip CLI doctor and API health were rerun on `dev`: 7 critical checks
+passed, loopback/private mode and database backup were healthy, and the server
+read back `11608ae12`. Doctor reported two non-fatal warnings: the intentional
+use of port 5113 by the running service and a Unix-style `666` mode warning on
+the Windows local-encrypted key file; the service bootstrap's Windows ACL
+readback remains owner-private. The factory preview still fails closed on the
+canonical MCK checkout's `core.bare=true`/populated-worktree contradiction.
+That topology defect is now tracked as MCK issue
+[#127](https://github.com/iMelki/mission-control-kanban/issues/127), with no
+Git config or worktree mutation performed.
