@@ -14,8 +14,13 @@ Status: active; implementation remains on `dev`.
   issue, base SHA, final SHA, receipt ID, review decision, and remote readback.
 - Consolidate a reviewed branch into local `dev` only after the row is complete
   and the working tree is clean for the owned paths.
-- Promote `dev` to `main` with a merge commit through a reviewed PR. Fast-forward
-  `dev` afterward only when it has not advanced independently.
+- Promote the repository's actual promotion branch with a merge commit through
+  a reviewed PR. Fast-forward `dev` afterward only when it has not advanced
+  independently.
+
+Paperclip uses `master` as its promotion branch. Draft PR
+[#26](https://github.com/iMelki/paperclip/pull/26) records `dev` → `master` and
+is review-only until every factory gate is green.
 
 ## Current inventory (2026-08-02)
 
@@ -48,6 +53,16 @@ include newly dirty candidate paths: `components.json`, the new UI card/tabs
 files, and `src/lib/bounded-request-body.ts`. This is evidence drift, not a
 reason to widen the envelope in place. The Builder must produce a refreshed
 receipt and envelope after the candidate is frozen and reviewed.
+
+The candidate was stable across two 15-second status fingerprints
+(`fe5a5e18878795b735c76bb44dfde20e8d892fc316768c784de4cb678153d1f6`), but its
+path set now includes unrelated UI additions. Split those paths in a clean PR
+or explicitly include them in the reviewed bridge scope before refreshing the
+receipt. Never stage the shared dirty root wholesale.
+
+Paperclip's stale local database-backup warning was repaired by a manual backup
+at `2026-08-02T10:35:00Z`; health readback now reports
+`databaseBackup.status=ok`.
 
 ## Upstream risk watch
 
