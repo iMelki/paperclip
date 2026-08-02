@@ -366,3 +366,27 @@ factory service log and must show the current `dev` SHA,
 tracked `ui/src/pages/Auth.tsx` change and untracked `.local-logs/` remain
 untouched as unrelated user work. No WSL service, MCK merge, release callback,
 or `dev→main/master` promotion was started.
+
+## Runtime-gate closure and bridge refresh (2026-08-02 18:40 UTC)
+
+The MCK Runtime Regression defect described above is now closed through the
+isolated PR path. PR [#130](https://github.com/iMelki/mission-control-kanban/pull/130)
+merged into MCK `dev` as
+`717b6c5b77c2a0ac59b435c89d76767fc5e935ba` after gitleaks, pre-commit,
+Turbopack inventory, runtime regression, and artifact-link checks passed. The
+superseded PR #129 is closed and its obsolete remote branch is deleted. Issue
+[#128](https://github.com/iMelki/mission-control-kanban/issues/128) is closed
+with exact read-back evidence: the post-#48 Settings/Board controls use
+Radix/shadcn `role="tab"`, and dnd-kit's labelled reorder handle no longer
+collides with task-card locators.
+
+The bridge PR [#119](https://github.com/iMelki/mission-control-kanban/pull/119)
+was then refreshed safely from `6807d2e19ba50dd9aabaeecff26be6ee28ac31b7` to
+`693407c0d1ae42299c3116ff8bee7e3edda9ade3` by merging current MCK `dev`.
+Its fresh Paperclip bridge, runtime regression, pre-commit, Turbopack
+inventory, and gitleaks checks are green. It remains open and must not merge:
+the independent Reviewer is `needs_human`, canonical MCK issue #127 still
+reports a populated checkout with `core.bare=true`, and Paperclip PR #26's
+historical secret-scan gate remains unresolved. No MCK `main` or Paperclip
+`master` promotion, release callback, or protected dirty-worktree mutation
+occurred.
