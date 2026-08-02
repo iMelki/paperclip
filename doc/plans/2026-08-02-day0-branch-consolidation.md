@@ -31,6 +31,14 @@ is review-only until every factory gate is green.
 | paperclip | `dev` at `c5a4ba433` | clean source checkout | Controlled Integrator/release checkout |
 | mission-control-kanban | `dev` at `820a9058` | dirty bridge candidate | Preserve candidate; Paperclip must produce release evidence before commit |
 
+Additional inventory: Agent Settings has a dirty cleanup root and locked or
+active linked worktrees for #488, #499, and browser bootstrap. Projects Ops has
+dirty report output and a separate dirty Asimtop worktree. MCK has an existing
+clean security PR (#42) that is unrelated to the dirty bridge candidate.
+Paperclip, Agent Settings, MCK, and Projects Ops do not currently have GitHub
+branch protection, so the documented PR and human-review gates are operational
+controls, not server-enforced defaults.
+
 ## Gates
 
 1. Start and health-check Windows Paperclip and MCK.
