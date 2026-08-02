@@ -94,6 +94,12 @@ request-body helper plus generated/runtime debris out of scope. The additional
 split into a clean PR or explicitly included in a newly reviewed bridge scope.
 Never stage the shared dirty root wholesale.
 
+Paperclip child issue ASS-23, **Reconcile MCK paths outside the locked bridge
+envelope**, now owns that path map. Its body was read back after repair with
+newline-preserved evidence, and it explicitly forbids wholesale staging,
+reset, stash, worktree removal, release, or promotion. ASS-19 may be renewed
+only after ASS-23 produces the owner/path manifest or a reviewed scope change.
+
 Paperclip's stale local database-backup warning was repaired by a manual backup
 at `2026-08-02T10:35:00Z`; health readback now reports
 `databaseBackup.status=ok`.
