@@ -293,3 +293,41 @@ bypass, history rewrite, or branch merge is allowed until each finding is
 classified, inert fixtures are made unmistakably inert where practical, the
 current and complete-history scans pass (or alerts are explicitly resolved),
 and PR checks rerun green.
+
+## Continuation checkpoint (2026-08-02 17:35 UTC)
+
+The Windows service was stopped cleanly before checkout movement. Its last
+health readback was `aba802a45` on the temporary document-revision branch,
+private loopback exposure, `authReady=true`, and database backup `ok` with a
+fresh backup. The Paperclip checkout is now on `dev` at
+`398ccd2958f6e7e1b6a40ee90ab98bc6dffb4f1b`, fast-forwarded from `origin/dev`;
+the only remaining local change is the preserved untracked `.local-logs/`
+directory. No reset, stash, clean, worktree removal, or log deletion occurred.
+
+Agent Settings contract consolidation is complete through reviewed PRs:
+
+- PR #513 merged into `dev` at
+  `cf6a181bb02dcb860b2c3b775107bf1b55a6dbe2`.
+- Refreshed host-attestation PR #515 merged into `dev` at
+  `e6310e89d65f9a6dc223a0ef4a7a7cbcab742da1`; route-pack checks passed.
+- The original durability-owned checkout remains on its concurrent dirty
+  branch and was not staged, reset, or reconciled by this run.
+
+Live factory evidence is split deliberately: Validator run
+`0e71d310-49e4-4277-a8b0-aab48b6d002f` succeeded with all manifest commands,
+and its locked-document redirect fix is covered by the merged Agent Settings
+contract. The independent Reviewer run
+`704507a1-6cfb-4741-a301-dd1ff0dddff4` completed fresh and read-only but
+returned `needs_human`; Paperclip document
+`independent-review-authority-evidence-704507a1` is the durable evidence.
+ASS-17 is now `blocked` because Builder, canonical workspace, immutable
+Validator document, Process-context body, and live tool-readback bindings do
+not form one candidate chain. No release, callback, GitHub outcome, or MCK
+merge was performed.
+
+The next service start must use the Paperclip `dev` checkout. The Validator
+adapter is left paused/error with its corrected environment-only host-path
+transport; do not restore the older backup containing the obsolete
+`-PaperclipHostPath` argument. Reconfigure only after a fresh canonical
+envelope/Builder receipt and a board-authorized effective-agent readback are
+available. WSL remains unstarted.
