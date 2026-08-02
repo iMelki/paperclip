@@ -11,6 +11,24 @@ import { Sparkles } from "lucide-react";
 
 type AuthMode = "sign_in" | "sign_up";
 
+function getSafeNextPath(candidate: string | null): string {
+  if (!candidate || !candidate.startsWith("/") || candidate.startsWith("//")) {
+    return getRememberedInvitePath() || "/";
+  }
+
+  // Backslashes are treated as path separators by URL parsers. Reject them
+  // before resolving the value so `/\\\\attacker.example` cannot become an
+  // external URL in a browser redirect/navigation implementation.
+  if (candidate.includes("\\")) {
+    return getRememberedInvitePath() || "/";
+  }
+
+  const resolved = new URL(candidate, window.location.origin);
+  return resolved.origin === window.location.origin
+    ? `${resolved.pathname}${resolved.search}${resolved.hash}`
+    : getRememberedInvitePath() || "/";
+}
+
 export function AuthPage() {
   const queryClient = useQueryClient();
   const navigate = useNavigate();
@@ -23,7 +41,7 @@ export function AuthPage() {
   const errorId = "auth-error";
 
   const nextPath = useMemo(
-    () => searchParams.get("next") || getRememberedInvitePath() || "/",
+    () => getSafeNextPath(searchParams.get("next")),
     [searchParams],
   );
   const { data: session, isLoading: isSessionLoading } = useQuery({

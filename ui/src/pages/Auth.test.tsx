@@ -253,4 +253,29 @@ describe("AuthPage", () => {
       root.unmount();
     });
   });
+
+  it("does not navigate to a URL-like next path", async () => {
+    const { root, queryClient } = renderAuthPage(container);
+
+    await act(async () => {
+      root.render(
+        <MemoryRouter initialEntries={["/auth?next=/\\\\attacker.example"]}>
+          <QueryClientProvider client={queryClient}>
+            <Routes>
+              <Route path="/auth" element={<AuthPage />} />
+              <Route path="*" element={<p data-testid="destination">destination</p>} />
+            </Routes>
+          </QueryClientProvider>
+        </MemoryRouter>,
+      );
+    });
+    await flushReact();
+    await flushReact();
+
+    expect(container.querySelector('[data-testid="destination"]')).toBeNull();
+
+    await act(async () => {
+      root.unmount();
+    });
+  });
 });
