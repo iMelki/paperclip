@@ -158,6 +158,8 @@ also woke a fresh run automatically, so exact run
 `status=cancelled`, `errorCode=cancelled`. ASS-19 is now `blocked` with no
 active run. This is a control-plane wake side effect to account for in future
 operator comments: status-only PATCHes must be used when a wake is not wanted.
+The incident is tracked in Paperclip [#25](https://github.com/iMelki/paperclip/issues/25)
+comment `5157477304` as a recovery-loop/wake-policy defect.
 
 The next authorized action is to create a syntactically validated receipt from
 the recorded evidence, re-wake ASS-19 for readback-only verification, and then
