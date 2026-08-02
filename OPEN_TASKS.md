@@ -1,10 +1,16 @@
 # Paperclip Open Tasks
 
-Last updated: 2026-07-29
+Last updated: 2026-08-02
 
 This file is the durable local index for active `paperclip` issues.
 
 ## Active Issues
+
+- [Day-0 branch/worktree consolidation plan](doc/plans/2026-08-02-day0-branch-consolidation.md)
+  - Preserve concurrent dirty branches and locked worktrees. Consolidate only
+    after receipt, independent review, exact-path release, and remote-SHA
+    readback. Builder worktrees never push; the Integrator primary checkout
+    performs release. Current Paperclip and MCK runtime gates remain open.
 
 - [#24 - Defer dev-runtime restarts while factory runs are active](https://github.com/iMelki/paperclip/issues/24)
   - Automatic source-change restarts can currently terminate a live factory
