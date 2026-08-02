@@ -255,6 +255,7 @@ function WorkspacePatchDiff({
   const { ref } = useFileDiffInstance({
     fileDiff,
     options,
+    editorOptions: undefined,
     metrics: undefined,
     lineAnnotations: undefined,
     selectedLines: undefined,
@@ -262,6 +263,7 @@ function WorkspacePatchDiff({
     hasGutterRenderUtility: false,
     hasCustomHeader: false,
     disableWorkerPool: false,
+    edit: false,
   });
 
   return createElement(DIFFS_TAG_NAME, { ref });
