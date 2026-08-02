@@ -152,3 +152,9 @@ export { pluginDatabaseNamespaces, pluginMigrations } from "./plugin_database.js
 export { pluginJobs, pluginJobRuns } from "./plugin_jobs.js";
 export { pluginWebhookDeliveries } from "./plugin_webhooks.js";
 export { pluginLogs } from "./plugin_logs.js";
+export { hostNodes } from "./host_nodes.js";
+export { agentInstances } from "./agent_instances.js";
+export { taskParticipations } from "./task_participations.js";
+export { mutationLeases } from "./mutation_leases.js";
+export { controlIntents } from "./control_intents.js";
+
