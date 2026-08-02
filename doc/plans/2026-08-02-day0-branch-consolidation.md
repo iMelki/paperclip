@@ -74,27 +74,39 @@ controls, not server-enforced defaults.
 ## Current live drift
 
 The 2026-08-02 Validator retry `540a4c3f-99e3-4b04-b952-4b8b9314a76a`
-failed closed before command execution because the locked envelope did not
-include newly dirty candidate paths: `components.json`, the new UI card/tabs
-files, and `src/lib/bounded-request-body.ts`. This is evidence drift, not a
-reason to widen the envelope in place. The Builder must produce a refreshed
-receipt and envelope after the candidate is frozen and reviewed.
+failed closed before command execution because the wake contract named
+envelope revision 7 and manifest `sha256:02ccb055...`, while the authoritative
+locked envelope is revision 8 with manifest
+`sha256:375d980e84d324d9efab58f44e0ac3f7f9bcb6828c7cf078b2ab6c2a0470bad7`.
+The subsequent Builder retry `e297d7bb-3046-4bc3-8ad1-4579d73618ef` proved the
+same contract drift and recorded `needs_human` without changing candidate
+bytes. This is evidence drift, not a reason to widen the envelope in place.
+The board must renew ASS-19 against revision 8, or restore the older manifest,
+before another Builder wake.
 
 The candidate was stable across two 15-second status fingerprints
-(`fe5a5e18878795b735c76bb44dfde20e8d892fc316768c784de4cb678153d1f6`), but its
-path set now includes unrelated UI additions. Split those paths in a clean PR
-or explicitly include them in the reviewed bridge scope before refreshing the
-receipt. Never stage the shared dirty root wholesale.
+(`fe5a5e18878795b735c76bb44dfde20e8d892fc316768c784de4cb678153d1f6`), but the
+worktree now reports 68 paths after excluding `.local-logs/**` and `.tmp/**`.
+The locked receipt intentionally covers 59 paths and preserves the bounded
+request-body helper plus generated/runtime debris out of scope. The additional
+`components.json`, UI primitives, `src/lib/utils.ts`, `MissionQueue`,
+`Panel`, and `WorkspaceSectionTabs` paths must therefore be owner-mapped and
+split into a clean PR or explicitly included in a newly reviewed bridge scope.
+Never stage the shared dirty root wholesale.
 
 Paperclip's stale local database-backup warning was repaired by a manual backup
 at `2026-08-02T10:35:00Z`; health readback now reports
 `databaseBackup.status=ok`.
 
-Builder run `e297d7bb-3046-4bc3-8ad1-4579d73618ef` is currently still running
-at `startup step: acp.handshake` without a Paperclip process PID or candidate
-output. Paperclip issue #24 records the observation. Do not restart the factory
-while this run is active; use the bounded timeout or an explicit stop/recovery
-path before retrying.
+Builder run `e297d7bb-3046-4bc3-8ad1-4579d73618ef` finished `succeeded` at
+`2026-08-02T10:49:59.248Z`, but its deliberate disposition is
+`needs_human`: live manifest SHA differed from the stale wake contract and no
+receipt/envelope refresh was attempted. Paperclip's liveness recovery issue
+ASS-22 was created because ASS-19 had no explicit next action; resolve that
+escalation only after the board renews the contract and names the next bounded
+Builder or Validator action. Issue #24 remains the runtime observability note
+for the transient ACP-handshake/no-PID behavior; do not treat the completed
+run as validation, review, release, or bridge completion.
 
 ## Upstream risk watch
 
