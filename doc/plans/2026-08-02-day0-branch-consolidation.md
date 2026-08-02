@@ -30,7 +30,7 @@ is review-only until every factory gate is green.
 |---|---|---|---|
 | agent-settings | `agent/claude/runtime-tmp-cleanup-2026-07-29` | dirty, concurrent cleanup work | Preserve; owner must finish or park it before any dev consolidation |
 | agent-settings | linked worktrees for #488, #499, browser bootstrap, revenue import | some locked/active | Do not remove; reconcile each branch to issue and remote SHA first |
-| paperclip | `dev` at `c5a4ba433` | clean source checkout | Controlled Integrator/release checkout |
+| paperclip | `dev` at `bc246dc58` | clean source checkout (`.local-logs/` is untracked) | Controlled Integrator/release checkout |
 | mission-control-kanban | `dev` at `820a9058` | dirty bridge candidate | Preserve candidate; Paperclip must produce release evidence before commit |
 
 Additional inventory: Agent Settings has a dirty cleanup root and locked or
@@ -194,7 +194,13 @@ snapshot is pushed as MCK PR
 `a05ca7c22fd18fbad8983e6b5f4a999703f4ba43`, targeting `dev`. Dependent PR
 [#120](https://github.com/iMelki/mission-control-kanban/pull/120) added the
 one-file root TypeScript build boundary and merged into the PR branch as
-`4d9552d34a2d6be7fddcd38d2354db6745ebb65c`; PR #119 now points at that head.
+`4d9552d34a2d6be7fddcd38d2354db6745ebb65c`. Independent review then required
+run-attributed, locked evidence and parser provenance hardening. The bounded
+repair was delivered in dependent PR
+[#121](https://github.com/iMelki/mission-control-kanban/pull/121), merged into
+the PR branch as `175a3efe573e4eeba252e52de6cbcb2519a14383`; PR #119 now points
+at that head and all required checks are green. PR #119 remains open and is
+not mergeable until the fresh Paperclip evidence gate accepts the candidate.
 The root
 `package-lock.json` and the nine ASS-23 owner-mapped MCK #48/#75 paths were
 excluded; the active MCK index remains untouched.
@@ -230,6 +236,46 @@ plane gate is the active independent Paperclip review of PR #119; only after
 that acceptance may the PR merge into MCK `dev`, followed by one deterministic
 Validator run on clean `dev` and an Integrator release/readback. The active
 dirty MCK checkout remains untouched.
+
+## Independent review disposition (2026-08-02)
+
+ASS-17 completed a fresh read-only review run
+`a6c66ef5-d379-4c4e-90c5-d70a1cc97a60` and recorded
+`independent-review-evidence` revision 3
+(`7291ffae-6202-4c49-9f87-af9c0afcbbff`, body SHA-256
+`sha256:4bc3c0a0201970cb9970c426e91762918b8bcee8163b634e8637f82a7efc72ef`).
+The decision is `change_requested`; PR #119 is not releasable or mergeable
+yet. The exact candidate head has 60 changed paths, and the envelope was
+renewed safely to revision 10 (id
+`446fdb94-8349-4ce4-9273-1780696d3091`, locked at
+`2026-08-02T12:58:57Z`) with `tsconfig.json` declared and canonical document
+hash `sha256:086234cc3cc5c6886b65caea4359a8da80e0145b2cba3b66d955a7206dc46cad`.
+The current Validator run
+`df6627ca-f886-4797-adc3-c78a0ed7fa22` failed after 4/5 commands, its evidence
+document is unlocked and run-unattributed, and the historical Builder receipt
+predates the candidate. The reviewer also confirmed that
+`parseEvidenceDocument` did not enforce lock plus latest-revision
+`createdByRunId` provenance; that gap is now hardened in repair commit
+`3b7576c14495f22ea709742120dbd5ae76665765`, merged via PR #121. All three
+effective-agent readbacks returned 403 Board access required. CI is therefore
+partial evidence only; it is not a deterministic factory release receipt.
+
+The sanctioned Paperclip `request_changes` transition initially returned 422
+(`This execution stage has no return assignee`). The duplicate automatic
+review continuation was cancelled without repository mutation. The board
+state was repaired safely: the failed stage was cleared, the Builder was set
+as the return owner, and the review policy was reseeded while ASS-17 remains
+`todo` with no active run. A future review activation must prove the return
+assignee in its execution state before it is started.
+
+Required bounded repair before a new review: create a fresh Builder receipt and
+candidate snapshot for the PR head; run all 11 deterministic Validator
+commands successfully; author and lock `factory-validation-evidence` from the
+recorded Validator run; harden evidence parsing to require lock/latest-revision
+run provenance; provide board effective-agent readbacks and installed-host
+signed-ping evidence; then start one fresh Reviewer run. No code, checkout,
+stage, commit, push, merge, release, or GitHub outcome was performed by the
+Reviewer.
 
 ## Promotion PR secret-scan gate (2026-08-02)
 
