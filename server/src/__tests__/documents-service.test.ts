@@ -5,6 +5,8 @@ import {
   createDb,
   documentRevisions,
   documents,
+  agents,
+  heartbeatRuns,
   issueDocuments,
   issues,
 } from "@paperclipai/db";
@@ -37,6 +39,8 @@ describeEmbeddedPostgres("documentService system issue documents", () => {
   }, EMBEDDED_POSTGRES_TEST_SETUP_TIMEOUT_MS);
 
   afterEach(async () => {
+    await db.delete(heartbeatRuns);
+    await db.delete(agents);
     await db.delete(documentRevisions);
     await db.delete(issueDocuments);
     await db.delete(documents);
@@ -84,7 +88,7 @@ describeEmbeddedPostgres("documentService system issue documents", () => {
       body: "# Handoff",
     });
 
-    return { issueId };
+    return { issueId, companyId };
   }
 
   it("filters continuation summaries from default document lists and issue payload summaries", async () => {
@@ -156,6 +160,40 @@ describeEmbeddedPostgres("documentService system issue documents", () => {
 
     expect(updated.created).toBe(false);
     expect(updated.document.body).toBe("# Updated plan");
+  });
+
+  it("returns the run that authored each immutable document revision", async () => {
+    const { issueId, companyId } = await createIssueWithDocuments();
+    const runId = randomUUID();
+    const agentId = randomUUID();
+    await db.insert(agents).values({
+      id: agentId,
+      companyId,
+      name: "Validator",
+    });
+    await db.insert(heartbeatRuns).values({
+      id: runId,
+      companyId,
+      agentId,
+      status: "completed",
+    });
+
+    const updated = await svc.upsertIssueDocument({
+      issueId,
+      key: "plan",
+      title: "Plan",
+      format: "markdown",
+      body: "# Run-bound plan",
+      baseRevisionId: (await svc.getIssueDocumentByKey(issueId, "plan"))?.latestRevisionId,
+      createdByRunId: runId,
+    });
+
+    expect(updated.created).toBe(false);
+    const revisions = await svc.listIssueDocumentRevisions(issueId, "plan");
+    expect(revisions.find((revision) => revision.id === updated.document.latestRevisionId))
+      .toEqual(expect.objectContaining({
+        createdByRunId: runId,
+      }));
   });
 
   it("creates a new document instead of updating a locked document when requested", async () => {
