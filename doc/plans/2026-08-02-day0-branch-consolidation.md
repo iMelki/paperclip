@@ -184,6 +184,43 @@ the host compatibility sentinel; it must not touch MCK #48's UI/dependency paths
 or release/push. Do not start another Validator run until ASS-25's receipt and
 focused host-migration test pass are read back.
 
+## Isolated bridge PR consolidation (2026-08-02)
+
+The board fallback was completed in a separate clean clone rather than
+staging the active dirty MCK checkout. The exact receipt-declared 59-path
+snapshot is pushed as MCK PR
+[#119](https://github.com/iMelki/mission-control-kanban/pull/119), branch
+`factory/bridge-consolidation-20260802`, commit
+`a05ca7c22fd18fbad8983e6b5f4a999703f4ba43`, targeting `dev`. The root
+`package-lock.json` and the nine ASS-23 owner-mapped MCK #48/#75 paths were
+excluded; the active MCK index remains untouched.
+
+The first clean-clone install exposed two reproducibility defects and both were
+repaired without widening the delivery:
+
+1. The copy initially omitted the modified root lockfile, which made `npm ci`
+   correctly fail. The bridge PR scope was then separated from the MCK #48
+   dependency batch: root `package.json` retains only bridge test scripts and
+   the base root lockfile is restored.
+2. `npm ci --ignore-scripts` omitted the native `better-sqlite3` binding and
+   nested bridge dependencies. The final evidence installs both root and
+   bridge lockfiles and explicitly rebuilds `better-sqlite3` before tests.
+
+Final clean-clone evidence is recorded in the locked Paperclip document
+`ASS-25/board-fallback-pr-receipt` (revision 1,
+`973a9c1e-c5c8-4217-9a26-8feb48fdd6b4`): bridge typecheck and 36 tests, 17
+factory webhook tests, host provenance (five migrations/59 statements), five
+Docker-backed PostgreSQL migration scenarios with cleanup verification, root
+typecheck/full tests/lint/production build, and staged Gitleaks protection all
+pass. The two deterministic SDK-provenance scanner findings use exact inline
+`gitleaks:allow` annotations, matching the existing Paperclip fixture policy;
+no blanket ignore or scanner bypass was added.
+
+ASS-25 remains `blocked`/`needs_review` and ASS-11 remains paused. No direct
+MCK `dev` commit, release, callback, or merge was performed. The next control
+plane gate is GitHub CI plus independent review of PR #119; only after a green
+merge into MCK `dev` may ASS-11 run once against clean `dev`.
+
 ## Promotion PR secret-scan gate (2026-08-02)
 
 Paperclip PR [#26](https://github.com/iMelki/paperclip/pull/26) remains draft
