@@ -99,6 +99,11 @@ envelope**, now owns that path map. Its body was read back after repair with
 newline-preserved evidence, and it explicitly forbids wholesale staging,
 reset, stash, worktree removal, release, or promotion. ASS-19 may be renewed
 only after ASS-23 produces the owner/path manifest or a reviewed scope change.
+The locked `path-owner-manifest` document on ASS-23 records all nine extra
+paths with content hashes: eight UI/dependency paths map to MCK #48 and the
+unused bounded request-body helper maps to MCK #75 for separate security
+review. The document was locked by `local-board` at
+`2026-08-02T10:59:33.69Z`.
 
 Paperclip's stale local database-backup warning was repaired by a manual backup
 at `2026-08-02T10:35:00Z`; health readback now reports
