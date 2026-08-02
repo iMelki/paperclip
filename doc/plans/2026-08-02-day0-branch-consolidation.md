@@ -40,6 +40,15 @@ Status: active; implementation remains on `dev`.
 7. Prepare repository-specific `dev` to `main` PRs; merge only the explicitly
    authorized promotion after review and natural-run evidence.
 
+## Current live drift
+
+The 2026-08-02 Validator retry `540a4c3f-99e3-4b04-b952-4b8b9314a76a`
+failed closed before command execution because the locked envelope did not
+include newly dirty candidate paths: `components.json`, the new UI card/tabs
+files, and `src/lib/bounded-request-body.ts`. This is evidence drift, not a
+reason to widen the envelope in place. The Builder must produce a refreshed
+receipt and envelope after the candidate is frozen and reviewed.
+
 ## Upstream risk watch
 
 Before enabling isolated worktrees broadly, recheck current upstream behavior
