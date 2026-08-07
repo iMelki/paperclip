@@ -31,10 +31,15 @@ function update(overrides: Partial<StatusCardUpdate>): StatusCardUpdate {
 }
 
 function iso(daysAgo: number): string {
+  // rollupUpdatesToday buckets by the UTC day boundary (see the "uses the UTC
+  // day boundary" test below), so fixtures must be built relative to UTC days
+  // too. Building them at *local* noon (the previous version of this helper)
+  // only avoids DST/midnight edge cases in whichever timezone the test runs
+  // in -- it does nothing for the mismatch between a local calendar day and a
+  // UTC calendar day, which is exactly the boundary this function uses.
   const d = new Date();
-  d.setDate(d.getDate() - daysAgo);
-  // Noon avoids DST/midnight edge cases in the local-day filter.
-  d.setHours(12, 0, 0, 0);
+  d.setUTCDate(d.getUTCDate() - daysAgo);
+  d.setUTCHours(12, 0, 0, 0);
   return d.toISOString();
 }
 
