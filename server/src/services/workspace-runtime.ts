@@ -182,6 +182,16 @@ type ProcessOutputAccumulator = {
 };
 
 export async function resetRuntimeServicesForTests() {
+  // Forgetting a record without stopping its process leaks the real service
+  // (and every descendant its shell wrapper spawned) as an orphan: nothing
+  // else in the process ever holds a reference to it again once the maps
+  // below are cleared. Route every live record through the same termination
+  // stopRuntimeService already uses in production so tests actually observe
+  // the service go away, not just Paperclip's bookkeeping about it.
+  const serviceIds = [...runtimeServicesById.keys()];
+  for (const serviceId of serviceIds) {
+    await stopRuntimeService(serviceId).catch(() => undefined);
+  }
   for (const record of runtimeServicesById.values()) {
     clearIdleTimer(record);
   }
@@ -2349,15 +2359,27 @@ export function formatManagedGitWorktreeBranchInspection(input: ManagedGitWorktr
   };
 }
 
-function terminateChildProcess(child: ChildProcess) {
+async function terminateChildProcess(child: ChildProcess) {
   if (!child.pid) return;
-  if (process.platform !== "win32") {
-    try {
-      process.kill(-child.pid, "SIGTERM");
-      return;
-    } catch {
-      // Fall through to the direct child kill.
-    }
+  if (process.platform === "win32") {
+    // `child` is the shell wrapper (`spawn(shell, ["-lc", command], ...)`), not
+    // the real service process -- a bare SIGTERM to this one pid leaves the
+    // actual command (e.g. the node process a service's `command` starts)
+    // running as an orphan with the port still held. terminateLocalService
+    // already does a trusted, tree-aware Windows kill (double taskkill /T
+    // attempt with polling) for exactly this shape of process; reuse it
+    // instead of a single-pid signal that only reaches the wrapper.
+    await terminateLocalService(
+      { pid: child.pid, processGroupId: child.pid },
+      { trustedPid: true },
+    );
+    return;
+  }
+  try {
+    process.kill(-child.pid, "SIGTERM");
+    return;
+  } catch {
+    // Fall through to the direct child kill.
   }
   if (!child.killed) {
     child.kill("SIGTERM");
@@ -4145,7 +4167,7 @@ async function spawnLocalRuntimeService(input: StartLocalRuntimeServiceInput): P
       lastSeenAt: record.lastUsedAt,
     });
   }).catch(async (err) => {
-    terminateChildProcess(child);
+    await terminateChildProcess(child);
     record.status = "stopped";
     record.healthStatus = "unhealthy";
     record.lastUsedAt = new Date().toISOString();
@@ -4188,10 +4210,20 @@ async function stopRuntimeService(serviceId: string) {
     runtimeServicesByReuseKey.delete(record.reuseKey);
   }
   if (record.child && record.child.pid) {
-    await terminateLocalService({
-      pid: record.child.pid,
-      processGroupId: record.processGroupId ?? record.child.pid,
-    });
+    // record.child is the ChildProcess object this service was spawned into;
+    // Node retains its process handle for the object's whole lifetime, so its
+    // pid cannot have been reused underneath us -- trustedPid is warranted
+    // (unlike an adopted record.providerRef below, whose pid came from a
+    // string and must earn trust via matchesWindowsProcessCreationIdentity).
+    // Without it, terminateLocalService's Windows branch returns
+    // outcome:"untrusted_identity" and never attempts a kill at all.
+    await terminateLocalService(
+      {
+        pid: record.child.pid,
+        processGroupId: record.processGroupId ?? record.child.pid,
+      },
+      { trustedPid: true },
+    );
   } else if (record.providerRef) {
     const pid = Number.parseInt(record.providerRef, 10);
     if (Number.isInteger(pid) && pid > 0) {
