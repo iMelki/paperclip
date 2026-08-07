@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { runChildProcess } from "@paperclipai/adapter-utils/server-utils";
 import { toShellPath } from "@paperclipai/adapter-utils/shell-path";
+import { resolveTestShellCommand } from "@paperclipai/adapter-utils/test-shell";
 import { execute } from "@paperclipai/adapter-cursor-local/server";
 
 async function writeFakeCursorCommand(commandPath: string): Promise<void> {
@@ -110,7 +111,7 @@ function createLocalSandboxRunner(pathMapping?: { remoteRoot: string; localRoot:
           return [key, mapValue(value, false)];
         }),
       );
-      return await runChildProcess(`cursor-sandbox-execute-${counter}`, mapValue(input.command, false), (input.args ?? []).map((arg) => mapValue(arg, shellCommand)), {
+      return await runChildProcess(`cursor-sandbox-execute-${counter}`, resolveTestShellCommand(mapValue(input.command, false)), (input.args ?? []).map((arg) => mapValue(arg, shellCommand)), {
         cwd: mapValue(input.cwd ?? process.cwd(), false),
         env: localEnv,
         stdin: input.stdin,

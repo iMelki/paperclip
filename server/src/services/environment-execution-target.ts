@@ -11,6 +11,17 @@ import type { EnvironmentRuntimeService } from "./environment-runtime.js";
 
 export const DEFAULT_SANDBOX_REMOTE_CWD = "/tmp";
 
+// These provider implementations stage stdin through a structured provider API
+// (or a provider-native private file API), rather than interpolating it into the
+// command string. Keep unknown/custom runners fail-closed. In particular,
+// Novita currently renders stdin as a literal `printf` in its provider command.
+const CONFIDENTIAL_STDIN_SANDBOX_PROVIDERS = new Set([
+  "cloudflare",
+  "daytona",
+  "e2b",
+  "modal",
+]);
+
 export async function resolveEnvironmentExecutionTarget(input: {
   db: Db;
   companyId: string;
@@ -88,7 +99,12 @@ export async function resolveEnvironmentExecutionTarget(input: {
       // opt-out back to batch-at-end delivery.
       streamRunLogs: parsed.config.streamRunLogs !== false,
       runner: input.environmentRuntime && input.lease
-        ? {
+          ? {
+            supportsConfidentialStdin: CONFIDENTIAL_STDIN_SANDBOX_PROVIDERS.has(parsed.config.provider),
+            // No production provider currently returns a launch-bound
+            // container/job/cgroup teardown receipt. Keep remote ACP execution
+            // disabled rather than mistaking direct-child exit for tree custody.
+            supportsProcessTreeCustody: false,
             // Provider-backed sandbox RPCs do not surface bounded mid-stream
             // progress for a single stdin upload, so keep the capability disabled
             // here. The client falls back to the chunked upload path when this is

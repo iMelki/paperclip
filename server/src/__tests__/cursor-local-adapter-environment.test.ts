@@ -3,6 +3,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { runChildProcess } from "@paperclipai/adapter-utils/server-utils";
+import { resolveTestShellCommand } from "@paperclipai/adapter-utils/test-shell";
 import { testEnvironment } from "@paperclipai/adapter-cursor-local/server";
 
 async function writeFakeAgentCommand(binDir: string, argsCapturePath: string): Promise<string> {
@@ -89,7 +90,7 @@ function createLocalSandboxRunner() {
       onSpawn?: (meta: { pid: number; startedAt: string }) => Promise<void>;
     }) => {
       counter += 1;
-      const command = fromShellPath(input.command);
+      const command = resolveTestShellCommand(fromShellPath(input.command));
       const cwd = fromShellPath(input.cwd ?? process.cwd());
       return await runChildProcess(`cursor-sandbox-env-${counter}`, command, input.args ?? [], {
         cwd,

@@ -113,7 +113,10 @@ async function git(cwd: string, args: string[]): Promise<string> {
 async function listTarMembers(rootDir: string, name: string, bytes: Buffer): Promise<string[]> {
   const tarPath = path.join(rootDir, name);
   await writeFile(tarPath, bytes);
-  const { stdout } = await execFile("tar", ["-tf", tarPath], { maxBuffer: 32 * 1024 * 1024 });
+  const { stdout } = await execFile("tar", ["-tf", path.basename(tarPath)], {
+    cwd: path.dirname(tarPath),
+    maxBuffer: 32 * 1024 * 1024,
+  });
   return stdout.split("\n").map((line) => line.trim()).filter(Boolean);
 }
 
@@ -726,10 +729,7 @@ describe("sandbox managed runtime", () => {
 
     expect(uploadedTars.length).toBeGreaterThanOrEqual(2);
     for (const { remotePath, bytes } of uploadedTars) {
-      const listPath = path.join(rootDir, `list-${path.basename(remotePath)}`);
-      await writeFile(listPath, bytes);
-      const { stdout } = await execFile("tar", ["-tf", listPath], { maxBuffer: 32 * 1024 * 1024 });
-      const members = stdout.split("\n").map((line) => line.trim()).filter(Boolean);
+      const members = await listTarMembers(rootDir, `list-${path.basename(remotePath)}`, bytes);
       // The archive must NOT contain a self-entry for the root directory; that is
       // what makes tar try to mutate the (possibly unowned) extraction target.
       expect(members).not.toContain(".");

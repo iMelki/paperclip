@@ -1,6 +1,7 @@
 import { createServer } from "node:http";
 import net from "node:net";
 import { execFile, spawn } from "node:child_process";
+import fs from "node:fs/promises";
 import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -8,6 +9,7 @@ import { promisify } from "node:util";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
+  AdapterExecutionTargetProcessSessionLaunchAmbiguousError,
   DEFAULT_REMOTE_SANDBOX_ADAPTER_TIMEOUT_SEC,
   adapterExecutionTargetSessionIdentity,
   adapterExecutionTargetToRemoteSpec,
@@ -15,6 +17,7 @@ import {
   ensureAdapterExecutionTargetCommandResolvable,
   formatAdapterExecutionTimeoutErrorMessage,
   formatAdapterExecutionTimeoutStartLogLine,
+  reconcileAdapterExecutionTargetProcessSessionLaunchTerminal,
   resolveAdapterExecutionTargetTimeout,
   resolveAdapterExecutionTargetTimeoutSec,
   runAdapterExecutionTargetProcess,
@@ -45,6 +48,9 @@ describe("sandbox adapter execution targets", () => {
   function createLocalSandboxRunner() {
     let counter = 0;
     return {
+      supportsConfidentialStdin: true,
+      supportsProcessTreeCustody: true,
+      reconcileProcessTreeCustody: async () => false,
       execute: async (input: {
         command: string;
         args?: string[];
@@ -126,7 +132,7 @@ describe("sandbox adapter execution targets", () => {
       const timeout = setTimeout(() => {
         child.kill("SIGKILL");
         reject(new Error("Timed out waiting for process session proxy."));
-      }, 5000);
+      }, process.platform === "win32" ? 10_000 : 5_000);
       child.on("error", (error) => {
         clearTimeout(timeout);
         reject(error);
@@ -205,13 +211,428 @@ describe("sandbox adapter execution targets", () => {
     const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-process-session-"));
     cleanupDirs.push(rootDir);
     const childPath = path.join(rootDir, "fake-acp-child.mjs");
+    const childReceiptPath = path.join(rootDir, "fake-acp-child.receipt");
     await writeFile(
       childPath,
       [
+        "import { appendFileSync } from 'node:fs';",
+        "const receiptPath = process.argv[2];",
         "process.stdin.on('data', (chunk) => {",
+        "  appendFileSync(receiptPath, 'data:' + chunk.toString());",
         "  process.stdout.write('out:' + chunk.toString());",
         "  process.stderr.write('err:' + chunk.toString());",
         "});",
+        "process.stdin.on('end', () => appendFileSync(receiptPath, 'end\\n'));",
+      ].join("\n"),
+      "utf8",
+    );
+    const delegate = createLocalSandboxRunner();
+    const runnerCalls: Array<Parameters<typeof delegate.execute>[0]> = [];
+    const runner = {
+      supportsConfidentialStdin: true,
+      supportsProcessTreeCustody: true,
+      reconcileProcessTreeCustody: async () => false,
+      execute: async (input: Parameters<typeof delegate.execute>[0]) => {
+        runnerCalls.push(input);
+        return delegate.execute(input);
+      },
+    };
+    const launchSecret = "process-session-secret-must-not-enter-command-args";
+    const target: AdapterSandboxExecutionTarget = {
+      kind: "remote",
+      transport: "sandbox",
+      providerKey: "local-test",
+      remoteCwd: rootDir,
+      timeoutMs: 30_000,
+      runner,
+    };
+
+    const bridge = await startAdapterExecutionTargetProcessSessionBridge({
+      runId: "run-process-session",
+      target,
+      runtimeRootDir: path.posix.join(rootDir, ".paperclip-runtime", "acpx"),
+      adapterKey: "acpx",
+      command: process.execPath,
+      args: [childPath, childReceiptPath],
+      cwd: rootDir,
+      env: { PAPERCLIP_API_KEY: launchSecret },
+      timeoutSec: 5,
+      onLog: async () => {},
+    });
+    expect(bridge).not.toBeNull();
+    const commandAuditText = JSON.stringify(
+      runnerCalls.map((call) => ({ command: call.command, args: call.args, env: call.env })),
+    );
+    expect(commandAuditText).not.toContain(launchSecret);
+    expect(commandAuditText).not.toContain(Buffer.from(launchSecret, "utf8").toString("base64"));
+    const launchCall = runnerCalls.find((call) =>
+      (call.args ?? []).join("\n").includes("PAPERCLIP_PROCESS_SESSION_REQUEST_PATH="),
+    );
+    expect(launchCall?.stdin).toContain(launchSecret);
+
+    try {
+      const result = await runProxyWithInput(bridge!.agentCommand, "hello\n");
+      expect(result.code).toBe(0);
+      await expect(readFile(childReceiptPath, "utf8")).resolves.toBe("data:hello\nend\n");
+      expect(result.stdout).toBe("out:hello\n");
+      expect(result.stderr).toBe("err:hello\n");
+    } catch (error) {
+      const childReceipt = await readFile(childReceiptPath, "utf8").catch(() => "<missing>");
+      throw new Error(`${error instanceof Error ? error.message : String(error)}; child receipt=${JSON.stringify(childReceipt)}`);
+    } finally {
+      await bridge?.stop();
+    }
+    // stop() must fence the remote wrapper itself, not merely observe the
+    // child exit event. An immediate recursive workspace removal is the
+    // Windows EBUSY regression proof for leaked cwd/queue handles.
+    await rm(rootDir, { recursive: true, force: true });
+  }, process.platform === "win32" ? 25_000 : 15_000);
+
+  it("refuses an untrusted provider before resolving or dispatching launch secrets", async () => {
+    const execute = vi.fn();
+    const resolveEnv = vi.fn(async () => ({ PAPERCLIP_API_KEY: "novita-command-secret" }));
+
+    await expect(
+      startAdapterExecutionTargetProcessSessionBridge({
+        runId: "run-process-session-untrusted-stdin",
+        target: {
+          kind: "remote",
+          transport: "sandbox",
+          providerKey: "novita",
+          remoteCwd: "/tmp",
+          runner: {
+            supportsConfidentialStdin: false,
+            execute,
+          },
+        },
+        runtimeRootDir: "/tmp/.paperclip-runtime/acpx",
+        adapterKey: "acpx",
+        command: "sh",
+        args: ["-lc", "exit 0"],
+        cwd: "/tmp",
+        env: resolveEnv,
+        onLog: async () => {},
+      }),
+    ).rejects.toThrow("does not advertise confidential stdin");
+
+    expect(resolveEnv).not.toHaveBeenCalled();
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  it("refuses launch before mutation when provider process-tree custody is unavailable", async () => {
+    const execute = vi.fn();
+    const resolveEnv = vi.fn(async () => ({ PAPERCLIP_API_KEY: "must-never-dispatch" }));
+
+    await expect(
+      startAdapterExecutionTargetProcessSessionBridge({
+        runId: "run-process-session-no-tree-custody",
+        target: {
+          kind: "remote",
+          transport: "sandbox",
+          providerKey: "unknown-provider",
+          remoteCwd: "/tmp",
+          runner: {
+            supportsConfidentialStdin: true,
+            execute,
+          },
+        },
+        runtimeRootDir: "/tmp/.paperclip-runtime/acpx",
+        adapterKey: "acpx",
+        command: "sh",
+        args: ["-lc", "exit 0"],
+        cwd: "/tmp",
+        env: resolveEnv,
+        onLog: async () => {},
+        onLaunchState: async () => {
+          throw new Error("launch fence must not be acquired");
+        },
+      }),
+    ).rejects.toThrow("does not advertise authoritative process-tree custody");
+
+    expect(resolveEnv).not.toHaveBeenCalled();
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  it("reconciles a durable terminal receipt after the disposable exit event was consumed", async () => {
+    const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-process-session-terminal-receipt-"));
+    cleanupDirs.push(rootDir);
+    const sessionId = "session-terminal-receipt";
+    const launchId = "launch-terminal-receipt";
+    const runId = "run-terminal-receipt";
+    const adapterKey = "acpx";
+    const sessionDir = path.join(rootDir, "process-sessions", sessionId);
+    const eventsDir = path.join(sessionDir, "events");
+    await mkdir(eventsDir, { recursive: true });
+
+    const liveWrapper = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
+      stdio: "ignore",
+    });
+    expect(liveWrapper.pid).toBeGreaterThan(0);
+    const wrapperPid = liveWrapper.pid!;
+    const launchIdentityPath = path.join(sessionDir, "launch.identity.json");
+    const launcherPidPath = path.join(sessionDir, "launcher.pid");
+    const wrapperPidPath = path.join(sessionDir, "wrapper.pid");
+    const launchAcceptedPath = path.join(sessionDir, "launch.accepted.json");
+    const terminalReceiptPath = path.join(sessionDir, "terminal.receipt.json");
+    const childClosedPath = path.join(sessionDir, "child.closed");
+    const wrapperDonePath = path.join(sessionDir, "wrapper.done");
+    const exactIdentity = {
+      schemaVersion: 1,
+      launchId,
+      sessionId,
+      runId,
+      adapterKey,
+      createdAt: new Date().toISOString(),
+    };
+    await writeFile(launchIdentityPath, `${JSON.stringify(exactIdentity)}\n`, "utf8");
+    await writeFile(launcherPidPath, `${wrapperPid}\n`, "utf8");
+    await writeFile(wrapperPidPath, `${wrapperPid}\n`, "utf8");
+    await writeFile(
+      launchAcceptedPath,
+      `${JSON.stringify({ schemaVersion: 1, launchId, wrapperPid, childPid: wrapperPid, acceptedAt: new Date().toISOString() })}\n`,
+      "utf8",
+    );
+    await writeFile(
+      terminalReceiptPath,
+      `${JSON.stringify({ schemaVersion: 1, launchId, type: "exit", code: 0, signal: null, timestamp: new Date().toISOString() })}\n`,
+      "utf8",
+    );
+    await writeFile(childClosedPath, `${new Date().toISOString()}\n`, "utf8");
+    await writeFile(wrapperDonePath, `${new Date().toISOString()}\n`, "utf8");
+    const consumedExitEventPath = path.join(eventsDir, "000000000001.json");
+    await writeFile(
+      consumedExitEventPath,
+      `${JSON.stringify({ type: "exit", code: 0, signal: null })}\n`,
+      "utf8",
+    );
+    await rm(consumedExitEventPath, { force: true });
+
+    const target: AdapterSandboxExecutionTarget = {
+      kind: "remote",
+      transport: "sandbox",
+      providerKey: "local-test",
+      environmentId: "environment-terminal-receipt",
+      leaseId: "lease-terminal-receipt",
+      remoteCwd: rootDir,
+      timeoutMs: 30_000,
+      runner: createLocalSandboxRunner(),
+    };
+    const launchIdentity = {
+      launchId,
+      sessionId,
+      runId,
+      adapterKey,
+      transport: "sandbox" as const,
+      providerKey: target.providerKey ?? null,
+      environmentId: target.environmentId ?? null,
+      leaseId: target.leaseId ?? null,
+      remoteCwd: rootDir,
+      sessionDir,
+      eventsDir,
+      launchIdentityPath,
+      launcherPidPath,
+      wrapperPidPath,
+      launchAcceptedPath,
+      terminalReceiptPath,
+      childClosedPath,
+      wrapperDonePath,
+    };
+
+    await expect(
+      reconcileAdapterExecutionTargetProcessSessionLaunchTerminal({ target, launchIdentity }),
+    ).resolves.toBe(false);
+
+    await writeFile(
+      launchIdentityPath,
+      `${JSON.stringify({ ...exactIdentity, runId: "different-run" })}\n`,
+      "utf8",
+    );
+    await new Promise<void>((resolve) => {
+      if (liveWrapper.exitCode !== null) return resolve();
+      liveWrapper.once("exit", () => resolve());
+      liveWrapper.kill();
+    });
+    await expect(
+      reconcileAdapterExecutionTargetProcessSessionLaunchTerminal({ target, launchIdentity }),
+    ).resolves.toBe(false);
+
+    await writeFile(launchIdentityPath, `${JSON.stringify(exactIdentity)}\n`, "utf8");
+    await expect(readdir(eventsDir)).resolves.toEqual([]);
+    await expect(
+      reconcileAdapterExecutionTargetProcessSessionLaunchTerminal({ target, launchIdentity }),
+    ).resolves.toBe(true);
+  }, process.platform === "win32" ? 25_000 : 15_000);
+
+  it("never spawns the ACP child when launch-request unlink cannot be checkpointed", async () => {
+    const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-process-session-request-unlink-"));
+    cleanupDirs.push(rootDir);
+    const runtimeRootDir = path.posix.join(rootDir, ".paperclip-runtime", "acpx");
+    const remoteScriptPath = path.join(
+      runtimeRootDir,
+      "process-sessions",
+      "paperclip-process-session-remote.mjs",
+    );
+    const childMarkerPath = path.join(rootDir, "child-spawned.marker");
+    const childPath = path.join(rootDir, "must-not-spawn.mjs");
+    await writeFile(childPath, `await import('node:fs/promises').then((fs) => fs.writeFile(${JSON.stringify(childMarkerPath)}, 'spawned'));\n`, "utf8");
+    const delegate = createLocalSandboxRunner();
+    let launchIdentity: {
+      sessionDir: string;
+      launchAcceptedPath: string;
+    } | null = null;
+    const runner = {
+      supportsConfidentialStdin: true,
+      supportsProcessTreeCustody: true,
+      reconcileProcessTreeCustody: async () => false,
+      execute: vi.fn(async (input: Parameters<typeof delegate.execute>[0]) => {
+        const commandText = (input.args ?? []).join("\n");
+        if (commandText.includes("PAPERCLIP_PROCESS_SESSION_REQUEST_PATH=")) {
+          const source = await readFile(remoteScriptPath, "utf8");
+          expect(source).toContain('await fs.rm(launchRequestPath, { force: true });');
+          expect(source.indexOf('await fs.rm(launchRequestPath, { force: true });'))
+            .toBeLessThan(source.indexOf("const child = spawn("));
+          await writeFile(
+            remoteScriptPath,
+            source.replace(
+              'await fs.rm(launchRequestPath, { force: true });',
+              'throw new Error("injected launch request unlink failure");',
+            ),
+            "utf8",
+          );
+        }
+        return delegate.execute(input);
+      }),
+    };
+    const launchSecret = "unlink-failure-secret";
+    const error = await startAdapterExecutionTargetProcessSessionBridge({
+      runId: "run-process-session-request-unlink",
+      target: {
+        kind: "remote",
+        transport: "sandbox",
+        providerKey: "local-test",
+        remoteCwd: rootDir,
+        timeoutMs: 30_000,
+        runner,
+      },
+      runtimeRootDir,
+      adapterKey: "acpx",
+      command: process.execPath,
+      args: [childPath],
+      cwd: rootDir,
+      env: { PAPERCLIP_API_KEY: launchSecret },
+      timeoutSec: 5,
+      onLog: async () => {},
+      onLaunchState: async (state) => {
+        if (state.status === "launching") launchIdentity = state.launchIdentity;
+      },
+    }).catch((caught) => caught);
+
+    expect(error).toBeInstanceOf(AdapterExecutionTargetProcessSessionLaunchAmbiguousError);
+    await expect(readFile(childMarkerPath, "utf8")).rejects.toThrow();
+    await expect(readFile(launchIdentity!.launchAcceptedPath, "utf8")).rejects.toThrow();
+    await expect(readFile(path.join(launchIdentity!.sessionDir, "launch.request.json"), "utf8"))
+      .resolves.toContain(launchSecret);
+  }, process.platform === "win32" ? 30_000 : 20_000);
+
+  it("removes secret-bearing session residue after exact not-started reconciliation", async () => {
+    const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-process-session-not-started-"));
+    cleanupDirs.push(rootDir);
+    const delegate = createLocalSandboxRunner();
+    const launchSecret = "verified-not-started-secret";
+    let sessionDir: string | null = null;
+    const runner = {
+      supportsConfidentialStdin: true,
+      supportsProcessTreeCustody: true,
+      reconcileProcessTreeCustody: async () => false,
+      execute: vi.fn(async (input: Parameters<typeof delegate.execute>[0]) => {
+        const source = input.args?.join("\n") ?? "";
+        if (source.includes("PAPERCLIP_PROCESS_SESSION_LAUNCHER_PID=")) {
+          if (!sessionDir) throw new Error("launch fence did not publish the session directory");
+          await mkdir(sessionDir, { recursive: true });
+          await writeFile(path.join(sessionDir, "launch.request.json"), launchSecret, "utf8");
+          return {
+            exitCode: 1,
+            signal: null,
+            timedOut: false,
+            stdout: "",
+            stderr: "provider rejected launch before dispatch",
+            pid: null,
+            startedAt: null,
+          };
+        }
+        if (input.command === "node" && source.includes("PAPERCLIP_PROCESS_SESSION_RECONCILE=")) {
+          return {
+            exitCode: 0,
+            signal: null,
+            timedOut: false,
+            stdout: `PAPERCLIP_PROCESS_SESSION_RECONCILE=${JSON.stringify({
+              state: "not_started",
+              identityPresent: false,
+              identityMatches: false,
+              launcherPid: null,
+              wrapperPid: null,
+              acceptedPresent: false,
+              acceptedMatches: false,
+              launcherAlive: null,
+              wrapperAlive: null,
+              childClosedPresent: false,
+              wrapperDonePresent: false,
+              terminalEventPresent: false,
+              terminalReceiptPresent: false,
+              terminalReceiptMatches: false,
+              terminalReceiptComplete: false,
+            })}\n`,
+            stderr: "",
+            pid: null,
+            startedAt: null,
+          };
+        }
+        return delegate.execute(input);
+      }),
+    };
+
+    const error = await startAdapterExecutionTargetProcessSessionBridge({
+      runId: "run-process-session-not-started",
+      target: {
+        kind: "remote",
+        transport: "sandbox",
+        providerKey: "local-test",
+        remoteCwd: rootDir,
+        runner,
+      },
+      runtimeRootDir: path.posix.join(rootDir, ".paperclip-runtime", "acpx"),
+      adapterKey: "acpx",
+      command: "sh",
+      args: ["-lc", "exit 0"],
+      cwd: rootDir,
+      env: { PAPERCLIP_API_KEY: launchSecret },
+      onLog: async () => {},
+      onLaunchState: async (state) => {
+        if (state.status === "launching") sessionDir = state.launchIdentity.sessionDir;
+      },
+    }).catch((caught) => caught);
+
+    expect(error).toBeInstanceOf(Error);
+    expect(error).not.toBeInstanceOf(AdapterExecutionTargetProcessSessionLaunchAmbiguousError);
+    expect((error as Error).message).toContain("provider rejected launch before dispatch");
+    expect(sessionDir).not.toBeNull();
+    await expect(readFile(path.join(sessionDir!, "launch.request.json"), "utf8")).rejects.toThrow();
+    expect((await readRuntimeTextFiles(rootDir)).join("\n")).not.toContain(launchSecret);
+  });
+
+  it("does not treat direct-child terminal proof as custody of a surviving detached descendant", async () => {
+    const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-process-session-descendant-"));
+    cleanupDirs.push(rootDir);
+    const childPath = path.join(rootDir, "spawn-detached-descendant.mjs");
+    const descendantPidPath = path.join(rootDir, "descendant.pid");
+    await writeFile(
+      childPath,
+      [
+        "import { spawn } from 'node:child_process';",
+        "import { writeFileSync } from 'node:fs';",
+        "const descendant = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { detached: true, stdio: 'ignore' });",
+        "descendant.unref();",
+        "writeFileSync(process.argv[2], String(descendant.pid) + '\\n');",
       ].join("\n"),
       "utf8",
     );
@@ -223,10 +644,53 @@ describe("sandbox adapter execution targets", () => {
       timeoutMs: 30_000,
       runner: createLocalSandboxRunner(),
     };
-
     const bridge = await startAdapterExecutionTargetProcessSessionBridge({
-      runId: "run-process-session",
+      runId: "run-process-session-detached-descendant",
       target,
+      runtimeRootDir: path.posix.join(rootDir, ".paperclip-runtime", "acpx"),
+      adapterKey: "acpx",
+      command: process.execPath,
+      args: [childPath, descendantPidPath],
+      cwd: rootDir,
+      env: {},
+      timeoutSec: 5,
+      onLog: async () => {},
+    });
+    expect(bridge).not.toBeNull();
+    await expect.poll(
+      () => readFile(descendantPidPath, "utf8").then((value) => Number(value.trim()), () => 0),
+      { timeout: 5_000 },
+    ).toBeGreaterThan(0);
+    const descendantPid = Number((await readFile(descendantPidPath, "utf8")).trim());
+    try {
+      await bridge!.stop();
+      await expect(bridge!.reconcileTerminal()).resolves.toBe(true);
+      expect(bridge!.treeCustody).toBe("unverified");
+      expect(() => process.kill(descendantPid, 0)).not.toThrow();
+      await expect(readdir(bridge!.launchIdentity.sessionDir)).resolves.toContain("terminal.receipt.json");
+    } finally {
+      try {
+        process.kill(descendantPid, "SIGKILL");
+      } catch {
+        // Already stopped.
+      }
+    }
+  }, process.platform === "win32" ? 25_000 : 15_000);
+
+  it("retries private proxy cleanup without replaying completed stop steps", async () => {
+    const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-process-session-stop-retry-"));
+    cleanupDirs.push(rootDir);
+    const childPath = path.join(rootDir, "fast-acp-child.mjs");
+    await writeFile(childPath, "process.stdin.resume();\n", "utf8");
+    const bridge = await startAdapterExecutionTargetProcessSessionBridge({
+      runId: "run-process-session-stop-retry",
+      target: {
+        kind: "remote",
+        transport: "sandbox",
+        providerKey: "local-test",
+        remoteCwd: rootDir,
+        runner: createLocalSandboxRunner(),
+      },
       runtimeRootDir: path.posix.join(rootDir, ".paperclip-runtime", "acpx"),
       adapterKey: "acpx",
       command: process.execPath,
@@ -236,16 +700,434 @@ describe("sandbox adapter execution targets", () => {
       timeoutSec: 5,
       onLog: async () => {},
     });
-    expect(bridge).not.toBeNull();
+    const originalRm = fs.rm.bind(fs);
+    let injectedCleanupFailures = 0;
+    const rmSpy = vi.spyOn(fs, "rm").mockImplementation(async (...args) => {
+      const targetPath = String(args[0]);
+      if (
+        injectedCleanupFailures === 0 &&
+        targetPath.includes("paperclip-process-session-proxy") &&
+        targetPath.includes(".cleanup-")
+      ) {
+        injectedCleanupFailures += 1;
+        throw new Error("injected transient private proxy cleanup failure");
+      }
+      return originalRm(...args);
+    });
 
     try {
+      await expect(bridge!.stop()).rejects.toThrow("injected transient private proxy cleanup failure");
+      await expect(bridge!.stop()).resolves.toBeUndefined();
+      expect(injectedCleanupFailures).toBe(1);
+    } finally {
+      rmSpy.mockRestore();
+      await bridge?.stop();
+    }
+  }, process.platform === "win32" ? 30_000 : 20_000);
+
+  it("adopts a durable process-session launch after the transport times out post-acceptance", async () => {
+    const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-process-session-reconcile-"));
+    cleanupDirs.push(rootDir);
+    const childPath = path.join(rootDir, "reconciled-acp-child.mjs");
+    await writeFile(
+      childPath,
+      [
+        "process.stdin.on('data', (chunk) => process.stdout.write('reconciled:' + chunk.toString()));",
+        "process.stdin.resume();",
+      ].join("\n"),
+      "utf8",
+    );
+    const delegate = createLocalSandboxRunner();
+    let launchCalls = 0;
+    let reconciliationCalls = 0;
+    const runner = {
+      supportsConfidentialStdin: true,
+      supportsProcessTreeCustody: true,
+      reconcileProcessTreeCustody: async () => false,
+      execute: vi.fn(async (input: Parameters<typeof delegate.execute>[0]) => {
+        const source = input.args?.join("\n") ?? "";
+        if (source.includes("PAPERCLIP_PROCESS_SESSION_LAUNCHER_PID=")) {
+          launchCalls += 1;
+          const accepted = await delegate.execute(input);
+          return {
+            ...accepted,
+            exitCode: null,
+            timedOut: true,
+            stdout: "",
+            stderr: "provider transport timed out after accepting the launch",
+          };
+        }
+        if (input.command === "node" && source.includes("PAPERCLIP_PROCESS_SESSION_RECONCILE=")) {
+          reconciliationCalls += 1;
+        }
+        return delegate.execute(input);
+      }),
+    };
+    const runtimeRootDir = path.posix.join(rootDir, ".paperclip-runtime", "acpx");
+    const logs: string[] = [];
+    const bridge = await startAdapterExecutionTargetProcessSessionBridge({
+      runId: "run-process-session-reconcile",
+      target: {
+        kind: "remote",
+        transport: "sandbox",
+        providerKey: "local-test",
+        remoteCwd: rootDir,
+        timeoutMs: 30_000,
+        runner,
+      },
+      runtimeRootDir,
+      adapterKey: "acpx",
+      command: process.execPath,
+      args: [childPath],
+      cwd: rootDir,
+      env: {},
+      timeoutSec: 5,
+      onLog: async (_stream, chunk) => {
+        logs.push(chunk);
+      },
+    });
+    expect(bridge).not.toBeNull();
+    expect(launchCalls).toBe(1);
+    expect(reconciliationCalls).toBe(1);
+    expect(logs.join("")).toContain("adopting durable wrapper");
+
+    try {
+      const processSessionRoot = path.join(runtimeRootDir, "process-sessions");
+      const sessionEntries = (await readdir(processSessionRoot, { withFileTypes: true }))
+        .filter((entry) => entry.isDirectory());
+      expect(sessionEntries).toHaveLength(1);
+      const sessionDir = path.join(processSessionRoot, sessionEntries[0]!.name);
+      const identity = JSON.parse(await readFile(path.join(sessionDir, "launch.identity.json"), "utf8"));
+      const accepted = JSON.parse(await readFile(path.join(sessionDir, "launch.accepted.json"), "utf8"));
+      const launcherPid = Number((await readFile(path.join(sessionDir, "launcher.pid"), "utf8")).trim());
+      const wrapperPid = Number((await readFile(path.join(sessionDir, "wrapper.pid"), "utf8")).trim());
+      expect(identity).toMatchObject({
+        schemaVersion: 1,
+        launchId: accepted.launchId,
+        runId: "run-process-session-reconcile",
+        adapterKey: "acpx",
+      });
+      expect(accepted).toMatchObject({ schemaVersion: 1, wrapperPid });
+      expect(launcherPid).toBeGreaterThan(0);
+      expect(wrapperPid).toBeGreaterThan(0);
+
       const result = await runProxyWithInput(bridge!.agentCommand, "hello\n");
       expect(result.code).toBe(0);
-      expect(result.stdout).toBe("out:hello\n");
-      expect(result.stderr).toBe("err:hello\n");
+      expect(result.stdout).toBe("reconciled:hello\n");
     } finally {
       await bridge?.stop();
     }
+  }, process.platform === "win32" ? 25_000 : 15_000);
+
+  it("never adopts a dead wrapper that crashed after acceptance without spawning a child", async () => {
+    const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-process-session-accepted-crash-"));
+    cleanupDirs.push(rootDir);
+    const delegate = createLocalSandboxRunner();
+    let launchCalls = 0;
+    let launchIdentity: {
+      launchId: string;
+      sessionId: string;
+      sessionDir: string;
+      eventsDir: string;
+      launchIdentityPath: string;
+      launcherPidPath: string;
+      wrapperPidPath: string;
+      launchAcceptedPath: string;
+      childClosedPath: string;
+      wrapperDonePath: string;
+    } | null = null;
+    const deadPid = 999_999_999;
+    const runner = {
+      supportsConfidentialStdin: true,
+      supportsProcessTreeCustody: true,
+      reconcileProcessTreeCustody: async () => false,
+      execute: vi.fn(async (input: Parameters<typeof delegate.execute>[0]) => {
+        const source = input.args?.join("\n") ?? "";
+        if (source.includes("PAPERCLIP_PROCESS_SESSION_LAUNCHER_PID=")) {
+          launchCalls += 1;
+          if (!launchIdentity) throw new Error("launch fence did not publish identity before dispatch");
+          await mkdir(launchIdentity.eventsDir, { recursive: true });
+          await writeFile(
+            launchIdentity.launchIdentityPath,
+            JSON.stringify({ schemaVersion: 1, launchId: launchIdentity.launchId }) + "\n",
+            "utf8",
+          );
+          await writeFile(launchIdentity.launcherPidPath, String(deadPid) + "\n", "utf8");
+          await writeFile(launchIdentity.wrapperPidPath, String(deadPid) + "\n", "utf8");
+          await writeFile(
+            launchIdentity.launchAcceptedPath,
+            JSON.stringify({
+              schemaVersion: 1,
+              launchId: launchIdentity.launchId,
+              wrapperPid: deadPid,
+              acceptedAt: new Date().toISOString(),
+            }) + "\n",
+            "utf8",
+          );
+          return {
+            exitCode: null,
+            signal: null,
+            timedOut: true,
+            stdout: "",
+            stderr: "provider lost the launch response after the wrapper acceptance write",
+            pid: null,
+            startedAt: null,
+          };
+        }
+        return delegate.execute(input);
+      }),
+    };
+
+    const error = await startAdapterExecutionTargetProcessSessionBridge({
+      runId: "run-process-session-accepted-crash",
+      target: {
+        kind: "remote",
+        transport: "sandbox",
+        providerKey: "lost-provider",
+        environmentId: "environment-1",
+        leaseId: "lease-1",
+        remoteCwd: rootDir,
+        timeoutMs: 30_000,
+        runner,
+      },
+      runtimeRootDir: path.posix.join(rootDir, ".paperclip-runtime", "acpx"),
+      adapterKey: "acpx",
+      command: process.execPath,
+      args: ["-e", "throw new Error('must never spawn')"],
+      cwd: rootDir,
+      env: {},
+      timeoutSec: 5,
+      onLog: async () => {},
+      onLaunchState: async (state) => {
+        if (state.status === "launching") launchIdentity = state.launchIdentity;
+      },
+    }).catch((caught) => caught);
+
+    expect(launchCalls).toBe(1);
+    expect(error).toBeInstanceOf(AdapterExecutionTargetProcessSessionLaunchAmbiguousError);
+    expect(error).toMatchObject({
+      code: "ACP_PROCESS_SESSION_LAUNCH_AMBIGUOUS",
+      retryable: false,
+      needsHuman: true,
+      acceptedStart: "unknown",
+    });
+    expect(error.message).toContain("wrapperAlive=false");
+    expect(error.message).toContain("terminalReceiptComplete=false");
+    expect(await readdir(launchIdentity!.eventsDir)).toEqual([]);
+    await expect(readFile(launchIdentity!.childClosedPath, "utf8")).rejects.toThrow();
+    await expect(readFile(launchIdentity!.wrapperDonePath, "utf8")).rejects.toThrow();
+  }, process.platform === "win32" ? 25_000 : 15_000);
+
+  it("keeps a post-acceptance host proxy setup failure behind the launch reconciliation fence", async () => {
+    const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-process-session-post-accepted-"));
+    cleanupDirs.push(rootDir);
+    const childPath = path.join(rootDir, "fast-acp-child.mjs");
+    await writeFile(
+      childPath,
+      'process.stdin.resume(); process.stdin.on("end", () => process.exit(0));\n',
+      "utf8",
+    );
+    const hostTmpRoot = path.join(rootDir, "host-tmp");
+    await mkdir(hostTmpRoot, { recursive: true });
+    vi.stubEnv("TMPDIR", hostTmpRoot);
+    vi.stubEnv("TMP", hostTmpRoot);
+    vi.stubEnv("TEMP", hostTmpRoot);
+    let acceptedIdentity: {
+      launchId: string;
+      sessionDir: string;
+      launchAcceptedPath: string;
+      wrapperDonePath: string;
+    } | null = null;
+    const originalWriteFile = fs.writeFile.bind(fs);
+    const proxyWrite = vi.spyOn(fs, "writeFile").mockImplementation(async (...args) => {
+      if (path.basename(String(args[0])) === "paperclip-process-session-proxy.mjs") {
+        throw new Error("injected proxy script write failure after listen");
+      }
+      return originalWriteFile(...args);
+    });
+    const serverClose = vi.spyOn(net.Server.prototype, "close");
+    let serverCloseCallCount = 0;
+
+    let error: unknown;
+    try {
+      error = await startAdapterExecutionTargetProcessSessionBridge({
+        runId: "run-process-session-post-accepted-setup-failure",
+        target: {
+          kind: "remote",
+          transport: "sandbox",
+          providerKey: "local-test",
+          remoteCwd: rootDir,
+          timeoutMs: 30_000,
+          runner: createLocalSandboxRunner(),
+        },
+        runtimeRootDir: path.posix.join(rootDir, ".paperclip-runtime", "acpx"),
+        adapterKey: "acpx",
+        command: process.execPath,
+        args: [childPath],
+        cwd: rootDir,
+        env: {},
+        timeoutSec: 5,
+        onLog: async () => {},
+        onLaunchState: async (state) => {
+          if (state.status === "accepted") acceptedIdentity = state.launchIdentity;
+        },
+      }).catch((caught) => caught);
+    } finally {
+      serverCloseCallCount = serverClose.mock.calls.length;
+      proxyWrite.mockRestore();
+      serverClose.mockRestore();
+    }
+
+    expect(acceptedIdentity).not.toBeNull();
+    expect(error).toBeInstanceOf(AdapterExecutionTargetProcessSessionLaunchAmbiguousError);
+    expect(error).toMatchObject({
+      code: "ACP_PROCESS_SESSION_LAUNCH_AMBIGUOUS",
+      retryable: false,
+      needsHuman: true,
+      acceptedStart: "accepted",
+      launchIdentity: { launchId: acceptedIdentity!.launchId },
+    });
+    expect((error as Error).message).toContain("Host proxy setup failed after the remote launch was accepted");
+    expect(serverCloseCallCount).toBeGreaterThan(0);
+    await expect(readdir(hostTmpRoot)).resolves.toEqual([]);
+    await expect(readFile(acceptedIdentity!.launchAcceptedPath, "utf8")).resolves.toContain(
+      acceptedIdentity!.launchId,
+    );
+    await writeFile(
+      path.join(acceptedIdentity!.sessionDir, "stdin", "999999999999.json"),
+      JSON.stringify({ type: "stdinEnd" }) + "\n",
+      "utf8",
+    );
+    await expect.poll(
+      () => readFile(acceptedIdentity!.wrapperDonePath, "utf8").then(() => true, () => false),
+      { timeout: 5_000 },
+    ).toBe(true);
+  }, process.platform === "win32" ? 25_000 : 15_000);
+
+  it("surfaces an ambiguous launch as a typed non-retryable needs-human error", async () => {
+    const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-process-session-ambiguous-"));
+    cleanupDirs.push(rootDir);
+    const delegate = createLocalSandboxRunner();
+    const runner = {
+      supportsConfidentialStdin: true,
+      supportsProcessTreeCustody: true,
+      reconcileProcessTreeCustody: async () => false,
+      execute: vi.fn(async (input: Parameters<typeof delegate.execute>[0]) => {
+        const source = input.args?.join("\n") ?? "";
+        if (source.includes("PAPERCLIP_PROCESS_SESSION_LAUNCHER_PID=")) {
+          return {
+            exitCode: null,
+            signal: null,
+            timedOut: true,
+            stdout: "",
+            stderr: "launch transport timed out",
+            pid: null,
+            startedAt: null,
+          };
+        }
+        if (input.command === "node" && source.includes("PAPERCLIP_PROCESS_SESSION_RECONCILE=")) {
+          throw new Error("reconciliation transport unavailable");
+        }
+        return delegate.execute(input);
+      }),
+    };
+
+    const error = await startAdapterExecutionTargetProcessSessionBridge({
+      runId: "run-process-session-ambiguous",
+      target: {
+        kind: "remote",
+        transport: "sandbox",
+        providerKey: "local-test",
+        remoteCwd: rootDir,
+        timeoutMs: 30_000,
+        runner,
+      },
+      runtimeRootDir: path.posix.join(rootDir, ".paperclip-runtime", "acpx"),
+      adapterKey: "acpx",
+      command: process.execPath,
+      args: ["-e", "process.exit(0)"],
+      cwd: rootDir,
+      env: {},
+      timeoutSec: 5,
+      onLog: async () => {},
+    }).catch((caught) => caught);
+
+    expect(error).toBeInstanceOf(AdapterExecutionTargetProcessSessionLaunchAmbiguousError);
+    expect(error).toMatchObject({
+      code: "ACP_PROCESS_SESSION_LAUNCH_AMBIGUOUS",
+      retryable: false,
+      needsHuman: true,
+      acceptedStart: "unknown",
+    });
+    expect(error.message).toContain("do not retry");
+    expect(error.launchIdentity).toMatchObject({
+      launchId: expect.any(String),
+      sessionId: expect.any(String),
+      sessionDir: expect.stringContaining("process-sessions"),
+    });
+  });
+
+  it("preserves the remote process-session queue when wrapper exit cannot be proven", async () => {
+    const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-process-session-preserve-"));
+    cleanupDirs.push(rootDir);
+    const childPath = path.join(rootDir, "fast-acp-child.mjs");
+    await writeFile(childPath, "process.exit(0);\n", "utf8");
+    const delegate = createLocalSandboxRunner();
+    const runner = {
+      supportsConfidentialStdin: true,
+      supportsProcessTreeCustody: true,
+      reconcileProcessTreeCustody: async () => false,
+      execute: vi.fn(async (input: Parameters<typeof delegate.execute>[0]) => {
+        const probeSource = input.command === "node" && input.args?.[0] === "-e" ? input.args[1] ?? "" : "";
+        if (probeSource.includes("const pids = JSON.parse(process.argv[1])")) {
+          return {
+            exitCode: 1,
+            signal: null,
+            timedOut: false,
+            stdout: "",
+            stderr: "wrapper still live",
+            pid: null,
+            startedAt: null,
+          };
+        }
+        return delegate.execute(input);
+      }),
+    };
+    const runtimeRootDir = path.posix.join(rootDir, ".paperclip-runtime", "acpx");
+    const logs: string[] = [];
+    const bridge = await startAdapterExecutionTargetProcessSessionBridge({
+      runId: "run-process-session-preserve",
+      target: {
+        kind: "remote",
+        transport: "sandbox",
+        providerKey: "local-test",
+        remoteCwd: rootDir,
+        timeoutMs: 30_000,
+        runner,
+      },
+      runtimeRootDir,
+      adapterKey: "acpx",
+      command: process.execPath,
+      args: [childPath],
+      cwd: rootDir,
+      env: {},
+      timeoutSec: 5,
+      onLog: async (_stream, chunk) => {
+        logs.push(chunk);
+      },
+    });
+
+    await bridge?.stop();
+
+    const processSessionRoot = path.join(runtimeRootDir, "process-sessions");
+    const processSessionEntries = await readdir(processSessionRoot, {
+      withFileTypes: true,
+    });
+    const preservedSession = processSessionEntries.find((entry) => entry.isDirectory());
+    expect(preservedSession).toBeTruthy();
+    await expect(readdir(path.join(processSessionRoot, preservedSession!.name, "stdin"))).resolves.toBeDefined();
+    await expect(readdir(path.join(processSessionRoot, preservedSession!.name, "events"))).resolves.toBeDefined();
+    expect(logs.join("")).toContain("did not exit within the cleanup grace; preserving");
   }, 15_000);
 
   it("buffers sandbox process session output until the local proxy connects", async () => {
@@ -1304,6 +2186,45 @@ describe("sandbox adapter execution targets", () => {
       await bridge?.stop();
       await new Promise<void>((resolve) => apiServer.close(() => resolve()));
     }
+  });
+
+  it("fails loud when sandbox callback capability revocation is not verified", async () => {
+    const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-bridge-stop-proof-"));
+    cleanupDirs.push(rootDir);
+    const remoteCwd = path.join(rootDir, "workspace");
+    const runtimeRootDir = path.join(remoteCwd, ".paperclip-runtime", "codex");
+    await mkdir(runtimeRootDir, { recursive: true });
+    const delegate = createLocalSandboxRunner();
+    let injectUnverifiedStop = false;
+    const runner = {
+      execute: vi.fn(async (input: Parameters<typeof delegate.execute>[0]) => {
+        const result = await delegate.execute(input);
+        const source = input.args?.join("\n") ?? "";
+        if (injectUnverifiedStop && source.includes('kill "$pid"')) {
+          return { ...result, timedOut: true };
+        }
+        return result;
+      }),
+    };
+    const bridge = await startAdapterExecutionTargetPaperclipBridge({
+      runId: "run-bridge-stop-proof",
+      target: {
+        kind: "remote",
+        transport: "sandbox",
+        providerKey: "local-test",
+        remoteCwd,
+        runner,
+      },
+      runtimeRootDir,
+      adapterKey: "codex",
+      hostApiToken: "real-run-jwt",
+      hostApiUrl: "http://127.0.0.1:9",
+    });
+
+    injectUnverifiedStop = true;
+    await expect(bridge!.stop()).rejects.toThrow(
+      "Sandbox callback bridge capability revocation was not verified",
+    );
   });
 
   it("uses the effective adapter timeout when starting the sandbox callback bridge", async () => {

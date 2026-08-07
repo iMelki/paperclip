@@ -136,7 +136,7 @@ function readPostmasterPid(dataDir: string): number | null {
   }
 }
 
-async function terminateWindowsPostgresProcessTree(dataDir: string): Promise<boolean> {
+async function observeWindowsPostgresProcessTree(dataDir: string): Promise<boolean> {
   if (process.platform !== "win32") return false;
   const pid = readPostmasterPid(dataDir);
   const result = await reapWindowsTestProcessTree({
@@ -153,16 +153,18 @@ async function terminateWindowsPostgresProcessTree(dataDir: string): Promise<boo
 // with no time bound of its own. Under the loaded serial server shard a slow
 // shutdown checkpoint can push that past vitest's hookTimeout and hang the
 // afterAll hook. So we bound the graceful stop. On Windows, a timeout or failed
-// stop falls back to taskkill for the exact postmaster process tree; other
-// platforms keep waiting asynchronously for the graceful stop to settle.
+// stop takes an advisory Windows process-tree snapshot for diagnostics, but it
+// sends no bare-PID/tree signal. Other platforms likewise keep waiting
+// asynchronously for the graceful stop to settle.
 //
-// Data-dir reclaim happens only after graceful stop or confirmed forced
-// termination. Removing it on the timeout path would pull files out from under
-// a still-running cluster and provoke checkpoint / WAL I/O errors.
-async function stopEmbeddedPostgresBounded(
+// Data-dir reclaim happens only after graceful stop. Snapshot absence is not a
+// kernel stop receipt; removing on that path could pull files out from under an
+// escaped or PID-reused process and provoke checkpoint / WAL I/O errors.
+export async function stopEmbeddedPostgresBounded(
   instance: EmbeddedPostgresInstance | null,
   dataDir: string | null,
   cleanupFn?: () => void,
+  stopTimeoutMs = EMBEDDED_POSTGRES_STOP_TIMEOUT_MS,
 ): Promise<void> {
   if (!instance) {
     cleanupFn?.();
@@ -188,7 +190,7 @@ async function stopEmbeddedPostgresBounded(
     outcome = await Promise.race([
       stopped,
       new Promise<"timeout">((resolve) => {
-        timer = setTimeout(() => resolve("timeout"), EMBEDDED_POSTGRES_STOP_TIMEOUT_MS);
+        timer = setTimeout(() => resolve("timeout"), stopTimeoutMs);
         timer.unref?.();
       }),
     ]);
@@ -202,16 +204,19 @@ async function stopEmbeddedPostgresBounded(
   }
 
   if (process.platform === "win32" && dataDir) {
-    const terminated = await terminateWindowsPostgresProcessTree(dataDir);
-    if (terminated) {
+    const confirmedStopped = await observeWindowsPostgresProcessTree(dataDir);
+    if (confirmedStopped) {
       cleanupOnce();
       return;
     }
   }
 
   // Never remove the data directory under a process that may still be alive.
-  // The raw stop promise owns cleanup once it eventually settles.
-  void stopped.finally(cleanupOnce);
+  // Only an eventual successful graceful stop owns delayed cleanup; a rejected
+  // stop is not a process-exit receipt.
+  void stopped.then((result) => {
+    if (result === "stopped") cleanupOnce();
+  });
 }
 
 function formatEmbeddedPostgresError(error: unknown): string {

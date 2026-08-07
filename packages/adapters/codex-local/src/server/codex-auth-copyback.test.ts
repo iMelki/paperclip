@@ -1,9 +1,21 @@
+import * as fsPromises from "node:fs/promises";
 import { chmod, lstat, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+
+vi.mock("node:fs/promises", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs/promises")>();
+  return { ...actual, open: vi.fn(actual.open), rm: vi.fn(actual.rm) };
+});
 
 import { copyBackCodexAuth } from "./codex-auth-copyback.js";
+import { createPrivateStagingDirectory } from "./windows-private-acl.js";
+
+function expectPrivatePosixMode(actual: number, expected = 0o600): void {
+  // NTFS confidentiality is expressed through DACLs, not POSIX mode bits.
+  if (process.platform !== "win32") expect(actual).toBe(expected);
+}
 
 // The copy-back module reuses the exact same direction-agnostic decision
 // predicate (`codex-auth-merge-decision.cjs`) that the inbound extract path
@@ -17,6 +29,9 @@ describe("copyBackCodexAuth", () => {
   const cleanupDirs: string[] = [];
 
   afterEach(async () => {
+    const actual = await vi.importActual<typeof import("node:fs/promises")>("node:fs/promises");
+    vi.mocked(fsPromises.open).mockImplementation(actual.open);
+    vi.mocked(fsPromises.rm).mockImplementation(actual.rm);
     while (cleanupDirs.length > 0) {
       const dir = cleanupDirs.pop();
       if (!dir) continue;
@@ -24,6 +39,7 @@ describe("copyBackCodexAuth", () => {
       await chmod(dir, 0o700).catch(() => undefined);
       await rm(dir, { recursive: true, force: true }).catch(() => undefined);
     }
+    vi.clearAllMocks();
   });
 
   function subscriptionAuth(input: {
@@ -51,7 +67,9 @@ describe("copyBackCodexAuth", () => {
   }
 
   async function makeHostDir(): Promise<string> {
-    const dir = await mkdtemp(path.join(os.tmpdir(), "paperclip-codex-copyback-"));
+    const dir = process.platform === "win32"
+      ? await createPrivateStagingDirectory(null, "paperclip-codex-copyback-")
+      : await mkdtemp(path.join(os.tmpdir(), "paperclip-codex-copyback-"));
     cleanupDirs.push(dir);
     return dir;
   }
@@ -110,7 +128,7 @@ describe("copyBackCodexAuth", () => {
 
     expect(result.outcome).toBe("copied");
     expect(result.finalHostAuth).toBe(sandboxAuth);
-    expect(result.finalHostMode).toBe(0o600);
+    expectPrivatePosixMode(result.finalHostMode);
     // Temp staging file must be gone once the swap completes.
     expect(result.leftoverEntries).toEqual([]);
     // Never leak token bytes in log output.
@@ -145,7 +163,7 @@ describe("copyBackCodexAuth", () => {
       const result = await runCopyBack({ sandboxAuth: entry.sandboxAuth, hostAuth: entry.hostAuth });
       expect(result.outcome, entry.name).toBe("kept-host");
       expect(result.finalHostAuth, entry.name).toBe(entry.hostAuth);
-      expect(result.finalHostMode, entry.name).toBe(0o600);
+      expectPrivatePosixMode(result.finalHostMode);
       expect(result.leftoverEntries, entry.name).toEqual([]);
     }
   });
@@ -192,10 +210,10 @@ describe("copyBackCodexAuth", () => {
       const result = await runCopyBack({ sandboxAuth: entry.sandboxAuth, hostAuth: entry.hostAuth });
       expect(result.outcome, entry.name).toBe("kept-host");
       expect(result.finalHostAuth, entry.name).toBe(entry.hostAuth);
-      expect(result.finalHostMode, entry.name).toBe(0o600);
+      expectPrivatePosixMode(result.finalHostMode);
       expect(result.leftoverEntries, entry.name).toEqual([]);
     }
-  });
+  }, 60_000);
 
   it("creates a missing shared Codex home before staging copy-back", async () => {
     const rootDir = await makeHostDir();
@@ -216,35 +234,103 @@ describe("copyBackCodexAuth", () => {
     expect(logs.join("\n")).not.toContain("sandbox-only");
   });
 
+  it("rejects oversized sandbox auth before mutating a missing host directory", async () => {
+    const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-codex-copyback-oversized-"));
+    cleanupDirs.push(rootDir);
+    const hostDir = path.join(rootDir, "missing-codex-home");
+    const hostAuthPath = path.join(hostDir, "auth.json");
+    const logs: string[] = [];
+
+    await expect(copyBackCodexAuth({
+      readSandboxAuth: async () => Buffer.alloc(1024 * 1024 + 1, 0x41),
+      hostAuthPath,
+      log: (line) => {
+        logs.push(line);
+      },
+    })).rejects.toThrow(/exceeds the 1048576-byte copy-back limit/i);
+
+    await expect(lstat(hostDir)).rejects.toMatchObject({ code: "ENOENT" });
+    expect(logs).toEqual([]);
+  });
+
   it("preserves the host file atomically when the install cannot be staged (no partial write, no leaked temp)", async () => {
-    // Make the host directory read-only so staging the same-filesystem temp fails
-    // with EACCES. The host credential must be left byte-for-byte intact and no
-    // partial/temp file may remain — the outbound write is all-or-nothing.
+    // Inject a platform-independent EACCES at the exclusive temp-file open. The
+    // host credential must remain byte-for-byte intact and no partial/temp file
+    // may remain — the outbound write is all-or-nothing.
     const hostDir = await makeHostDir();
     const hostAuth = subscriptionAuth({ accountId: "acct-same", lastRefresh: OLDER, marker: "host-intact" });
     const hostAuthPath = path.join(hostDir, "auth.json");
     await writeFile(hostAuthPath, hostAuth, { mode: 0o600 });
     const before = await stat(hostAuthPath);
 
-    await chmod(hostDir, 0o500); // r-x: readable/traversable, not writable
-    try {
-      const sandboxAuth = subscriptionAuth({ accountId: "acct-same", lastRefresh: NEWER, marker: "sandbox-newer" });
-      await expect(
-        copyBackCodexAuth({
-          readSandboxAuth: async () => Buffer.from(sandboxAuth, "utf8"),
-          hostAuthPath,
-          log: () => {},
-        }),
-      ).rejects.toThrow();
-    } finally {
-      await chmod(hostDir, 0o700);
-    }
+    const openMock = vi.mocked(fsPromises.open);
+    openMock.mockImplementationOnce(async () => {
+      throw Object.assign(new Error("injected staging denial"), { code: "EACCES" });
+    });
+    const sandboxAuth = subscriptionAuth({ accountId: "acct-same", lastRefresh: NEWER, marker: "sandbox-newer" });
+    await expect(
+      copyBackCodexAuth({
+        readSandboxAuth: async () => Buffer.from(sandboxAuth, "utf8"),
+        hostAuthPath,
+        log: () => {},
+      }),
+    ).rejects.toThrow(/injected staging denial/);
 
     const after = await stat(hostAuthPath);
     expect(await readFile(hostAuthPath, "utf8")).toBe(hostAuth);
-    expect(after.mode & 0o777).toBe(0o600);
+    expectPrivatePosixMode(after.mode & 0o777);
     expect(after.mtimeMs).toBe(before.mtimeMs);
     expect((await readdir(hostDir)).filter((name) => name !== "auth.json")).toEqual([]);
+  });
+
+  it("retries a transient credential-temp cleanup failure and proves no residue remains", async () => {
+    const hostDir = await makeHostDir();
+    const hostAuth = subscriptionAuth({ accountId: "acct-same", lastRefresh: NEWER, marker: "host-newer" });
+    const sandboxAuth = subscriptionAuth({ accountId: "acct-same", lastRefresh: OLDER, marker: "sandbox-older" });
+    const rmMock = vi.mocked(fsPromises.rm);
+    rmMock.mockRejectedValueOnce(Object.assign(new Error("injected transient cleanup denial"), { code: "EACCES" }));
+
+    const result = await runCopyBack({ sandboxAuth, hostAuth, hostDir });
+
+    expect(result.outcome).toBe("kept-host");
+    expect(result.finalHostAuth).toBe(hostAuth);
+    expect(result.leftoverEntries).toEqual([]);
+    const tempCleanupCalls = rmMock.mock.calls.filter(([target]) => (
+      typeof target === "string" && target.includes(".auth.json.copyback-")
+    ));
+    expect(tempCleanupCalls).toHaveLength(2);
+  });
+
+  it("fails loud after bounded credential-temp cleanup retries and leaves the host untouched", async () => {
+    const hostDir = await makeHostDir();
+    const hostAuthPath = path.join(hostDir, "auth.json");
+    const hostAuth = subscriptionAuth({ accountId: "acct-same", lastRefresh: NEWER, marker: "host-newer" });
+    const sandboxAuth = subscriptionAuth({ accountId: "acct-same", lastRefresh: OLDER, marker: "sandbox-older" });
+    await writeFile(hostAuthPath, hostAuth, { mode: 0o600 });
+
+    const rmMock = vi.mocked(fsPromises.rm);
+    const cleanupError = Object.assign(new Error("injected persistent cleanup denial"), { code: "EACCES" });
+    rmMock.mockRejectedValueOnce(cleanupError);
+    rmMock.mockRejectedValueOnce(cleanupError);
+    rmMock.mockRejectedValueOnce(cleanupError);
+
+    await expect(
+      copyBackCodexAuth({
+        readSandboxAuth: async () => Buffer.from(sandboxAuth, "utf8"),
+        hostAuthPath,
+        log: () => {},
+      }),
+    ).rejects.toThrow(/failed to prove credential temp cleanup/i);
+
+    expect(await readFile(hostAuthPath, "utf8")).toBe(hostAuth);
+    const leftovers = (await readdir(hostDir)).filter((name) => name !== "auth.json");
+    expect(leftovers).toHaveLength(1);
+    expect(leftovers[0]).toMatch(/^\.auth\.json\.copyback-.+\.tmp-.+$/);
+    expect(await readFile(path.join(hostDir, leftovers[0]!, "auth.json"), "utf8")).toBe(sandboxAuth);
+    const tempCleanupCalls = rmMock.mock.calls.filter(([target]) => (
+      typeof target === "string" && target.includes(".auth.json.copyback-")
+    ));
+    expect(tempCleanupCalls).toHaveLength(3);
   });
 
   it("treats an absent sandbox auth.json (ENOENT) as a keep-host no-op, host untouched, no throw", async () => {
@@ -266,7 +352,7 @@ describe("copyBackCodexAuth", () => {
 
     expect(result.outcome).toBe("kept-host");
     expect(result.finalHostAuth).toBe(hostAuth);
-    expect(result.finalHostMode).toBe(0o600);
+    expectPrivatePosixMode(result.finalHostMode);
     // No staging temp is ever created on the ENOENT path.
     expect(result.leftoverEntries).toEqual([]);
     expect(result.logs.join("\n")).toContain("no sandbox credential to copy back");

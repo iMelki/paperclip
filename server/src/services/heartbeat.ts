@@ -1,6 +1,6 @@
 import fs from "node:fs/promises";
 import path from "node:path";
-import { execFile as execFileCallback } from "node:child_process";
+import { execFile as execFileCallback, type ChildProcess } from "node:child_process";
 import { promisify } from "node:util";
 import { createHash, randomUUID } from "node:crypto";
 import { and, asc, desc, eq, getTableColumns, gt, gte, inArray, isNull, lt, lte, notInArray, or, sql } from "drizzle-orm";
@@ -15,6 +15,7 @@ import {
   type BillingType,
   type CostStatus,
   type EnvironmentLeaseStatus,
+  type EnvironmentLease,
   type ExecutionWorkspace,
   type ExecutionWorkspaceConfig,
   type HeartbeatRunStatusPhase,
@@ -44,6 +45,8 @@ import {
   documentAnnotationComments,
   documentAnnotationThreads,
   documentRevisions,
+  environmentLeases,
+  environments,
   issueDocuments,
   executionWorkspaces,
   heartbeatRunEvents,
@@ -246,6 +249,14 @@ import {
   type SessionCompactionPolicy,
 } from "@paperclipai/adapter-utils";
 import {
+  reconcileAndReleaseAcpxProcessSessionLaunchResources,
+  requestStopAndWaitAcpxProcessSessionLaunch,
+} from "@paperclipai/adapter-utils/acpx-engine";
+import {
+  reconcileAdapterExecutionTargetProcessSessionLaunchTerminal,
+  type AdapterExecutionTargetProcessSessionLaunchIdentity,
+} from "@paperclipai/adapter-utils/execution-target";
+import {
   readPaperclipSkillSyncPreference,
   UNMANAGED_BACKGROUND_TASK_LIVENESS_REASON,
   UNMANAGED_BACKGROUND_TASK_STOP_REASON,
@@ -258,6 +269,7 @@ import { parseExecutionPolicyBootstrapEnv } from "./execution-policy-bootstrap.j
 import { environmentRuntimeService } from "./environment-runtime.js";
 import { skillVersionSelectionMap } from "./runtime-skill-selections.js";
 import { environmentRunOrchestrator } from "./environment-run-orchestrator.js";
+import { resolveEnvironmentExecutionTarget } from "./environment-execution-target.js";
 import { isUnsafeSessionWorkspaceCwd } from "./session-workspace-cwd.js";
 import {
   clearHeartbeatRunRuntimeStatus,
@@ -367,6 +379,8 @@ const WORKSPACE_VALIDATION_FAILURE_CODE = "workspace_validation_failed";
 const WORKSPACE_VALIDATION_RECOVERY_CAUSE = "workspace_validation_failed";
 const CONFIGURATION_INCOMPLETE_FAILURE_CODE = "configuration_incomplete";
 const CONFIGURATION_INCOMPLETE_RECOVERY_CAUSE = "configuration_incomplete";
+const ACP_PROCESS_SESSION_LAUNCH_AMBIGUOUS = "ACP_PROCESS_SESSION_LAUNCH_AMBIGUOUS";
+const ACP_PROCESS_SESSION_LAUNCH_EVENT = "acp.process_session.launch";
 const EXECUTION_REVIEW_PARTICIPANT_RECOVERY_RETRY_REASON = "execution_review_participant_recovery";
 const EXECUTION_REVIEW_PARTICIPANT_RECOVERY_WAKE_REASON = "execution_review_participant_recovery";
 const EXECUTION_REVIEW_PARTICIPANT_RECOVERY_CAUSE = "execution_review_participant_recovery";
@@ -1550,6 +1564,14 @@ type WorkspaceValidationFailureLike = WorkspaceValidationFailure | {
   resultJson: Record<string, unknown>;
 };
 
+type ProcessSessionLaunchAmbiguousFailureLike = Error & {
+  code: typeof ACP_PROCESS_SESSION_LAUNCH_AMBIGUOUS;
+  retryable: false;
+  needsHuman: true;
+  acceptedStart: "unknown" | "accepted";
+  launchIdentity: Record<string, unknown>;
+};
+
 function isWorkspaceValidationFailure(error: unknown): error is WorkspaceValidationFailureLike {
   if (error instanceof WorkspaceValidationFailure) return true;
   const maybe = error as { code?: unknown; resultJson?: unknown } | null;
@@ -1562,10 +1584,116 @@ function isWorkspaceValidationFailure(error: unknown): error is WorkspaceValidat
   );
 }
 
+function isProcessSessionLaunchAmbiguousFailure(
+  error: unknown,
+): error is ProcessSessionLaunchAmbiguousFailureLike {
+  const candidate = error as Partial<ProcessSessionLaunchAmbiguousFailureLike> | null;
+  return Boolean(
+    candidate &&
+      candidate.code === ACP_PROCESS_SESSION_LAUNCH_AMBIGUOUS &&
+      candidate.retryable === false &&
+      candidate.needsHuman === true &&
+      (candidate.acceptedStart === "unknown" || candidate.acceptedStart === "accepted") &&
+      candidate.launchIdentity &&
+      typeof candidate.launchIdentity === "object",
+  );
+}
+
+function processSessionLaunchAmbiguousResultJson(
+  error: ProcessSessionLaunchAmbiguousFailureLike,
+): Record<string, unknown> {
+  return {
+    processSessionLaunch: {
+      status: "needs_human",
+      acceptedStart: error.acceptedStart,
+      retryable: error.retryable,
+      ...parseObject(error.launchIdentity),
+    },
+  };
+}
+
+function readProcessSessionLaunchFencePayload(event: AdapterRuntimeEvent): Record<string, unknown> | null {
+  if (event.eventType.trim() !== ACP_PROCESS_SESSION_LAUNCH_EVENT) return null;
+  const payload = parseObject(event.payload);
+  const status = readNonEmptyString(payload.status);
+  const launchId = readNonEmptyString(payload.launchId);
+  const sessionId = readNonEmptyString(payload.sessionId);
+  const sessionDir = readNonEmptyString(payload.sessionDir);
+  if (
+    (status !== "launching" && status !== "accepted" && status !== "not_started") ||
+    !launchId ||
+    !sessionId ||
+    !sessionDir
+  ) {
+    throw new Error("Remote ACP process-session launch event is missing its durable launch identity.");
+  }
+  return {
+    ...payload,
+    status,
+    launchId,
+    sessionId,
+    sessionDir,
+    acceptedStart: status === "accepted" ? "accepted" : "unknown",
+    retryable: status === "not_started",
+    needsHuman: false,
+  };
+}
+
 function isWorkspaceValidationFailedRun(
   run: Pick<typeof heartbeatRuns.$inferSelect, "errorCode"> | null | undefined,
 ) {
   return run?.errorCode === WORKSPACE_VALIDATION_FAILURE_CODE;
+}
+
+function isProcessSessionLaunchAmbiguousRun(
+  run: { errorCode?: string | null } | null | undefined,
+) {
+  return run?.errorCode === ACP_PROCESS_SESSION_LAUNCH_AMBIGUOUS;
+}
+
+function isProcessSessionLaunchActiveFenceRun(
+  run: { status?: unknown; resultJson?: unknown } | null | undefined,
+): boolean {
+  if (run?.status !== "running") return false;
+  const launch = parseObject(parseObject(run.resultJson).processSessionLaunch);
+  return launch.status === "launching" || launch.status === "accepted";
+}
+
+function isProcessSessionLaunchReplayFencedRun(
+  run: { status?: unknown; errorCode?: string | null; resultJson?: unknown } | null | undefined,
+): boolean {
+  return isProcessSessionLaunchAmbiguousRun(run) || isProcessSessionLaunchActiveFenceRun(run);
+}
+
+function readProcessSessionLaunchIdentityFromRun(
+  run: { id: string; resultJson: unknown },
+): AdapterExecutionTargetProcessSessionLaunchIdentity | null {
+  const launch = parseObject(parseObject(run.resultJson).processSessionLaunch);
+  const required = {
+    launchId: readNonEmptyString(launch.launchId),
+    sessionId: readNonEmptyString(launch.sessionId),
+    runId: readNonEmptyString(launch.runId),
+    adapterKey: readNonEmptyString(launch.adapterKey),
+    remoteCwd: readNonEmptyString(launch.remoteCwd),
+    sessionDir: readNonEmptyString(launch.sessionDir),
+    eventsDir: readNonEmptyString(launch.eventsDir),
+    launchIdentityPath: readNonEmptyString(launch.launchIdentityPath),
+    launcherPidPath: readNonEmptyString(launch.launcherPidPath),
+    wrapperPidPath: readNonEmptyString(launch.wrapperPidPath),
+    launchAcceptedPath: readNonEmptyString(launch.launchAcceptedPath),
+    terminalReceiptPath: readNonEmptyString(launch.terminalReceiptPath),
+    childClosedPath: readNonEmptyString(launch.childClosedPath),
+    wrapperDonePath: readNonEmptyString(launch.wrapperDonePath),
+  };
+  if (launch.transport !== "sandbox" || Object.values(required).some((value) => !value)) return null;
+  if (required.runId !== run.id) return null;
+  return {
+    ...(required as Record<keyof typeof required, string>),
+    transport: "sandbox",
+    providerKey: readNonEmptyString(launch.providerKey),
+    environmentId: readNonEmptyString(launch.environmentId),
+    leaseId: readNonEmptyString(launch.leaseId),
+  };
 }
 
 function readWorkspaceValidationPayloadFromRun(
@@ -5698,31 +5826,68 @@ async function terminateHeartbeatRunProcess(input: {
   graceMs?: number;
   trustedPid?: boolean;
   trustedProcessGroup?: boolean;
+  childProcess?: ChildProcess | null;
 }): Promise<LocalServiceTerminationResult | null> {
   const pid = input.pid ?? null;
   const processGroupId = input.processGroupId ?? null;
   if (typeof pid !== "number" && typeof processGroupId !== "number") return null;
 
+  const normalizedPid =
+    typeof pid === "number" && Number.isInteger(pid) && pid > 0 ? pid : null;
+  const normalizedProcessGroupId =
+    typeof processGroupId === "number" && Number.isInteger(processGroupId) && processGroupId > 0
+      ? processGroupId
+      : null;
+  const pidAlive = normalizedPid !== null && isProcessAlive(normalizedPid);
+  const processGroupAlive = normalizedProcessGroupId !== null && isProcessGroupAlive(normalizedProcessGroupId);
+  if (!pidAlive && !processGroupAlive) {
+    return {
+      pid: normalizedPid ?? normalizedProcessGroupId,
+      attempted: false,
+      confirmedStopped: false,
+      outcome: "untrusted_identity",
+      error: process.platform === "win32"
+        ? "windows_process_tree_absence_unproven"
+        : "posix_process_tree_absence_unproven_without_kernel_custody",
+    };
+  }
+  if (!input.trustedPid && !input.trustedProcessGroup) {
+    return {
+      pid: normalizedPid ?? normalizedProcessGroupId,
+      attempted: false,
+      confirmedStopped: false,
+      outcome: "untrusted_identity",
+      error: "A live PID or process group reconstructed from persisted state is observation-only without a live ChildProcess handle.",
+    };
+  }
+
   return await terminateLocalService(
     {
-      pid:
-        typeof pid === "number" && Number.isInteger(pid) && pid > 0
-          ? pid
-          : (processGroupId ?? 0),
-      processGroupId:
-        typeof processGroupId === "number" && Number.isInteger(processGroupId) && processGroupId > 0
-          ? processGroupId
-          : null,
+      pid: normalizedPid ?? normalizedProcessGroupId ?? 0,
+      processGroupId: normalizedProcessGroupId,
     },
-    input.graceMs || input.trustedPid || input.trustedProcessGroup || input.expectedStartedAt
+    input.graceMs || input.trustedPid || input.trustedProcessGroup || input.expectedStartedAt || input.childProcess
       ? {
           ...(input.graceMs ? { forceAfterMs: input.graceMs } : {}),
           ...(input.trustedPid ? { trustedPid: true } : {}),
           ...(input.trustedProcessGroup ? { trustedProcessGroup: true } : {}),
           ...(input.expectedStartedAt ? { expectedStartedAt: input.expectedStartedAt } : {}),
+          ...(input.childProcess ? { childProcess: input.childProcess } : {}),
         }
       : undefined,
   );
+}
+
+function missingProcessTreeCustodyResult(): LocalServiceTerminationResult {
+  return {
+    pid: null,
+    attempted: false,
+    confirmedStopped: false,
+    outcome: "untrusted_identity",
+    error: process.platform === "win32"
+      ? "windows_process_tree_absence_unproven_without_job_custody"
+      : "posix_process_tree_absence_unproven_without_kernel_custody",
+  };
 }
 
 function buildProcessLossMessage(run: {
@@ -6104,6 +6269,127 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     pluginWorkerManager: options.pluginWorkerManager,
     environmentRuntime,
   });
+  const releaseReconciledEnvironmentLease = async (run: typeof heartbeatRuns.$inferSelect) => {
+    const release = await envOrchestrator.releaseForRun({
+      heartbeatRunId: run.id,
+      companyId: run.companyId,
+      agentId: run.agentId,
+      status: "released",
+      failureReason: "Remote ACP terminal receipt reconciled before retained-run release",
+    });
+    if (release.errors.length > 0) {
+      throw new AggregateError(
+        release.errors.map((entry) => entry.error),
+        `Failed to release reconciled environment lease(s) for run ${run.id}`,
+      );
+    }
+  };
+  const reconcileRetainedProcessSessionLaunchResources = async (
+    run: typeof heartbeatRuns.$inferSelect,
+  ): Promise<{
+    found: boolean;
+    terminal: boolean;
+    treeCustodyVerified?: boolean;
+    cleanupComplete?: boolean;
+    released: boolean;
+    reconstructedAfterRestart?: boolean;
+    cleanupUnreconstructible?: boolean;
+  }> => {
+    const identity = readProcessSessionLaunchIdentityFromRun(run);
+    if (!identity) return { found: false, terminal: false, released: false };
+
+    const inProcess = await reconcileAndReleaseAcpxProcessSessionLaunchResources({
+      runId: run.id,
+      launchId: identity.launchId,
+    });
+    if (inProcess.found) {
+      if (inProcess.released) await releaseReconciledEnvironmentLease(run);
+      return inProcess;
+    }
+
+    // Paperclip may have restarted after the remote launch was accepted. Rebuild
+    // a read-only provider runner from the still-active persisted lease and the
+    // exact launch identity; never acquire a new lease or accept caller-supplied
+    // terminal state. Host sockets/locks ended with the old process. Managed-home
+    // copyback/staging cleanup closures are not reconstructible, and direct child
+    // terminal proof is not process-tree custody. Restart reconstruction is
+    // therefore read-only evidence: it can never release the environment/issue.
+    if (!identity.leaseId || !identity.environmentId) {
+      return { found: false, terminal: false, released: false, reconstructedAfterRestart: true };
+    }
+    const lease = await db
+      .select()
+      .from(environmentLeases)
+      .where(and(
+        eq(environmentLeases.id, identity.leaseId),
+        eq(environmentLeases.heartbeatRunId, run.id),
+        eq(environmentLeases.status, "active"),
+      ))
+      .then((rows) => rows[0] ?? null);
+    if (!lease || lease.environmentId !== identity.environmentId) {
+      return { found: false, terminal: false, released: false, reconstructedAfterRestart: true };
+    }
+    const [environment, agent] = await Promise.all([
+      db.select().from(environments).where(
+        eq(environments.id, identity.environmentId),
+      ).then((rows) => rows[0] ?? null),
+      db.select().from(agents).where(and(
+        eq(agents.id, run.agentId),
+        eq(agents.companyId, run.companyId),
+      )).then((rows) => rows[0] ?? null),
+    ]);
+    if (!environment || !agent) {
+      return { found: false, terminal: false, released: false, reconstructedAfterRestart: true };
+    }
+    const target = await resolveEnvironmentExecutionTarget({
+      db,
+      companyId: run.companyId,
+      adapterType: agent.adapterType,
+      environment,
+      leaseId: lease.id,
+      leaseMetadata: parseObject(lease.metadata),
+      lease: lease as EnvironmentLease,
+      environmentRuntime,
+    });
+    const terminal = await reconcileAdapterExecutionTargetProcessSessionLaunchTerminal({
+      target,
+      launchIdentity: identity,
+    });
+    if (!terminal) {
+      return { found: true, terminal: false, released: false, reconstructedAfterRestart: true };
+    }
+    const latest = await getRun(run.id);
+    if (latest?.status === "running") {
+      const existing = parseObject(latest.resultJson);
+      const launch = parseObject(existing.processSessionLaunch);
+      await db
+        .update(heartbeatRuns)
+        .set({
+          resultJson: {
+            ...existing,
+            processSessionLaunch: {
+              ...launch,
+              reconstructedAfterRestart: true,
+              directTerminalVerified: true,
+              treeCustodyVerified: false,
+              cleanupUnreconstructible: true,
+              managedHomeCopyback: "not_reconstructible_after_restart",
+            },
+          },
+          updatedAt: new Date(),
+        })
+        .where(and(eq(heartbeatRuns.id, latest.id), eq(heartbeatRuns.status, "running")));
+    }
+    return {
+      found: true,
+      terminal: true,
+      treeCustodyVerified: false,
+      cleanupComplete: false,
+      released: false,
+      reconstructedAfterRestart: true,
+      cleanupUnreconstructible: true,
+    };
+  };
   const workspaceOperationsSvc = workspaceOperationService(db);
   const liveRunExecutions = {
     has(id: string) {
@@ -8371,6 +8657,10 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
   }
 
   async function handleRunLivenessContinuation(run: typeof heartbeatRuns.$inferSelect) {
+    // The remote transport failed after launch submission, so replay could create a
+    // second ACP process. Only an operator may reconcile this terminal state.
+    if (isProcessSessionLaunchReplayFencedRun(run)) return;
+
     const livenessState = run.livenessState as RunLivenessState | null;
     if (livenessState !== "plan_only" && livenessState !== "empty_response") return;
 
@@ -9001,6 +9291,50 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       .then((rows) => rows[0] ?? null);
   }
 
+  async function retainProcessSessionLaunchForReconciliation(input: {
+    run: typeof heartbeatRuns.$inferSelect;
+    message: string;
+    resultJson?: Record<string, unknown> | null;
+  }) {
+    const latest = await getRun(input.run.id);
+    if (!latest || latest.status !== "running") return latest;
+    const supplied = parseObject(input.resultJson);
+    const suppliedLaunch = parseObject(supplied.processSessionLaunch);
+    const existing = parseObject(latest.resultJson);
+    const existingLaunch = parseObject(existing.processSessionLaunch);
+    const retained = await db
+      .update(heartbeatRuns)
+      .set({
+        error: input.message,
+        errorCode: ACP_PROCESS_SESSION_LAUNCH_AMBIGUOUS,
+        resultJson: {
+          ...existing,
+          ...supplied,
+          processSessionLaunch: {
+            ...existingLaunch,
+            ...suppliedLaunch,
+            status: "needs_human",
+            retryable: false,
+            needsHuman: true,
+          },
+        },
+        updatedAt: new Date(),
+      })
+      .where(and(eq(heartbeatRuns.id, latest.id), eq(heartbeatRuns.status, "running")))
+      .returning()
+      .then((rows) => rows[0] ?? null);
+    if (retained) {
+      await appendRunEvent(retained, await nextRunEventSeq(retained.id), {
+        eventType: "lifecycle",
+        stream: "system",
+        level: "error",
+        message: "Remote ACP launch retained as running; issue and environment remain fenced for reconciliation",
+        payload: { errorCode: ACP_PROCESS_SESSION_LAUNCH_AMBIGUOUS, needsHuman: true },
+      });
+    }
+    return retained ?? latest;
+  }
+
   async function clearDetachedRunWarning(runId: string) {
     const updated = await db
       .update(heartbeatRuns)
@@ -9251,6 +9585,19 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     run: typeof heartbeatRuns.$inferSelect,
     agent: typeof agents.$inferSelect,
   ) {
+    // A missing-comment follow-up is still an execution replay. Suppress it when
+    // remote launch acceptance is unknown and preserve the needs-human receipt.
+    if (isProcessSessionLaunchReplayFencedRun(run)) {
+      if (run.issueCommentStatus !== "not_applicable") {
+        await patchRunIssueCommentStatus(run.id, {
+          issueCommentStatus: "not_applicable",
+          issueCommentSatisfiedByCommentId: null,
+          issueCommentRetryQueuedAt: null,
+        });
+      }
+      return { outcome: "not_applicable" as const, queuedRun: null };
+    }
+
     const contextSnapshot = parseObject(run.contextSnapshot);
     const issueId = readNonEmptyString(contextSnapshot.issueId);
     if (!issueId) {
@@ -9647,6 +9994,11 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         continue;
       }
 
+      if (isProcessSessionLaunchReplayFencedRun(run)) {
+        classify(candidate, "skipped", "process_session_launch_reconciliation_required", patch);
+        continue;
+      }
+
       if (intent.drainRequired) {
         classify(candidate, "skipped", "drain_required", patch);
         continue;
@@ -9661,9 +10013,21 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       const processGroupId = run.processGroupId ?? candidate.processGroupId;
       const processPidAlive = isProcessAlive(processPid);
       const processGroupAlive = isProcessGroupAlive(processGroupId);
-      if (!processPid && !processGroupId) {
-        classify(candidate, "lost", "missing_process_metadata", patch);
-        continue;
+      if (!processPidAlive && !processGroupAlive) {
+        const termination = await terminateHeartbeatRunProcess({
+          pid: processPid,
+          processGroupId,
+          expectedStartedAt: run.processStartedAt,
+        }) ?? missingProcessTreeCustodyResult();
+        if (termination.confirmedStopped === false) {
+          await retainRunForUnverifiedTermination({
+            run,
+            result: termination,
+            operation: "shutdown",
+          });
+          classify(candidate, "skipped", "process_tree_absence_unproven_without_kernel_custody", patch);
+          continue;
+        }
       }
       if (!processPidAlive && !processGroupAlive) {
         classify(candidate, "lost", "process_not_alive", patch);
@@ -9775,6 +10139,44 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     const needsHumanRunIds: string[] = [];
 
     for (const { run, agent } of activeRuns) {
+      if (isProcessSessionLaunchReplayFencedRun(run)) {
+        // The remote wrapper/child may outlive this host process. Do not stop,
+        // release, or replay it during graceful shutdown; preserve the durable
+        // identity and lease for explicit reconciliation after restart.
+        const identity = readProcessSessionLaunchIdentityFromRun(run);
+        const reconciliation = isProcessSessionLaunchActiveFenceRun(run) && identity
+          ? await requestStopAndWaitAcpxProcessSessionLaunch({
+              runId: run.id,
+              launchId: identity.launchId,
+            }).catch(() => ({
+              found: true,
+              terminal: false,
+              treeCustodyVerified: false,
+              cleanupComplete: false,
+              released: false,
+            }))
+          : await reconcileRetainedProcessSessionLaunchResources(run).catch(() => ({
+              found: true,
+              terminal: false,
+              treeCustodyVerified: false,
+              cleanupComplete: false,
+              released: false,
+            }));
+        if (reconciliation.released) {
+          // A future provider may supply exact launch-bound tree custody and
+          // complete all retained cleanup before shutdown continues normally.
+        } else {
+        await appendRunEvent(run, await nextRunEventSeq(run.id), {
+          eventType: "lifecycle",
+          stream: "system",
+          level: "warn",
+          message: "Graceful shutdown preserved a remote ACP launch without verified tree custody/cleanup",
+          payload: { signal, errorCode: ACP_PROCESS_SESSION_LAUNCH_AMBIGUOUS, reconciliation },
+        });
+        needsHumanRunIds.push(run.id);
+        continue;
+        }
+      }
       const running = runningProcesses.get(run.id);
       const runningChildIsLive = running
         ? (running.child.exitCode == null && running.child.signalCode == null)
@@ -9785,7 +10187,9 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
             processGroupId: running.processGroupId ?? run.processGroupId,
             expectedStartedAt: run.processStartedAt,
             graceMs: Math.max(1, running.graceSec) * 1000,
-            ...(runningChildIsLive ? { trustedPid: true, trustedProcessGroup: true } : {}),
+            ...(runningChildIsLive
+              ? { trustedPid: true, trustedProcessGroup: true, childProcess: running.child }
+              : {}),
           })
         : run.processPid || run.processGroupId
           ? await terminateHeartbeatRunProcess({
@@ -9793,7 +10197,9 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
               processGroupId: run.processGroupId,
               expectedStartedAt: run.processStartedAt,
             })
-          : null;
+          : isTrackedLocalChildProcessAdapter(agent.adapterType)
+            ? missingProcessTreeCustodyResult()
+            : null;
       if (termination?.confirmedStopped === false) {
         await retainRunForUnverifiedTermination({
           run,
@@ -12132,6 +12538,12 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     for (const { run, adapterType, adapterConfig } of activeRuns) {
       if (runningProcesses.has(run.id) || activeRunExecutions.has(run.id)) continue;
 
+      // A remote ACP child may already exist even though the host proxy never
+      // reached onSpawn. Preserve the run and its environment lease until the
+      // durable remote identity is reconciled; process-loss replay could create
+      // a duplicate child.
+      if (isProcessSessionLaunchReplayFencedRun(run)) continue;
+
       // Apply staleness threshold to avoid false positives
       if (staleThresholdMs > 0) {
         const refTime = run.updatedAt ? new Date(run.updatedAt).getTime() : 0;
@@ -12170,14 +12582,13 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       }
 
       let descendantOnlyCleanup = false;
-      if (processGroupAlive) {
+      if (tracksLocalChild) {
         const termination = await terminateHeartbeatRunProcess({
           pid: run.processPid,
           processGroupId: run.processGroupId,
           expectedStartedAt: run.processStartedAt,
-          trustedProcessGroup: true,
-        });
-        if (termination?.confirmedStopped === false) {
+        }) ?? missingProcessTreeCustodyResult();
+        if (termination.confirmedStopped === false) {
           await retainRunForUnverifiedTermination({
             run,
             result: termination,
@@ -12185,7 +12596,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           });
           continue;
         }
-        descendantOnlyCleanup = termination?.confirmedStopped === true;
+        descendantOnlyCleanup = termination.confirmedStopped === true;
       }
 
       const runContext = parseObject(run.contextSnapshot);
@@ -12581,6 +12992,10 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
 
     activeRunExecutions.add(run.id);
     let runScratch: HeartbeatRunScratch | null = null;
+    // In-memory fail-closed witness for a launch fence observed during this
+    // execution. It survives a later DB read/write failure in the outer catch
+    // and finally blocks, where null/unknown must never authorize release.
+    let processSessionLaunchFenceObserved = false;
 
     try {
     const agent = await getAgent(run.agentId);
@@ -14165,6 +14580,36 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       const onAdapterEvent = async (event: AdapterRuntimeEvent) => {
         const eventType = event.eventType.trim();
         if (!eventType) return;
+        const launchFence = readProcessSessionLaunchFencePayload(event);
+        if (launchFence) {
+          const latest = await getRun(currentRun.id);
+          const fenced = await db
+            .update(heartbeatRuns)
+            .set({
+              // A normal in-progress launch is a replay fence, not an error and
+              // not a needs-human ambiguity. Persist the durable identity in
+              // resultJson so crash recovery can fail closed while ordinary
+              // live cancel/pause continues through the active bridge handle.
+              error: null,
+              errorCode: null,
+              resultJson: {
+                ...parseObject(latest?.resultJson),
+                processSessionLaunch: launchFence,
+              },
+              updatedAt: new Date(),
+            })
+            .where(and(eq(heartbeatRuns.id, currentRun.id), eq(heartbeatRuns.status, "running")))
+            .returning({ id: heartbeatRuns.id })
+            .then((rows) => rows[0] ?? null);
+          if (!fenced) {
+            throw new Error(`Could not persist the remote ACP replay fence for run ${currentRun.id}.`);
+          }
+          // The local witness becomes authoritative only after the guarded DB
+          // write succeeds. A pre-dispatch write failure aborts launch and must
+          // remain an ordinary safe setup failure; an append-event failure
+          // after this point must retain the already-durable fence.
+          processSessionLaunchFenceObserved = launchFence.status !== "not_started";
+        }
         await appendRunEvent(currentRun, seq++, {
           eventType: eventType.slice(0, 120),
           stream: event.stream,
@@ -14380,6 +14825,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       };
 
       let adapterResult: Awaited<ReturnType<typeof adapter.execute>>;
+      let workspaceFinalizeDeferredForActiveLaunch = false;
       try {
         const adapterContext = { ...context };
         const runtimeMcpServers = await buildPaperclipRuntimeMcpServers({
@@ -14439,13 +14885,24 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           },
           authToken: authToken ?? undefined,
         });
-        // Adapter returned cleanly, which means its workspace-restore finally
-        // block also ran without throwing. Record the workspace_finalize
-        // barrier so dependents that share this executionWorkspace can wake.
-        // If recording the barrier itself fails, propagate as a run failure
-        // rather than silently leaving dependents stranded behind a missing
-        // finalize row.
-        await recordWorkspaceFinalize("succeeded");
+        const postAdapterRun = await getRun(run.id);
+        workspaceFinalizeDeferredForActiveLaunch = isProcessSessionLaunchActiveFenceRun(postAdapterRun);
+        if (
+          adapterResult.errorCode !== ACP_PROCESS_SESSION_LAUNCH_AMBIGUOUS &&
+          !workspaceFinalizeDeferredForActiveLaunch
+        ) {
+          // Adapter returned cleanly, which means its workspace-restore finally
+          // block also ran without throwing. Record the workspace_finalize
+          // barrier so dependents that share this executionWorkspace can wake.
+          // If recording the barrier itself fails, propagate as a run failure
+          // rather than silently leaving dependents stranded behind a missing
+          // finalize row.
+          await recordWorkspaceFinalize("succeeded");
+        }
+        // An ambiguous accepted remote launch deliberately leaves the finalize
+        // barrier absent/pending. The remote child may still be mutating this
+        // workspace, so a succeeded row would wake dependents into overlapping
+        // WIP before explicit launch reconciliation.
       } catch (adapterErr) {
         // Adapter (or its restore finally) threw — or the finalize record
         // write itself threw. Either way the workspace may be in a partial
@@ -14475,6 +14932,102 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
             { err: revokeErr, runId: run.id, companyId: agent.companyId },
             "failed to revoke heartbeat-run MCP gateway tokens",
           );
+        }
+      }
+      if (adapterResult.errorCode === ACP_PROCESS_SESSION_LAUNCH_AMBIGUOUS) {
+        await retainProcessSessionLaunchForReconciliation({
+          run,
+          message:
+            adapterResult.errorMessage ??
+            "Remote ACP launch acceptance requires reconciliation; automatic replay is fenced.",
+          resultJson: parseObject(adapterResult.resultJson),
+        });
+        return;
+      }
+      const activeLaunchRun = await getRun(run.id);
+      if (activeLaunchRun && isProcessSessionLaunchActiveFenceRun(activeLaunchRun)) {
+        const launchIdentity = readProcessSessionLaunchIdentityFromRun(activeLaunchRun);
+        let reconciliation: {
+          found: boolean;
+          terminal: boolean;
+          treeCustodyVerified: boolean;
+          cleanupComplete: boolean;
+          released: boolean;
+          controllerError?: string;
+        } = {
+          found: false,
+          terminal: false,
+          treeCustodyVerified: false,
+          cleanupComplete: false,
+          released: false,
+        };
+        if (launchIdentity) {
+          try {
+            reconciliation = await requestStopAndWaitAcpxProcessSessionLaunch({
+              runId: run.id,
+              launchId: launchIdentity.launchId,
+            });
+          } catch (error) {
+            reconciliation = {
+              found: true,
+              terminal: false,
+              treeCustodyVerified: false,
+              cleanupComplete: false,
+              released: false,
+              controllerError: error instanceof Error ? error.message : String(error),
+            };
+          }
+        }
+        if (!reconciliation.released) {
+          const existingLaunch = parseObject(parseObject(activeLaunchRun.resultJson).processSessionLaunch);
+          await retainProcessSessionLaunchForReconciliation({
+            run: activeLaunchRun,
+            message:
+              "Remote ACP attempt reached an adapter terminal state, but process-tree custody and retained cleanup are not verified; issue, environment, credentials, and staging remain fenced.",
+            resultJson: {
+              ...parseObject(adapterResult.resultJson),
+              processSessionLaunch: {
+                ...existingLaunch,
+                adapterTerminal: {
+                  exitCode: adapterResult.exitCode,
+                  signal: adapterResult.signal,
+                  timedOut: adapterResult.timedOut,
+                  errorCode: adapterResult.errorCode ?? null,
+                },
+                directTerminalVerified: reconciliation.terminal,
+                treeCustodyVerified: reconciliation.treeCustodyVerified,
+                cleanupComplete: reconciliation.cleanupComplete,
+                controllerFound: reconciliation.found,
+                ...(reconciliation.controllerError
+                  ? { controllerError: reconciliation.controllerError }
+                  : {}),
+              },
+            },
+          });
+          return;
+        }
+        // The active controller proved terminal + launch-bound tree custody,
+        // revoked retained capabilities, completed copyback/disposal, and
+        // released its staging lease. Clear only the local witness here; the
+        // finally block still requires a readable durable run with no active
+        // fence, so any later status-write/read uncertainty remains fail-closed.
+        processSessionLaunchFenceObserved = false;
+      }
+      if (workspaceFinalizeDeferredForActiveLaunch) {
+        try {
+          await recordWorkspaceFinalize("succeeded");
+        } catch (adapterErr) {
+          try {
+            await recordWorkspaceFinalize("failed", {
+              errorMessage: adapterErr instanceof Error ? adapterErr.message : String(adapterErr),
+            });
+          } catch (recordErr) {
+            logger.warn(
+              { err: recordErr, runId: run.id, executionWorkspaceId: persistedExecutionWorkspace?.id ?? null },
+              "failed to record deferred workspace_finalize=failed operation",
+            );
+          }
+          throw adapterErr;
         }
       }
       const adapterManagedRuntimeServices = adapterResult.runtimeServices
@@ -14845,16 +15398,26 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         err instanceof Error ? err.message : "Unknown adapter failure",
         await getCurrentUserRedactionOptions(),
       );
+      const processSessionLaunchAmbiguousFailure = isProcessSessionLaunchAmbiguousFailure(err) ? err : null;
       const workspaceValidationFailure = isWorkspaceValidationFailure(err) ? err : null;
       const configurationIncompleteFailure = isConfigurationIncompleteFailure(err) ? err : null;
       const recordedResponsibleUserDenialCode =
         normalizeResponsibleUserDenialCode((await getRun(run.id).catch(() => null))?.errorCode);
       const failureErrorCode =
-        workspaceValidationFailure?.code
+        processSessionLaunchAmbiguousFailure?.code
+        ?? workspaceValidationFailure?.code
         ?? configurationIncompleteFailure?.code
         ?? recordedResponsibleUserDenialCode
         ?? "adapter_failed";
       logger.error({ err, runId }, "heartbeat execution failed");
+      if (processSessionLaunchAmbiguousFailure) {
+        await retainProcessSessionLaunchForReconciliation({
+          run,
+          message,
+          resultJson: processSessionLaunchAmbiguousResultJson(processSessionLaunchAmbiguousFailure),
+        });
+        return;
+      }
 
       let logSummary: { bytes: number; sha256?: string; compressed: boolean } | null = null;
       if (handle) {
@@ -14879,7 +15442,13 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         resultJson: mergeRunStopMetadataForAgent(agent, "failed", {
           errorCode: failureErrorCode,
           errorMessage: message,
-          resultJson: workspaceValidationFailure?.resultJson ?? configurationIncompleteFailure?.resultJson ?? null,
+          resultJson:
+            (processSessionLaunchAmbiguousFailure
+              ? processSessionLaunchAmbiguousResultJson(processSessionLaunchAmbiguousFailure)
+              : null)
+            ?? workspaceValidationFailure?.resultJson
+            ?? configurationIncompleteFailure?.resultJson
+            ?? null,
         }),
         stdoutExcerpt,
         stderrExcerpt,
@@ -14973,16 +15542,61 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           // A missing secret/env binding is a known pre-dispatch configuration gap,
           // not an opaque setup crash. Surface it with its own errorCode so the
           // recovery path routes it to a human owner instead of looping retries.
+          const processSessionLaunchAmbiguousSetupFailure = isProcessSessionLaunchAmbiguousFailure(outerErr)
+            ? outerErr
+            : null;
           const workspaceValidationSetupFailure = isWorkspaceValidationFailure(outerErr) ? outerErr : null;
           const configurationIncompleteSetupFailure = isConfigurationIncompleteFailure(outerErr) ? outerErr : null;
           const recordedResponsibleUserDenialCode =
             normalizeResponsibleUserDenialCode((await getRun(runId).catch(() => null))?.errorCode);
           const setupFailureErrorCode =
+            processSessionLaunchAmbiguousSetupFailure?.code ??
             workspaceValidationSetupFailure?.code ??
             configurationIncompleteSetupFailure?.code ??
             recordedResponsibleUserDenialCode ??
             "setup_failed";
           logger.error({ err: outerErr, runId }, "heartbeat execution setup failed");
+          if (processSessionLaunchAmbiguousSetupFailure) {
+            await retainProcessSessionLaunchForReconciliation({
+              run,
+              message,
+              resultJson: processSessionLaunchAmbiguousResultJson(processSessionLaunchAmbiguousSetupFailure),
+            }).catch((retainError) => {
+              logger.error(
+                { err: retainError, runId },
+                "failed to preserve remote ACP launch reconciliation fence after setup failure",
+              );
+            });
+            return;
+          }
+          const replayFencedSetupRun = await getRun(runId).catch(() => null);
+          if (
+            processSessionLaunchFenceObserved ||
+            (replayFencedSetupRun && isProcessSessionLaunchReplayFencedRun(replayFencedSetupRun))
+          ) {
+            // A provider mutation may already have been accepted even when a
+            // later, unrelated setup callback throws an ordinary Error. Never
+            // let that outer error overwrite the durable launch fence or wake a
+            // dependent task. Preserve the exact existing launch identity and
+            // keep issue/environment/runtime custody retained.
+            if (replayFencedSetupRun) {
+              await retainProcessSessionLaunchForReconciliation({
+                run: replayFencedSetupRun,
+                message,
+              }).catch((retainError) => {
+                logger.error(
+                  { err: retainError, runId },
+                  "failed to preserve active remote ACP launch fence after setup failure",
+                );
+              });
+            } else {
+              logger.error(
+                { runId },
+                "remote ACP launch fence was observed but run readback failed; retaining environment and runtime",
+              );
+            }
+            return;
+          }
           const setupFailureAgent = await getAgent(run.agentId).catch(() => null);
           const setupFailureWrite = await setRunStatusIfRunning(runId, "failed", {
             error: message,
@@ -14993,7 +15607,12 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
                 errorCode: setupFailureErrorCode,
                 errorMessage: message,
                 resultJson:
-                  workspaceValidationSetupFailure?.resultJson ?? configurationIncompleteSetupFailure?.resultJson ?? null,
+                  (processSessionLaunchAmbiguousSetupFailure
+                    ? processSessionLaunchAmbiguousResultJson(processSessionLaunchAmbiguousSetupFailure)
+                    : null)
+                    ?? workspaceValidationSetupFailure?.resultJson
+                    ?? configurationIncompleteSetupFailure?.resultJson
+                    ?? null,
               }),
             } : {}),
           }).catch(() => ({ run: null, updated: false as const }));
@@ -15065,14 +15684,45 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           }
         } finally {
           const latestRun = await getRun(run.id).catch(() => null);
-          await releaseEnvironmentLeasesForRun({
-            runId: run.id,
-            companyId: run.companyId,
-            agentId: run.agentId,
-            status: latestRun?.status,
-            failureReason: latestRun?.error ?? undefined,
-          });
-          await releaseRuntimeServicesForRun(run.id).catch(() => undefined);
+          if (
+            latestRun &&
+            !processSessionLaunchFenceObserved &&
+            !isProcessSessionLaunchReplayFencedRun(latestRun)
+          ) {
+            await releaseEnvironmentLeasesForRun({
+              runId: run.id,
+              companyId: run.companyId,
+              agentId: run.agentId,
+              status: latestRun?.status,
+              failureReason: latestRun?.error ?? undefined,
+            });
+            await releaseRuntimeServicesForRun(run.id).catch(async (runtimeReleaseError) => {
+              logger.warn(
+                { err: runtimeReleaseError, runId: run.id },
+                "runtime service release remained fenced after heartbeat completion",
+              );
+              if (latestRun) {
+                await appendRunEvent(latestRun, await nextRunEventSeq(latestRun.id), {
+                  eventType: "lifecycle",
+                  stream: "system",
+                  level: "warn",
+                  message: "Runtime service release remained fenced pending authoritative process-tree reconciliation",
+                  payload: {
+                    needsHuman: true,
+                    runtimeServiceReleaseRetained: true,
+                    reason: runtimeReleaseError instanceof Error
+                      ? runtimeReleaseError.message
+                      : String(runtimeReleaseError),
+                  },
+                }).catch((eventError) => {
+                  logger.warn(
+                    { err: eventError, runId: latestRun.id },
+                    "failed to persist runtime service release retention event",
+                  );
+                });
+              }
+            });
+          }
           if (runScratch && latestRun && isHeartbeatRunTerminalStatus(latestRun.status)) {
             const scratchForCleanup = runScratch;
             let scratchCleanup: Awaited<ReturnType<typeof cleanupHeartbeatRunScratch>> | null = null;
@@ -17308,6 +17958,63 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     const run = await getRun(runId);
     if (!run) throw notFound("Heartbeat run not found");
     if (!CANCELLABLE_HEARTBEAT_RUN_STATUSES.includes(run.status as (typeof CANCELLABLE_HEARTBEAT_RUN_STATUSES)[number])) return run;
+    let remoteLaunchReleased = false;
+    if (isProcessSessionLaunchReplayFencedRun(run)) {
+      let reconciliation:
+        | Awaited<ReturnType<typeof reconcileRetainedProcessSessionLaunchResources>>
+        | Awaited<ReturnType<typeof requestStopAndWaitAcpxProcessSessionLaunch>>;
+      try {
+        const identity = readProcessSessionLaunchIdentityFromRun(run);
+        reconciliation = isProcessSessionLaunchActiveFenceRun(run) && identity
+          ? await requestStopAndWaitAcpxProcessSessionLaunch({
+              runId: run.id,
+              launchId: identity.launchId,
+            })
+          : await reconcileRetainedProcessSessionLaunchResources(run);
+      } catch (error) {
+        reconciliation = {
+          found: true,
+          terminal: false,
+          treeCustodyVerified: false,
+          cleanupComplete: false,
+          released: false,
+        };
+        await appendRunEvent(run, await nextRunEventSeq(run.id), {
+          eventType: "lifecycle",
+          stream: "system",
+          level: "error",
+          message: "Remote ACP terminal reconciliation cleanup failed; run and issue lock remain fenced",
+          payload: {
+            errorCode: ACP_PROCESS_SESSION_LAUNCH_AMBIGUOUS,
+            needsHuman: true,
+            cleanupError: error instanceof Error ? error.message : String(error),
+          },
+        });
+      }
+      if (!reconciliation.released) {
+        await appendRunEvent(run, await nextRunEventSeq(run.id), {
+          eventType: "lifecycle",
+          stream: "system",
+          level: "warn",
+          message: "Run cancellation refused while remote ACP launch/tree custody and cleanup remain fenced",
+          payload: { errorCode: ACP_PROCESS_SESSION_LAUNCH_AMBIGUOUS, needsHuman: true, reconciliation },
+        });
+        throw conflict("Remote ACP launch, process-tree custody, and retained cleanup must be reconciled before cancelling or releasing its issue lock", {
+          code: ACP_PROCESS_SESSION_LAUNCH_AMBIGUOUS,
+          needsHuman: true,
+          reconciliation,
+          processSessionLaunch: parseObject(parseObject(run.resultJson).processSessionLaunch),
+        });
+      }
+      remoteLaunchReleased = true;
+      await appendRunEvent(run, await nextRunEventSeq(run.id), {
+        eventType: "lifecycle",
+        stream: "system",
+        level: "info",
+        message: "Remote ACP terminal receipt reconciled; cancellation may release retained run resources",
+        payload: { errorCode: ACP_PROCESS_SESSION_LAUNCH_AMBIGUOUS, reconciliation },
+      });
+    }
     const agent = await getAgent(run.agentId);
     const errorCode = options.errorCode ?? "cancelled";
     const resultJson = agent
@@ -17331,7 +18038,9 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           processGroupId: running.processGroupId ?? run.processGroupId,
           expectedStartedAt: run.processStartedAt,
           graceMs: Math.max(1, running.graceSec) * 1000,
-          ...(runningChildIsLive ? { trustedPid: true, trustedProcessGroup: true } : {}),
+          ...(runningChildIsLive
+            ? { trustedPid: true, trustedProcessGroup: true, childProcess: running.child }
+            : {}),
         })
       : run.processPid || run.processGroupId
         ? await terminateHeartbeatRunProcess({
@@ -17339,7 +18048,9 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
             processGroupId: run.processGroupId,
             expectedStartedAt: run.processStartedAt,
           })
-        : null;
+        : !remoteLaunchReleased && agent && isTrackedLocalChildProcessAdapter(agent.adapterType)
+          ? missingProcessTreeCustodyResult()
+          : null;
     if (termination?.confirmedStopped === false) {
       await retainRunForUnverifiedTermination({
         run,
@@ -17394,6 +18105,48 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
 
     let cancelledCount = 0;
     for (const run of runs) {
+      let remoteLaunchReleased = false;
+      if (isProcessSessionLaunchReplayFencedRun(run)) {
+        let reconciliation:
+          | Awaited<ReturnType<typeof reconcileRetainedProcessSessionLaunchResources>>
+          | Awaited<ReturnType<typeof requestStopAndWaitAcpxProcessSessionLaunch>>;
+        try {
+          const identity = readProcessSessionLaunchIdentityFromRun(run);
+          reconciliation = isProcessSessionLaunchActiveFenceRun(run) && identity
+            ? await requestStopAndWaitAcpxProcessSessionLaunch({
+                runId: run.id,
+                launchId: identity.launchId,
+              })
+            : await reconcileRetainedProcessSessionLaunchResources(run);
+        } catch {
+          reconciliation = {
+            found: true,
+            terminal: false,
+            treeCustodyVerified: false,
+            cleanupComplete: false,
+            released: false,
+          };
+        }
+        if (reconciliation.released) {
+          remoteLaunchReleased = true;
+          await appendRunEvent(run, await nextRunEventSeq(run.id), {
+            eventType: "lifecycle",
+            stream: "system",
+            level: "info",
+            message: "Remote ACP terminal receipt reconciled during agent pause",
+            payload: { errorCode: ACP_PROCESS_SESSION_LAUNCH_AMBIGUOUS, reconciliation },
+          });
+        } else {
+          await appendRunEvent(run, await nextRunEventSeq(run.id), {
+            eventType: "lifecycle",
+            stream: "system",
+            level: "warn",
+            message: "Agent pause retained a remote ACP launch without verified tree custody/cleanup",
+            payload: { errorCode: ACP_PROCESS_SESSION_LAUNCH_AMBIGUOUS, needsHuman: true, reconciliation },
+          });
+          continue;
+        }
+      }
       const running = runningProcesses.get(run.id);
       const runningChildIsLive = running
         ? (running.child.exitCode == null && running.child.signalCode == null)
@@ -17404,7 +18157,9 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
             processGroupId: running.processGroupId ?? run.processGroupId,
             expectedStartedAt: run.processStartedAt,
             graceMs: Math.max(1, running.graceSec) * 1000,
-            ...(runningChildIsLive ? { trustedPid: true, trustedProcessGroup: true } : {}),
+            ...(runningChildIsLive
+              ? { trustedPid: true, trustedProcessGroup: true, childProcess: running.child }
+              : {}),
           })
         : run.processPid || run.processGroupId
           ? await terminateHeartbeatRunProcess({
@@ -17412,7 +18167,9 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
               processGroupId: run.processGroupId,
               expectedStartedAt: run.processStartedAt,
             })
-          : null;
+          : !remoteLaunchReleased && agent && isTrackedLocalChildProcessAdapter(agent.adapterType)
+            ? missingProcessTreeCustodyResult()
+            : null;
       if (termination?.confirmedStopped === false) {
         await retainRunForUnverifiedTermination({
           run,

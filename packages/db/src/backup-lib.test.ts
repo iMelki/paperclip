@@ -462,7 +462,9 @@ describeEmbeddedPostgres("runDatabaseBackup", () => {
       const sourceSql = postgres(sourceConnectionString, { max: 1, onnotice: () => {} });
       const restoreSql = postgres(restoreConnectionString, { max: 1, onnotice: () => {} });
       const originalPgDumpPath = process.env.PAPERCLIP_PG_DUMP_PATH;
+      const originalPsqlPath = process.env.PAPERCLIP_PSQL_PATH;
       process.env.PAPERCLIP_PG_DUMP_PATH = "/bin/false";
+      process.env.PAPERCLIP_PSQL_PATH = "/bin/false";
 
       try {
         await sourceSql.unsafe(`
@@ -481,7 +483,7 @@ describeEmbeddedPostgres("runDatabaseBackup", () => {
           VALUES (
             '22222222-2222-4222-8222-222222222222',
             '11111111-1111-4111-8111-111111111111',
-            'child emitted before parent'
+            E'child emitted before parent\twith newline\nand backslash \\\\.'
           );
         `);
 
@@ -509,12 +511,20 @@ describeEmbeddedPostgres("runDatabaseBackup", () => {
           FROM "public"."aaa_child_records" child
           JOIN "public"."zzz_parent_records" parent ON parent."id" = child."parent_id"
         `);
-        expect(rows).toEqual([{ note: "child emitted before parent", name: "parent" }]);
+        expect(rows).toEqual([{
+          note: "child emitted before parent\twith newline\nand backslash \\.",
+          name: "parent",
+        }]);
       } finally {
         if (originalPgDumpPath === undefined) {
           delete process.env.PAPERCLIP_PG_DUMP_PATH;
         } else {
           process.env.PAPERCLIP_PG_DUMP_PATH = originalPgDumpPath;
+        }
+        if (originalPsqlPath === undefined) {
+          delete process.env.PAPERCLIP_PSQL_PATH;
+        } else {
+          process.env.PAPERCLIP_PSQL_PATH = originalPsqlPath;
         }
         await sourceSql.end();
         await restoreSql.end();

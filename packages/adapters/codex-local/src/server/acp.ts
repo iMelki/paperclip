@@ -43,6 +43,7 @@ import {
   resolveSharedCodexHomeDir,
   stageCodexHomeForSync,
 } from "./codex-home.js";
+import { cleanupPrivateStagingDirectory } from "./windows-private-acl.js";
 
 const moduleDir = path.dirname(fileURLToPath(import.meta.url));
 const packageRootDir = path.resolve(moduleDir, "../..");
@@ -181,7 +182,7 @@ export function buildCodexAcpConfig(config: Record<string, unknown>): Record<str
  * refreshed sandbox token that is never copied back would spend the host's token
  * and corrupt the host credential.
  */
-async function prepareCodexRemoteManagedHome(
+export async function prepareCodexRemoteManagedHome(
   input: AcpxRemoteManagedHomeContext,
 ): Promise<AcpxRemoteManagedHomeResult> {
   const { env, runId, onLog } = input;
@@ -217,13 +218,48 @@ async function prepareCodexRemoteManagedHome(
       },
     ]);
   } catch (err) {
-    await fs.rm(stagedCodexHomeDir, { recursive: true, force: true }).catch(() => {});
+    try {
+      await cleanupPrivateStagingDirectory(stagedCodexHomeDir);
+    } catch (cleanupError) {
+      throw new AggregateError(
+        [err, cleanupError],
+        `Codex remote managed-home staging failed and private residue cleanup could not be verified: ${stagedCodexHomeDir}`,
+      );
+    }
     throw err;
   }
   // Repoint CODEX_HOME from the HOST path onto the seeded in-sandbox home.
   env.CODEX_HOME =
     stagedRuntime.assetDirs.home ??
     path.posix.join(stagedRuntime.runtimeRootDir ?? "", "home");
+
+  // Idempotency belongs to this exact disposer capability, not to a global
+  // path tombstone cache. Concurrent callers share one in-flight cleanup;
+  // success is remembered for the lifetime of the staged runtime, while a
+  // failure clears the promise so the retained launch controller can retry.
+  let stagedHomeDisposed = false;
+  let stagedHomeDisposePromise: Promise<void> | null = null;
+  const disposeStagedHome = async (): Promise<void> => {
+    if (stagedHomeDisposed) return;
+    if (stagedHomeDisposePromise) return stagedHomeDisposePromise;
+    stagedHomeDisposePromise = (async () => {
+      try {
+        await cleanupPrivateStagingDirectory(stagedCodexHomeDir);
+        stagedHomeDisposed = true;
+      } catch (error) {
+        await onLog(
+          "stderr",
+          `[paperclip] Failed to remove staged Codex home "${stagedCodexHomeDir}": ${
+            error instanceof Error ? error.message : String(error)
+          }\n`,
+        );
+        throw error;
+      }
+    })().finally(() => {
+      if (!stagedHomeDisposed) stagedHomeDisposePromise = null;
+    });
+    return stagedHomeDisposePromise;
+  };
 
   return {
     stagedRuntime,
@@ -242,33 +278,25 @@ async function prepareCodexRemoteManagedHome(
         );
         await stagedRuntime.restoreWorkspace((line) => onLog("stdout", line));
       } catch (err) {
-        // Fail-soft: a teardown copy-back miss loses this rotation and surfaces
-        // loudly as refresh_token_reused on the next host Codex use (re-auth
-        // recovers) — never silent host-credential corruption, so it must not
-        // mask the run result.
         await onLog(
           "stderr",
           `[paperclip] Codex ACP teardown restore/copy-back failed: ${
             err instanceof Error ? err.message : String(err)
           }\n`,
         );
+        // This teardown is an authority boundary for reconciled remote runs:
+        // resolving would let the controller report cleanupComplete/released
+        // even though a refreshed single-use credential was not copied back.
+        throw err;
       }
     },
     // One-time cleanup of the HOST staged home temp dir. Fired ONLY when the
     // staged runtime is dropped (failed/cancelled/timed-out turn, incompatible
     // re-stage, idle eviction) — never on a clean turn that keeps the runtime
     // warm — so it can't remove the staged home while a reuse still depends on
-    // it. Idempotent: `force: true` no-ops if it was already removed.
-    disposeStaged: async () => {
-      await fs.rm(stagedCodexHomeDir, { recursive: true, force: true }).catch(async (error) => {
-        await onLog(
-          "stderr",
-          `[paperclip] Failed to remove staged Codex home "${stagedCodexHomeDir}": ${
-            error instanceof Error ? error.message : String(error)
-          }\n`,
-        );
-      });
-    },
+    // it. The closure is idempotent without retaining process-global path
+    // tombstones and remains retryable after a failed exact cleanup.
+    disposeStaged: disposeStagedHome,
   };
 }
 
@@ -465,7 +493,10 @@ async function defaultCodexAcpFallbackReason(
     executionTarget: input.executionTarget,
     legacyRemoteExecution: input.executionTransport?.remoteExecution,
   });
-  if (target?.kind === "remote" && !sandboxTargetHasProcessSessionBridge(target)) {
+  if (target?.kind === "remote") {
+    if (sandboxTargetHasProcessSessionBridge(target)) {
+      return "Remote Codex ACP process sessions are disabled until Paperclip #22 provides durable launch-bound process-tree custody and restart-safe cleanup reconstruction.";
+    }
     if (target.transport === "sandbox") {
       return "Codex ACP requires a bidirectional remote process target; this sandbox exposes only one-shot command execution.";
     }
@@ -521,10 +552,10 @@ export async function testCodexAcpEnvironment(
 
   if (targetIsRemote) {
     checks.push({
-      code: "codex_acp_remote_target",
-      level: "info",
-      message: "Codex ACP will run against the remote execution environment.",
-      hint: "Remote ACP requires a bidirectional process target such as SSH or Paperclip's sandbox process-session bridge.",
+      code: "codex_acp_remote_target_disabled",
+      level: "error",
+      message: "Remote Codex ACP is disabled pending Paperclip #22 launch-custody and restart-safe cleanup work.",
+      hint: "Use engine=cli for remote runs. An explicit engine=acp request remains fail-closed before staging or launch.",
     });
   }
 

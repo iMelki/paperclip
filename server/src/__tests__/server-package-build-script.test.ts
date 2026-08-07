@@ -14,6 +14,7 @@ describe("server package build script", () => {
     expect(buildScript).toContain("node ../scripts/build-filesystem.mjs copy-tree");
     expect(buildScript).toContain("src/onboarding-assets dist/onboarding-assets");
     expect(buildScript).toContain("src/built-ins dist/built-ins");
+    expect(buildScript).toContain("src/__tests__/contracts dist/__tests__/contracts");
     expect(buildScript).not.toContain("mkdir -p");
     expect(buildScript).not.toContain("cp -R");
   });

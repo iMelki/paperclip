@@ -13,10 +13,39 @@ import {
   type SandboxSyncResult,
 } from "./sandbox-managed-runtime.js";
 import { preferredShellForSandbox, shellCommandArgs } from "./sandbox-shell.js";
+import {
+  dirnamePortablePath,
+  isWindowsAbsolutePath,
+  shellQuote,
+  shellQuotePath,
+} from "./shell-path.js";
 import type { RunProcessResult } from "./server-utils.js";
 import type { RuntimeProgressSink, RuntimeStatusSink } from "./runtime-progress.js";
 
 export interface CommandManagedRuntimeRunner {
+  /**
+   * True only when `execute({ stdin })` keeps stdin bytes out of the provider
+   * command/argv/environment and delivers them over a private transport or a
+   * provider-native private file API. Secret-bearing process-session launch
+   * requests fail closed unless this capability is explicitly asserted.
+   */
+  supportsConfidentialStdin?: boolean;
+  /**
+   * True only when this runner can prove launch-bound process-tree absence via
+   * `reconcileProcessTreeCustody`. Direct-child exit/close is insufficient.
+   * Runner-backed remote ACP execution fails closed unless both are present.
+   */
+  supportsProcessTreeCustody?: boolean;
+  reconcileProcessTreeCustody?(input: {
+    launchId: string;
+    sessionId: string;
+    runId: string;
+    adapterKey: string;
+    environmentId: string | null;
+    leaseId: string | null;
+    remoteCwd: string;
+    sessionDir: string;
+  }): Promise<boolean>;
   /**
    * True only when `execute({ stdin })` can surface useful in-flight progress
    * for a single stdin-backed command. Provider-backed sandbox runners usually
@@ -75,10 +104,6 @@ export interface CommandManagedRuntimeSpec {
 
 export type CommandManagedRuntimeAsset = SandboxManagedRuntimeAsset;
 
-function shellQuote(value: string) {
-  return `'${value.replace(/'/g, `'"'"'`)}'`;
-}
-
 function mergeRuntimeExcludes(entries: string[] | undefined): string[] {
   return [...new Set([".paperclip-runtime", ...(entries ?? [])])];
 }
@@ -93,6 +118,11 @@ const REMOTE_WRITE_SINGLE_STREAM_MAX_BASE64_BYTES = 96 * 1024 * 1024;
 const REMOTE_WRITE_FALLBACK_BASE64_CHUNK_SIZE = 4 * 1024 * 1024;
 const REMOTE_WRITE_FALLBACK_DECODED_CHUNK_SIZE = (REMOTE_WRITE_FALLBACK_BASE64_CHUNK_SIZE / 4) * 3;
 const REMOTE_READ_CHUNK_BYTES = REMOTE_WRITE_FALLBACK_DECODED_CHUNK_SIZE;
+// Private sentinel used by the size probe so an absent remote path can retain
+// the same ENOENT contract as node:fs instead of becoming an untyped shell
+// failure. Other command failures remain fail-loud with their diagnostics.
+const REMOTE_READ_MISSING_EXIT_CODE = 44;
+const REMOTE_READ_MISSING_SENTINEL = "__PAPERCLIP_REMOTE_READ_ENOENT_V1__";
 
 function base64EncodedLength(byteLength: number): number {
   return Math.ceil(byteLength / 3) * 4;
@@ -132,26 +162,36 @@ function bufferToArrayBuffer(buffer: Buffer): ArrayBuffer {
   return buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength) as ArrayBuffer;
 }
 
+function createRemoteReadMissingError(remotePath: string): NodeJS.ErrnoException {
+  const error = new Error(
+    `ENOENT: no such file or directory, readFile '${remotePath}'`,
+  ) as NodeJS.ErrnoException;
+  error.code = "ENOENT";
+  error.path = remotePath;
+  error.syscall = "readFile";
+  return error;
+}
+
 // Named builder (Security Condition C3): extract an uploaded tarball into its
 // target directory as a clean destroy-then-replace, then remove the tarball.
 // Every path is shell-quoted; the fallback NEVER concatenates untrusted asset
 // keys / file names into the shell.
 function buildSyncInExtractDirectoryCommand(input: { remoteTarPath: string; targetDir: string }): string {
   return (
-    `rm -rf ${shellQuote(input.targetDir)} && ` +
-    `mkdir -p ${shellQuote(input.targetDir)} && ` +
-    `tar -xf ${shellQuote(input.remoteTarPath)} -C ${shellQuote(input.targetDir)} && ` +
-    `rm -f ${shellQuote(input.remoteTarPath)}`
+    `rm -rf ${shellQuotePath(input.targetDir)} && ` +
+    `mkdir -p ${shellQuotePath(input.targetDir)} && ` +
+    `tar -xf ${shellQuotePath(input.remoteTarPath)} -C ${shellQuotePath(input.targetDir)} && ` +
+    `rm -f ${shellQuotePath(input.remoteTarPath)}`
   );
 }
 
 // Named builder (C3): apply a POSIX mode to a placed file. Octal literal, quoted
 // path; no interpolation of untrusted values.
 function buildSyncInChmodCommand(input: { mode: number; targetPath: string }): string {
-  return `chmod ${(input.mode & 0o7777).toString(8)} ${shellQuote(input.targetPath)}`;
+  return `chmod ${(input.mode & 0o7777).toString(8)} ${shellQuotePath(input.targetPath)}`;
 }
 function buildSyncInRenameCommand(input: { sourcePath: string; targetPath: string }): string {
-  return "mv -f " + shellQuote(input.sourcePath) + " " + shellQuote(input.targetPath);
+  return "mv -f " + shellQuotePath(input.sourcePath) + " " + shellQuotePath(input.targetPath);
 }
 
 function buildUniqueStagingPath(input: { targetPath: string; suffix: string }): string {
@@ -175,17 +215,38 @@ export function assertPostUploadCommandsConfined(operations: readonly SandboxSyn
   for (const operation of operations) {
     const commands = operation.postUploadCommands ?? [];
     if (commands.length === 0) continue;
-    const targetRoots = operation.files.map((mapping) => path.posix.normalize(mapping.targetPath));
+    const targetRoots = operation.files.map((mapping) => mapping.targetPath);
     for (const command of commands) {
       if (command.cwd == null) continue;
       const raw = command.cwd;
-      if (!path.posix.isAbsolute(raw) || raw.split("/").includes("..")) {
-        throw new Error(`post-upload command cwd is not a confined absolute POSIX path: ${raw}`);
+      const usesWindowsPaths = isWindowsAbsolutePath(raw);
+      const pathApi = usesWindowsPaths ? path.win32 : path.posix;
+      if (!pathApi.isAbsolute(raw)) {
+        throw new Error(`post-upload command cwd is not a confined absolute path: ${raw}`);
       }
-      const normalized = path.posix.normalize(raw);
-      const within = targetRoots.some(
-        (root) => normalized === root || normalized.startsWith(`${root}/`),
-      );
+      const rawSegments = raw.split(usesWindowsPaths ? /[\\/]+/ : /\/+/);
+      if (rawSegments.includes("..")) {
+        throw new Error(`post-upload command cwd is not a confined absolute ${usesWindowsPaths ? "Windows" : "POSIX"} path because '..' segments are forbidden: ${raw}`);
+      }
+      const normalized = pathApi.normalize(raw);
+      const within = targetRoots.some((root) => {
+        const rootUsesWindowsPaths = isWindowsAbsolutePath(root);
+        const rootPathApi = rootUsesWindowsPaths ? path.win32 : path.posix;
+        const rootSegments = root.split(rootUsesWindowsPaths ? /[\\/]+/ : /\/+/);
+        if (
+          rootUsesWindowsPaths !== usesWindowsPaths
+          || !rootPathApi.isAbsolute(root)
+          || rootSegments.includes("..")
+        ) {
+          return false;
+        }
+        const relative = pathApi.relative(pathApi.normalize(root), normalized);
+        return relative === "" || (
+          relative !== ".."
+          && !relative.startsWith(`..${pathApi.sep}`)
+          && !pathApi.isAbsolute(relative)
+        );
+      });
       if (!within) {
         throw new Error(`post-upload command cwd escapes the operation's target root: ${raw}`);
       }
@@ -200,6 +261,21 @@ export function createCommandManagedRuntimeClient(input: {
   shellCommand?: "bash" | "sh" | null;
 }): SandboxManagedRuntimeClient {
   const shellCommand = preferredShellForSandbox(input.shellCommand);
+  const executeShell = async (
+    script: string,
+    opts: {
+      stdin?: string;
+      timeoutMs?: number;
+      onLog?: (stream: "stdout" | "stderr", chunk: string) => Promise<void>;
+    } = {},
+  ) => input.runner.execute({
+    command: shellCommand,
+    args: shellCommandArgs(script),
+    cwd: input.commandCwd,
+    stdin: opts.stdin,
+    timeoutMs: opts.timeoutMs ?? input.timeoutMs,
+    onLog: opts.onLog,
+  });
   const runShell = async (
     script: string,
     opts: {
@@ -208,27 +284,20 @@ export function createCommandManagedRuntimeClient(input: {
       onLog?: (stream: "stdout" | "stderr", chunk: string) => Promise<void>;
     } = {},
   ) => {
-    const result = await input.runner.execute({
-      command: shellCommand,
-      args: shellCommandArgs(script),
-      cwd: input.commandCwd,
-      stdin: opts.stdin,
-      timeoutMs: opts.timeoutMs ?? input.timeoutMs,
-      onLog: opts.onLog,
-    });
+    const result = await executeShell(script, opts);
     requireSuccessfulResult(result, script);
     return result;
   };
 
   const client: SandboxManagedRuntimeClient = {
     makeDir: async (remotePath) => {
-      await runShell(`mkdir -p ${shellQuote(remotePath)}`);
+      await runShell(`mkdir -p ${shellQuotePath(remotePath)}`);
     },
     writeFile: async (remotePath, bytes, options) => {
       const buffer = toBuffer(bytes);
       const total = buffer.byteLength;
       const encodedLength = base64EncodedLength(total);
-      const remoteDir = path.posix.dirname(remotePath);
+      const remoteDir = dirnamePortablePath(remotePath);
       const remoteTempPath = buildUniqueStagingPath({ targetPath: remotePath, suffix: ".paperclip-upload" });
       const canUseSingleStreamProgressPath = input.runner.supportsSingleStreamStdinProgress === true;
 
@@ -245,10 +314,10 @@ export function createCommandManagedRuntimeClient(input: {
           const body = buffer.toString("base64");
           await options?.onProgress?.(0, total);
           await runShell(
-            `cleanup() { rm -f ${shellQuote(remoteTempPath)}; }; trap cleanup EXIT INT TERM; ` +
-              `mkdir -p ${shellQuote(remoteDir)} && ` +
-              `base64 -d > ${shellQuote(remoteTempPath)} && ` +
-              `mv -f ${shellQuote(remoteTempPath)} ${shellQuote(remotePath)}`,
+            `cleanup() { rm -f ${shellQuotePath(remoteTempPath)}; }; trap cleanup EXIT INT TERM; ` +
+              `mkdir -p ${shellQuotePath(remoteDir)} && ` +
+              `base64 -d > ${shellQuotePath(remoteTempPath)} && ` +
+              `mv -f ${shellQuotePath(remoteTempPath)} ${shellQuotePath(remotePath)}`,
             { stdin: body },
           );
           await options?.onProgress?.(total, total);
@@ -261,16 +330,16 @@ export function createCommandManagedRuntimeClient(input: {
         // each self-contained chunk on arrival and emitting progress per write,
         // then atomically rename into place.
         await runShell(
-          `mkdir -p ${shellQuote(remoteDir)} && ` +
-            `rm -f ${shellQuote(remoteTempPath)} && : > ${shellQuote(remoteTempPath)}`,
+          `mkdir -p ${shellQuotePath(remoteDir)} && ` +
+            `rm -f ${shellQuotePath(remoteTempPath)} && : > ${shellQuotePath(remoteTempPath)}`,
         );
         for (let offset = 0; offset < total; offset += REMOTE_WRITE_FALLBACK_DECODED_CHUNK_SIZE) {
           const end = Math.min(total, offset + REMOTE_WRITE_FALLBACK_DECODED_CHUNK_SIZE);
           const chunk = buffer.subarray(offset, end).toString("base64");
-          await runShell(`base64 -d >> ${shellQuote(remoteTempPath)}`, { stdin: chunk });
+          await runShell(`base64 -d >> ${shellQuotePath(remoteTempPath)}`, { stdin: chunk });
           await options?.onProgress?.(end, total);
         }
-        await runShell(`mv -f ${shellQuote(remoteTempPath)} ${shellQuote(remotePath)}`);
+        await runShell(`mv -f ${shellQuotePath(remoteTempPath)} ${shellQuotePath(remotePath)}`);
         await options?.onProgress?.(total, total);
       } finally {
         await bestEffortRemoveRemotePath(client, remoteTempPath);
@@ -280,7 +349,25 @@ export function createCommandManagedRuntimeClient(input: {
       // Chunked reads intentionally query the remote size first, even without
       // a progress sink, so each sandbox RPC stays bounded and truncation is
       // detected without materializing the whole file as one stdout string.
-      const sizeResult = await runShell(`wc -c < ${shellQuote(remotePath)}`);
+      const quotedRemotePath = shellQuotePath(remotePath);
+      const quotedRemoteParent = shellQuotePath(dirnamePortablePath(remotePath));
+      const sizeScript =
+        `if [ -e ${quotedRemotePath} ] || [ -L ${quotedRemotePath} ]; then ` +
+        `wc -c < ${quotedRemotePath}; ` +
+        `elif [ -d ${quotedRemoteParent} ] && [ -x ${quotedRemoteParent} ]; then ` +
+        `printf '%s\n' ${shellQuote(REMOTE_READ_MISSING_SENTINEL)}; ` +
+        `exit ${REMOTE_READ_MISSING_EXIT_CODE}; ` +
+        "else exit 45; fi";
+      const sizeResult = await executeShell(sizeScript);
+      if (
+        !sizeResult.timedOut
+        && sizeResult.exitCode === REMOTE_READ_MISSING_EXIT_CODE
+        && sizeResult.stderr.trim().length === 0
+        && sizeResult.stdout.trim() === REMOTE_READ_MISSING_SENTINEL
+      ) {
+        throw createRemoteReadMissingError(remotePath);
+      }
+      requireSuccessfulResult(sizeResult, sizeScript);
       const totalBytes = Number.parseInt(sizeResult.stdout.trim(), 10);
       if (!Number.isFinite(totalBytes) || totalBytes < 0) {
         throw new Error(`Could not determine remote file size for ${remotePath}`);
@@ -298,7 +385,7 @@ export function createCommandManagedRuntimeClient(input: {
       }
       for (let chunkIndex = 0; decodedSoFar < totalBytes; chunkIndex++) {
         const result = await runShell(
-          `dd if=${shellQuote(remotePath)} bs=${REMOTE_READ_CHUNK_BYTES} skip=${chunkIndex} count=1 2>/dev/null | base64`,
+          `dd if=${shellQuotePath(remotePath)} bs=${REMOTE_READ_CHUNK_BYTES} skip=${chunkIndex} count=1 2>/dev/null | base64`,
         );
         const chunk = Buffer.from(result.stdout.replace(/\s+/g, ""), "base64");
         if (chunk.byteLength === 0) break;
@@ -315,8 +402,8 @@ export function createCommandManagedRuntimeClient(input: {
     },
     listFiles: async (remotePath) => {
       const result = await runShell(
-        `if [ -d ${shellQuote(remotePath)} ]; then ` +
-          `for entry in ${shellQuote(remotePath)}/*; do ` +
+        `if [ -d ${shellQuotePath(remotePath)} ]; then ` +
+          `for entry in ${shellQuotePath(remotePath)}/*; do ` +
           `[ -f "$entry" ] || continue; ` +
           `basename "$entry"; ` +
           `done; ` +
@@ -331,7 +418,7 @@ export function createCommandManagedRuntimeClient(input: {
     remove: async (remotePath) => {
       const result = await input.runner.execute({
         command: shellCommand,
-        args: shellCommandArgs(`rm -rf ${shellQuote(remotePath)}`),
+        args: shellCommandArgs(`rm -rf ${shellQuotePath(remotePath)}`),
         cwd: input.commandCwd,
         timeoutMs: input.timeoutMs,
       });

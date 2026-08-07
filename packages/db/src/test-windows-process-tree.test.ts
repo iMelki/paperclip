@@ -1,10 +1,11 @@
-import { execFile, spawn } from "node:child_process";
+import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   readWindowsTestProcessIdentity,
+  parseWindowsTestProcessSnapshot,
   reapWindowsTestProcessTree,
   selectOwnedWindowsTestProcessTree,
   type WindowsTestProcessIdentity,
@@ -19,6 +20,24 @@ function identity(
   commandLine: string | null,
 ): WindowsTestProcessIdentity {
   return { pid, parentPid, createdAt, commandLine };
+}
+
+async function waitForFixtureExit(exitPromise: Promise<void>, timeoutMs = 5_000) {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      exitPromise,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(
+          () => reject(new Error("Timed out waiting for the Windows process-tree fixture to exit.")),
+          timeoutMs,
+        );
+        timer.unref?.();
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 describe("Windows test process tree selection", () => {
@@ -158,38 +177,49 @@ describe("Windows test process tree selection", () => {
     ).toEqual([101]);
   });
 
+  it("rejects a whole CIM snapshot when any identity record is malformed", () => {
+    const valid = {
+      pid: 100,
+      parentPid: 1,
+      createdAt: "2026-07-29T18:00:00.000Z",
+      commandLine: "node service.js",
+    };
+
+    expect(() => parseWindowsTestProcessSnapshot(JSON.stringify([
+      valid,
+      { ...valid, pid: "101" },
+    ]))).toThrow(/invalid windows process snapshot identity/i);
+    expect(() => parseWindowsTestProcessSnapshot(JSON.stringify([
+      valid,
+      { ...valid, pid: 101, createdAt: "not-a-timestamp" },
+    ]))).toThrow(/invalid windows process snapshot identity/i);
+    expect(() => parseWindowsTestProcessSnapshot(JSON.stringify([
+      valid,
+      { ...valid, commandLine: undefined },
+    ]))).toThrow(/invalid windows process snapshot identity/i);
+    expect(() => parseWindowsTestProcessSnapshot(JSON.stringify([
+      valid,
+      { ...valid },
+    ]))).toThrow(/duplicate pid/i);
+  });
+
   windowsOnly(
-    "reaps a live marked Node process tree and reports before/after evidence",
+    "observes a live marked process but sends no bare-PID signal or stop claim",
     async () => {
       const marker = path.join(
         os.tmpdir(),
         `paperclip-process-tree-${randomUUID()}`,
       );
-      const rootScript = [
-        "const { spawn } = require('node:child_process');",
-        "const marker = process.argv[1];",
-        "const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)', marker], { windowsHide: true });",
-        "console.log(child.pid);",
-        "setInterval(() => {}, 1000);",
-      ].join(" ");
       const root = spawn(
         process.execPath,
-        ["-e", rootScript, marker],
+        ["-e", "setInterval(() => {}, 1000);", marker],
         {
-          stdio: ["ignore", "pipe", "ignore"],
+          stdio: "ignore",
           windowsHide: true,
         },
       );
-      const childPid = await new Promise<number>((resolve, reject) => {
-        const timeout = setTimeout(
-          () => reject(new Error("Timed out waiting for child PID")),
-          5_000,
-        );
-        root.stdout?.once("data", (chunk) => {
-          clearTimeout(timeout);
-          resolve(Number.parseInt(String(chunk).trim(), 10));
-        });
-        root.once("error", reject);
+      const rootExit = new Promise<void>((resolve) => {
+        root.once("exit", () => resolve());
       });
 
       try {
@@ -202,31 +232,21 @@ describe("Windows test process tree selection", () => {
           timeoutMs: 8_000,
         });
         expect(result).toMatchObject({
-          attempted: true,
-          confirmedStopped: true,
-          reason: "reaped",
-          remainingPids: [],
+          attempted: false,
+          confirmedStopped: false,
+          reason: "advisory_only_without_job_object",
+          attemptedPids: [],
         });
-        expect(result.capturedPids).toEqual(
-          expect.arrayContaining([root.pid!, childPid]),
-        );
-        expect(result.snapshots).toBeGreaterThanOrEqual(2);
+        expect(result.capturedPids).toContain(root.pid!);
+        expect(result.remainingPids).toContain(root.pid!);
+        expect(result.snapshots).toBe(1);
+        expect(root.exitCode).toBeNull();
       } finally {
-        if (root.exitCode === null && root.pid) {
-          const taskkill = path.join(
-            process.env.SystemRoot ?? "C:\\Windows",
-            "System32",
-            "taskkill.exe",
-          );
-          await new Promise<void>((resolve) => {
-            execFile(
-              taskkill,
-              ["/PID", String(root.pid), "/T", "/F"],
-              { windowsHide: true },
-              () => resolve(),
-            );
-          });
+        if (root.exitCode === null && root.signalCode === null) {
+          expect(root.kill("SIGKILL")).toBe(true);
         }
+        await waitForFixtureExit(rootExit);
+        expect(root.exitCode !== null || root.signalCode !== null).toBe(true);
       }
     },
     15_000,

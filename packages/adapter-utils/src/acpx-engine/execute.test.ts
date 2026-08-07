@@ -5,6 +5,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AcpRuntimeOptions } from "acpx/runtime";
 import type { AdapterRuntimeMcpAccess } from "@paperclipai/adapter-utils";
 import {
+  ACP_PROCESS_SESSION_LAUNCH_AMBIGUOUS,
+  AdapterExecutionTargetProcessSessionLaunchAmbiguousError,
   DEFAULT_REMOTE_SANDBOX_ADAPTER_TIMEOUT_SEC,
   prepareAdapterExecutionTargetRuntime,
   startAdapterExecutionTargetPaperclipBridge,
@@ -26,18 +28,30 @@ vi.mock("@paperclipai/adapter-utils/execution-target", async (importActual) => {
   };
 });
 import {
-  createAcpxEngineExecutor,
+  createAcpxEngineExecutor as createAcpxEngineExecutorImpl,
   findAncestorBin,
   geminiVersionSupportsNativeAcpFlag,
   parseGeminiVersionParts,
   rewriteGeminiAcpFlagForVersion,
+  reconcileAndReleaseAcpxProcessSessionLaunchResources,
+  requestStopAndWaitAcpxProcessSessionLaunch,
   summarizeAcpxTurnUsage,
   type AcpxEngineExecutorOptions,
 } from "./execute.js";
 import { runChildProcess } from "../server-utils.js";
+import { resolveTestShellCommand } from "../test-shell.js";
 
 
 const tempRoots: string[] = [];
+
+function createAcpxEngineExecutor(
+  options: AcpxEngineExecutorOptions = {},
+) {
+  return createAcpxEngineExecutorImpl({
+    ...options,
+    testOnlyEnableRemoteProcessSessionReleaseProtocol: true,
+  });
+}
 
 async function makeTempRoot() {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-acpx-skills-"));
@@ -46,17 +60,12 @@ async function makeTempRoot() {
 }
 
 afterEach(async () => {
-  // A remote run stages a process-session bridge whose detached event writer can
-  // still be flushing a trailing event file into `.../process-sessions/<id>/events`
-  // when the run's own best-effort `client.remove(sessionDir)` (which production
-  // catch-wraps) has already returned. Under CI load that trailing write can land
-  // between this recursive delete's directory snapshot and its `rmdir`, surfacing as
-  // `ENOTEMPTY`. `maxRetries`/`retryDelay` make the cleanup ride out that window the
-  // same way production tolerates it, instead of failing the just-passed test.
+  vi.unstubAllEnvs();
+  // Production stop() now fences the detached process-session wrapper PID
+  // before removing its queue. Keep this cleanup immediate and retry-free so a
+  // leaked cwd/event writer fails the test instead of hiding behind rm retries.
   await Promise.all(
-    tempRoots.splice(0).map((root) =>
-      fs.rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }),
-    ),
+    tempRoots.splice(0).map((root) => fs.rm(root, { recursive: true, force: true })),
   );
 });
 
@@ -88,6 +97,7 @@ function createLocalSandboxRunner(
     args?: string[];
     cwd?: string;
     env?: Record<string, string>;
+    stdin?: string;
   }) => void,
 ) {
   let counter = 0;
@@ -98,6 +108,9 @@ function createLocalSandboxRunner(
   let providerExecMs = 0;
   let providerGetMs = 0;
   return {
+    supportsConfidentialStdin: true,
+    supportsProcessTreeCustody: true,
+    reconcileProcessTreeCustody: async () => true,
     execCount: () => counter,
     providerExecMs: () => providerExecMs,
     providerGetMs: () => providerGetMs,
@@ -115,7 +128,7 @@ function createLocalSandboxRunner(
       providerExecMs += 600;
       providerGetMs += 15;
       onExecute?.(input);
-      const command = input.command === "bash" ? "/bin/bash" : input.command;
+      const command = resolveTestShellCommand(input.command);
       return await runChildProcess(`acpx-sandbox-run-${counter}`, command, input.args ?? [], {
         cwd: input.cwd ?? process.cwd(),
         env: input.env ?? {},
@@ -801,18 +814,31 @@ describe("shared ACPX engine runtime behavior", () => {
   it("shapes ACPX session env for remote execution identities", async () => {
     const root = await makeTempRoot();
     const localCwd = path.join(root, "local");
-    const remoteCwd = "/workspace/remote";
+    const remoteCwd = path.join(root, "remote");
+    await fs.mkdir(localCwd, { recursive: true });
+    await fs.mkdir(remoteCwd, { recursive: true });
     const { sessionInputs, runtimeOptions } = await runExecutor(
       { agent: "custom", agentCommand: "node ./fake-acp.js", cwd: localCwd, stateDir: path.join(root, "state") },
-      { context: { paperclipWorkspace: { cwd: localCwd, workspaceWorktreePath: localCwd } }, executionTarget: { kind: "remote", transport: "ssh", remoteCwd } },
+      {
+        authToken: "real-run-jwt",
+        context: { paperclipWorkspace: { cwd: localCwd, workspaceWorktreePath: localCwd } },
+        executionTarget: {
+          kind: "remote",
+          transport: "sandbox",
+          providerKey: "fake-plugin",
+          remoteCwd,
+          runner: createLocalSandboxRunner(),
+        },
+      },
     );
     const env = (sessionInputs[0]!.sessionOptions as { env: Record<string, string> }).env;
-    expect(env.PAPERCLIP_WORKSPACE_CWD).toBe(localCwd);
-    // The ssh remote transport is NOT the runner-backed process-session lane, so
-    // it stays byte-identical: no host-spawn redirect. `cwd` is the host cwd and
-    // `spawnCwd` is unset.
-    expect(runtimeOptions[0]!.cwd).toBe(localCwd);
-    expect(runtimeOptions[0]!.spawnCwd).toBeUndefined();
+    expect(env.PAPERCLIP_WORKSPACE_CWD).toBe(remoteCwd);
+    expect(env.PAPERCLIP_WORKSPACE_CWD).not.toBe(localCwd);
+    expect(env.PAPERCLIP_WORKSPACE_WORKTREE_PATH).toBeUndefined();
+    // The test-only runner-backed lane advertises the remote session cwd while
+    // keeping the relay proxy's host spawn rooted in the real local worktree.
+    expect(runtimeOptions[0]!.cwd).toBe(remoteCwd);
+    expect(runtimeOptions[0]!.spawnCwd).toBe(localCwd);
   });
 
   it("does not materialize credential wrapper scripts", async () => {
@@ -932,38 +958,62 @@ describe("shared ACPX engine runtime behavior", () => {
     await fs.mkdir(localCwd, { recursive: true });
     await fs.mkdir(remoteCwd, { recursive: true });
 
-    let sessionPayload: Record<string, unknown> | null = null;
+    let launchRequest: Record<string, unknown> | null = null;
+    let launchScript: string | null = null;
     const runner = createLocalSandboxRunner(
-      (input: { args?: string[]; env?: Record<string, string> }) => {
-        if (input.env?.PAPERCLIP_SANDBOX_EXEC_CHANNEL === "bridge") {
-          const script = input.args?.[1] ?? "";
-          const match = script.match(/PAPERCLIP_PROCESS_SESSION_COMMAND_B64='([^']+)'/);
-          if (match) {
-            sessionPayload = JSON.parse(Buffer.from(match[1]!, "base64").toString("utf8")) as Record<string, unknown>;
-          }
+      (input: { args?: string[]; env?: Record<string, string>; stdin?: string }) => {
+        if (
+          input.env?.PAPERCLIP_SANDBOX_EXEC_CHANNEL !== "bridge"
+          || typeof input.stdin !== "string"
+        ) return;
+        try {
+          const candidate = JSON.parse(input.stdin) as Record<string, unknown>;
+          if (candidate.schemaVersion !== 1 || typeof candidate.config !== "object") return;
+          launchRequest = candidate;
+          launchScript = input.args?.[1] ?? "";
+        } catch {
+          // Other bridge commands may use non-JSON stdin; only the launch
+          // request is relevant to this confidentiality assertion.
         }
       },
     );
 
-    const { runtimeOptions, sessionInputs } = await runExecutor(
-      { agent: "custom", agentCommand: "node ./fake-acp.js", stateDir, cwd: localCwd },
-      {
-        authToken: "real-run-jwt",
-        executionTarget: {
-          kind: "remote",
-          transport: "sandbox",
-          providerKey: "fake-plugin",
-          remoteCwd,
-          runner,
+    const hostOnlySentinelKey = "PAPERCLIP_HOST_ONLY_TEST_SENTINEL";
+    const previousHostOnlySentinel = process.env[hostOnlySentinelKey];
+    process.env[hostOnlySentinelKey] = "must-not-cross-remote-boundary";
+    let runtimeOptions: Record<string, unknown>[];
+    let sessionInputs: Record<string, unknown>[];
+    try {
+      ({ runtimeOptions, sessionInputs } = await runExecutor(
+        { agent: "custom", agentCommand: "node ./fake-acp.js", stateDir, cwd: localCwd },
+        {
+          authToken: "real-run-jwt",
+          executionTarget: {
+            kind: "remote",
+            transport: "sandbox",
+            providerKey: "fake-plugin",
+            remoteCwd,
+            runner,
+          },
         },
-      },
-    );
+      ));
+    } finally {
+      if (previousHostOnlySentinel === undefined) delete process.env[hostOnlySentinelKey];
+      else process.env[hostOnlySentinelKey] = previousHostOnlySentinel;
+    }
 
-    expect(sessionPayload).toMatchObject({
-      command: "sh",
-      args: ["-lc", "exec node ./fake-acp.js"],
-      cwd: remoteCwd,
+    expect(launchRequest).toMatchObject({
+      schemaVersion: 1,
+      config: {
+        command: "sh",
+        args: ["-lc", "exec node ./fake-acp.js"],
+        cwd: remoteCwd,
+      },
     });
+    expect(launchScript).toContain("cat >");
+    expect(launchScript).toContain("PAPERCLIP_PROCESS_SESSION_REQUEST_PATH");
+    expect(launchScript).not.toContain("PAPERCLIP_PROCESS_SESSION_COMMAND_B64");
+    expect(launchScript).not.toContain("real-run-jwt");
 
     // Host-spawn cwd decoupling: on the remote process-session lane the acpx
     // runtime host-spawns the relay proxy, whose `chdir` must land in a
@@ -976,7 +1026,8 @@ describe("shared ACPX engine runtime behavior", () => {
     expect(sessionInputs[0]!.cwd).toBe(remoteCwd);
     expect(runtimeOptions[0]!.spawnCwd).toBe(localCwd);
     expect(runtimeOptions[0]!.spawnCwd).not.toBe(sessionInputs[0]!.cwd);
-    const payloadEnv = ((sessionPayload as Record<string, unknown> | null)?.env ?? {}) as Record<string, unknown>;
+    const requestConfig = ((launchRequest as Record<string, unknown> | null)?.config ?? {}) as Record<string, unknown>;
+    const payloadEnv = (requestConfig.env ?? {}) as Record<string, unknown>;
     expect(payloadEnv).toMatchObject({
       PAPERCLIP_API_BRIDGE_MODE: "queue_v1",
     });
@@ -985,6 +1036,7 @@ describe("shared ACPX engine runtime behavior", () => {
     );
     expect(payloadEnv.PAPERCLIP_API_KEY).toBeTruthy();
     expect(payloadEnv.PAPERCLIP_API_KEY).not.toBe("real-run-jwt");
+    expect(payloadEnv[hostOnlySentinelKey]).toBeUndefined();
   });
 
   it("keeps the session fingerprint stable when only the host spawn cwd changes", async () => {
@@ -1469,8 +1521,11 @@ describe("gemini ACP flag selection", () => {
 
   async function writeFakeGemini(binDir: string, version: string) {
     await fs.mkdir(binDir, { recursive: true });
-    const binPath = path.join(binDir, "gemini");
-    await fs.writeFile(binPath, `#!/bin/sh\necho "${version}"\n`, { mode: 0o755 });
+    const binPath = path.join(binDir, process.platform === "win32" ? "gemini.cmd" : "gemini");
+    const contents = process.platform === "win32"
+      ? `@echo off\r\necho ${version}\r\n`
+      : `#!/bin/sh\necho "${version}"\n`;
+    await fs.writeFile(binPath, contents, { mode: 0o755 });
   }
 
   function pathWithFakeBin(binDir: string): string {
@@ -1502,6 +1557,7 @@ describe("gemini ACP flag selection", () => {
     const { logs, runtimeOptions } = await runExecutor(
       { agent: "custom", agentCommand: "node ./fake-acp.js", stateDir, cwd },
       {
+        authToken: "real-run-jwt",
         executionTarget: {
           kind: "remote",
           transport: "sandbox",
@@ -1509,6 +1565,7 @@ describe("gemini ACP flag selection", () => {
           environmentId: "env-1",
           leaseId: "lease-1",
           remoteCwd: cwd,
+          runner: createLocalSandboxRunner(),
         },
       },
     );
@@ -1557,10 +1614,13 @@ describe("gemini ACP flag selection", () => {
     const { logs, runtimeOptions } = await runExecutor(
       { agent: "custom", agentCommand: "node ./fake-acp.js", stateDir, cwd, timeoutSec: 90 },
       {
+        authToken: "real-run-jwt",
         executionTarget: {
           kind: "remote",
           transport: "sandbox",
+          providerKey: "fake-plugin",
           remoteCwd: cwd,
+          runner: createLocalSandboxRunner(),
         },
       },
     );
@@ -1580,10 +1640,13 @@ describe("gemini ACP flag selection", () => {
     const cwd = path.join(root, "worktree");
     await fs.mkdir(cwd, { recursive: true });
     const sandboxContext = {
+      authToken: "real-run-jwt",
       executionTarget: {
         kind: "remote",
         transport: "sandbox",
+        providerKey: "fake-plugin",
         remoteCwd: cwd,
+        runner: createLocalSandboxRunner(),
       },
     };
 
@@ -1814,6 +1877,266 @@ describe("ACPX engine remote sandbox staging seam (PR 1: workspace + cwd)", () =
     return { root, stateDir, localCwd, remoteCwd, executionTarget };
   }
 
+  it.each(["novita", "custom-provider"])(
+    "fails closed before staging or launch for %s without authoritative tree custody",
+    async (providerKey) => {
+      const root = await makeTempRoot();
+      const stateDir = path.join(root, "state");
+      const localCwd = path.join(root, "worktree");
+      await fs.mkdir(localCwd, { recursive: true });
+      const runnerExecute = vi.fn();
+      const createRuntime = vi.fn(() => buildRuntime() as never);
+      const onEvent = vi.fn<(event: { eventType?: string }) => Promise<void>>(async () => {});
+      const execute = createAcpxEngineExecutor({ createRuntime });
+
+      await expect(
+        execute({
+          runId: `run-no-custody-${providerKey}`,
+          agent: { id: "agent-1", companyId: "company-1" },
+          runtime: {},
+          config: {
+            agent: "custom",
+            agentCommand: "node ./fake-acp.js",
+            stateDir,
+            cwd: localCwd,
+            env: { PAPERCLIP_API_KEY: "must-never-reach-provider" },
+          },
+          context: {},
+          authToken: "must-never-reach-provider",
+          executionTarget: {
+            kind: "remote",
+            transport: "sandbox",
+            providerKey,
+            remoteCwd: "/workspace",
+            runner: {
+              supportsConfidentialStdin: providerKey !== "novita",
+              execute: runnerExecute,
+            },
+          },
+          onLog: async () => {},
+          onMeta: async () => {},
+          onEvent,
+        } as never),
+      ).rejects.toThrow("authoritative process-tree custody");
+
+      expect(runnerExecute).not.toHaveBeenCalled();
+      expect(prepareAdapterExecutionTargetRuntime).not.toHaveBeenCalled();
+      expect(startAdapterExecutionTargetPaperclipBridge).not.toHaveBeenCalled();
+      expect(startAdapterExecutionTargetProcessSessionBridge).not.toHaveBeenCalled();
+      expect(createRuntime).not.toHaveBeenCalled();
+      expect(
+        onEvent.mock.calls.some(([event]) => event.eventType === "acp.process_session.launch"),
+      ).toBe(false);
+    },
+  );
+
+  it("keeps the incomplete remote release protocol disabled even when capabilities are advertised", async () => {
+    // Environment/config strings are deliberately ignored; only the injected
+    // internal test dependency can exercise the inert controller.
+    vi.stubEnv("PAPERCLIP_TEST_ENABLE_REMOTE_ACP_RELEASE_PROTOCOL", "1");
+    const root = await makeTempRoot();
+    const localCwd = path.join(root, "worktree");
+    await fs.mkdir(localCwd, { recursive: true });
+    const runnerExecute = vi.fn();
+    const reconcileProcessTreeCustody = vi.fn(async () => true);
+    const createRuntime = vi.fn(() => buildRuntime() as never);
+    const onEvent = vi.fn<(event: { eventType?: string }) => Promise<void>>(async () => {});
+    const execute = createAcpxEngineExecutorImpl({ createRuntime });
+
+    await expect(
+      execute({
+        runId: "run-release-protocol-disabled",
+        agent: { id: "agent-1", companyId: "company-1" },
+        runtime: {},
+        config: {
+          agent: "custom",
+          agentCommand: "node ./fake-acp.js",
+          stateDir: path.join(root, "state"),
+          cwd: localCwd,
+          env: { PAPERCLIP_API_KEY: "must-never-dispatch" },
+        },
+        context: {},
+        authToken: "must-never-dispatch",
+        executionTarget: {
+          kind: "remote",
+          transport: "sandbox",
+          providerKey: "future-provider",
+          remoteCwd: "/workspace",
+          runner: {
+            supportsConfidentialStdin: true,
+            supportsProcessTreeCustody: true,
+            reconcileProcessTreeCustody,
+            execute: runnerExecute,
+          },
+        },
+        onLog: async () => {},
+        onMeta: async () => {},
+        onEvent,
+      } as never),
+    ).rejects.toThrow("two-phase durable cleanup acknowledgement protocol is incomplete (Paperclip #22)");
+
+    expect(runnerExecute).not.toHaveBeenCalled();
+    expect(reconcileProcessTreeCustody).not.toHaveBeenCalled();
+    expect(prepareAdapterExecutionTargetRuntime).not.toHaveBeenCalled();
+    expect(startAdapterExecutionTargetPaperclipBridge).not.toHaveBeenCalled();
+    expect(startAdapterExecutionTargetProcessSessionBridge).not.toHaveBeenCalled();
+    expect(createRuntime).not.toHaveBeenCalled();
+    expect(
+      onEvent.mock.calls.some(([event]) => event.eventType === "acp.process_session.launch"),
+    ).toBe(false);
+  });
+
+  it("never falls back to host ACPX for a runner-backed custom agent without a command", async () => {
+    const root = await makeTempRoot();
+    const localCwd = path.join(root, "worktree");
+    await fs.mkdir(localCwd, { recursive: true });
+    const runnerExecute = vi.fn();
+    const createRuntime = vi.fn(() => buildRuntime() as never);
+    const execute = createAcpxEngineExecutorImpl({ createRuntime });
+
+    await expect(
+      execute({
+        runId: "run-no-command-no-local-fallback",
+        agent: { id: "agent-1", companyId: "company-1" },
+        runtime: {},
+        config: {
+          agent: "custom",
+          stateDir: path.join(root, "state"),
+          cwd: localCwd,
+        },
+        context: {},
+        executionTarget: {
+          kind: "remote",
+          transport: "sandbox",
+          providerKey: "custom-provider",
+          remoteCwd: "/workspace",
+          runner: {
+            supportsConfidentialStdin: true,
+            supportsProcessTreeCustody: true,
+            reconcileProcessTreeCustody: async () => true,
+            execute: runnerExecute,
+          },
+        },
+        onLog: async () => {},
+        onMeta: async () => {},
+        onEvent: async () => {},
+      } as never),
+    ).rejects.toThrow("two-phase durable cleanup acknowledgement protocol is incomplete (Paperclip #22)");
+
+    expect(runnerExecute).not.toHaveBeenCalled();
+    expect(prepareAdapterExecutionTargetRuntime).not.toHaveBeenCalled();
+    expect(startAdapterExecutionTargetPaperclipBridge).not.toHaveBeenCalled();
+    expect(startAdapterExecutionTargetProcessSessionBridge).not.toHaveBeenCalled();
+    expect(createRuntime).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    {
+      label: "runner-less sandbox",
+      executionTarget: {
+        kind: "remote",
+        transport: "sandbox",
+        providerKey: "runnerless-provider",
+        remoteCwd: "/workspace",
+      },
+    },
+    {
+      label: "non-sandbox SSH",
+      executionTarget: {
+        kind: "remote",
+        transport: "ssh",
+        remoteCwd: "/workspace",
+        spec: {
+          host: "127.0.0.1",
+          port: 22,
+          username: "fixture",
+          remoteCwd: "/workspace",
+          remoteWorkspacePath: "/workspace",
+          privateKey: null,
+          knownHosts: null,
+          strictHostKeyChecking: true,
+        },
+      },
+    },
+  ])("rejects explicit ACP on a $label target before local fallback", async ({ executionTarget }) => {
+    const root = await makeTempRoot();
+    const localCwd = path.join(root, "must-not-materialize");
+    const createRuntime = vi.fn(() => buildRuntime() as never);
+    const onEvent = vi.fn(async () => {});
+    const execute = createAcpxEngineExecutorImpl({ createRuntime });
+
+    await expect(
+      execute({
+        runId: "run-remote-no-local-fallback",
+        agent: { id: "agent-1", companyId: "company-1" },
+        runtime: {},
+        config: {
+          agent: "custom",
+          agentCommand: "node ./fake-acp.js",
+          stateDir: path.join(root, "state"),
+          cwd: localCwd,
+        },
+        context: {},
+        executionTarget,
+        onLog: async () => {},
+        onMeta: async () => {},
+        onEvent,
+      } as never),
+    ).rejects.toThrow("no remote staging, launch, or host/local fallback is permitted");
+
+    expect(createRuntime).not.toHaveBeenCalled();
+    expect(prepareAdapterExecutionTargetRuntime).not.toHaveBeenCalled();
+    expect(startAdapterExecutionTargetPaperclipBridge).not.toHaveBeenCalled();
+    expect(startAdapterExecutionTargetProcessSessionBridge).not.toHaveBeenCalled();
+    expect(onEvent).not.toHaveBeenCalled();
+    await expect(fs.stat(localCwd)).rejects.toThrow();
+  });
+
+  it.each([
+    {
+      label: "malformed direct remote target",
+      targetFields: {
+        executionTarget: { kind: "remote", transport: "sandbox" },
+      },
+    },
+    {
+      label: "malformed legacy remote transport",
+      targetFields: {
+        executionTransport: { remoteExecution: {} },
+      },
+    },
+  ])("rejects a $label before local ACP fallback", async ({ targetFields }) => {
+    const root = await makeTempRoot();
+    const localCwd = path.join(root, "must-not-materialize-invalid-remote");
+    const createRuntime = vi.fn(() => buildRuntime() as never);
+    const execute = createAcpxEngineExecutorImpl({ createRuntime });
+
+    await expect(
+      execute({
+        runId: "run-invalid-remote-no-local-fallback",
+        agent: { id: "agent-1", companyId: "company-1" },
+        runtime: {},
+        config: {
+          agent: "custom",
+          agentCommand: "node ./fake-acp.js",
+          stateDir: path.join(root, "state"),
+          cwd: localCwd,
+        },
+        context: {},
+        ...targetFields,
+        onLog: async () => {},
+        onMeta: async () => {},
+        onEvent: async () => {},
+      } as never),
+    ).rejects.toThrow("Remote ACP execution target is invalid");
+
+    expect(createRuntime).not.toHaveBeenCalled();
+    expect(prepareAdapterExecutionTargetRuntime).not.toHaveBeenCalled();
+    expect(startAdapterExecutionTargetPaperclipBridge).not.toHaveBeenCalled();
+    expect(startAdapterExecutionTargetProcessSessionBridge).not.toHaveBeenCalled();
+    await expect(fs.stat(localCwd)).rejects.toThrow();
+  });
+
   it("test_remote_buildRuntime_crosses_staging_seam", async () => {
     const { stateDir, localCwd, remoteCwd, executionTarget } = await setupRemoteSandbox();
     const { sessionInputs, events } = await runExecutor(
@@ -1853,18 +2176,14 @@ describe("ACPX engine remote sandbox staging seam (PR 1: workspace + cwd)", () =
 
   it("hands the merged paperclip env to the process-session launch when the setups overlap", async () => {
     const { stateDir, localCwd, remoteCwd, executionTarget } = await setupRemoteSandbox();
-    // Decode the process-session LAUNCH payload (the base64 command blob) — the
-    // in-sandbox process env is carried there, NOT in the exec's own `env`.
+    // Decode the stdin-fed private launch request. The in-sandbox process env
+    // is carried in request.config, never in provider command/argv/env.
     let launchPayload: Record<string, unknown> | null = null;
     (executionTarget as { runner: unknown }).runner = createLocalSandboxRunner((input) => {
       if (input.env?.PAPERCLIP_SANDBOX_EXEC_CHANNEL === "bridge") {
         const script = input.args?.[1] ?? "";
-        const match = script.match(/PAPERCLIP_PROCESS_SESSION_COMMAND_B64='([^']+)'/);
-        if (match) {
-          launchPayload = JSON.parse(Buffer.from(match[1]!, "base64").toString("utf8")) as Record<
-            string,
-            unknown
-          >;
+        if (script.includes("PAPERCLIP_PROCESS_SESSION_REQUEST_PATH=") && input.stdin) {
+          launchPayload = (JSON.parse(input.stdin) as { config: Record<string, unknown> }).config;
         }
       }
     });
@@ -1894,40 +2213,434 @@ describe("ACPX engine remote sandbox staging seam (PR 1: workspace + cwd)", () =
     expect(payloadEnv.PAPERCLIP_API_KEY).not.toBe("real-run-jwt");
   });
 
-  it("stops the process-session bridge when the paperclip bridge fails under concurrency", async () => {
+  it("does not dispatch the process-session provider mutation before Paperclip bridge success", async () => {
     const { stateDir, localCwd, executionTarget } = await setupRemoteSandbox();
-    // The paperclip bridge fails; the process-session bridge — started CONCURRENTLY
-    // with it — still resolves a live handle. The abandon path must stop that
-    // handle so no started bridge leaks on partial failure.
-    const stop = vi.fn(async () => {});
-    vi.mocked(startAdapterExecutionTargetPaperclipBridge).mockImplementationOnce(async () => {
-      throw new Error("paperclip bridge boom");
-    });
+    const paperclipStop = vi.fn(async () => {});
+    let resolvePaperclip!: (value: { env: Record<string, string>; stop(): Promise<void> }) => void;
+    const paperclipGate = new Promise<{ env: Record<string, string>; stop(): Promise<void> }>(
+      (resolve) => {
+        resolvePaperclip = resolve;
+      },
+    );
+    vi.mocked(startAdapterExecutionTargetPaperclipBridge).mockImplementationOnce(
+      async () => paperclipGate,
+    );
+    const providerDispatch = vi.fn();
     vi.mocked(startAdapterExecutionTargetProcessSessionBridge).mockImplementationOnce(
-      async () => ({ agentCommand: null, stop }) as never,
+      async (input) => {
+        if (typeof input.env !== "function") throw new Error("expected deferred launch env");
+        await input.env();
+        providerDispatch();
+        return null;
+      },
     );
 
     const execute = createAcpxEngineExecutor({
       createRuntime: () => buildRuntime() as never,
     });
+    const resultPromise = execute({
+      runId: "run-bridge-dependency",
+      agent: { id: "agent-1", companyId: "company-1" },
+      runtime: {},
+      config: { agent: "custom", agentCommand: "node ./fake-acp.js", stateDir, cwd: localCwd },
+      context: {},
+      authToken: "real-run-jwt",
+      executionTarget,
+      onLog: async () => {},
+      onMeta: async () => {},
+      onEvent: async () => {},
+    } as never);
+
+    try {
+      await expect.poll(
+        () => vi.mocked(startAdapterExecutionTargetProcessSessionBridge).mock.calls.length,
+      ).toBe(1);
+      expect(providerDispatch).not.toHaveBeenCalled();
+    } finally {
+      // Always release the controlled bridge, even when an assertion above
+      // fails, so this test cannot retain an in-flight executor fixture.
+      resolvePaperclip({
+        env: { PAPERCLIP_API_KEY: "bridge-token" },
+        stop: paperclipStop,
+      });
+      await Promise.allSettled([resultPromise]);
+    }
+    await expect(resultPromise).resolves.toMatchObject({ exitCode: 0 });
+    expect(providerDispatch).toHaveBeenCalledTimes(1);
+    expect(paperclipStop).toHaveBeenCalledTimes(1);
+  });
+
+  it("returns a dedicated result and retains remote resources when launch acceptance needs reconciliation", async () => {
+    const { stateDir, localCwd, remoteCwd, executionTarget } = await setupRemoteSandbox();
+    executionTarget.runner.reconcileProcessTreeCustody = async () => false;
+    const paperclipStop = vi.fn<() => Promise<void>>()
+      .mockRejectedValueOnce(new Error("injected callback bridge stop failure"))
+      .mockResolvedValue(undefined);
+    const managedHomeTeardown = vi.fn(async () => {});
+    const stagedRuntimeDispose = vi.fn(async () => {});
+    const stagingLocks = new Map<string, Promise<unknown>>();
+    const reconcileTerminal = vi.fn<() => Promise<boolean>>()
+      .mockResolvedValueOnce(false)
+      .mockResolvedValue(true);
+    vi.mocked(startAdapterExecutionTargetPaperclipBridge).mockResolvedValueOnce({
+      env: {},
+      stop: paperclipStop,
+    });
+    const launchIdentity = {
+      launchId: "launch-ambiguous-1",
+      sessionId: "session-ambiguous-1",
+      runId: "run-launch-ambiguous",
+      adapterKey: "custom_local",
+      transport: "sandbox" as const,
+      providerKey: "local-test",
+      environmentId: "environment-1",
+      leaseId: "lease-1",
+      remoteCwd,
+      sessionDir: path.posix.join(remoteCwd, ".paperclip-runtime", "acpx", "process-sessions", "session-ambiguous-1"),
+      eventsDir: path.posix.join(remoteCwd, "events"),
+      launchIdentityPath: path.posix.join(remoteCwd, "launch.identity.json"),
+      launcherPidPath: path.posix.join(remoteCwd, "launcher.pid"),
+      wrapperPidPath: path.posix.join(remoteCwd, "wrapper.pid"),
+      launchAcceptedPath: path.posix.join(remoteCwd, "launch.accepted.json"),
+      terminalReceiptPath: path.posix.join(remoteCwd, "terminal.receipt.json"),
+      childClosedPath: path.posix.join(remoteCwd, "child.closed"),
+      wrapperDonePath: path.posix.join(remoteCwd, "wrapper.done"),
+    };
+    vi.mocked(startAdapterExecutionTargetProcessSessionBridge).mockRejectedValueOnce(
+      new AdapterExecutionTargetProcessSessionLaunchAmbiguousError(
+        launchIdentity,
+        "The reconciliation transport was unavailable.",
+        { reconcileTerminal },
+      ),
+    );
+    const execute = createAcpxEngineExecutor({
+      createRuntime: () => buildRuntime() as never,
+      stagedRuntimes: new Map(),
+      stagingLocks,
+      prepareRemoteManagedHome: async (input) => ({
+        stagedRuntime: await input.stage([]),
+        teardown: managedHomeTeardown,
+        disposeStaged: stagedRuntimeDispose,
+      }),
+    });
+    const logs: string[] = [];
+
+    const result = await execute({
+      runId: "run-launch-ambiguous",
+      agent: { id: "agent-1", companyId: "company-1" },
+      runtime: {},
+      config: { agent: "custom", agentCommand: "node ./fake-acp.js", stateDir, cwd: localCwd },
+      context: {},
+      authToken: "real-run-jwt",
+      executionTarget,
+      onLog: async (_stream: "stdout" | "stderr", chunk: string) => logs.push(chunk),
+      onMeta: async () => {},
+      onEvent: async () => {},
+    } as never);
+
+    expect(result).toMatchObject({
+      exitCode: 1,
+      timedOut: false,
+      errorCode: ACP_PROCESS_SESSION_LAUNCH_AMBIGUOUS,
+      clearSession: true,
+      errorMeta: {
+        category: "protocol",
+        acpCode: ACP_PROCESS_SESSION_LAUNCH_AMBIGUOUS,
+        retryable: false,
+        needsHuman: true,
+        acceptedStart: "unknown",
+        launchIdentity,
+        phase: "setup",
+      },
+      resultJson: {
+        phase: "setup",
+        processSessionLaunch: {
+          status: "needs_human",
+          acceptedStart: "unknown",
+          retryable: false,
+          ...launchIdentity,
+        },
+      },
+    });
+    expect(result.errorMessage).toContain("do not retry");
+    expect(logs.join("")).toContain("automatic replay is disabled");
+    expect(logs.join("")).toContain("Preserving remote ACP runtime resources");
+    expect(paperclipStop).toHaveBeenCalledTimes(1);
+    expect(managedHomeTeardown).not.toHaveBeenCalled();
+    expect(stagedRuntimeDispose).not.toHaveBeenCalled();
+    expect(stagingLocks.size).toBe(1);
+
+    await expect(reconcileAndReleaseAcpxProcessSessionLaunchResources({
+      runId: launchIdentity.runId,
+      launchId: launchIdentity.launchId,
+    })).resolves.toEqual({
+      found: true,
+      terminal: false,
+      treeCustodyVerified: false,
+      cleanupComplete: false,
+      released: false,
+    });
+    expect(paperclipStop).toHaveBeenCalledTimes(2);
+    expect(managedHomeTeardown).not.toHaveBeenCalled();
+    expect(stagedRuntimeDispose).not.toHaveBeenCalled();
+    expect(stagingLocks.size).toBe(1);
+
+    await expect(reconcileAndReleaseAcpxProcessSessionLaunchResources({
+      runId: launchIdentity.runId,
+      launchId: launchIdentity.launchId,
+    })).resolves.toEqual({
+      found: true,
+      terminal: true,
+      treeCustodyVerified: false,
+      cleanupComplete: false,
+      released: false,
+    });
+    expect(paperclipStop).toHaveBeenCalledTimes(2);
+    expect(managedHomeTeardown).not.toHaveBeenCalled();
+    expect(stagedRuntimeDispose).not.toHaveBeenCalled();
+    expect(stagingLocks.size).toBe(1);
+
+    await expect(reconcileAndReleaseAcpxProcessSessionLaunchResources({
+      runId: launchIdentity.runId,
+      launchId: launchIdentity.launchId,
+    })).resolves.toMatchObject({
+      found: true,
+      terminal: true,
+      treeCustodyVerified: false,
+      cleanupComplete: false,
+      released: false,
+    });
+    expect(stagingLocks.size).toBe(1);
+  });
+
+  it("retries accepted host-capability cleanup before releasing retained resources", async () => {
+    const { stateDir, localCwd, remoteCwd, executionTarget } = await setupRemoteSandbox();
+    const stagingLocks = new Map<string, Promise<unknown>>();
+    const managedHomeTeardown = vi
+      .fn<() => Promise<void>>()
+      .mockRejectedValueOnce(new Error("transient managed-home copy-back failure"))
+      .mockResolvedValue(undefined);
+    const stagedRuntimeDispose = vi
+      .fn<() => Promise<void>>()
+      .mockRejectedValueOnce(new Error("transient private staging cleanup failure"))
+      .mockResolvedValue(undefined);
+    const acceptedHostCleanup = vi.fn<() => Promise<void>>()
+      .mockRejectedValueOnce(new Error("transient private proxy cleanup failure"))
+      .mockResolvedValue(undefined);
+    const paperclipStop = vi.fn(async () => {});
+    const sessionId = "session-host-cleanup-retry";
+    const launchId = "launch-host-cleanup-retry";
+    const runId = "run-host-cleanup-retry";
+    const sessionDir = path.posix.join(remoteCwd, ".paperclip-runtime", "acpx", "process-sessions", sessionId);
+    const launchIdentity = {
+      launchId,
+      sessionId,
+      runId,
+      adapterKey: "custom_local",
+      transport: "sandbox" as const,
+      providerKey: "fake-plugin",
+      environmentId: null,
+      leaseId: null,
+      remoteCwd,
+      sessionDir,
+      eventsDir: path.posix.join(sessionDir, "events"),
+      launchIdentityPath: path.posix.join(sessionDir, "launch.identity.json"),
+      launcherPidPath: path.posix.join(sessionDir, "launcher.pid"),
+      wrapperPidPath: path.posix.join(sessionDir, "wrapper.pid"),
+      launchAcceptedPath: path.posix.join(sessionDir, "launch.accepted.json"),
+      terminalReceiptPath: path.posix.join(sessionDir, "terminal.receipt.json"),
+      childClosedPath: path.posix.join(sessionDir, "child.closed"),
+      wrapperDonePath: path.posix.join(sessionDir, "wrapper.done"),
+    };
+    vi.mocked(startAdapterExecutionTargetPaperclipBridge).mockResolvedValueOnce({
+      env: {},
+      stop: paperclipStop,
+    });
+    vi.mocked(startAdapterExecutionTargetProcessSessionBridge).mockRejectedValueOnce(
+      new AdapterExecutionTargetProcessSessionLaunchAmbiguousError(
+        launchIdentity,
+        "Host proxy setup failed after acceptance.",
+        {
+          acceptedStart: "accepted",
+          reconcileTerminal: async () => true,
+          cleanupAcceptedHostResources: acceptedHostCleanup,
+        },
+      ),
+    );
+    const execute = createAcpxEngineExecutor({
+      createRuntime: () => buildRuntime() as never,
+      stagedRuntimes: new Map(),
+      stagingLocks,
+      prepareRemoteManagedHome: async (input) => ({
+        stagedRuntime: await input.stage([]),
+        teardown: managedHomeTeardown,
+        disposeStaged: stagedRuntimeDispose,
+      }),
+    });
+
+    const result = await execute({
+      runId,
+      agent: { id: "agent-1", companyId: "company-1" },
+      runtime: {},
+      config: { agent: "custom", agentCommand: "node ./fake-acp.js", stateDir, cwd: localCwd },
+      context: {},
+      authToken: "real-run-jwt",
+      executionTarget,
+      onLog: async () => {},
+      onMeta: async () => {},
+      onEvent: async () => {},
+    } as never);
+
+    expect(result.errorCode).toBe(ACP_PROCESS_SESSION_LAUNCH_AMBIGUOUS);
+    await expect(
+      reconcileAndReleaseAcpxProcessSessionLaunchResources({ runId, launchId }),
+    ).rejects.toThrow("Failed to stop all ACP launch resources");
+    expect(acceptedHostCleanup).toHaveBeenCalledTimes(1);
+    expect(managedHomeTeardown).not.toHaveBeenCalled();
+    expect(stagedRuntimeDispose).not.toHaveBeenCalled();
+    expect(stagingLocks.size).toBe(1);
 
     await expect(
-      execute({
-        runId: "run-bridge-fail",
-        agent: { id: "agent-1", companyId: "company-1" },
-        runtime: {},
-        config: { agent: "custom", agentCommand: "node ./fake-acp.js", stateDir, cwd: localCwd },
-        context: {},
-        authToken: "real-run-jwt",
-        executionTarget,
-        onLog: async () => {},
-        onMeta: async () => {},
-        onEvent: async () => {},
-      } as never),
-    ).rejects.toThrow("paperclip bridge boom");
+      reconcileAndReleaseAcpxProcessSessionLaunchResources({ runId, launchId }),
+    ).rejects.toThrow("Failed to complete retained ACP cleanup");
+    expect(acceptedHostCleanup).toHaveBeenCalledTimes(2);
+    expect(managedHomeTeardown).toHaveBeenCalledTimes(1);
+    expect(stagedRuntimeDispose).not.toHaveBeenCalled();
+    expect(stagingLocks.size).toBe(1);
 
-    // The concurrently-started process-session bridge was stopped exactly once.
-    expect(stop).toHaveBeenCalledTimes(1);
+    await expect(
+      reconcileAndReleaseAcpxProcessSessionLaunchResources({ runId, launchId }),
+    ).rejects.toThrow("Failed to complete retained ACP cleanup");
+    expect(acceptedHostCleanup).toHaveBeenCalledTimes(2);
+    expect(managedHomeTeardown).toHaveBeenCalledTimes(2);
+    expect(stagedRuntimeDispose).toHaveBeenCalledTimes(1);
+    expect(stagingLocks.size).toBe(1);
+
+    await expect(
+      reconcileAndReleaseAcpxProcessSessionLaunchResources({ runId, launchId }),
+    ).resolves.toEqual({
+      found: true,
+      terminal: true,
+      treeCustodyVerified: true,
+      cleanupComplete: true,
+      released: true,
+    });
+    expect(acceptedHostCleanup).toHaveBeenCalledTimes(2);
+    expect(managedHomeTeardown).toHaveBeenCalledTimes(2);
+    expect(stagedRuntimeDispose).toHaveBeenCalledTimes(2);
+    expect(stagingLocks.size).toBe(0);
+  });
+
+  it("uses the registered active controller and keeps cleanup fenced while terminal proof is pending", async () => {
+    const { stateDir, localCwd, remoteCwd, executionTarget } = await setupRemoteSandbox();
+    executionTarget.runner.reconcileProcessTreeCustody = async () => false;
+    const stagingLocks = new Map<string, Promise<unknown>>();
+    const managedHomeTeardown = vi.fn(async () => {});
+    const stagedRuntimeDispose = vi.fn(async () => {});
+    const processStop = vi.fn(async () => {});
+    const paperclipStop = vi.fn(async () => {});
+    let resolveTerminal!: (value: boolean) => void;
+    const terminalGate = new Promise<boolean>((resolve) => {
+      resolveTerminal = resolve;
+    });
+    const reconcileTerminal = vi.fn(() => terminalGate);
+    const sessionId = "session-active-controller-1";
+    const launchId = "launch-active-controller-1";
+    const runId = "run-active-controller-1";
+    const sessionDir = path.posix.join(remoteCwd, ".paperclip-runtime", "acpx", "process-sessions", sessionId);
+    const launchIdentity = {
+      launchId,
+      sessionId,
+      runId,
+      adapterKey: "custom_local",
+      transport: "sandbox" as const,
+      providerKey: "local-test",
+      environmentId: "environment-1",
+      leaseId: "lease-1",
+      remoteCwd,
+      sessionDir,
+      eventsDir: path.posix.join(sessionDir, "events"),
+      launchIdentityPath: path.posix.join(sessionDir, "launch.identity.json"),
+      launcherPidPath: path.posix.join(sessionDir, "launcher.pid"),
+      wrapperPidPath: path.posix.join(sessionDir, "wrapper.pid"),
+      launchAcceptedPath: path.posix.join(sessionDir, "launch.accepted.json"),
+      terminalReceiptPath: path.posix.join(sessionDir, "terminal.receipt.json"),
+      childClosedPath: path.posix.join(sessionDir, "child.closed"),
+      wrapperDonePath: path.posix.join(sessionDir, "wrapper.done"),
+    };
+    vi.mocked(startAdapterExecutionTargetPaperclipBridge).mockResolvedValueOnce({
+      env: {},
+      stop: paperclipStop,
+    });
+    vi.mocked(startAdapterExecutionTargetProcessSessionBridge).mockResolvedValueOnce({
+      agentCommand: "paperclip-process-session-proxy.mjs",
+      launchIdentity,
+      reconcileTerminal,
+      treeCustody: "unverified",
+      stop: processStop,
+    });
+    const execute = createAcpxEngineExecutor({
+      createRuntime: () => buildRuntime() as never,
+      stagedRuntimes: new Map(),
+      stagingLocks,
+      prepareRemoteManagedHome: async (input) => ({
+        stagedRuntime: await input.stage([]),
+        teardown: managedHomeTeardown,
+        disposeStaged: stagedRuntimeDispose,
+      }),
+    });
+
+    const resultPromise = execute({
+      runId,
+      agent: { id: "agent-1", companyId: "company-1" },
+      runtime: {},
+      config: { agent: "custom", agentCommand: "node ./fake-acp.js", stateDir, cwd: localCwd },
+      context: {},
+      authToken: "real-run-jwt",
+      executionTarget,
+      onLog: async () => {},
+      onMeta: async () => {},
+      onEvent: async () => {},
+    } as never);
+
+    try {
+      await expect.poll(() => processStop.mock.calls.length).toBe(1);
+      expect(paperclipStop).toHaveBeenCalledTimes(1);
+      expect(reconcileTerminal).toHaveBeenCalledTimes(1);
+      expect(stagingLocks.size).toBe(1);
+      expect(managedHomeTeardown).not.toHaveBeenCalled();
+      expect(stagedRuntimeDispose).not.toHaveBeenCalled();
+    } finally {
+      // Always settle the terminal-proof gate and executor so a failed
+      // assertion cannot retain the active controller or its staging lease.
+      resolveTerminal(true);
+      await Promise.allSettled([resultPromise]);
+    }
+    const result = await resultPromise;
+    expect(result).toMatchObject({
+      exitCode: 0,
+      resultJson: {
+        processSessionLaunch: {
+          launchId,
+          status: "terminal_unreleased",
+          directTerminalVerified: true,
+          treeCustodyVerified: false,
+          cleanupComplete: false,
+          released: false,
+        },
+      },
+    });
+    expect(stagingLocks.size).toBe(1);
+    expect(managedHomeTeardown).not.toHaveBeenCalled();
+    expect(stagedRuntimeDispose).not.toHaveBeenCalled();
+    await expect(requestStopAndWaitAcpxProcessSessionLaunch({ runId, launchId })).resolves.toMatchObject({
+      found: true,
+      terminal: true,
+      treeCustodyVerified: false,
+      cleanupComplete: false,
+      released: false,
+    });
+    expect(processStop).toHaveBeenCalledTimes(1);
   });
 
   it("test_remote_session_new_uses_in_sandbox_cwd", async () => {
@@ -2242,7 +2955,7 @@ describe("ACPX engine remote session-lifecycle re-staging (PR 3: stage once / re
     };
   }
 
-  it("test_acp_resume_compatible_session_does_not_restage", async () => {
+  it("test_acp_resume_after_launch_release_restages_before_resuming", async () => {
     const { stateDir, localCwd, remoteCwd, executionTarget } = await setupRemoteSandbox();
     const ensureInputs: Array<Record<string, unknown>> = [];
     const execute = createAcpxEngineExecutor({
@@ -2261,9 +2974,10 @@ describe("ACPX engine remote session-lifecycle re-staging (PR 3: stage once / re
 
     expect(first.exitCode).toBe(0);
     expect(second.exitCode).toBe(0);
-    // Staging (workspace ship + home seed) ran exactly ONCE across both runs:
-    // the compatible resume reused the already-staged in-sandbox runtime.
-    expect(vi.mocked(prepareAdapterExecutionTargetRuntime)).toHaveBeenCalledTimes(1);
+    // Exact launch-bound reconciliation releases the staged workspace/home with
+    // each process session. A compatible ACP session may resume, but it must
+    // restage a fresh runtime instead of reusing already-disposed resources.
+    expect(vi.mocked(prepareAdapterExecutionTargetRuntime)).toHaveBeenCalledTimes(2);
     // Both runs bind session/new (and resume) to the in-sandbox workspace cwd...
     expect(ensureInputs[0]?.cwd).toBe(remoteCwd);
     expect(ensureInputs[1]?.cwd).toBe(remoteCwd);
@@ -2425,11 +3139,10 @@ describe("ACPX engine remote session-lifecycle re-staging (PR 3: stage once / re
     expect(ensureInputs[1]?.resumeSessionId).toBeUndefined();
   });
 
-  // Greptile P1 "Teardown Invalidates Cached Runtime": the per-run copy-back must
-  // fire on every run (incl. a reused resume) while the one-time host staged-temp
-  // cleanup must NOT fire between clean runs — otherwise the reused staged runtime
-  // would be invalidated before the next resume.
-  it("test_reused_resume_copies_back_per_run_without_disposing_staged_temp", async () => {
+  // Each accepted process-session launch owns one exact copy-back + staged-temp
+  // cleanup bundle. Session resume metadata can survive between launches, but
+  // launch-bound staging authority cannot remain cached after release.
+  it("test_reused_resume_copies_back_and_disposes_each_launch_bound_staging_bundle", async () => {
     const { stateDir, localCwd, executionTarget } = await setupRemoteSandbox();
     const ensureInputs: Array<Record<string, unknown>> = [];
     let teardownCalls = 0;
@@ -2462,13 +3175,12 @@ describe("ACPX engine remote session-lifecycle re-staging (PR 3: stage once / re
 
     expect(first.exitCode).toBe(0);
     expect(second.exitCode).toBe(0);
-    // Staged once, reused on the compatible resume.
-    expect(vi.mocked(prepareAdapterExecutionTargetRuntime)).toHaveBeenCalledTimes(1);
+    // Each accepted launch stages its own workspace/home bundle.
+    expect(vi.mocked(prepareAdapterExecutionTargetRuntime)).toHaveBeenCalledTimes(2);
     // Per-run copy-back fired on BOTH runs — cadence unchanged.
     expect(teardownCalls).toBe(2);
-    // The staged temp was never disposed while the entry stayed warm for reuse,
-    // so the resume found its staged home intact.
-    expect(disposeCalls).toBe(0);
+    // Exact controller release disposes both launch-bound staging bundles.
+    expect(disposeCalls).toBe(2);
     expect(ensureInputs[1]?.resumeSessionId).toBe(first.sessionId);
   });
 
@@ -2505,7 +3217,7 @@ describe("ACPX engine remote session-lifecycle re-staging (PR 3: stage once / re
     expect(disposeCalls).toBe(1);
   });
 
-  it("test_idle_staged_runtime_cleanup_waits_for_active_turn_release", async () => {
+  it("test_launch_bound_staging_cleanup_waits_for_active_turn_release", async () => {
     const { stateDir, localCwd, executionTarget } = await setupRemoteSandbox();
     const events: string[] = [];
     let currentNow = 0;
@@ -2569,25 +3281,50 @@ describe("ACPX engine remote session-lifecycle re-staging (PR 3: stage once / re
 
     const first = await execute({ runId: "run-a", runtime: {}, ...base } as never);
     expect(first.exitCode).toBe(0);
+    expect(events).toEqual(["stage:run-a", "dispose:run-a"]);
 
-    const second = execute({
-      runId: "run-b",
-      runtime: { sessionParams: first.sessionParams },
-      ...base,
-    } as never);
-    await turnStarted;
-    currentNow = 10_000;
-    const third = execute({ runId: "run-c", runtime: {}, ...base } as never);
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    let second: ReturnType<typeof execute> | null = null;
+    let third: ReturnType<typeof execute> | null = null;
+    try {
+      second = execute({
+        runId: "run-b",
+        runtime: { sessionParams: first.sessionParams },
+        ...base,
+      } as never);
+      await turnStarted;
+      currentNow = 10_000;
+      third = execute({ runId: "run-c", runtime: {}, ...base } as never);
+      await new Promise((resolve) => setTimeout(resolve, 20));
 
-    expect(events).toEqual(["stage:run-a"]);
+      // Run B owns the session staging lease while its turn is active. Run C
+      // cannot stage until B's controller has disposed B's launch-bound bundle
+      // and released that lease.
+      expect(events).toEqual([
+        "stage:run-a",
+        "dispose:run-a",
+        "stage:run-b",
+      ]);
+    } finally {
+      // Always release the controlled turn, even when an assertion above fails,
+      // so the test cannot strand a process-session fixture for later cases.
+      releaseTurn();
+      await Promise.allSettled([second, third].filter(
+        (pending): pending is ReturnType<typeof execute> => pending !== null,
+      ));
+    }
 
-    releaseTurn();
-    const [resultB, resultC] = await Promise.all([second, third]);
+    const [resultB, resultC] = await Promise.all([second!, third!]);
 
     expect(resultB.exitCode).toBe(0);
     expect(resultC.exitCode).toBe(0);
-    expect(events).toEqual(["stage:run-a", "dispose:run-a", "stage:run-c"]);
+    expect(events).toEqual([
+      "stage:run-a",
+      "dispose:run-a",
+      "stage:run-b",
+      "dispose:run-b",
+      "stage:run-c",
+      "dispose:run-c",
+    ]);
   });
 
   // Superseding an incompatible session that collides on sessionKey re-stages
@@ -2705,24 +3442,35 @@ describe("ACPX engine remote session-lifecycle re-staging (PR 3: stage once / re
         await new Promise((resolve) => setTimeout(resolve, 5));
         const stagedRuntime = await input.stage([]);
         events.push(`exit:${input.runId}`);
-        return { stagedRuntime };
+        return {
+          stagedRuntime,
+          disposeStaged: async () => {
+            events.push(`dispose:${input.runId}`);
+          },
+        };
       },
     });
     const base = baseExecuteArgs({ stateDir, localCwd, executionTarget });
 
     const runA = execute({ runId: "run-a", runtime: {}, ...base } as never);
     await turnStarted;
-    const runB = execute({ runId: "run-b", runtime: {}, ...base } as never);
-    await new Promise((resolve) => setTimeout(resolve, 20));
-    expect(events).not.toContain("enter:run-b");
+    let runB: ReturnType<typeof execute> | null = null;
+    try {
+      runB = execute({ runId: "run-b", runtime: {}, ...base } as never);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(events).not.toContain("enter:run-b");
+    } finally {
+      releaseTurn();
+      await Promise.allSettled([runA, runB].filter(
+        (pending): pending is ReturnType<typeof execute> => pending !== null,
+      ));
+    }
 
-    releaseTurn();
-    await runA;
-    events.push("run-a-finished");
-    await runB;
+    await Promise.all([runA, runB!]);
 
     expect(events).toContain("enter:run-b");
-    expect(events.indexOf("enter:run-b")).toBeGreaterThan(events.indexOf("run-a-finished"));
+    expect(events).toContain("dispose:run-a");
+    expect(events.indexOf("enter:run-b")).toBeGreaterThan(events.indexOf("dispose:run-a"));
   });
 
   // The per-session lease must be released when a run is abandoned before it

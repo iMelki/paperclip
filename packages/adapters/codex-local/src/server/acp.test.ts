@@ -1,13 +1,20 @@
+import { randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AdapterExecutionContext, AdapterInvocationMeta } from "@paperclipai/adapter-utils";
+import {
+  createPrivateExecutableAssetDirectory,
+  type PrivateExecutableAssetDirectory,
+} from "@paperclipai/adapter-utils/private-executable-asset";
 import { runChildProcess } from "@paperclipai/adapter-utils/server-utils";
+import { resolveTestShellCommand } from "@paperclipai/adapter-utils/test-shell";
 import {
   buildCodexAcpConfig,
-  createCodexAcpExecutor,
+  createCodexAcpExecutor as createCodexAcpExecutorImpl,
   nodeVersionMeetsCodexAcpMinimum,
+  prepareCodexRemoteManagedHome,
   resolveCodexAcpBillingIdentity,
   resolveCodexExecutionEngine,
   resolveCodexExecutionEngineForRun,
@@ -20,6 +27,9 @@ import {
 function createLocalSandboxRunner() {
   let counter = 0;
   return {
+    supportsConfidentialStdin: true,
+    supportsProcessTreeCustody: true,
+    reconcileProcessTreeCustody: async () => true,
     execute: async (input: {
       command: string;
       args?: string[];
@@ -30,7 +40,7 @@ function createLocalSandboxRunner() {
       onLog?: (stream: "stdout" | "stderr", chunk: string) => Promise<void>;
     }) => {
       counter += 1;
-      const command = input.command === "bash" ? "/bin/bash" : input.command;
+      const command = resolveTestShellCommand(input.command);
       return await runChildProcess(`codex-acp-sandbox-run-${counter}`, command, input.args ?? [], {
         cwd: input.cwd ?? process.cwd(),
         env: input.env ?? {},
@@ -64,10 +74,20 @@ type FakeRuntimeTurn = {
 };
 
 const tempRoots: string[] = [];
+const privateTestAssets = new Set<PrivateExecutableAssetDirectory>();
 const originalNodeVersion = process.version;
 const originalPaperclipHome = process.env.PAPERCLIP_HOME;
 const originalPaperclipInstanceId = process.env.PAPERCLIP_INSTANCE_ID;
 const originalCodexHome = process.env.CODEX_HOME;
+
+function createCodexAcpExecutor(
+  options: Parameters<typeof createCodexAcpExecutorImpl>[0] = {},
+) {
+  return createCodexAcpExecutorImpl({
+    ...options,
+    testOnlyEnableRemoteProcessSessionReleaseProtocol: true,
+  });
+}
 
 // Older/newer ISO timestamps for the copy-back monotonic (strictly-newer)
 // decision predicate, plus a subscription-shaped auth.json fixture matching the
@@ -92,14 +112,24 @@ function subscriptionAuthJson(accountId: string, lastRefresh: string, marker: st
   );
 }
 
+async function makePrivateHostCodexHome(): Promise<string> {
+  const asset = await createPrivateExecutableAssetDirectory({
+    prefix: "paperclip-codex-acp-host-home-test-",
+  });
+  privateTestAssets.add(asset);
+  return asset.directoryPath;
+}
+
 // Enumerate the host staged-home temp dirs `stageCodexHomeForSync` created for a
 // given runId (`paperclip-codex-home-sync-<runId>-<random>` under os.tmpdir()).
 // A unique per-test runId scopes the match to this run's staging dirs only, so
 // the assertion is not disturbed by other tests/processes sharing the tmp dir.
 async function listCodexHomeSyncDirs(runId: string): Promise<string[]> {
   const prefix = `paperclip-codex-home-sync-${runId}-`;
-  const entries = await fs.readdir(os.tmpdir());
-  return entries.filter((name) => name.startsWith(prefix)).map((name) => path.join(os.tmpdir(), name));
+  const parent = process.platform === "win32" ? process.env.LOCALAPPDATA : os.tmpdir();
+  if (!parent) throw new Error("Private Codex staging parent is unavailable.");
+  const entries = await fs.readdir(parent);
+  return entries.filter((name) => name.startsWith(prefix)).map((name) => path.join(parent, name));
 }
 
 function setNodeVersion(version: string): void {
@@ -118,6 +148,10 @@ afterEach(async () => {
   else process.env.PAPERCLIP_INSTANCE_ID = originalPaperclipInstanceId;
   if (originalCodexHome === undefined) delete process.env.CODEX_HOME;
   else process.env.CODEX_HOME = originalCodexHome;
+  for (const asset of privateTestAssets) {
+    await asset.cleanup();
+  }
+  privateTestAssets.clear();
   await Promise.all(tempRoots.splice(0).map((root) => fs.rm(root, { recursive: true, force: true })));
 });
 
@@ -371,30 +405,87 @@ describe("codex_local ACP lane", () => {
     ).rejects.toThrow("In-place workspace realization requires the Codex CLI engine");
   });
 
-  it("uses ACP for bridged sandbox auto runs when the ACP command is configured as a shell command", async () => {
+  it("falls back to CLI for bridged sandbox auto runs and fails explicit remote ACP closed", async () => {
     setNodeVersion("v22.13.0");
+    const root = await makeTempRoot("paperclip-codex-remote-acp-disabled-");
+    const runnerExecute = vi.fn(async () => ({
+      exitCode: 0,
+      signal: null,
+      timedOut: false,
+      stdout: "",
+      stderr: "",
+      pid: null,
+      startedAt: new Date().toISOString(),
+    }));
+    const executionTarget = {
+      kind: "remote" as const,
+      transport: "sandbox" as const,
+      providerKey: "fake-plugin",
+      remoteCwd: "/work",
+      runner: {
+        supportsConfidentialStdin: true,
+        supportsProcessTreeCustody: true,
+        reconcileProcessTreeCustody: async () => true,
+        execute: runnerExecute,
+      },
+    };
     await expect(
       resolveCodexExecutionEngineForRun({
         config: { agentCommand: "codex-acp" },
-        executionTarget: {
-          kind: "remote",
-          transport: "sandbox",
-          providerKey: "fake-plugin",
-          remoteCwd: "/work",
-          runner: {
-            execute: async () => ({
-              exitCode: 0,
-              signal: null,
-              timedOut: false,
-              stdout: "",
-              stderr: "",
-              pid: null,
-              startedAt: new Date().toISOString(),
-            }),
-          },
-        },
+        executionTarget,
       }),
-    ).resolves.toEqual({ engine: "acp", explicit: false });
+    ).resolves.toMatchObject({
+      engine: "cli",
+      explicit: false,
+      fallbackReason: expect.stringContaining("Paperclip #22"),
+    });
+    await expect(
+      resolveCodexExecutionEngineForRun({
+        config: { engine: "acp", agentCommand: "codex-acp" },
+        executionTarget,
+      }),
+    ).resolves.toEqual({ engine: "acp", explicit: true });
+
+    const createRuntime = vi.fn(() => new FakeRuntime({}) as never);
+    const execute = createCodexAcpExecutorImpl({ createRuntime });
+    await expect(execute(buildContext(root, { executionTarget }))).rejects.toThrow(
+      /Paperclip #22/,
+    );
+    expect(createRuntime).not.toHaveBeenCalled();
+    expect(runnerExecute).not.toHaveBeenCalled();
+  });
+
+  it("reports the Paperclip #22 remote ACP gate in environment validation", async () => {
+    const root = await makeTempRoot("paperclip-codex-remote-acp-env-");
+    const result = await testCodexAcpEnvironment({
+      adapterType: "codex_local",
+      companyId: "company-1",
+      config: { engine: "acp", cwd: root, agentCommand: "codex-acp" },
+      executionTarget: {
+        kind: "remote",
+        transport: "sandbox",
+        providerKey: "fake-plugin",
+        remoteCwd: "/work",
+        runner: {
+          execute: async () => ({
+            exitCode: 0,
+            signal: null,
+            timedOut: false,
+            stdout: "",
+            stderr: "",
+            pid: null,
+            startedAt: new Date().toISOString(),
+          }),
+        },
+      },
+    });
+
+    expect(result.status).toBe("fail");
+    expect(result.checks).toContainEqual(expect.objectContaining({
+      code: "codex_acp_remote_target_disabled",
+      level: "error",
+      message: expect.stringContaining("Paperclip #22"),
+    }));
   });
 
   it("falls back to the CLI lane for one-shot sandbox auto runs", async () => {
@@ -644,11 +735,10 @@ describe("codex_local ACP lane", () => {
     const sourceHome = path.join(root, "codex-home");
     // A separate shared host home with no auth.json so the teardown copy-back is
     // a benign no-op here (this test asserts the inbound seed + remap only).
-    const sharedHostHome = path.join(root, "shared-codex-home");
+    const sharedHostHome = await makePrivateHostCodexHome();
     await fs.mkdir(localCwd, { recursive: true });
     await fs.mkdir(remoteCwd, { recursive: true });
     await fs.mkdir(sourceHome, { recursive: true });
-    await fs.mkdir(sharedHostHome, { recursive: true });
     await fs.writeFile(
       path.join(sourceHome, "auth.json"),
       subscriptionAuthJson("acct-seed", NEWER_REFRESH, "seed"),
@@ -710,11 +800,10 @@ describe("codex_local ACP lane", () => {
     const localCwd = path.join(root, "worktree");
     const remoteCwd = path.join(root, "remote-workspace");
     const sourceHome = path.join(root, "codex-home");
-    const sharedHostHome = path.join(root, "shared-codex-home");
+    const sharedHostHome = await makePrivateHostCodexHome();
     await fs.mkdir(localCwd, { recursive: true });
     await fs.mkdir(remoteCwd, { recursive: true });
     await fs.mkdir(sourceHome, { recursive: true });
-    await fs.mkdir(sharedHostHome, { recursive: true });
     // The home staged into the sandbox carries a strictly-newer, same-identity
     // credential (simulating an in-sandbox token rotation); the shared host copy
     // is older.
@@ -764,9 +853,10 @@ describe("codex_local ACP lane", () => {
     const hostAuth = JSON.parse(await fs.readFile(path.join(sharedHostHome, "auth.json"), "utf8"));
     expect(hostAuth.last_refresh).toBe(NEWER_REFRESH);
     expect(hostAuth.tokens.refresh_token).toBe("ref-sandbox-newer");
-    // Mode preserved at 0600 by the atomic same-directory rename.
+    // POSIX mode is preserved by the atomic rename. The copy-back DACL suite
+    // separately proves the protected Windows temp and post-rename policies.
     const mode = (await fs.stat(path.join(sharedHostHome, "auth.json"))).mode & 0o777;
-    expect(mode).toBe(0o600);
+    if (process.platform !== "win32") expect(mode).toBe(0o600);
   });
 
   it("keeps the shared host Codex auth when the sandbox copy is not strictly newer", async () => {
@@ -774,11 +864,10 @@ describe("codex_local ACP lane", () => {
     const localCwd = path.join(root, "worktree");
     const remoteCwd = path.join(root, "remote-workspace");
     const sourceHome = path.join(root, "codex-home");
-    const sharedHostHome = path.join(root, "shared-codex-home");
+    const sharedHostHome = await makePrivateHostCodexHome();
     await fs.mkdir(localCwd, { recursive: true });
     await fs.mkdir(remoteCwd, { recursive: true });
     await fs.mkdir(sourceHome, { recursive: true });
-    await fs.mkdir(sharedHostHome, { recursive: true });
     // The staged/sandbox credential is OLDER than the shared host copy: the
     // strictly-newer guard must keep the host credential (never overwrite a good
     // token with a spent one).
@@ -828,22 +917,16 @@ describe("codex_local ACP lane", () => {
     expect(hostAuth.tokens.refresh_token).toBe("ref-host-newer");
   });
 
-  it("keeps the host staged Codex home after a clean teardown so a compatible resume can reuse it", async () => {
-    // Session-re-staging guardrail: the per-run copy-back (`teardown`) must NOT
-    // remove the host staged-home temp dir — that removal moved to the one-time
-    // `disposeStaged`, fired only when the runtime is dropped. So after a CLEAN
-    // turn the engine caches the staged runtime warm and its host staged home is
-    // still on disk for the next compatible resume to reuse.
-    const runId = "run-keep-staged-home";
+  it("releases the host staged Codex home after process-session controller cleanup", async () => {
+    const runId = `run-keep-staged-home-${process.pid}-${randomUUID()}`;
     const root = await makeTempRoot("paperclip-codex-acp-keep-staged-");
     const localCwd = path.join(root, "worktree");
     const remoteCwd = path.join(root, "remote-workspace");
     const sourceHome = path.join(root, "codex-home");
-    const sharedHostHome = path.join(root, "shared-codex-home");
+    const sharedHostHome = await makePrivateHostCodexHome();
     await fs.mkdir(localCwd, { recursive: true });
     await fs.mkdir(remoteCwd, { recursive: true });
     await fs.mkdir(sourceHome, { recursive: true });
-    await fs.mkdir(sharedHostHome, { recursive: true });
     // Strictly-newer sandbox credential so the per-run copy-back has real work.
     await fs.writeFile(
       path.join(sourceHome, "auth.json"),
@@ -857,7 +940,9 @@ describe("codex_local ACP lane", () => {
     );
     process.env.CODEX_HOME = sharedHostHome;
 
-    // Isolated staged-runtime cache so this test observes only its own entry.
+    // Isolated staged-runtime cache so this test proves the process-session
+    // controller does not publish a reusable entry after releasing its exact
+    // launch-bound cleanup bundle.
     const stagedRuntimes = new Map();
     const execute = createCodexAcpExecutor({
       createRuntime: (options: FakeRuntimeOptions) => new FakeRuntime(options) as never,
@@ -891,20 +976,48 @@ describe("codex_local ACP lane", () => {
     );
 
     expect(result.exitCode).toBe(0);
-    // Guardrail: `teardown` ran the copy-back but left the host staged home in
-    // place, and the clean turn cached the staged runtime warm for reuse.
+    // The accepted launch controller owns the staging resource through exact
+    // tree-custody/copy-back cleanup and must remove it before reporting release.
     const stagedDirs = await listCodexHomeSyncDirs(runId);
-    expect(stagedDirs).toHaveLength(1);
-    await expect(fs.stat(stagedDirs[0]!)).resolves.toBeDefined();
-    expect(stagedRuntimes.size).toBe(1);
+    expect(stagedDirs).toHaveLength(0);
+    expect(stagedRuntimes.size).toBe(0);
     // The per-run copy-back still fired: the strictly-newer sandbox credential
     // landed on the shared host under the monotonic guard.
     const hostAuth = JSON.parse(await fs.readFile(path.join(sharedHostHome, "auth.json"), "utf8"));
     expect(hostAuth.last_refresh).toBe(NEWER_REFRESH);
     expect(hostAuth.tokens.refresh_token).toBe("ref-sandbox-newer");
-    // No `disposeStaged` fires while the entry stays warm, so remove the
-    // intentionally-persisted staged temp ourselves to avoid leaking it.
-    await Promise.all(stagedDirs.map((dir) => fs.rm(dir, { recursive: true, force: true })));
+  });
+
+  it("makes the exact staged Codex-home disposer idempotent without a global path tombstone", async () => {
+    const runId = `run-dispose-staged-home-${process.pid}-${randomUUID()}`;
+    const sharedHostHome = await makePrivateHostCodexHome();
+    await fs.writeFile(
+      path.join(sharedHostHome, "auth.json"),
+      subscriptionAuthJson("acct-same", NEWER_REFRESH, "host-newer"),
+      { mode: 0o600 },
+    );
+    process.env.CODEX_HOME = sharedHostHome;
+    const env = { CODEX_HOME: sharedHostHome };
+
+    const prepared = await prepareCodexRemoteManagedHome({
+      env,
+      runId,
+      onLog: async () => undefined,
+      stage: async () => ({
+        workspaceRemoteDir: "/workspace",
+        runtimeRootDir: "/runtime",
+        assetDirs: { home: "/runtime/home" },
+        restoreWorkspace: async () => undefined,
+      }),
+    } as never);
+    const stagedDirs = await listCodexHomeSyncDirs(runId);
+    expect(stagedDirs).toHaveLength(1);
+    expect(prepared.disposeStaged).toEqual(expect.any(Function));
+
+    await prepared.disposeStaged!();
+    await prepared.disposeStaged!();
+
+    await expect(fs.stat(stagedDirs[0]!)).rejects.toThrow();
   });
 
   it("removes the host staged Codex home when a failed turn drops the staged runtime", async () => {
@@ -917,11 +1030,10 @@ describe("codex_local ACP lane", () => {
     const localCwd = path.join(root, "worktree");
     const remoteCwd = path.join(root, "remote-workspace");
     const sourceHome = path.join(root, "codex-home");
-    const sharedHostHome = path.join(root, "shared-codex-home");
+    const sharedHostHome = await makePrivateHostCodexHome();
     await fs.mkdir(localCwd, { recursive: true });
     await fs.mkdir(remoteCwd, { recursive: true });
     await fs.mkdir(sourceHome, { recursive: true });
-    await fs.mkdir(sharedHostHome, { recursive: true });
     await fs.writeFile(
       path.join(sourceHome, "auth.json"),
       subscriptionAuthJson("acct-same", NEWER_REFRESH, "sandbox-newer"),

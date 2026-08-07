@@ -10,6 +10,7 @@ import {
   companySkills,
   createDb,
   toolApplications,
+  toolCatalogEntries,
   toolConnectionInstalls,
   toolConnections,
   toolProfileBindings,
@@ -355,7 +356,7 @@ describeEmbeddedPostgres("heartbeat runtime skill version pins", () => {
       type: "mcp_http",
       status: "active",
     }).returning();
-    const [installed, uninstalled] = await db.insert(toolConnections).values([
+    const [installed, installedUncatalogued, uninstalled] = await db.insert(toolConnections).values([
       {
         companyId,
         applicationId: application!.id,
@@ -364,7 +365,18 @@ describeEmbeddedPostgres("heartbeat runtime skill version pins", () => {
         transport: "mcp_remote",
         status: "active",
         enabled: true,
+        healthStatus: "ok",
         config: { url: "https://installed.example.test/mcp" },
+      },
+      {
+        companyId,
+        applicationId: application!.id,
+        name: "Installed Uncatalogued Runtime MCP",
+        uid: `test/${randomUUID()}`,
+        transport: "mcp_remote",
+        status: "active",
+        enabled: true,
+        config: { url: "https://installed-uncatalogued.example.test/mcp" },
       },
       {
         companyId,
@@ -377,6 +389,18 @@ describeEmbeddedPostgres("heartbeat runtime skill version pins", () => {
         config: { url: "https://uninstalled.example.test/mcp" },
       },
     ]).returning();
+    const [installedCatalog] = await db.insert(toolCatalogEntries).values({
+      companyId,
+      applicationId: application!.id,
+      connectionId: installed!.id,
+      name: "runtime_read",
+      toolName: "runtime_read",
+      entryKind: "tool",
+      status: "active",
+      versionHash: "a".repeat(64),
+      schemaHash: "b".repeat(64),
+      reviewedAt: new Date(),
+    }).returning();
     const [profile] = await db.insert(toolProfiles).values({
       companyId,
       profileKey: `app:${installed!.id}`,
@@ -386,10 +410,11 @@ describeEmbeddedPostgres("heartbeat runtime skill version pins", () => {
     await db.insert(toolProfileEntries).values({
       companyId,
       profileId: profile!.id,
-      selectorType: "connection",
+      selectorType: "catalog_entry",
       effect: "include",
       applicationId: application!.id,
       connectionId: installed!.id,
+      catalogEntryId: installedCatalog!.id,
     });
     await db.insert(toolProfileBindings).values({
       companyId,
@@ -397,12 +422,20 @@ describeEmbeddedPostgres("heartbeat runtime skill version pins", () => {
       targetType: "agent",
       targetId: agentId,
     });
-    await db.insert(toolConnectionInstalls).values({
-      companyId,
-      connectionId: installed!.id,
-      targetType: "agent",
-      targetId: agentId,
-    });
+    await db.insert(toolConnectionInstalls).values([
+      {
+        companyId,
+        connectionId: installed!.id,
+        targetType: "agent",
+        targetId: agentId,
+      },
+      {
+        companyId,
+        connectionId: installedUncatalogued!.id,
+        targetType: "agent",
+        targetId: agentId,
+      },
+    ]);
 
     const heartbeat = heartbeatService(db);
     const run = await heartbeat.invoke(agentId, "on_demand", {}, "manual");
@@ -413,10 +446,11 @@ describeEmbeddedPostgres("heartbeat runtime skill version pins", () => {
     expect(captured?.mcpServers).toHaveLength(1);
     expect(captured?.mcpServers[0]).toMatchObject({
       connectionId: installed!.id,
-      name: installed!.name,
+      name: expect.stringContaining(installed!.name),
       token: expect.stringMatching(/^pcgw_/),
       url: expect.stringContaining("/api/tool-gateway/gateways/"),
     });
+    expect(captured?.mcpServers.some((server) => server.connectionId === installedUncatalogued!.id)).toBe(false);
     expect(captured?.mcpServers.some((server) => server.connectionId === uninstalled!.id)).toBe(false);
     const bearer = captured?.mcpServers[0]?.token;
     expect(bearer).toMatch(/^pcgw_/);

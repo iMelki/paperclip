@@ -156,5 +156,5 @@ export { hostNodes } from "./host_nodes.js";
 export { agentInstances } from "./agent_instances.js";
 export { taskParticipations } from "./task_participations.js";
 export { mutationLeases } from "./mutation_leases.js";
+export { coordinationClaimIdempotencyKeys } from "./coordination_claim_idempotency_keys.js";
 export { controlIntents } from "./control_intents.js";
-

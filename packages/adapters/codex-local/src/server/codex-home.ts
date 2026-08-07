@@ -3,6 +3,11 @@ import os from "node:os";
 import path from "node:path";
 import type { AdapterExecutionContext } from "@paperclipai/adapter-utils";
 import { resolvePaperclipInstanceRootForAdapter } from "@paperclipai/adapter-utils/server-utils";
+import {
+  cleanupPrivateStagingDirectory,
+  createPrivateStagingDirectory,
+  verifyPrivateStagingDirectory,
+} from "./windows-private-acl.js";
 
 const TRUTHY_ENV_RE = /^(1|true|yes|on)$/i;
 const COPIED_SHARED_FILES = ["config.json", "config.toml", "instructions.md"] as const;
@@ -359,7 +364,8 @@ function isResolvedPathInside(candidate: string, root: string): boolean {
  * Recursively copies one skill subtree — rooted at its real directory
  * `containmentRoot` — into `targetDir`, dereferencing symlinks to bytes (so the
  * sandbox receives real file content, not host-relative links) and normalizing
- * every copied regular file to mode `0600`. Created directories get mode `0700`.
+ * every copied regular file to POSIX mode `0600`. Created directories get POSIX
+ * mode `0700`; Windows descendants inherit the protected staged-root DACL.
  *
  * Two containment guards protect the staged upload:
  *
@@ -424,7 +430,8 @@ async function stageContainedSubtree(
 /**
  * Recursively copies `sourceDir` (a directory allowlist entry — currently only
  * `skills/`) into `targetDir`, dereferencing symlinks to bytes and normalizing
- * every copied regular file to mode `0600`. Created directories get mode `0700`.
+ * every copied regular file to POSIX mode `0600`. Created directories get POSIX
+ * mode `0700`; Windows descendants inherit the protected staged-root DACL.
  *
  * This replaces `fs.cp({ dereference: true })` which preserves source file modes,
  * leaving `0644` documents and `0755` scripts group/other-readable in the staged
@@ -513,9 +520,10 @@ async function stageCodexHomeEntry(
   // resolved bytes (the live single-use auth token), which we write as a plain
   // regular file so copy-back and in-sandbox auth read real bytes.
   const bytes = await fs.readFile(source);
-  // Stage every regular file `0600`, not just `auth.json`. The staged dir is a
-  // 0700 mkdtemp and each file is read back only by the owner (Codex in-sandbox +
-  // copy-back), so nothing needs group/other read. This is least privilege and,
+  // Stage every regular file `0600` on POSIX, not just `auth.json`. The staged
+  // root is `0700` on POSIX and has a protected allowlisted DACL on Windows;
+  // descendants inherit that boundary before any credential bytes are written.
+  // Nothing needs broad host-local read. This is least privilege and,
   // critically, keeps secret-bearing entries protected: `config.toml` embeds the
   // managed MCP `Authorization = "Bearer …"` header (and the source writer
   // persists it 0600), so a per-file credential allowlist would silently
@@ -537,10 +545,11 @@ async function stageCodexHomeEntry(
  *   land as real files, never dangling links.
  * - **Missing-but-optional entries are skipped** — no `auth.json` in
  *   keyring-credential mode, or no `config.json`, is not an error.
- * - **`mkdtemp` guarantees the staged dir is `0700`** on POSIX, and every staged
- *   regular file is written `0600` (least privilege), so staged credentials —
- *   `auth.json` (OAuth token) and `config.toml` (managed MCP bearer header) —
- *   are never group/other-readable.
+ * - **Private host staging** — POSIX verifies `0700`/`0600`; Windows creates the
+ *   root atomically with a protected inheritable DACL limited to the current
+ *   user, LocalSystem, and Builtin Administrators. The policy exists before the
+ *   directory is visible, so staged OAuth and MCP bearer credentials are not
+ *   exposed to inherited readers or modifiers on the host.
  * - **Fail-closed** — any *unexpected* I/O error removes the partial temp dir
  *   and re-throws, so a run never proceeds with a partial or empty home.
  *
@@ -551,18 +560,33 @@ export async function stageCodexHomeForSync(
   options: StageCodexHomeForSyncOptions = {},
 ): Promise<string> {
   const runIdPart = nonEmpty(options.runId ?? undefined);
-  const stagedHome = await fs.mkdtemp(
-    path.join(os.tmpdir(), `paperclip-codex-home-sync-${runIdPart ? `${runIdPart}-` : ""}`),
+  const stagedHome = await createPrivateStagingDirectory(
+    null,
+    `paperclip-codex-home-sync-${runIdPart ? `${runIdPart}-` : ""}`,
   );
   try {
+    // The root was created with its private policy already attached on Windows,
+    // and verified 0700 on POSIX, before the first credential/config/skill byte.
     for (const entry of CODEX_SYNC_ALLOWLIST) {
       await stageCodexHomeEntry(effectiveCodexHome, stagedHome, entry);
     }
+    // Revalidate the exact root and its parent after every credential/config
+    // byte is present. A replaced directory or changed parent DELETE_CHILD ACL
+    // is a custody failure, never a usable staged home.
+    await verifyPrivateStagingDirectory(stagedHome);
     return stagedHome;
   } catch (error) {
-    // Fail-closed: never hand back a partial home. Remove the temp dir we
-    // created before propagating the failure.
-    await fs.rm(stagedHome, { recursive: true, force: true }).catch(() => {});
+    // Fail-closed: never hand back a partial home and never hide credential
+    // residue. This root was created by this call with an exact protected DACL,
+    // so bounded recursive removal is scoped to our private staging tree.
+    try {
+      await cleanupPrivateStagingDirectory(stagedHome);
+    } catch (cleanupError) {
+      throw new AggregateError(
+        [error, cleanupError],
+        `Codex home staging failed and private credential cleanup could not be proven: ${stagedHome}`,
+      );
+    }
     throw error;
   }
 }

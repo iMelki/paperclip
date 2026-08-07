@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { constants as fsConstants, promises as fs } from "node:fs";
 import path from "node:path";
@@ -31,7 +31,10 @@ async function walkDirectory(
   out: Map<string, SnapshotEntry> = new Map(),
 ): Promise<Map<string, SnapshotEntry>> {
   const current = relative ? path.join(root, relative) : root;
-  const entries = await fs.readdir(current, { withFileTypes: true }).catch(() => []);
+  // Snapshot enumeration is an authority boundary. Missing/unreadable/IO-raced
+  // directories must fail loud: treating them as empty would turn a source read
+  // failure into host-side deletion of every unchanged baseline entry.
+  const entries = await fs.readdir(current, { withFileTypes: true });
   entries.sort((left, right) => left.name.localeCompare(right.name));
 
   for (const entry of entries) {
@@ -106,55 +109,227 @@ function entriesMatch(left: SnapshotEntry | null | undefined, right: SnapshotEnt
   return false;
 }
 
-async function isHolderAlive(lockDir: string): Promise<boolean> {
+interface LockFileIdentity {
+  dev: bigint;
+  ino: bigint;
+}
+
+interface DirectoryMergeLockOwner {
+  version: 1;
+  token: string;
+  pid: number;
+  createdAt: string;
+}
+
+type DirectoryMergeLockInspection =
+  | { state: "missing" }
+  | { state: "unproven"; reason: string }
+  | { state: "valid"; identity: LockFileIdentity; owner: DirectoryMergeLockOwner };
+
+function sameLockIdentity(left: LockFileIdentity, right: LockFileIdentity): boolean {
+  return left.dev === right.dev && left.ino === right.ino;
+}
+
+function parseDirectoryMergeLockOwner(raw: string): DirectoryMergeLockOwner | null {
   try {
-    const raw = await fs.readFile(path.join(lockDir, "owner.json"), "utf8");
-    const owner = JSON.parse(raw) as { pid?: unknown };
-    const pid = typeof owner.pid === "number" && Number.isFinite(owner.pid) && owner.pid > 0 ? owner.pid : null;
-    if (pid === null) {
-      // Owner record is unparseable / missing pid — treat as stale.
-      return false;
+    const parsed = JSON.parse(raw) as Partial<DirectoryMergeLockOwner>;
+    if (
+      parsed.version !== 1 ||
+      typeof parsed.token !== "string" ||
+      parsed.token.length < 16 ||
+      typeof parsed.pid !== "number" ||
+      !Number.isInteger(parsed.pid) ||
+      parsed.pid <= 0 ||
+      typeof parsed.createdAt !== "string" ||
+      !Number.isFinite(Date.parse(parsed.createdAt))
+    ) {
+      return null;
     }
-    try {
-      process.kill(pid, 0);
-      return true;
-    } catch {
-      return false;
-    }
+    return parsed as DirectoryMergeLockOwner;
   } catch {
-    // owner.json missing or unreadable — treat as stale.
-    return false;
+    return null;
   }
 }
 
-async function acquireDirectoryMergeLock(lockDir: string): Promise<() => Promise<void>> {
+async function inspectDirectoryMergeLock(
+  lockPath: string,
+): Promise<DirectoryMergeLockInspection> {
+  let handle;
+  try {
+    handle = await fs.open(lockPath, "r");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return { state: "missing" };
+    return { state: "unproven", reason: "lock file could not be opened" };
+  }
+  try {
+    const before = await handle.stat({ bigint: true });
+    if (!before.isFile()) return { state: "unproven", reason: "lock path is not a regular file" };
+    const raw = await handle.readFile("utf8");
+    const after = await handle.stat({ bigint: true });
+    const beforeIdentity = { dev: before.dev, ino: before.ino };
+    const afterIdentity = { dev: after.dev, ino: after.ino };
+    if (!sameLockIdentity(beforeIdentity, afterIdentity)) {
+      return { state: "unproven", reason: "lock identity changed while reading" };
+    }
+    const owner = parseDirectoryMergeLockOwner(raw);
+    if (!owner) {
+      // This includes the intentional open('wx') -> write+fsync publication
+      // window. Incomplete/unreadable evidence is never proof of staleness.
+      return { state: "unproven", reason: "lock owner publication is incomplete or malformed" };
+    }
+    return { state: "valid", identity: beforeIdentity, owner };
+  } catch {
+    return { state: "unproven", reason: "lock owner evidence could not be read" };
+  } finally {
+    await handle.close().catch(() => undefined);
+  }
+}
+
+function holderIsDefinitelyDead(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return false;
+  } catch (error) {
+    // EPERM and every unknown probe failure mean live/unproven. Only ESRCH is
+    // affirmative absence authority.
+    return (error as NodeJS.ErrnoException).code === "ESRCH";
+  }
+}
+
+async function restoreUnexpectedQuarantine(
+  quarantinePath: string,
+  lockPath: string,
+): Promise<void> {
+  try {
+    // link() is exclusive at the canonical name. It cannot overwrite a newer
+    // claimant; on success unlinking the quarantine preserves the exact inode.
+    await fs.link(quarantinePath, lockPath);
+    await fs.unlink(quarantinePath);
+  } catch {
+    // Leave the unexpected inode at its unique quarantine path for diagnosis;
+    // never delete an identity we did not authorize.
+  }
+}
+
+async function reclaimDeadDirectoryMergeLock(
+  lockPath: string,
+  observed: Extract<DirectoryMergeLockInspection, { state: "valid" }>,
+): Promise<boolean> {
+  const quarantinePath = `${lockPath}.stale-${observed.owner.token}-${randomUUID()}`;
+  try {
+    await fs.rename(lockPath, quarantinePath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw error;
+  }
+  const moved = await inspectDirectoryMergeLock(quarantinePath);
+  if (
+    moved.state !== "valid" ||
+    !sameLockIdentity(moved.identity, observed.identity) ||
+    moved.owner.token !== observed.owner.token
+  ) {
+    await restoreUnexpectedQuarantine(quarantinePath, lockPath);
+    throw new Error(
+      `Workspace restore lock identity changed during stale reclaim; preserved at ${quarantinePath}`,
+    );
+  }
+  await fs.unlink(quarantinePath);
+  return true;
+}
+
+function buildDirectoryMergeLockRelease(input: {
+  lockPath: string;
+  identity: LockFileIdentity;
+  owner: DirectoryMergeLockOwner;
+}): () => Promise<void> {
+  let state:
+    | { status: "active" }
+    | { status: "moved"; quarantinePath: string }
+    | { status: "removed" } = { status: "active" };
+  return async () => {
+    if (state.status === "removed") return;
+    if (state.status === "active") {
+      const current = await inspectDirectoryMergeLock(input.lockPath);
+      if (
+        current.state !== "valid" ||
+        !sameLockIdentity(current.identity, input.identity) ||
+        current.owner.token !== input.owner.token
+      ) {
+        throw new Error(
+          "Workspace restore lock identity changed before release; refusing to delete a replacement claim.",
+        );
+      }
+      const quarantinePath = `${input.lockPath}.release-${input.owner.token}-${randomUUID()}`;
+      await fs.rename(input.lockPath, quarantinePath);
+      state = { status: "moved", quarantinePath };
+    }
+
+    const { quarantinePath } = state;
+    const moved = await inspectDirectoryMergeLock(quarantinePath);
+    if (moved.state === "missing") {
+      state = { status: "removed" };
+      return;
+    }
+    if (
+      moved.state !== "valid" ||
+      !sameLockIdentity(moved.identity, input.identity) ||
+      moved.owner.token !== input.owner.token
+    ) {
+      throw new Error(
+        "Workspace restore lock identity changed after release rename; refusing deletion.",
+      );
+    }
+    await fs.unlink(quarantinePath);
+    state = { status: "removed" };
+  };
+}
+
+async function acquireDirectoryMergeLock(lockPath: string): Promise<() => Promise<void>> {
   const deadline = Date.now() + 30_000;
   while (true) {
+    const owner: DirectoryMergeLockOwner = {
+      version: 1,
+      token: randomUUID(),
+      pid: process.pid,
+      createdAt: new Date().toISOString(),
+    };
+    let handle;
     try {
-      await fs.mkdir(lockDir);
-      await fs.writeFile(
-        path.join(lockDir, "owner.json"),
-        `${JSON.stringify({ pid: process.pid, createdAt: new Date().toISOString() })}\n`,
-        "utf8",
-      );
-      return async () => {
-        await fs.rm(lockDir, { recursive: true, force: true }).catch(() => undefined);
-      };
+      handle = await fs.open(lockPath, "wx", 0o600);
     } catch (error) {
       const code = error && typeof error === "object" ? (error as { code?: unknown }).code : null;
       if (code !== "EEXIST") throw error;
-      // Stale-lock detection: if the owner PID is dead (SIGKILL / OOM / crash),
-      // the lockDir would otherwise persist forever and stall restores. Mirror
-      // the materializePaperclipSkillCopy lock pattern — remove and retry.
-      if (!(await isHolderAlive(lockDir))) {
-        await fs.rm(lockDir, { recursive: true, force: true }).catch(() => undefined);
+      const observed = await inspectDirectoryMergeLock(lockPath);
+      if (
+        observed.state === "valid" &&
+        holderIsDefinitelyDead(observed.owner.pid) &&
+        await reclaimDeadDirectoryMergeLock(lockPath, observed)
+      ) {
         continue;
       }
       if (Date.now() >= deadline) {
-        throw new Error(`Timed out waiting for workspace restore lock at ${lockDir}`);
+        const reason = observed.state === "unproven" ? ` (${observed.reason})` : "";
+        throw new Error(`Timed out waiting for workspace restore lock at ${lockPath}${reason}`);
       }
       await new Promise((resolve) => setTimeout(resolve, 50));
+      continue;
     }
+
+    const stat = await handle.stat({ bigint: true });
+    const identity = { dev: stat.dev, ino: stat.ino };
+    try {
+      await handle.writeFile(`${JSON.stringify(owner)}\n`, "utf8");
+      await handle.sync();
+    } catch (error) {
+      await handle.close().catch(() => undefined);
+      const observed = await inspectDirectoryMergeLock(lockPath);
+      if (observed.state === "valid" && sameLockIdentity(observed.identity, identity)) {
+        await reclaimDeadDirectoryMergeLock(lockPath, observed).catch(() => undefined);
+      }
+      throw error;
+    }
+    await handle.close();
+    return buildDirectoryMergeLockRelease({ lockPath, identity, owner });
   }
 }
 
@@ -170,9 +345,98 @@ export async function withDirectoryMergeLock<T>(
   }
 }
 
+type TargetRootIdentity = {
+  dev: bigint;
+  ino: bigint;
+  realpath: string;
+};
+
+async function captureSafeTargetRootIdentity(targetDir: string): Promise<TargetRootIdentity> {
+  const root = await fs.lstat(targetDir, { bigint: true });
+  if (!root.isDirectory() || root.isSymbolicLink()) {
+    throw new Error("Workspace restore target root must remain a real directory.");
+  }
+  return {
+    dev: root.dev,
+    ino: root.ino,
+    realpath: await fs.realpath(targetDir),
+  };
+}
+
+async function assertSafeTargetRootIdentity(
+  targetDir: string,
+  expected: TargetRootIdentity,
+): Promise<void> {
+  const observed = await captureSafeTargetRootIdentity(targetDir);
+  if (
+    observed.dev !== expected.dev
+    || observed.ino !== expected.ino
+    || observed.realpath !== expected.realpath
+  ) {
+    throw new Error("Workspace restore target root identity changed during merge.");
+  }
+}
+
+async function ensureSafeTargetParentDirectories(
+  targetDir: string,
+  relative: string,
+): Promise<void> {
+  const root = await fs.lstat(targetDir);
+  if (!root.isDirectory() || root.isSymbolicLink()) {
+    throw new Error("Workspace restore target root must remain a real directory.");
+  }
+  const segments = relative.split("/").filter(Boolean).slice(0, -1);
+  let current = targetDir;
+  for (const segment of segments) {
+    current = path.join(current, segment);
+    let entry = await fs.lstat(current).catch((error) => {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+      throw error;
+    });
+    if (!entry) {
+      await fs.mkdir(current).catch((error) => {
+        if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      });
+      entry = await fs.lstat(current);
+    }
+    if (!entry.isDirectory() || entry.isSymbolicLink()) {
+      throw new Error(
+        `Workspace restore refuses nested mutation through non-directory or symlink ancestor: ${current}`,
+      );
+    }
+  }
+}
+
+async function assertSafeExistingTargetAncestors(
+  targetDir: string,
+  relative: string,
+): Promise<boolean> {
+  const root = await fs.lstat(targetDir);
+  if (!root.isDirectory() || root.isSymbolicLink()) {
+    throw new Error("Workspace restore target root must remain a real directory.");
+  }
+  const segments = relative.split("/").filter(Boolean).slice(0, -1);
+  let current = targetDir;
+  for (const segment of segments) {
+    current = path.join(current, segment);
+    const entry = await fs.lstat(current).catch((error) => {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+      throw error;
+    });
+    if (!entry) return false;
+    if (!entry.isDirectory() || entry.isSymbolicLink()) {
+      throw new Error(
+        `Workspace restore refuses nested deletion through non-directory or symlink ancestor: ${current}`,
+      );
+    }
+  }
+  return true;
+}
+
 async function copySnapshotEntry(sourceDir: string, targetDir: string, relative: string, entry: SnapshotEntry): Promise<void> {
   const sourcePath = path.join(sourceDir, relative);
   const targetPath = path.join(targetDir, relative);
+  await ensureSafeTargetParentDirectories(targetDir, relative);
 
   if (entry.kind === "dir") {
     const existing = await fs.lstat(targetPath).catch(() => null);
@@ -186,7 +450,6 @@ async function copySnapshotEntry(sourceDir: string, targetDir: string, relative:
     return;
   }
 
-  await fs.mkdir(path.dirname(targetPath), { recursive: true });
   await fs.rm(targetPath, { recursive: true, force: true }).catch(() => undefined);
   if (entry.kind === "symlink") {
     await fs.symlink(entry.target, targetPath);
@@ -219,14 +482,19 @@ export async function mergeDirectoryWithBaseline(input: {
 }): Promise<void> {
   const source = await captureDirectorySnapshot(input.sourceDir, { exclude: input.baseline.exclude });
   await withDirectoryMergeLock(input.targetDir, async () => {
+    const targetRootIdentity = await captureSafeTargetRootIdentity(input.targetDir);
+    await assertSafeTargetRootIdentity(input.targetDir, targetRootIdentity);
     await input.beforeApply?.();
+    await assertSafeTargetRootIdentity(input.targetDir, targetRootIdentity);
     const current = await captureDirectorySnapshot(input.targetDir, { exclude: input.baseline.exclude });
     const deletedLeafEntries = [...input.baseline.entries.entries()]
       .filter(([relative, entry]) => entry.kind !== "dir" && !source.entries.has(relative))
       .sort(([left], [right]) => right.length - left.length);
 
     for (const [relative, baselineEntry] of deletedLeafEntries) {
+      await assertSafeTargetRootIdentity(input.targetDir, targetRootIdentity);
       if (!entriesMatch(current.entries.get(relative), baselineEntry)) continue;
+      if (!(await assertSafeExistingTargetAncestors(input.targetDir, relative))) continue;
       await fs.rm(path.join(input.targetDir, relative), { recursive: true, force: true }).catch(() => undefined);
     }
 
@@ -234,7 +502,10 @@ export async function mergeDirectoryWithBaseline(input: {
       .filter(([relative, entry]) => entry.kind === "dir" && !source.entries.has(relative))
       .sort(([left], [right]) => right.length - left.length);
 
-    for (const [relative] of deletedDirs) {
+    for (const [relative, baselineEntry] of deletedDirs) {
+      await assertSafeTargetRootIdentity(input.targetDir, targetRootIdentity);
+      if (!entriesMatch(current.entries.get(relative), baselineEntry)) continue;
+      if (!(await assertSafeExistingTargetAncestors(input.targetDir, relative))) continue;
       await fs.rmdir(path.join(input.targetDir, relative)).catch(() => undefined);
     }
 
@@ -243,10 +514,13 @@ export async function mergeDirectoryWithBaseline(input: {
       .sort(([left], [right]) => left.localeCompare(right));
 
     for (const [relative, entry] of changedSourceEntries) {
+      await assertSafeTargetRootIdentity(input.targetDir, targetRootIdentity);
       await copySnapshotEntry(input.sourceDir, input.targetDir, relative, entry);
     }
 
+    await assertSafeTargetRootIdentity(input.targetDir, targetRootIdentity);
     await input.afterApply?.();
+    await assertSafeTargetRootIdentity(input.targetDir, targetRootIdentity);
   });
 }
 

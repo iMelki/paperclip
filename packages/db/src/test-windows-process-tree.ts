@@ -10,11 +10,7 @@ const windowsPowerShellCommand = path.join(
   "v1.0",
   "powershell.exe",
 );
-const taskkillCommand = path.join(
-  process.env.SystemRoot ?? "C:\\Windows",
-  "System32",
-  "taskkill.exe",
-);
+const MAX_WINDOWS_PROCESS_ID = 0x7fffffff;
 
 export type WindowsTestProcessIdentity = {
   pid: number;
@@ -32,7 +28,8 @@ export type ReapWindowsTestProcessTreeResult = {
     | "reaped"
     | "untrusted_root"
     | "snapshot_failed"
-    | "still_running";
+    | "still_running"
+    | "advisory_only_without_job_object";
   rootPid: number;
   capturedPids: number[];
   attemptedPids: number[];
@@ -146,32 +143,46 @@ export function selectOwnedWindowsTestProcessTree(input: {
   });
 }
 
-function parseWindowsTestProcessSnapshot(
+export function parseWindowsTestProcessSnapshot(
   stdout: string,
 ): WindowsTestProcessIdentity[] {
   const parsed = JSON.parse(stdout) as unknown;
-  const records = Array.isArray(parsed) ? parsed : [parsed];
-  return records.flatMap((record) => {
-    if (!record || typeof record !== "object" || Array.isArray(record)) return [];
+  if (!Array.isArray(parsed)) {
+    throw new Error("Invalid Windows process snapshot: expected an array.");
+  }
+  const seenPids = new Set<number>();
+  return parsed.map((record) => {
+    if (!record || typeof record !== "object" || Array.isArray(record)) {
+      throw new Error("Invalid Windows process snapshot record.");
+    }
     const value = record as Record<string, unknown>;
-    const pid = Number(value.pid);
-    const parentPid = Number(value.parentPid);
+    const pid = value.pid;
+    const parentPid = value.parentPid;
     if (
-      !Number.isInteger(pid)
-      || pid <= 0
+      typeof pid !== "number"
+      || !Number.isInteger(pid)
+      || pid < 0
+      || pid > MAX_WINDOWS_PROCESS_ID
+      || typeof parentPid !== "number"
       || !Number.isInteger(parentPid)
       || parentPid < 0
+      || parentPid > MAX_WINDOWS_PROCESS_ID
       || typeof value.createdAt !== "string"
+      || !Number.isFinite(Date.parse(value.createdAt))
+      || (value.commandLine !== null && typeof value.commandLine !== "string")
     ) {
-      return [];
+      throw new Error("Invalid Windows process snapshot identity.");
     }
-    return [{
+    if (seenPids.has(pid)) {
+      throw new Error("Invalid Windows process snapshot: duplicate PID.");
+    }
+    seenPids.add(pid);
+    return {
       pid,
       parentPid,
       createdAt: value.createdAt,
-      commandLine:
-        typeof value.commandLine === "string" ? value.commandLine : null,
-    }];
+      commandLine: value.commandLine,
+    };
   });
 }
 
@@ -234,24 +245,6 @@ export async function snapshotWindowsTestProcesses(
     },
   );
   return parseWindowsTestProcessSnapshot(stdout);
-}
-
-async function taskkillWindowsTestProcess(
-  pid: number,
-  timeoutMs: number,
-): Promise<void> {
-  await execFileAsync(
-    taskkillCommand,
-    ["/PID", String(pid), "/T", "/F"],
-    {
-      windowsHide: true,
-      timeout: Math.max(1, Math.min(1_500, timeoutMs)),
-    },
-  ).catch(() => undefined);
-}
-
-function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 export async function reapWindowsTestProcessTree(input: {
@@ -356,76 +349,26 @@ export async function reapWindowsTestProcessTree(input: {
     return {
       ...base,
       attempted: false,
-      confirmedStopped: true,
+      confirmedStopped: false,
       reason: "no_owned_processes",
       snapshots,
     };
   }
-
-  const capturedByKey = new Map(owned.map((item) => [identityKey(item), item]));
-  const attemptedPids = new Set<number>();
-  while (Date.now() < deadline) {
-    const currentOwned = selectOwnedWindowsTestProcessTree({
-      snapshot,
-      rootPid,
-      ownerMarkers: input.ownerMarkers,
-      previouslyOwned: [...capturedByKey.values()],
-    });
-    for (const item of currentOwned) {
-      capturedByKey.set(identityKey(item), item);
-    }
-    if (currentOwned.length === 0) {
-      return {
-        rootPid,
-        attempted: attemptedPids.size > 0,
-        confirmedStopped: true,
-        reason: "reaped",
-        capturedPids: [...new Set(
-          [...capturedByKey.values()].map((item) => item.pid),
-        )].sort((left, right) => left - right),
-        attemptedPids: [...attemptedPids].sort((left, right) => left - right),
-        remainingPids: [],
-        snapshots,
-      };
-    }
-
-    const root = currentOwned.find((item) => item.pid === rootPid);
-    const killCandidates = root ? [root] : currentOwned.slice(0, 1);
-    for (const item of killCandidates) {
-      if (item.pid === process.pid) continue;
-      attemptedPids.add(item.pid);
-      await taskkillWindowsTestProcess(
-        item.pid,
-        Math.max(1, deadline - Date.now()),
-      );
-    }
-    await delay(Math.min(75, Math.max(1, deadline - Date.now())));
-    try {
-      snapshot = await snapshotWindowsTestProcesses(
-        Math.max(250, deadline - Date.now()),
-      );
-      snapshots += 1;
-    } catch {
-      break;
-    }
-  }
-
-  const remaining = selectOwnedWindowsTestProcessTree({
-    snapshot,
-    rootPid,
-    ownerMarkers: input.ownerMarkers,
-    previouslyOwned: [...capturedByKey.values()],
-  });
+  // CIM PID/creation/lineage snapshots are advisory observations. A process can
+  // exit and have its PID reused after this snapshot but before a bare-PID kill,
+  // and an unobserved intermediate can leave a reparented descendant. Without a
+  // launch-time Job Object and retained kernel handle, this helper must not
+  // signal or claim the tree stopped—even in test cleanup on an operator host.
   return {
     rootPid,
-    attempted: attemptedPids.size > 0,
-    confirmedStopped: remaining.length === 0,
-    reason: remaining.length === 0 ? "reaped" : "still_running",
-    capturedPids: [...new Set(
-      [...capturedByKey.values()].map((item) => item.pid),
-    )].sort((left, right) => left - right),
-    attemptedPids: [...attemptedPids].sort((left, right) => left - right),
-    remainingPids: remaining
+    attempted: false,
+    confirmedStopped: false,
+    reason: "advisory_only_without_job_object",
+    capturedPids: owned
+      .map((item) => item.pid)
+      .sort((left, right) => left - right),
+    attemptedPids: [],
+    remainingPids: owned
       .map((item) => item.pid)
       .sort((left, right) => left - right),
     snapshots,

@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import type { AdapterRuntimeMcpServer } from "@paperclipai/adapter-utils";
 import { runChildProcess } from "@paperclipai/adapter-utils/server-utils";
+import { resolveTestShellCommand } from "@paperclipai/adapter-utils/test-shell";
 import {
   claudeCommandSupportsEffortFlag,
   claudeSessionCwdMatchesExecutionTarget,
@@ -308,8 +309,14 @@ async function setupExecuteEnv(
   await (options?.commandWriter ?? writeFakeClaudeCommand)(commandPath);
   const previousHome = process.env.HOME;
   const previousPath = process.env.PATH;
+  const previousClaudeConfigDir = process.env.CLAUDE_CONFIG_DIR;
+  const previousPaperclipHome = process.env.PAPERCLIP_HOME;
+  const previousPaperclipInstanceId = process.env.PAPERCLIP_INSTANCE_ID;
   process.env.HOME = root;
   process.env.PATH = `${binDir}${path.delimiter}${process.env.PATH ?? ""}`;
+  process.env.CLAUDE_CONFIG_DIR = path.join(root, ".claude");
+  process.env.PAPERCLIP_HOME = path.join(root, ".paperclip");
+  process.env.PAPERCLIP_INSTANCE_ID = "test-instance";
   return {
     workspace, commandPath, capturePath, statePath,
     restore: () => {
@@ -317,6 +324,12 @@ async function setupExecuteEnv(
       else process.env.HOME = previousHome;
       if (previousPath === undefined) delete process.env.PATH;
       else process.env.PATH = previousPath;
+      if (previousClaudeConfigDir === undefined) delete process.env.CLAUDE_CONFIG_DIR;
+      else process.env.CLAUDE_CONFIG_DIR = previousClaudeConfigDir;
+      if (previousPaperclipHome === undefined) delete process.env.PAPERCLIP_HOME;
+      else process.env.PAPERCLIP_HOME = previousPaperclipHome;
+      if (previousPaperclipInstanceId === undefined) delete process.env.PAPERCLIP_INSTANCE_ID;
+      else process.env.PAPERCLIP_INSTANCE_ID = previousPaperclipInstanceId;
     },
   };
 }
@@ -337,7 +350,7 @@ function createLocalSandboxRunner() {
       counter += 1;
       return runChildProcess(
         `sandbox-run-${counter}`,
-        input.command,
+        resolveTestShellCommand(input.command),
         input.args ?? [],
         {
           cwd: input.cwd ?? process.cwd(),
@@ -814,6 +827,9 @@ describe("claude execute", () => {
     const claudeRoot = path.join(root, ".claude");
     const previousHome = process.env.HOME;
     const previousPath = process.env.PATH;
+    const previousClaudeConfigDir = process.env.CLAUDE_CONFIG_DIR;
+    const previousPaperclipHome = process.env.PAPERCLIP_HOME;
+    const previousPaperclipInstanceId = process.env.PAPERCLIP_INSTANCE_ID;
 
     await fs.mkdir(localWorkspace, { recursive: true });
     await fs.mkdir(remoteWorkspace, { recursive: true });
@@ -824,6 +840,9 @@ describe("claude execute", () => {
 
     process.env.HOME = root;
     process.env.PATH = `${binDir}${path.delimiter}${process.env.PATH ?? ""}`;
+    process.env.CLAUDE_CONFIG_DIR = claudeRoot;
+    process.env.PAPERCLIP_HOME = path.join(root, ".paperclip");
+    process.env.PAPERCLIP_INSTANCE_ID = "test-instance";
 
     try {
       const result = await execute({
@@ -892,6 +911,12 @@ describe("claude execute", () => {
       else process.env.HOME = previousHome;
       if (previousPath === undefined) delete process.env.PATH;
       else process.env.PATH = previousPath;
+      if (previousClaudeConfigDir === undefined) delete process.env.CLAUDE_CONFIG_DIR;
+      else process.env.CLAUDE_CONFIG_DIR = previousClaudeConfigDir;
+      if (previousPaperclipHome === undefined) delete process.env.PAPERCLIP_HOME;
+      else process.env.PAPERCLIP_HOME = previousPaperclipHome;
+      if (previousPaperclipInstanceId === undefined) delete process.env.PAPERCLIP_INSTANCE_ID;
+      else process.env.PAPERCLIP_INSTANCE_ID = previousPaperclipInstanceId;
       await fs.rm(root, { recursive: true, force: true });
     }
   }, SANDBOX_EXECUTION_TEST_TIMEOUT_MS);

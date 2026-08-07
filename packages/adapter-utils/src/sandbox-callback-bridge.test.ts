@@ -5,7 +5,7 @@ import path from "node:path";
 import { promisify } from "node:util";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { prepareCommandManagedRuntime } from "./command-managed-runtime.js";
+import { prepareCommandManagedRuntime, type CommandManagedRuntimeRunner } from "./command-managed-runtime.js";
 import {
   authorizeSandboxCallbackBridgeRequestWithRoutes,
   createCommandManagedSandboxCallbackBridgeQueueClient,
@@ -1113,5 +1113,34 @@ describe("sandbox callback bridge", () => {
         PAPERCLIP_SANDBOX_EXEC_CHANNEL: "bridge",
       },
     }));
+  });
+
+  it("publishes command-managed queue files by atomic same-directory rename", async () => {
+    const runner = {
+      execute: vi.fn(async (_input: Parameters<CommandManagedRuntimeRunner["execute"]>[0]) => ({
+        exitCode: 0,
+        signal: null,
+        timedOut: false,
+        stdout: "",
+        stderr: "",
+        pid: null,
+        startedAt: new Date().toISOString(),
+      })),
+    };
+    const client = createCommandManagedSandboxCallbackBridgeQueueClient({
+      runner,
+      remoteCwd: "/workspace",
+      timeoutMs: 30_000,
+    });
+    const queuePath = "/workspace/.paperclip-runtime/acpx/process-sessions/session-1/stdin/000000000001.json";
+
+    await client.writeTextFile(queuePath, '{"type":"stdinEnd"}\n');
+
+    const scripts = runner.execute.mock.calls.map(([input]) => input.args?.[1] ?? "");
+    const finalize = scripts.find((script) => script.includes("base64 -d") && script.includes("mv -f"));
+    expect(finalize).toBeTruthy();
+    expect(finalize).toContain(`${queuePath}.paperclip-upload.tmp`);
+    expect(finalize).toContain(`mv -f '${queuePath}.paperclip-upload.tmp' '${queuePath}'`);
+    expect(finalize).not.toContain(`> '${queuePath}'`);
   });
 });

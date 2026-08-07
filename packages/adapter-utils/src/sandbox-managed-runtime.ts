@@ -403,7 +403,17 @@ async function withTempDir<T>(prefix: string, fn: (dir: string) => Promise<T>): 
 }
 
 async function execTar(args: string[], options: { cwd?: string } = {}): Promise<void> {
-  await execFile("tar", args, {
+  let tarCommand = "tar";
+  if (process.platform === "win32") {
+    const nativeTar = path.join(process.env.SystemRoot ?? "C:\\Windows", "System32", "tar.exe");
+    try {
+      await fs.access(nativeTar);
+      tarCommand = nativeTar;
+    } catch {
+      // Older Windows hosts may not provide the inbox bsdtar executable.
+    }
+  }
+  await execFile(tarCommand, args, {
     cwd: options.cwd,
     env: {
       ...process.env,

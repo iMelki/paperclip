@@ -3,6 +3,10 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import {
+  createPrivateExecutableAssetDirectory,
+  type PrivateExecutableAssetDirectory,
+} from "@paperclipai/adapter-utils/private-executable-asset";
 import type { SandboxManagedRuntimeAsset } from "@paperclipai/adapter-utils/sandbox-managed-runtime";
 
 // Captured Codex `home` asset descriptor + the sandbox `auth.json` fixture the
@@ -11,6 +15,10 @@ import type { SandboxManagedRuntimeAsset } from "@paperclipai/adapter-utils/sand
 const captured: { assets: SandboxManagedRuntimeAsset[] } = { assets: [] };
 const sandboxAuthFixture: { bytes: Buffer } = { bytes: Buffer.from("{}") };
 const REMOTE_RUNTIME_ROOT = "/remote/workspace/.paperclip-runtime/codex";
+
+function expectPrivatePosixMode(actual: number, expected = 0o600): void {
+  if (process.platform !== "win32") expect(actual).toBe(expected);
+}
 
 const {
   runChildProcess,
@@ -85,6 +93,7 @@ prepareAdapterExecutionTargetRuntime.mockImplementation(async (input: { assets?:
 
 describe("codex execute — outbound auth copy-back restore contribution", () => {
   const cleanupDirs: string[] = [];
+  const privateTestAssets = new Set<PrivateExecutableAssetDirectory>();
   let savedCodexHomeEnv: string | undefined;
 
   afterEach(async () => {
@@ -94,6 +103,10 @@ describe("codex execute — outbound auth copy-back restore contribution", () =>
     } else {
       process.env.CODEX_HOME = savedCodexHomeEnv;
     }
+    for (const asset of privateTestAssets) {
+      await asset.cleanup();
+    }
+    privateTestAssets.clear();
     while (cleanupDirs.length > 0) {
       const dir = cleanupDirs.pop();
       if (!dir) continue;
@@ -127,9 +140,20 @@ describe("codex execute — outbound auth copy-back restore contribution", () =>
     // The shared host home is what `resolveSharedCodexHomeDir` returns
     // (process.env.CODEX_HOME) — the copy-back target. Point it at a tmp dir so
     // the round-trip never touches the real host credential.
-    const sharedHostHome = path.join(rootDir, "shared-codex-home");
+    const sharedHostHome = process.platform === "win32"
+      ? await (async () => {
+          // `%TEMP%` can inherit DELETE_CHILD for unrelated principals. Use the
+          // production private-directory primitive for the credential parent so
+          // the fixture does not weaken the fail-closed custody boundary.
+          const asset = await createPrivateExecutableAssetDirectory({
+            prefix: "paperclip-codex-copyback-e2e-home-",
+          });
+          privateTestAssets.add(asset);
+          return asset.directoryPath;
+        })()
+      : path.join(rootDir, "shared-codex-home");
     await mkdir(workspaceDir, { recursive: true });
-    await mkdir(sharedHostHome, { recursive: true });
+    if (process.platform !== "win32") await mkdir(sharedHostHome, { recursive: true });
     const hostAuthPath = path.join(sharedHostHome, "auth.json");
     await writeFile(hostAuthPath, input.hostAuth, { mode: 0o600 });
 
@@ -208,7 +232,7 @@ describe("codex execute — outbound auth copy-back restore contribution", () =>
     const result = await runTeardown({ sandboxAuth, hostAuth });
 
     expect(result.finalHostAuth).toBe(sandboxAuth);
-    expect(result.finalHostMode).toBe(0o600);
+    expectPrivatePosixMode(result.finalHostMode);
   });
 
   it("keeps the host auth.json when the sandbox copy is a tie or older on teardown", async () => {
@@ -228,7 +252,7 @@ describe("codex execute — outbound auth copy-back restore contribution", () =>
     for (const entry of cases) {
       const result = await runTeardown({ sandboxAuth: entry.sandboxAuth, hostAuth: entry.hostAuth });
       expect(result.finalHostAuth, entry.name).toBe(entry.hostAuth);
-      expect(result.finalHostMode, entry.name).toBe(0o600);
+      expectPrivatePosixMode(result.finalHostMode);
     }
   });
 });

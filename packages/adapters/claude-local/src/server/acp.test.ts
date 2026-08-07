@@ -1,12 +1,12 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AdapterExecutionContext, AdapterInvocationMeta } from "@paperclipai/adapter-utils";
 import { runChildProcess } from "@paperclipai/adapter-utils/server-utils";
 import {
   buildClaudeAcpConfig,
-  createClaudeAcpExecutor,
+  createClaudeAcpExecutor as createClaudeAcpExecutorImpl,
   nodeVersionMeetsClaudeAcpMinimum,
   resolveClaudeAcpBillingIdentity,
   resolveClaudeExecutionEngine,
@@ -20,6 +20,9 @@ import {
 function createLocalSandboxRunner() {
   let counter = 0;
   return {
+    supportsConfidentialStdin: true,
+    supportsProcessTreeCustody: true,
+    reconcileProcessTreeCustody: async () => true,
     execute: async (input: {
       command: string;
       args?: string[];
@@ -70,6 +73,15 @@ const originalEnv: Record<string, string | undefined> = {
   PAPERCLIP_INSTANCE_ID: process.env.PAPERCLIP_INSTANCE_ID,
   CLAUDE_CONFIG_DIR: process.env.CLAUDE_CONFIG_DIR,
 };
+
+function createClaudeAcpExecutor(
+  options: Parameters<typeof createClaudeAcpExecutorImpl>[0] = {},
+) {
+  return createClaudeAcpExecutorImpl({
+    ...options,
+    testOnlyEnableRemoteProcessSessionReleaseProtocol: true,
+  });
+}
 
 function setNodeVersion(version: string): void {
   Object.defineProperty(process, "version", {
@@ -333,30 +345,87 @@ describe("claude_local ACP lane", () => {
     ).rejects.toThrow('networkScope must be "deny" or "allowlist"');
   });
 
-  it("uses ACP for bridged sandbox auto runs when the ACP command is configured as a shell command", async () => {
+  it("falls back to CLI for bridged sandbox auto runs and fails explicit remote ACP closed", async () => {
     setNodeVersion("v22.12.0");
+    const root = await makeTempRoot("paperclip-claude-remote-acp-disabled-");
+    const runnerExecute = vi.fn(async () => ({
+      exitCode: 0,
+      signal: null,
+      timedOut: false,
+      stdout: "",
+      stderr: "",
+      pid: null,
+      startedAt: new Date().toISOString(),
+    }));
+    const executionTarget = {
+      kind: "remote" as const,
+      transport: "sandbox" as const,
+      providerKey: "fake-plugin",
+      remoteCwd: "/work",
+      runner: {
+        supportsConfidentialStdin: true,
+        supportsProcessTreeCustody: true,
+        reconcileProcessTreeCustody: async () => true,
+        execute: runnerExecute,
+      },
+    };
     await expect(
       resolveClaudeExecutionEngineForRun({
         config: { agentCommand: "claude-agent-acp" },
-        executionTarget: {
-          kind: "remote",
-          transport: "sandbox",
-          providerKey: "fake-plugin",
-          remoteCwd: "/work",
-          runner: {
-            execute: async () => ({
-              exitCode: 0,
-              signal: null,
-              timedOut: false,
-              stdout: "",
-              stderr: "",
-              pid: null,
-              startedAt: new Date().toISOString(),
-            }),
-          },
-        },
+        executionTarget,
       }),
-    ).resolves.toEqual({ engine: "acp", explicit: false });
+    ).resolves.toMatchObject({
+      engine: "cli",
+      explicit: false,
+      fallbackReason: expect.stringContaining("Paperclip #22"),
+    });
+    await expect(
+      resolveClaudeExecutionEngineForRun({
+        config: { engine: "acp", agentCommand: "claude-agent-acp" },
+        executionTarget,
+      }),
+    ).resolves.toEqual({ engine: "acp", explicit: true });
+
+    const createRuntime = vi.fn(() => new FakeRuntime({}) as never);
+    const execute = createClaudeAcpExecutorImpl({ createRuntime });
+    await expect(execute(buildContext(root, { executionTarget }))).rejects.toThrow(
+      /Paperclip #22/,
+    );
+    expect(createRuntime).not.toHaveBeenCalled();
+    expect(runnerExecute).not.toHaveBeenCalled();
+  });
+
+  it("reports the Paperclip #22 remote ACP gate in environment validation", async () => {
+    const root = await makeTempRoot("paperclip-claude-remote-acp-env-");
+    const result = await testClaudeAcpEnvironment({
+      adapterType: "claude_local",
+      companyId: "company-1",
+      config: { engine: "acp", cwd: root, agentCommand: "claude-agent-acp" },
+      executionTarget: {
+        kind: "remote",
+        transport: "sandbox",
+        providerKey: "fake-plugin",
+        remoteCwd: "/work",
+        runner: {
+          execute: async () => ({
+            exitCode: 0,
+            signal: null,
+            timedOut: false,
+            stdout: "",
+            stderr: "",
+            pid: null,
+            startedAt: new Date().toISOString(),
+          }),
+        },
+      },
+    });
+
+    expect(result.status).toBe("fail");
+    expect(result.checks).toContainEqual(expect.objectContaining({
+      code: "claude_acp_remote_target_disabled",
+      level: "error",
+      message: expect.stringContaining("Paperclip #22"),
+    }));
   });
 
   it("falls back to the CLI lane for one-shot sandbox auto runs", async () => {

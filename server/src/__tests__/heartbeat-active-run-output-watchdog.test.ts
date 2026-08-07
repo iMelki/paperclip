@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { spawn } from "node:child_process";
 import { and, eq, sql } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
@@ -26,6 +27,7 @@ import {
 } from "../services/heartbeat.ts";
 import { recoveryService } from "../services/recovery/service.ts";
 import { getRunLogStore } from "../services/run-log-store.ts";
+import { isPidAlive } from "../services/local-service-supervisor.ts";
 
 const mockAdapterExecute = vi.hoisted(() =>
   vi.fn(async () => ({
@@ -131,6 +133,9 @@ describeEmbeddedPostgres("active-run output watchdog", () => {
     sourceStatus?: "in_progress" | "done" | "cancelled";
     sourceOriginKind?: string;
     sameRunTerminalEvidence?: "activity" | "comment";
+    processPid?: number | null;
+    processGroupId?: number | null;
+    adapterType?: string;
   }) {
     const companyId = randomUUID();
     const managerId = randomUUID();
@@ -169,7 +174,7 @@ describeEmbeddedPostgres("active-run output watchdog", () => {
         role: "engineer",
         status: "running",
         reportsTo: managerId,
-        adapterType: "codex_local",
+        adapterType: opts.adapterType ?? "codex_local",
         adapterConfig: {},
         runtimeConfig: {},
         permissions: {},
@@ -199,6 +204,8 @@ describeEmbeddedPostgres("active-run output watchdog", () => {
       triggerDetail: "system",
       startedAt,
       processStartedAt: startedAt,
+      processPid: opts.processPid ?? null,
+      processGroupId: opts.processGroupId ?? null,
       lastOutputAt,
       lastOutputSeq: opts.withOutput ? 3 : 0,
       lastOutputStream: opts.withOutput ? "stdout" : null,
@@ -462,6 +469,7 @@ describeEmbeddedPostgres("active-run output watchdog", () => {
       ageMs: ACTIVE_RUN_OUTPUT_CRITICAL_THRESHOLD_MS + 60_000,
       sourceStatus: "done",
       sameRunTerminalEvidence: "activity",
+      adapterType: "openclaw_gateway",
     });
     const heartbeat = heartbeatService(db);
 
@@ -485,7 +493,7 @@ describeEmbeddedPostgres("active-run output watchdog", () => {
         sameRunEvidenceKind: "activity",
         evaluationIssueId: null,
         evaluationIssueIdentifier: null,
-        cleanup: { outcome: "no_process_metadata" },
+        cleanup: { outcome: "skipped_non_local_adapter" },
       },
     });
 
@@ -503,6 +511,215 @@ describeEmbeddedPostgres("active-run output watchdog", () => {
       .from(heartbeatRunEvents)
       .where(eq(heartbeatRunEvents.runId, runId));
     expect(event?.message).toContain("Source-resolved watchdog fold");
+  });
+
+  it("retains a local source-resolved run and issue lock when all process metadata is missing", async () => {
+    const now = new Date("2026-04-22T20:00:00.000Z");
+    const { companyId, issueId, runId } = await seedRunningRun({
+      now,
+      ageMs: ACTIVE_RUN_OUTPUT_CRITICAL_THRESHOLD_MS + 60_000,
+      sourceStatus: "done",
+      sameRunTerminalEvidence: "activity",
+      processPid: null,
+      processGroupId: null,
+    });
+    const heartbeat = heartbeatService(db);
+
+    const result = await heartbeat.scanSilentActiveRuns({ now, companyId });
+
+    expect(result).toMatchObject({ created: 0, folded: 0, skipped: 1 });
+    const [run] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, runId));
+    expect(run).toMatchObject({
+      status: "running",
+      errorCode: "process_termination_unverified_needs_human",
+      processPid: null,
+      processGroupId: null,
+    });
+    const [source] = await db.select().from(issues).where(eq(issues.id, issueId));
+    expect(source?.executionRunId).toBe(runId);
+    const [event] = await db
+      .select()
+      .from(heartbeatRunEvents)
+      .where(eq(heartbeatRunEvents.runId, runId));
+    expect(event?.payload).toMatchObject({
+      needsHuman: true,
+      cleanup: {
+        attempted: false,
+        outcome: "termination_unverified_needs_human",
+        terminationOutcome: "untrusted_identity",
+        pid: null,
+        processGroupId: null,
+      },
+    });
+  });
+
+  it("retains a source-resolved remote ACP ambiguity when no local PID proves the child terminal", async () => {
+    const now = new Date("2026-04-22T20:00:00.000Z");
+    const { companyId, issueId, runId } = await seedRunningRun({
+      now,
+      ageMs: ACTIVE_RUN_OUTPUT_CRITICAL_THRESHOLD_MS + 60_000,
+      sourceStatus: "done",
+      sameRunTerminalEvidence: "activity",
+    });
+    await db
+      .update(heartbeatRuns)
+      .set({
+        errorCode: "ACP_PROCESS_SESSION_LAUNCH_AMBIGUOUS",
+        error: "Remote ACP launch acceptance needs human reconciliation",
+        resultJson: {
+          processSessionLaunch: {
+            launchId: "launch-source-resolved-fenced-1",
+            sessionId: "session-source-resolved-fenced-1",
+            status: "needs_human",
+          },
+        },
+      })
+      .where(eq(heartbeatRuns.id, runId));
+    const heartbeat = heartbeatService(db);
+
+    const result = await heartbeat.scanSilentActiveRuns({ now, companyId });
+
+    expect(result).toMatchObject({ created: 0, folded: 0, skipped: 1 });
+    const [run] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, runId));
+    expect(run).toMatchObject({
+      status: "running",
+      errorCode: "ACP_PROCESS_SESSION_LAUNCH_AMBIGUOUS",
+      processPid: null,
+      processGroupId: null,
+    });
+    const [source] = await db.select().from(issues).where(eq(issues.id, issueId));
+    expect(source?.executionRunId).toBe(runId);
+    const events = await db
+      .select()
+      .from(heartbeatRunEvents)
+      .where(eq(heartbeatRunEvents.runId, runId));
+    expect(events.some((event) => event.message.includes("remote ACP launch reconciliation still fences"))).toBe(true);
+  });
+
+  it("retains a source-resolved accepted ACP launch even before it is classified ambiguous", async () => {
+    const now = new Date("2026-04-22T20:30:00.000Z");
+    const { companyId, issueId, runId } = await seedRunningRun({
+      now,
+      ageMs: ACTIVE_RUN_OUTPUT_CRITICAL_THRESHOLD_MS + 60_000,
+      sourceStatus: "done",
+      sameRunTerminalEvidence: "activity",
+    });
+    await db
+      .update(heartbeatRuns)
+      .set({
+        errorCode: null,
+        error: null,
+        resultJson: {
+          processSessionLaunch: {
+            launchId: "launch-source-resolved-active-1",
+            sessionId: "session-source-resolved-active-1",
+            status: "accepted",
+          },
+        },
+      })
+      .where(eq(heartbeatRuns.id, runId));
+    const heartbeat = heartbeatService(db);
+
+    const result = await heartbeat.scanSilentActiveRuns({ now, companyId });
+
+    expect(result).toMatchObject({ created: 0, folded: 0, skipped: 1 });
+    const [run] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, runId));
+    expect(run).toMatchObject({
+      status: "running",
+      errorCode: null,
+      processPid: null,
+      processGroupId: null,
+    });
+    const [source] = await db.select().from(issues).where(eq(issues.id, issueId));
+    expect(source?.executionRunId).toBe(runId);
+    const events = await db
+      .select()
+      .from(heartbeatRunEvents)
+      .where(eq(heartbeatRunEvents.runId, runId));
+    expect(events.some((event) => event.message.includes("remote ACP launch reconciliation still fences"))).toBe(true);
+  });
+
+  it("retains a source-resolved run when only a persisted live PID remains", async () => {
+    const child = spawn(process.execPath, ["-e", "setInterval(() => undefined, 1000)"], {
+      stdio: "ignore",
+    });
+    expect(child.pid).toBeTypeOf("number");
+    try {
+      await expect.poll(() => isPidAlive(child.pid!), { timeout: 5_000 }).toBe(true);
+      const now = new Date("2026-04-22T20:00:00.000Z");
+      const { companyId, issueId, runId } = await seedRunningRun({
+        now,
+        ageMs: ACTIVE_RUN_OUTPUT_CRITICAL_THRESHOLD_MS + 60_000,
+        sourceStatus: "done",
+        sameRunTerminalEvidence: "activity",
+        processPid: child.pid,
+      });
+      const heartbeat = heartbeatService(db);
+
+      const result = await heartbeat.scanSilentActiveRuns({ now, companyId });
+
+      expect(result).toMatchObject({ created: 0, folded: 0, skipped: 1 });
+      expect(isPidAlive(child.pid!)).toBe(true);
+      const [run] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, runId));
+      expect(run).toMatchObject({
+        status: "running",
+        errorCode: "process_termination_unverified_needs_human",
+      });
+      const [source] = await db.select().from(issues).where(eq(issues.id, issueId));
+      expect(source?.executionRunId).toBe(runId);
+      const [event] = await db
+        .select()
+        .from(heartbeatRunEvents)
+        .where(eq(heartbeatRunEvents.runId, runId));
+      expect(event?.payload).toMatchObject({
+        needsHuman: true,
+        cleanup: {
+          attempted: false,
+          outcome: "termination_unverified_needs_human",
+          terminationOutcome: "untrusted_identity",
+        },
+      });
+    } finally {
+      child.kill("SIGKILL");
+    }
+  });
+
+  it("retains a source-resolved run when its dead wrapper has a null persisted process group", async () => {
+    const deadPid = 999_999_999;
+    expect(isPidAlive(deadPid)).toBe(false);
+    const now = new Date("2026-04-22T20:00:00.000Z");
+    const { companyId, issueId, runId } = await seedRunningRun({
+      now,
+      ageMs: ACTIVE_RUN_OUTPUT_CRITICAL_THRESHOLD_MS + 60_000,
+      sourceStatus: "done",
+      sameRunTerminalEvidence: "activity",
+      processPid: deadPid,
+      processGroupId: null,
+    });
+    const heartbeat = heartbeatService(db);
+
+    const result = await heartbeat.scanSilentActiveRuns({ now, companyId });
+
+    expect(result).toMatchObject({ created: 0, folded: 0, skipped: 1 });
+    const [run] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, runId));
+    expect(run).toMatchObject({
+      status: "running",
+      errorCode: "process_termination_unverified_needs_human",
+    });
+    const [source] = await db.select().from(issues).where(eq(issues.id, issueId));
+    expect(source?.executionRunId).toBe(runId);
+    const [event] = await db
+      .select()
+      .from(heartbeatRunEvents)
+      .where(eq(heartbeatRunEvents.runId, runId));
+    expect(event?.payload).toMatchObject({
+      needsHuman: true,
+      cleanup: {
+        attempted: false,
+        outcome: "termination_unverified_needs_human",
+        terminationOutcome: "untrusted_identity",
+      },
+    });
   });
 
   it("still escalates terminal source issues without same-run terminal evidence", async () => {

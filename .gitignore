@@ -70,3 +70,7 @@ tests/storybook-visual/playwright-report/
 .superpowers/
 .claude/worktrees/
 .herenow
+
+# Local scratch/receipt dirs (not source, not review artifacts)
+.local-logs/
+.tmp-validation/

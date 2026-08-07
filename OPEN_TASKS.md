@@ -1,10 +1,57 @@
 # Paperclip Open Tasks
 
-Last updated: 2026-08-02
+Last updated: 2026-08-03
 
 This file is the durable local index for active `paperclip` issues.
 
 ## Active Issues
+
+- [#31 - Bug: refresh heartbeat MCP fixture after catalog-only authorization hardening](https://github.com/iMelki/paperclip/issues/31)
+  - The positive heartbeat fixture now includes the active catalog entry while
+    negative coverage still excludes uncataloged connections and protects
+    bearer material. Close only after the normal repository validation hook
+    and pushed-SHA readback are green.
+
+- [#29 - Finish coordination claim idempotency and lease credential lifecycle](https://github.com/iMelki/paperclip/issues/29)
+  - Migration `0197` now converts the experimental plaintext lease credential
+    column to a unique SHA-256 hash and adds a company-scoped, 72-hour claim
+    idempotency ledger. Focused schema, token, and real embedded-PostgreSQL
+    migration tests are green. Keep the issue open until the claim transaction
+    implements atomic same-key replay/different-payload rejection, bounded
+    expiry cleanup, fencing, and a reviewed token-rotation or encrypted-replay
+    design. Before any write route, every lease/participation reference must use
+    a same-company composite foreign key and an embedded-PostgreSQL test must
+    prove that a foreign-company reference is rejected by the database itself;
+    the current single-column references are only an observe-only foundation.
+
+- [#28 - Add authenticated, contract-truthful task coordination authority](https://github.com/iMelki/paperclip/issues/28)
+  - The first read foundation is company-authorized before detail loading,
+    company-scoped throughout, pinned to the canonical Projects Ops contract,
+    and explicit about unavailable Git, process, output, placement, and control
+    evidence. Cross-company collection/detail races fail closed, fallback task
+    identity is collision-resistant across companies. Observer responses must
+    omit exact placement and Git working-state evidence; exact placement is
+    limited to board or assigned/actively participating agents. Expired or
+    ambiguous active leases must never be projected as current scope. Claim,
+    heartbeat, release, and control-intent write APIs, fencing,
+    path canonicalization, stop evidence, and takeover remain open; observe
+    mode must continue until those gates pass. The company collection is now
+    bounded before projection (default 50, maximum 100, maximum offset 10,000),
+    strictly validates limit/offset, orders deterministically by updated time
+    plus id, and batches each related table once instead of querying every root.
+    Nested rows are capped with explicit truncation drift; incomplete lease
+    history withholds all mutation scope. High-fanout coverage proves the fixed
+    seven-query shape, bounded 200-instance projection, and linear membership
+    checks. Child/work-unit truncation also makes task-wide lease authority
+    incomplete, because an omitted child can hide a lease; every mutation scope
+    is therefore withheld even when returned lease rows are below their own
+    cap. Projected remote URLs remove userinfo, query, and fragment values.
+    Paperclip
+    coordinates desired state, claims, attempts, leases, and control intents and
+    projects verified observations; it never replaces the definition-owned
+    native journal's cursor/checkpoint/replay authority or backend accepted-task
+    authority. Reconcile both before replay, and never treat a Paperclip outage
+    as replay authorization.
 
 - [Day-0 branch/worktree consolidation plan](doc/plans/2026-08-02-day0-branch-consolidation.md)
   - Preserve concurrent dirty branches and locked worktrees. Consolidate only
@@ -47,8 +94,72 @@ This file is the durable local index for active `paperclip` issues.
     ownership cannot be proved. The two observed loaded-host checks now use
     bounded 30-second and 20-second limits and pass together, while explicit
     dependency globs prevent spurious Windows watcher restarts. Keep this issue
-    open until the fresh
-    complete-suite receipt is green with zero surviving fixtures.
+    open until the fresh complete-suite receipt is green with zero surviving
+    fixtures. The 2026-08-03 normal coordination hook failed four DB tests and
+    left nine new Postgres candidates with zero new listeners; its wrapper also
+    self-contaminated the before count, so the canonical probe must exclude its
+    own harness/ancestor identities. Exact process/listener-delta proof remains
+    required. The follow-up runtime-service
+    repair now persists process-group identity before readiness, retains live
+    or unproven descendants across natural exit and restart, treats persisted
+    PID/group/registry identifiers as observation-only until a stable process
+    birth identity exists, and extends that fail-closed boundary across
+    heartbeat cancellation, shutdown, orphan reaping, and source-resolved
+    recovery. The standalone `dev:stop` and `scripts/kill-workspaces.sh`
+    controls likewise refuse to signal or discard evidence for a live or
+    unproven persisted-only record. Follow-up fixes keep an unprobeable Windows
+    process tree—including the production null-process-group shape—when a dead
+    wrapper may still have live descendants in needs-human state. CIM lineage
+    snapshots are advisory: an unobserved intermediate can spawn a grandchild
+    between samples, so `taskkill /T` plus root exit never confirms a Windows
+    tree stop without a launch-time Job Object or equivalent kernel receipt.
+    Cross-platform orphan/restart,
+    lost-handle cancellation/recovery, standalone-control, and descendant-
+    survival regressions cover the boundary. Database restore's no-`psql`
+    fallback also streams canonical COPY sections through one native session
+    with backpressure and fail-closed parsing. The full normal hook plus an
+    uncontaminated zero-survivor process receipt remain the release gates. The
+    second no-bypass hook passed 327 files / 3,367 tests but added three more
+    Postgres candidates with zero listeners; no cleanup or signal was used.
+    The third hook reached the adapter layer and exposed detached test-wrapper
+    leakage. Exact process identities reconciled 27 wrappers and 27 launchers,
+    moved their 26 temporary roots to the Windows Recycle Bin, and verified
+    zero remaining candidates. The repaired source-only adapter matrix passes
+    322 tests with 25 skips across 20 passing and one skipped file in
+    180,071.6 ms, with patch/config bytes unchanged and process-session
+    candidates 0→0. A fresh complete hook must reproduce zero survivors before
+    #20 can close. The final safety audit also found and repaired three
+    fail-closed gaps: only `ESRCH` now proves PID/group absence, process group
+    `1` is never probed or signalled as `kill(-1, ...)`, and unresolved own-
+    group identity cannot authorize a historical group. Once group scope is
+    selected, TERM or forced-kill failure never downgrades to PID-only success;
+    identifiers outside Node's positive int32 range are rejected without a
+    syscall. Focused Windows tests pass 6/6 and Ubuntu-24.04/WSL passes 11/11
+    selected cases (119 unrelated cases skipped). The later 2,566,059ms hook
+    passed 3,378 general-server tests with nine skips before codex-local failed;
+    exact cleanup stopped its five identity-matched orphan workers, cleared
+    eight inherited listener rows, and recycled only their five linked database
+    roots while preserving the real port-5432 service. The commit receipt missed
+    those listener rows because Windows attributed them to dead parent PIDs;
+    post-run accounting must join recorded parent identities and postmaster
+    ports instead of filtering only by currently live candidates. Dev-runner
+    generation launch now uses an exclusive append-only claim journal whose
+    exact header is durable before spawn and whose accepted child identity is
+    appended and fsynced before publication. Release requires exact,
+    generation-matched registry readback; raw registry writers/removers acquire
+    a distinct guard in the same claim namespace. Both release paths preserve
+    retry state across post-rename failures, and a premature asynchronous
+    generation release can be retried after valid publication. Windows focused
+    lifecycle/registry coverage passes 45 tests with five POSIX-only skips;
+    Ubuntu-24.04/WSL passes all 37 core cases, including post-rename fsync retry.
+    Server TypeScript is clean. A targeted workspace rollback test reached its
+    intended retained-claim assertions but final cleanup refused the expected
+    `untrusted_identity`; no matching child remained live, and the exact
+    evidence roots are preserved at
+    `%LOCALAPPDATA%\Temp\paperclip-runtime-control-rollback-VFP9fd` and
+    `%LOCALAPPDATA%\Temp\paperclip-runtime-control-rollback-home-UPv21H`.
+    They must not be deleted or signalled without a separate identity-safe
+    reconciliation. The complete-suite zero-survivor receipt remains open.
 
 - [#22 - Make complete validation and package builds Windows-portable](https://github.com/iMelki/paperclip/issues/22)
   - The portable Node filesystem helper, validated direct package-manager
@@ -57,7 +168,79 @@ This file is the durable local index for active `paperclip` issues.
     final audit also found remaining host-side bare npm/pnpm executions,
     POSIX prepack/postpack pairs, and missing native-Windows CI coverage; finish
     those canonical resolver/lifecycle consumers before the fresh full matrix,
-    typecheck, build, and representative pack readback.
+    typecheck, build, and representative pack readback. The 2026-08-03 normal
+    hook also reproduced four sandbox fallback sync-in failures where
+    `/usr/bin/sh` received native Windows paths, plus local/CI divergence in the
+    installed `@pierre/diffs` version. Command-managed upload paths reject raw
+    POSIX and Windows traversal components before normalization, but the cwd
+    check is still lexical and does not prove symlink/junction containment;
+    realpath-aware confinement remains open. Repo-managed `bash`/`sh`
+    provision commands also reuse the resolved Git shell on Windows instead of
+    allowing a nested bare `bash` lookup to select WSL and reinterpret an MSYS
+    path; the previously failing worktree provision/reattach cases now resolve
+    the source script through one shell namespace. Valid UNC paths convert to
+    double-slash shell paths, while malformed and device-namespace UNC forms
+    fail closed; focused command-managed coverage includes spaces, apostrophes,
+    confinement, and prefix escapes. The obsolete workspace-diff
+    editor props that failed the first hook are removed. The normal hook does
+    not include `pnpm build`. The second hook's only suite failure exposed a
+    missing emitted-test JSON asset; the portable server build now copies the
+    pinned contract into `dist`, and source/built regressions pass 5/5 and 4/4
+    with matching schema hashes. Adapter test discovery is now source-only and
+    serial, Git-for-Windows hooks prefer native `tar`, local Git fixtures use a
+    line-ending-stable checkout, Windows command shims are resolved explicitly,
+    and sandbox queue publication uses a same-directory atomic rename. The
+    source-only adapter matrix is green at 322 passed / 25 skipped with no
+    process-session delta. The explicit monorepo build is also green in
+    67,031.5 ms with staged bytes unchanged and no new process candidates. The
+    repeated full hook, native Windows matrix, and provider-native atomic
+    realpath confinement remain release gates. The fourth no-bypass hook
+    exposed eight server fake-sandbox failures caused by a hook-wide
+    System32-first PATH selecting Windows `find.exe` for POSIX syntax. Native
+    host tar selection is now scoped to System32 `tar.exe`; five fake runners
+    use the canonical Git shell resolver, and hermetic Claude config/home state
+    avoids host-profile coupling and overlong instance paths. Under the same
+    hostile PATH, 61/61 server cases and 35/36 adapter cases (one prerequisite
+    skip) pass with byte-stable input/output. Codex-local now mirrors source-only
+    serial discovery, uses the Git shell in native Windows fixtures, applies
+    native temp-path and child-termination assertions, and assigns unique ACP
+    run identities with bounded cleanup. Its full source suite passes 222 with
+    nine legitimate skips across 23 files in 117.69s. Because Node mode bits do
+    not express NTFS confidentiality, remote Codex home staging and same-volume
+    copy-back now create their randomized roots atomically with a protected .NET
+    `DirectorySecurity` descriptor before the paths become visible. The helper
+    rejects a parent that grants `DELETE_CHILD` to any untrusted SID and
+    revalidates parent/child identity after secret population. Copy-back creates
+    the OAuth child only below that private root and
+    keeps it owner/SYSTEM/admin-only through the merge decision. Only an
+    accepted same-identity, strictly newer credential receives the final Codex
+    sandbox-reader ACE, via one complete protected DACL operation plus identity
+    and exact-policy readback before rename. It removes only the exact child plus
+    an empty directory with
+    bounded fail-loud retries. Failed staged-home cleanup surfaces the original
+    error and unproven residue together. Exact production readback and DACL
+    tests prove the atomic path, long run-id compatibility, and only the intended
+    host principals (plus the independently resolved standard Codex read group
+    on the final credential). A Windows restricted-token regression proves the
+    rejected stage unreadable before acceptance and the final credential
+    readable only after the policy transition. Keep
+    #22 open for provider-native realpath/link confinement and the broader native
+    Windows matrix. All production remote ACP targets remain hard-disabled:
+    runner-backed and runner-less sandboxes plus SSH/non-sandbox targets fail
+    before workspace materialization, staging, provider execution, or local ACP
+    fallback. Malformed non-null remote intent also fails closed instead of
+    degrading to local. Implicit/default remote execution stays on CLI, while explicit
+    remote `engine=acp` fails closed. An injection-only test seam exercises the
+    inert runner-backed controller. Enabling a real provider requires callback-
+    bridge process-tree custody, a two-phase durable cleanup acknowledgement,
+    and restart-safe reconciliation. Numeric PID-file stop, in-memory registry
+    deletion, or direct-child exit cannot satisfy that gate. Ubuntu/WSL core
+    lifecycle tests are green, but six `dev-service` CLI subprocess cases cannot
+    be counted as Linux evidence in the shared checkout because its
+    cross-platform `node_modules` contains an esbuild host/binary version
+    mismatch (`0.28.1` host versus `0.27.3` Windows binary). Re-run that CLI
+    cohort from a native Linux dependency installation under #22; do not weaken
+    assertions or treat the environment mismatch as a product pass.
 
 - [#19 - Make headless onboarding and doctor failures automation-safe](https://github.com/iMelki/paperclip/issues/19)
   - Implemented explicit config-only `onboard --yes --no-run` behavior and

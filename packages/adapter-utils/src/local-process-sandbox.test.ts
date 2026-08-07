@@ -30,7 +30,7 @@ afterEach(async () => {
   await Promise.all(cleanup.splice(0).map((candidate) => fs.rm(candidate, { recursive: true, force: true })));
 });
 
-describe("local process sandbox", () => {
+describe.skipIf(process.platform !== "linux")("local process sandbox", () => {
   it("parses read-only and writable extra paths", () => {
     expect(parseLocalProcessSandboxExtraPaths(["/opt/cache", { path: "/var/lib/tool", access: "rw" }])).toEqual([
       { path: "/opt/cache", access: "ro" },

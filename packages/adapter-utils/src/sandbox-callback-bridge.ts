@@ -1,9 +1,9 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
-import os from "node:os";
 import path from "node:path";
 
 import type { CommandManagedRuntimeRunner } from "./command-managed-runtime.js";
+import { createPrivateExecutableAssetDirectory } from "./private-executable-asset.js";
 import { preferredShellForSandbox, shellCommandArgs } from "./sandbox-shell.js";
 import {
   dirnamePortablePath,
@@ -335,15 +335,29 @@ export function buildSandboxCallbackBridgeEnv(input: {
 }
 
 export async function createSandboxCallbackBridgeAsset(): Promise<SandboxCallbackBridgeAsset> {
-  const localDir = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-bridge-asset-"));
+  const privateDirectory = await createPrivateExecutableAssetDirectory({
+    prefix: "paperclip-bridge-asset-",
+  });
+  const localDir = privateDirectory.directoryPath;
   const entrypoint = path.join(localDir, SANDBOX_CALLBACK_BRIDGE_ENTRYPOINT);
-  await fs.writeFile(entrypoint, getSandboxCallbackBridgeServerSource(), "utf8");
+  try {
+    await fs.writeFile(entrypoint, getSandboxCallbackBridgeServerSource(), "utf8");
+    await privateDirectory.assertIntegrity();
+  } catch (error) {
+    try {
+      await privateDirectory.cleanup();
+    } catch (cleanupError) {
+      throw new AggregateError(
+        [error, cleanupError],
+        "Failed to initialize and clean up the private sandbox callback bridge asset.",
+      );
+    }
+    throw error;
+  }
   return {
     localDir,
     entrypoint,
-    cleanup: async () => {
-      await fs.rm(localDir, { recursive: true, force: true }).catch(() => undefined);
-    },
+    cleanup: privateDirectory.cleanup,
   };
 }
 
@@ -497,9 +511,12 @@ export function createCommandManagedSandboxCallbackBridgeQueueClient(input: {
     writeTextFile: async (remotePath, body) => {
       const remoteDir = dirnamePortablePath(remotePath);
       const tempPath = `${remotePath}.paperclip-upload.b64`;
+      const decodedTempPath = `${remotePath}.paperclip-upload.tmp`;
       await runChecked(
         `prepare upload ${remotePath}`,
-        `mkdir -p ${shellQuotePath(remoteDir)} && rm -f ${shellQuotePath(tempPath)} && : > ${shellQuotePath(tempPath)}`,
+        `mkdir -p ${shellQuotePath(remoteDir)} && ` +
+          `rm -f ${shellQuotePath(tempPath)} ${shellQuotePath(decodedTempPath)} && ` +
+          `: > ${shellQuotePath(tempPath)}`,
       );
       const base64Body = toBuffer(Buffer.from(body, "utf8")).toString("base64");
       await runCheckedWithStdin(
@@ -509,7 +526,9 @@ export function createCommandManagedSandboxCallbackBridgeQueueClient(input: {
       );
       await runChecked(
         `finalize upload ${remotePath}`,
-        `base64 -d < ${shellQuotePath(tempPath)} > ${shellQuotePath(remotePath)} && rm -f ${shellQuotePath(tempPath)}`,
+        `base64 -d < ${shellQuotePath(tempPath)} > ${shellQuotePath(decodedTempPath)} && ` +
+          `mv -f ${shellQuotePath(decodedTempPath)} ${shellQuotePath(remotePath)} && ` +
+          `rm -f ${shellQuotePath(tempPath)}`,
       );
     },
     writeResponseFile: async (responsePath, body, options = {}) => {

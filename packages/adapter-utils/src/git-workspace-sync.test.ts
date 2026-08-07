@@ -40,6 +40,7 @@ describe("git workspace sync", () => {
     await git(repo, ["checkout", "-b", "main"]);
     await git(repo, ["config", "user.name", "Paperclip Test"]);
     await git(repo, ["config", "user.email", "test@paperclip.dev"]);
+    await git(repo, ["config", "core.autocrlf", "false"]);
     await writeFile(path.join(repo, "tracked.txt"), "base\n", "utf8");
     await git(repo, ["add", "tracked.txt"]);
     await git(repo, ["commit", "-m", "base"]);

@@ -20,6 +20,16 @@ describe("pause durability: continuation retry classification", () => {
     expect(classifyContinuationFailure(run("agent_not_invokable")).kind).toBe("non_retryable");
   });
 
+  it("an ambiguous accepted remote ACP launch requires human reconciliation and never retries", () => {
+    const classification = classifyContinuationFailure(run("ACP_PROCESS_SESSION_LAUNCH_AMBIGUOUS"));
+    expect(classification).toEqual({
+      kind: "non_retryable",
+      maxAttempts: 0,
+      baseBackoffMs: 0,
+      errorCode: "ACP_PROCESS_SESSION_LAUNCH_AMBIGUOUS",
+    });
+  });
+
   it("timed_out (timeout) still retries as transient infra", () => {
     const c = classifyContinuationFailure(run("timeout"));
     expect(c.kind).toBe("transient_infra");

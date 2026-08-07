@@ -11,6 +11,8 @@ import {
   type SandboxManagedRuntimeClient,
   type SandboxSyncOperation,
 } from "./sandbox-managed-runtime.js";
+import { toShellPath } from "./shell-path.js";
+import { resolveTestShellCommand } from "./test-shell.js";
 
 const execFile = promisify(execFileCallback);
 
@@ -57,7 +59,7 @@ function makeNativeClient(): RecordingClient {
       }
       // Honor the operation's ordered post-upload commands (PR-2), fail-fast.
       for (const command of operation.postUploadCommands ?? []) {
-        await execFile("sh", ["-c", command.command], { maxBuffer: 32 * 1024 * 1024 });
+        await execFile(resolveTestShellCommand("sh"), ["-c", command.command], { maxBuffer: 32 * 1024 * 1024 });
       }
       return { operationId: operation.operationId, filesTransferred, bytesTransferred: 0 };
     })),
@@ -75,7 +77,9 @@ function makeNativeClient(): RecordingClient {
       return entries.filter((e) => e.isFile()).map((e) => e.name).sort();
     },
     remove: async (remotePath) => { await rm(remotePath, { recursive: true, force: true }); },
-    run: async (command) => { await execFile("sh", ["-c", command], { maxBuffer: 32 * 1024 * 1024 }); },
+    run: async (command) => {
+      await execFile(resolveTestShellCommand("sh"), ["-c", command], { maxBuffer: 32 * 1024 * 1024 });
+    },
     syncIn: async (operations) => { syncInOps.push(operations); return applyOperations(operations); },
     syncOut: async (operations) => { syncOutOps.push(operations); return applyOperations(operations); },
   };
@@ -125,7 +129,7 @@ describe("sandbox native file sync", () => {
     expect(assetOp!.operationId).not.toContain("skills");
     expect(assetOp!.files).toHaveLength(1);
     expect(assetOp!.files[0]).toMatchObject({
-      targetPath: path.posix.join(prepared.runtimeRootDir, "skills-upload.tar"),
+      targetPath: path.join(prepared.runtimeRootDir, "skills-upload.tar"),
       kind: "file",
     });
     // Default provision → a plain destroy-then-replace tar extract post-command.
@@ -177,8 +181,11 @@ describe("sandbox native file sync", () => {
         {
           key: "creds",
           localDir: customAssetDir,
-          provision: { postUploadCommand: ({ assetTarPath, assetDir }) =>
-            `rm -rf ${assetDir} && mkdir -p ${assetDir} && tar -xf ${assetTarPath} -C ${assetDir} && rm -f ${assetTarPath}` },
+          provision: { postUploadCommand: ({ assetTarPath, assetDir }) => {
+            const shellAssetDir = toShellPath(assetDir);
+            const shellAssetTarPath = toShellPath(assetTarPath);
+            return `rm -rf ${shellAssetDir} && mkdir -p ${shellAssetDir} && tar -xf ${shellAssetTarPath} -C ${shellAssetDir} && rm -f ${shellAssetTarPath}`;
+          } },
         },
       ],
     });
@@ -214,8 +221,11 @@ describe("sandbox native file sync", () => {
         localDir: localAssetsDir,
         // A bespoke post-upload command (e.g. a credential merge) rides syncIn as
         // the operation's ordered post-upload command — no native-diversion gate.
-        provision: { postUploadCommand: ({ assetTarPath, assetDir }) =>
-          `rm -rf ${assetDir} && mkdir -p ${assetDir} && tar -xf ${assetTarPath} -C ${assetDir} && rm -f ${assetTarPath}` },
+        provision: { postUploadCommand: ({ assetTarPath, assetDir }) => {
+          const shellAssetDir = toShellPath(assetDir);
+          const shellAssetTarPath = toShellPath(assetTarPath);
+          return `rm -rf ${shellAssetDir} && mkdir -p ${shellAssetDir} && tar -xf ${shellAssetTarPath} -C ${shellAssetDir} && rm -f ${shellAssetTarPath}`;
+        } },
       }],
     });
 
@@ -231,7 +241,7 @@ describe("sandbox native file sync", () => {
     expect(await readFile(path.join(prepared.assetDirs.creds, "cred.txt"), "utf8")).toBe("secret\n");
   });
 
-  it("dereferences symlinks only when followSymlinks is true (native honors the flag)", async () => {
+  it.skipIf(process.platform === "win32")("dereferences symlinks only when followSymlinks is true (native honors the flag)", async () => {
     const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-native-symlink-"));
     cleanupDirs.push(rootDir);
     const localWorkspaceDir = path.join(rootDir, "local-workspace");
@@ -292,12 +302,12 @@ describe("assertSyncOperationsConfined", () => {
   it("rejects an absolute target outside every root", () => {
     expect(() => assertSyncOperationsConfined(op("/etc/passwd"), {
       sourceRoots: ["/host/src"], targetRoots: ["/remote/ws"],
-    })).toThrow(/escapes its confinement root/);
+    })).toThrow(/confined absolute path|escapes its confinement root/);
   });
 
   it("rejects a source outside every source root", () => {
     expect(() => assertSyncOperationsConfined(op("/remote/ws/ok", "/etc/shadow"), {
       sourceRoots: ["/host/src"], targetRoots: ["/remote/ws"],
-    })).toThrow(/escapes its confinement root/);
+    })).toThrow(/confined absolute path|escapes its confinement root/);
   });
 });

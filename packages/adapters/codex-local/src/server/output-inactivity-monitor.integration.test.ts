@@ -139,7 +139,13 @@ describe("codex inactivity monitor (integration: real subprocess)", () => {
         expect(monitorFired, "monitor should fire when codex goes silent").toBe(true);
         // Process was killed by our signal, not by hitting timeoutSec.
         expect(proc.timedOut).toBe(false);
-        expect(["SIGTERM", "SIGKILL"]).toContain(proc.signal);
+        if (process.platform === "win32") {
+          // Windows reports a terminated child with a non-zero exit code and a
+          // null signal even when ChildProcess.kill accepted SIGTERM/SIGKILL.
+          expect(proc.exitCode).not.toBe(0);
+        } else {
+          expect(["SIGTERM", "SIGKILL"]).toContain(proc.signal);
+        }
         expect(["SIGTERM", "SIGKILL"]).toContain(terminationSignal);
         // The errorMessage shape mirrors the AdapterExecutionResult that
         // execute.ts will produce for this case.

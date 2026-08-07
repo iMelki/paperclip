@@ -1,4 +1,5 @@
 import fs from "node:fs/promises";
+import { randomUUID } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -750,7 +751,7 @@ describe("evaluateCodexCredentialReadiness", () => {
     }
   });
 
-  it("restricts permissions on an existing managed MCP config", async () => {
+  it.skipIf(process.platform === "win32")("restricts POSIX permissions on an existing managed MCP config", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-codex-mcp-config-"));
     try {
       const configPath = path.join(root, "config.toml");
@@ -770,6 +771,14 @@ describe("evaluateCodexCredentialReadiness", () => {
 });
 
 describe("stageCodexHomeForSync", () => {
+  function stagedHomeParentForTest(): string {
+    if (process.platform !== "win32") return os.tmpdir();
+    if (!process.env.LOCALAPPDATA) {
+      throw new Error("LOCALAPPDATA is required for private Windows staging tests.");
+    }
+    return process.env.LOCALAPPDATA;
+  }
+
   afterEach(() => {
     vi.restoreAllMocks();
   });
@@ -846,7 +855,7 @@ describe("stageCodexHomeForSync", () => {
   });
 
   // C1 — staged credential file must be mode 0600 (not the world-readable default).
-  it("writes the staged auth.json with mode 0600", async () => {
+  it.skipIf(process.platform === "win32")("writes the staged auth.json with POSIX mode 0600", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-codex-stage-mode-"));
     let staged: string | null = null;
     try {
@@ -862,7 +871,9 @@ describe("stageCodexHomeForSync", () => {
 
   // config.toml carries the managed MCP `Authorization: Bearer …` header and is
   // secret-bearing; the staged copy must be 0600, not the world-readable default.
-  it("writes the staged config.toml (managed MCP bearer header) with mode 0600", async () => {
+  it.skipIf(process.platform === "win32")(
+    "writes the staged config.toml (managed MCP bearer header) with POSIX mode 0600",
+    async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-codex-stage-toml-mode-"));
     let staged: string | null = null;
     try {
@@ -882,11 +893,12 @@ describe("stageCodexHomeForSync", () => {
       if (staged) await fs.rm(staged, { recursive: true, force: true });
       await fs.rm(root, { recursive: true, force: true });
     }
-  });
+    },
+  );
 
   // Least privilege: no staged regular file needs group/other read, so every
   // one (config.json, instructions.md — not just credentials) is staged 0600.
-  it("writes every staged regular file with mode 0600", async () => {
+  it.skipIf(process.platform === "win32")("writes every staged regular file with POSIX mode 0600", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-codex-stage-all-mode-"));
     let staged: string | null = null;
     try {
@@ -902,8 +914,8 @@ describe("stageCodexHomeForSync", () => {
     }
   });
 
-  // C2 — staged dir must be 0700 (mkdtemp guarantees this on POSIX).
-  it("creates the staged dir with mode 0700", async () => {
+  // C2 — staged dir must be 0700 (verified after randomized creation on POSIX).
+  it.skipIf(process.platform === "win32")("creates the staged dir with POSIX mode 0700", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-codex-stage-dir-"));
     let staged: string | null = null;
     try {
@@ -956,25 +968,56 @@ describe("stageCodexHomeForSync", () => {
   // AND remove the temp dir it created (cleanup on the error path).
   it("fails closed and removes the temp dir on an unexpected I/O error", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-codex-stage-fail-"));
+    const runId = `run-fail-${randomUUID()}`;
+    const stagedPrefix = `paperclip-codex-home-sync-${runId}-`;
     try {
       const { home } = await buildFakeHome(root);
-
-      let createdDir: string | null = null;
-      const realMkdtemp = fs.mkdtemp.bind(fs);
-      vi.spyOn(fs, "mkdtemp").mockImplementation(async (prefix: string, ...rest: unknown[]) => {
-        const dir = await (realMkdtemp as typeof fs.mkdtemp)(prefix, ...(rest as []));
-        createdDir = dir as string;
-        return dir;
-      });
+      const stagingParent = stagedHomeParentForTest();
+      const before = (await fs.readdir(stagingParent)).filter((entry) => entry.startsWith(stagedPrefix));
       vi.spyOn(fs, "readFile").mockRejectedValue(
         Object.assign(new Error("boom"), { code: "EACCES" }),
       );
 
-      await expect(stageCodexHomeForSync(home, { runId: "run-fail" })).rejects.toThrow("boom");
-      expect(createdDir).not.toBeNull();
-      // The staged temp dir was cleaned up despite the failure.
-      await expect(fs.access(createdDir as unknown as string)).rejects.toMatchObject({ code: "ENOENT" });
+      await expect(stageCodexHomeForSync(home, { runId })).rejects.toThrow("boom");
+      const after = (await fs.readdir(stagingParent)).filter((entry) => entry.startsWith(stagedPrefix));
+      expect(after).toEqual(before);
     } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("surfaces an unexpected I/O failure together with unproven private staging cleanup", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-codex-stage-cleanup-fail-"));
+    const runId = `run-cleanup-fail-${randomUUID()}`;
+    const stagedPrefix = `paperclip-codex-home-sync-${runId}-`;
+    let stagedPath: string | null = null;
+    try {
+      const { home } = await buildFakeHome(root);
+      vi.spyOn(fs, "readFile").mockRejectedValue(
+        Object.assign(new Error("read boom"), { code: "EACCES" }),
+      );
+      const realRm = fs.rm.bind(fs);
+      vi.spyOn(fs, "rm").mockImplementation(async (target, options) => {
+        if (String(target).includes(stagedPrefix)) {
+          throw Object.assign(new Error("cleanup boom"), { code: "EBUSY" });
+        }
+        return await realRm(target, options);
+      });
+
+      await expect(stageCodexHomeForSync(home, { runId })).rejects.toThrow(
+        /cleanup could not be proven/i,
+      );
+      vi.restoreAllMocks();
+      const stagingParent = stagedHomeParentForTest();
+      const stagedEntries = (await fs.readdir(stagingParent))
+        .filter((entry) => entry.startsWith(stagedPrefix));
+      expect(stagedEntries).toHaveLength(1);
+      stagedPath = path.join(stagingParent, stagedEntries[0]!);
+    } finally {
+      vi.restoreAllMocks();
+      if (stagedPath) {
+        await fs.rm(stagedPath, { recursive: true, force: true, maxRetries: 3, retryDelay: 25 });
+      }
       await fs.rm(root, { recursive: true, force: true });
     }
   });
@@ -1009,7 +1052,9 @@ describe("stageCodexHomeForSync", () => {
 
   // Mode normalization: nested skill files must be staged 0600 regardless of
   // their source mode (0644 documents, 0755 scripts, etc.).
-  it("writes nested skill files with mode 0600 regardless of source mode", async () => {
+  it.skipIf(process.platform === "win32")(
+    "writes nested skill files with POSIX mode 0600 regardless of source mode",
+    async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-codex-stage-skill-mode-"));
     let staged: string | null = null;
     try {
@@ -1029,7 +1074,8 @@ describe("stageCodexHomeForSync", () => {
       if (staged) await fs.rm(staged, { recursive: true, force: true });
       await fs.rm(root, { recursive: true, force: true });
     }
-  });
+    },
+  );
 
   // Finding 1 (Greptile): a directory symlink such as `back -> .` inside a skill
   // resolves to an ancestor directory (it does NOT raise ELOOP), so naive

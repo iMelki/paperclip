@@ -3,6 +3,7 @@ import { basename, resolve } from "node:path";
 import { createInterface } from "node:readline";
 import { spawn } from "node:child_process";
 import { open as openFile } from "node:fs/promises";
+import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { createGunzip, createGzip } from "node:zlib";
 import postgres from "postgres";
@@ -403,7 +404,23 @@ async function hasStatementBreakpoints(backupFile: string): Promise<boolean> {
   }
 }
 
-async function* readRestoreStatements(backupFile: string): AsyncGenerator<string> {
+function isCopyFromStdinCommand(line: string): boolean {
+  // JavaScript-generated backups emit COPY headers on one line before the raw
+  // text-format rows. Keep detection narrow so SQL bodies are not reclassified.
+  return /^\s*COPY\b.+\bFROM\s+stdin\s*;\s*$/i.test(line);
+}
+
+function hasExecutableRestoreSql(statement: string): boolean {
+  return statement
+    .split(/\r?\n/)
+    .some((line) => line.trim().length > 0 && !line.trimStart().startsWith("--"));
+}
+
+async function restoreWithJavascriptFallback(
+  backupFile: string,
+  sql: ReturnType<typeof postgres>,
+  onOperation: (operation: string) => void,
+): Promise<void> {
   const raw = createReadStream(backupFile);
   const stream = backupFile.endsWith(".gz") ? raw.pipe(createGunzip()) : raw;
   stream.setEncoding("utf8");
@@ -419,22 +436,51 @@ async function* readRestoreStatements(backupFile: string): AsyncGenerator<string
     return statement;
   };
 
+  const executeStatement = async () => {
+    const statement = flushStatement();
+    if (!hasExecutableRestoreSql(statement)) return;
+    onOperation(statement);
+    await sql.unsafe(statement).execute();
+  };
+
+  const lines = reader[Symbol.asyncIterator]();
+
+  const readCopyData = async function* (): AsyncGenerator<string> {
+    while (true) {
+      const next = await lines.next();
+      if (next.done) {
+        throw new Error("Unexpected end of backup while reading COPY data");
+      }
+      // `\.` is psql's file sentinel, not COPY payload. Ending the postgres.js
+      // writable sends the protocol-level CopyDone message instead.
+      if (next.value === "\\.") return;
+      yield `${next.value}\n`;
+    }
+  };
+
   try {
-    for await (const line of reader) {
+    while (true) {
+      const next = await lines.next();
+      if (next.done) break;
+      const line = next.value;
+
       if (line === STATEMENT_BREAKPOINT) {
-        const statement = flushStatement();
-        if (statement.length > 0) {
-          yield statement;
-        }
+        await executeStatement();
         continue;
       }
+
+      if (isCopyFromStdinCommand(line)) {
+        await executeStatement();
+        onOperation(line);
+        const copyStream = await sql.unsafe(line).writable();
+        await pipeline(Readable.from(readCopyData()), copyStream);
+        continue;
+      }
+
       statementLines.push(line);
     }
 
-    const trailingStatement = flushStatement();
-    if (trailingStatement.length > 0) {
-      yield trailingStatement;
-    }
+    await executeStatement();
   } finally {
     reader.close();
     stream.destroy();
@@ -1005,19 +1051,24 @@ export async function runDatabaseRestore(opts: RunDatabaseRestoreOptions): Promi
   }
 
   const sql = postgres(opts.connectionString, { max: 1, connect_timeout: connectTimeout });
+  const restoreProgress: { operation: string | null } = { operation: null };
 
   try {
     await sql`SELECT 1`;
-    for await (const statement of readRestoreStatements(opts.backupFile)) {
-      await sql.unsafe(statement).execute();
-    }
+    await restoreWithJavascriptFallback(opts.backupFile, sql, (operation) => {
+      restoreProgress.operation = operation;
+    });
   } catch (error) {
-    const statementPreview = typeof error === "object" && error !== null && typeof (error as Record<string, unknown>).query === "string"
+    const errorQueryPreview = typeof error === "object" && error !== null && typeof (error as Record<string, unknown>).query === "string"
       ? String((error as Record<string, unknown>).query)
         .split(/\r?\n/)
         .map((line) => line.trim())
         .find((line) => line.length > 0 && !line.startsWith("--"))
       : null;
+    const statementPreview = errorQueryPreview ?? restoreProgress.operation
+      ?.split(/\r?\n/)
+      .map((line) => line.trim())
+      .find((line) => line.length > 0 && !line.startsWith("--"));
     const psqlMessage = psqlRestoreError === null ? "" : `; psql error: ${sanitizeRestoreErrorMessage(psqlRestoreError)}`;
     throw new Error(
       `Failed to restore ${basename(opts.backupFile)}: ${sanitizeRestoreErrorMessage(error)}${statementPreview ? ` [statement: ${statementPreview.slice(0, 120)}]` : ""}${psqlMessage}`,

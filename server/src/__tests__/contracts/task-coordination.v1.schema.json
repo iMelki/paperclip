@@ -1,0 +1,172 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://raw.githubusercontent.com/iMelki/projects-ops/main/docs/schemas/task-coordination.v1.json",
+  "title": "TaskCoordinationView",
+  "type": "object",
+  "required": [
+    "schemaVersion",
+    "task",
+    "workUnits",
+    "participants",
+    "placements",
+    "delivery",
+    "health",
+    "controls",
+    "provenance"
+  ],
+  "properties": {
+    "schemaVersion": { "type": "string", "enum": ["task-coordination.v1"] },
+    "task": {
+      "type": "object",
+      "required": ["canonicalKey", "status", "accountableLead", "generation", "createdAt", "updatedAt"],
+      "properties": {
+        "canonicalKey": { "type": "string", "pattern": "^github:[^/]+/[^#]+#\\d+$" },
+        "githubProjectItemId": { "type": ["string", "null"] },
+        "mckTaskId": { "type": ["string", "null"] },
+        "paperclipParentIssueId": { "type": ["string", "null"] },
+        "correlationId": { "type": "string" },
+        "status": { "type": "string", "enum": ["open", "in_progress", "blocked", "under_review", "completed", "cancelled"] },
+        "accountableLead": { "type": "string" },
+        "generation": { "type": "integer", "minimum": 1 },
+        "createdAt": { "type": "string", "format": "date-time", "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?(Z|[+-]\\d{2}:\\d{2})$" },
+        "updatedAt": { "type": "string", "format": "date-time", "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?(Z|[+-]\\d{2}:\\d{2})$" }
+      }
+    },
+    "workUnits": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "owner", "acceptanceCriteria", "mutationScope", "state"],
+        "properties": {
+          "id": { "type": "string" },
+          "paperclipChildIssueId": { "type": ["string", "null"] },
+          "githubChildIssueId": { "type": ["string", "null"] },
+          "owner": { "type": "string" },
+          "acceptanceCriteria": { "type": "array", "items": { "type": "string" } },
+          "tests": { "type": "array", "items": { "type": "string" } },
+          "mutationScope": {
+            "type": "object",
+            "required": ["repositories", "paths"],
+            "properties": {
+              "repositories": { "type": "array", "items": { "type": "string" } },
+              "paths": { "type": "array", "items": { "type": "string" } }
+            }
+          },
+          "state": { "type": "string", "enum": ["pending", "in_progress", "submitted", "approved", "failed"] }
+        }
+      }
+    },
+    "participants": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "runtime", "role", "mode", "enforcementMode", "lastSeenAt"],
+        "properties": {
+          "id": { "type": "string" },
+          "runtime": { "type": "string", "enum": ["paperclip-native", "claude-code", "codex-desktop", "hermes", "openclaw", "manual"] },
+          "role": { "type": "string", "enum": ["lead", "worker", "reviewer", "helper"] },
+          "mode": { "type": "string", "enum": ["mutate", "read", "review"] },
+          "enforcementMode": { "type": "string", "enum": ["observe", "enforce_mutations"] },
+          "runId": { "type": ["string", "null"] },
+          "sessionId": { "type": ["string", "null"] },
+          "currentAction": { "type": ["string", "null"] },
+          "progressNote": { "type": ["string", "null"] },
+          "blocker": { "type": ["string", "null"] },
+          "nextAction": { "type": ["string", "null"] },
+          "retryState": { "type": ["object", "null"] },
+          "startedAt": { "type": "string", "format": "date-time", "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?(Z|[+-]\\d{2}:\\d{2})$" },
+          "lastSeenAt": { "type": "string", "format": "date-time", "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?(Z|[+-]\\d{2}:\\d{2})$" },
+          "endedAt": { "type": ["string", "null"], "format": "date-time", "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?(Z|[+-]\\d{2}:\\d{2})$" }
+        }
+      }
+    },
+    "placements": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["hostId", "hostname", "os", "runtime", "repository", "branch", "dirty"],
+        "properties": {
+          "hostId": { "type": "string" },
+          "hostname": { "type": "string" },
+          "os": { "type": "string" },
+          "runtime": { "type": "string" },
+          "reachableAddresses": { "type": "array", "items": { "type": "string" } },
+          "environment": { "type": "string" },
+          "nativePath": { "type": "string" },
+          "runtimePath": { "type": "string" },
+          "worktreeIdentity": { "type": "string" },
+          "repository": { "type": "string" },
+          "remoteUrl": { "type": "string" },
+          "branch": { "type": "string" },
+          "baseSha": { "type": "string" },
+          "headSha": { "type": "string" },
+          "dirty": { "type": "boolean" },
+          "aheadCount": { "type": "integer" },
+          "behindCount": { "type": "integer" },
+          "processId": { "type": ["integer", "null"] },
+          "processGroup": { "type": ["string", "null"] },
+          "serviceReferences": { "type": "array", "items": { "type": "string" } },
+          "logReferences": { "type": "array", "items": { "type": "string" } }
+        }
+      }
+    },
+    "delivery": {
+      "type": "object",
+      "required": ["commits", "pullRequests"],
+      "properties": {
+        "commits": { "type": "array", "items": { "type": "string" } },
+        "pullRequests": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["number", "url", "headBranch", "baseBranch", "status"],
+            "properties": {
+              "number": { "type": "integer" },
+              "url": { "type": "string" },
+              "headBranch": { "type": "string" },
+              "baseBranch": { "type": "string" },
+              "status": { "type": "string", "enum": ["open", "draft", "merged", "closed"] },
+              "checks": { "type": "array", "items": { "type": "object" } },
+              "receipt": { "type": ["object", "null"] }
+            }
+          }
+        }
+      }
+    },
+    "health": {
+      "type": "object",
+      "required": ["heartbeatAgeSeconds", "status", "freshnessTimestamp", "evidenceSource"],
+      "properties": {
+        "heartbeatAgeSeconds": { "type": "number", "minimum": 0 },
+        "processEvidence": { "type": "boolean" },
+        "outputEvidence": { "type": "boolean" },
+        "status": { "type": "string", "enum": ["healthy", "reporting_degraded", "stale", "orphaned", "error", "offline"] },
+        "freshnessTimestamp": { "type": "string", "format": "date-time", "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?(Z|[+-]\\d{2}:\\d{2})$" },
+        "evidenceSource": { "type": "string" }
+      }
+    },
+    "controls": {
+      "type": "object",
+      "required": ["permittedIntents", "pendingIntents", "completedReceipts"],
+      "properties": {
+        "permittedIntents": {
+          "type": "array",
+          "items": { "type": "string", "enum": ["pause", "cancel", "retry", "release", "reassign", "takeover"] }
+        },
+        "pendingIntents": { "type": "array", "items": { "type": "object" } },
+        "completedReceipts": { "type": "array", "items": { "type": "object" } }
+      }
+    },
+    "provenance": {
+      "type": "object",
+      "required": ["sourceAuthority", "observedAt", "confidence", "reconciliationDrift"],
+      "properties": {
+        "sourceAuthority": { "type": "string", "enum": ["paperclip", "mck", "github", "mission-control"] },
+        "observedAt": { "type": "string", "format": "date-time", "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?(Z|[+-]\\d{2}:\\d{2})$" },
+        "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+        "reconciliationDrift": { "type": "boolean" },
+        "driftDetails": { "type": "array", "items": { "type": "string" } }
+      }
+    }
+  }
+}

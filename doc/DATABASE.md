@@ -181,6 +181,56 @@ This policy makes training exports self-describing while keeping the decision re
 
 The plugin runtime tracks plugin-owned database namespaces and migrations in `plugin_database_namespaces` and `plugin_migrations`. Hosted deployments that separate runtime and migration connections should set `DATABASE_MIGRATION_URL`; plugin namespace migration work uses the migration connection when present.
 
+## Task coordination credential foundations
+
+`mutation_leases` stores only `lease_token_hash` (SHA-256 hex), never the
+plaintext bearer token. Migration `0197_coordination_lease_credentials.sql`
+hashes any experimental `0196` plaintext values before dropping the old
+column and index.
+
+`coordination_claim_idempotency_keys` is the durable ledger for the future
+claim endpoint. It records the company-scoped idempotency key, request hash,
+recovery status, lease/participation identities, a non-secret response body,
+lock timestamp, and a 72-hour expiry. Cached response data must not contain a
+lease bearer token. A same-key replay should reuse the persisted lease identity
+and rotate a fresh token atomically after verifying the request hash. No claim
+write API is enabled by this schema foundation alone.
+
+Coordination reads are company-scoped and fail closed before detail loading.
+Exact placement—including host/address/path/process fields and repository,
+branch, and dirty-state evidence—is returned only to a board actor or an agent
+assigned to or actively participating in the requested issue. Other in-company
+agent reads omit placement rows and use a fail-closed response DTO. Responses
+are marked `Cache-Control: no-store`. Company collection/detail reads re-check
+the expected company, and fallback task identities combine company and issue
+UUIDs rather than claiming an unverified GitHub mapping.
+
+## Runtime-service process identity
+
+Migration `0198_workspace_runtime_service_process_group.sql` adds
+`workspace_runtime_services.process_group_id`. Local runtime services persist
+their starting row and process-group identity before waiting for readiness, so
+a server restart can retain an orphaned descendant as failed/unhealthy instead
+of reporting it stopped.
+
+A process id, process-group number, or restart-adopted registry row is evidence,
+not signal authority by itself. After process-memory loss, Paperclip retains
+the row for human review and will not signal it until a future contract
+persists and verifies an OS-stable process birth identity. Numeric id reuse,
+missing identity proof, and unsupported inspection therefore fail closed.
+Windows restart reconciliation still uses stable descendant lineage across
+bounded snapshots for observability; it does not attempt a PID-only tree kill.
+The same signal-authority boundary applies to heartbeat and recovery records:
+after the in-memory child handle is lost, persisted PID, process-start, boot,
+and process-group fields can prove that operator review is needed but cannot
+authorize cancellation, shutdown cleanup, orphan reaping, or source-resolved
+cleanup. Standalone `dev:stop` and workspace-registry cleanup follow the same
+rule: live or unproven records are retained with a nonzero needs-human result.
+On Windows, process-group state is unprobeable and normally null for production
+child-process adapters. A dead persisted wrapper PID therefore cannot prove
+descendant exit; cancellation, hot-restart adoption, and stale-run reaping retain
+the run and its lease until an OS-native tree-exit receipt exists.
+
 ## Backups
 
 Paperclip supports automatic and manual logical database backups. These dumps include
@@ -188,6 +238,14 @@ non-system database schemas such as `public`, the Drizzle migration journal, and
 plugin-owned database schemas. See `doc/DEVELOPING.md` for the current
 `paperclipai db:backup` / `pnpm db:backup` commands and backup retention
 configuration.
+
+Restore prefers `psql` when it is installed. When `psql` is unavailable, the
+native fallback recognizes Paperclip's canonical single-line
+`COPY ... FROM stdin` statements, streams the following rows through one
+postgres.js writable session with backpressure, and consumes (rather than
+inserting) the `\.` terminator. Unsupported COPY shapes or an unterminated COPY
+section fail closed and still require `psql`; the fallback does not guess at
+arbitrary external dump formatting.
 
 Database backups do not include non-database instance files such as local-disk
 uploads, workspace files, or the local encrypted secrets master key. Back those paths

@@ -17,8 +17,12 @@ export function resolveTestShellCommand(command: string): string {
     // Git's launcher under bin/ seeds /usr/bin and /mingw64/bin for non-login
     // shells. Invoking usr/bin/sh.exe directly inherits the Windows PATH as-is,
     // which leaves core tools such as mkdir, rm, and base64 undiscoverable.
-    for (const binDir of ["bin", "usr/bin"]) {
-      const candidate = path.join(root, "Git", binDir, `${command}.exe`);
+    const candidates = [
+      path.join(root, "Git", "bin", `${command}.exe`),
+      ...(command === "sh" ? [path.join(root, "Git", "bin", "bash.exe")] : []),
+      path.join(root, "Git", "usr", "bin", `${command}.exe`),
+    ];
+    for (const candidate of candidates) {
       if (fs.existsSync(candidate)) {
         return candidate;
       }

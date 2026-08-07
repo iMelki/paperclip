@@ -3,6 +3,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { runChildProcess } from "@paperclipai/adapter-utils/server-utils";
+import { resolveTestShellCommand } from "@paperclipai/adapter-utils/test-shell";
 import { execute } from "@paperclipai/adapter-codex-local/server";
 
 async function writeFakeCodexCommand(commandPath: string): Promise<void> {
@@ -98,7 +99,7 @@ function createLocalSandboxRunner() {
       counter += 1;
       return runChildProcess(
         `sandbox-run-${counter}`,
-        input.command,
+        resolveTestShellCommand(input.command),
         input.args ?? [],
         {
           cwd: input.cwd ?? process.cwd(),
