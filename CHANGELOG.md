@@ -4,6 +4,12 @@ All notable changes to this repository should be recorded here.
 
 ## Unreleased
 
+- Completed the explicit catalog-review contract in the MCP E2E connected
+  fixture (`reviewedCatalogEntryIds`) after draft discovery was correctly
+  quarantined by the Tool Gateway policy. Paperclip CI run `31262062577`
+  passes all required jobs and all three E2E shards. Tracked the separate
+  asynchronous teardown FK/deadlock race as issue #42 rather than weakening
+  quarantine behavior.
 - Narrowed deterministic Validator context access to a running standard-trust
   Process-adapter heartbeat assigned to a direct child issue. The exception
   permits `issue:read` for that direct parent only, accepts either a null or

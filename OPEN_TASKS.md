@@ -81,9 +81,18 @@ This file is the durable local index for active `paperclip` issues.
     Bubblewrap shadow instance with pinned Node, pnpm, and Codex versions.
 
 - [#26 - Day-0 software-factory promotion PR](https://github.com/iMelki/paperclip/pull/26)
-  - Real non-draft PR `dev → master`, current head tracked in Projects Ops
-    #102. Never merge until the complete required matrix, independent review,
-    release receipt, and runtime readback are green.
+  - Real non-draft PR `dev → master`, head `bd5a64776`, with required CI run
+    `31262062577` fully green (including all three E2E shards), fresh history
+    Gitleaks green, and native runtime provenance read back. Never merge until
+    formal independent review, the MCK #135/#136 bridge gates, a fresh
+    Builder→Validator→Reviewer→release receipt, and MCK #46 evidence are
+    complete.
+
+- [#42 - Make E2E teardown await or tolerate late heartbeat finalizers](https://github.com/iMelki/paperclip/issues/42)
+  - Open follow-up for asynchronous teardown FK/deadlock noise documented by
+    upstream issues #9366/#9761. It is not causal for the repaired US-1
+    catalog-review fixture, but it must be fixed before teardown evidence is
+    called clean.
 
 - Historical Gitleaks inventory
   - Refreshed 2026-08-08 with Gitleaks 8.30.1: 7,151 commits / 240.71 MB,

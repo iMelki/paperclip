@@ -426,3 +426,24 @@ individual reachability/ownership review. Dirty or locked worktrees are never
 reset, stashed, rebound, or removed. This matches GitHub's documented branch
 deletion guidance and applies across the additional content-factory,
 policy-gateway, stream-deck-agent, Memory, and search-api repositories.
+
+## Continuation evidence (2026-08-08)
+
+Paperclip `dev` is now `bd5a64776a04fd002c092e41808dd172caada817`, pushed and
+read back at `origin/dev`. The real promotion PR [#26](https://github.com/iMelki/paperclip/pull/26)
+is non-draft and remains review-only. Required workflow run
+[`31262062577`](https://github.com/iMelki/paperclip/actions/runs/31262062577)
+is fully green, including all three E2E shards; the repaired fixture explicitly
+sends `reviewedCatalogEntryIds` so draft-discovered catalog entries remain
+deny-by-default until reviewed. A fresh Gitleaks history scan covered 7,258
+commits / 250.06 MB with no leaks (`_factory-work/paperclip-gitleaks-history-
+bd5a64776.log`).
+
+The native loopback instance `assistants-factory-win` was restarted from that
+exact SHA and `/api/health` read back `ok`, private, `authReady=true`, process
+start `2026-08-08T14:31:51.919Z`, version `2026.722.0+393.git.bd5a64776`, and
+backup `paperclip-20260808-151056.sql.gz`. Formal independent review, MCK
+#135/#136 host and v2 bridge evidence, a fresh role-chain receipt, WSL parity,
+and MCK #46's natural scheduled run remain open gates. The later FK/deadlock
+messages are tracked separately in [#42](https://github.com/iMelki/paperclip/issues/42)
+and are not evidence against the catalog-quarantine fix.
