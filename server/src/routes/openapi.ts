@@ -1997,6 +1997,24 @@ registry.registerPath({
 
 registry.registerPath({
   method: "get",
+  path: "/api/companies/{companyId}/coordination/tasks",
+  tags: ["coordination"],
+  summary: "List coordination tasks for a company",
+  request: { params: z.object({ companyId: z.string() }) },
+  responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden },
+});
+
+registry.registerPath({
+  method: "get",
+  path: "/api/issues/{rootIssueId}/coordination",
+  tags: ["coordination"],
+  summary: "Get coordination details for a root issue",
+  request: { params: z.object({ rootIssueId: z.string() }) },
+  responses: { 200: r.ok(), 401: r.unauthorized, 404: r.notFound },
+});
+
+registry.registerPath({
+  method: "get",
   path: "/api/issues/{id}",
   tags: ["issues"],
   summary: "Get an issue",

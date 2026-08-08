@@ -23,6 +23,7 @@ const apiPrefixes: Record<string, string> = {
   "built-in-agents.ts": "/api",
   "cloud-upstreams.ts": "/api",
   "companies.ts": "/api/companies",
+  "coordination.ts": "/api",
   "company-skills.ts": "/api",
   "company-skill-policy.ts": "/api",
   "costs.ts": "/api",
