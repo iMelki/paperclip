@@ -508,7 +508,9 @@ async function isLikelyMatchingCommand(record: LocalServiceRegistryRecord) {
               String(record.pid),
             ])
           ).stdout.trim();
-    return doesCommandLineMatch(record.command, commandLine);
+    if (doesCommandLineMatch(record.command, commandLine)) return true;
+    const ownerPid = record.port ? await readLocalServicePortOwner(record.port) : null;
+    return ownerPid !== null && await doesUnixProcessLineageMatch(ownerPid, record.command);
   } catch {
     return false;
   }
@@ -537,11 +539,31 @@ function doesCommandLineMatch(
   if (!recordedExecutable || !recordedArguments) return false;
   const normalizedLower = normalizedCommandLine.toLowerCase();
   const argumentTailLower = recordedArguments.toLowerCase();
-  return normalizedLower.includes(
-    `${recordedExecutable.toLowerCase()} ${argumentTailLower}`,
-  ) || normalizedLower.includes(
-    `${recordedExecutable.toLowerCase()}.exe ${argumentTailLower}`,
+  const executableLower = recordedExecutable.toLowerCase();
+  return ["", ".exe", ".cjs", ".js"].some((suffix) =>
+    normalizedLower.includes(`${executableLower}${suffix} ${argumentTailLower}`),
   );
+}
+
+async function doesUnixProcessLineageMatch(ownerPid: number, recordedCommand: string) {
+  if (process.platform === "win32") return false;
+  const visited = new Set<number>();
+  let pid: number | null = normalizeLocalServicePid(ownerPid);
+  for (let depth = 0; pid !== null && depth < 16 && !visited.has(pid); depth += 1) {
+    visited.add(pid);
+    try {
+      const [{ stdout: commandLine }, { stdout: parentPidText }] = await Promise.all([
+        execFileAsync("ps", ["-o", "command=", "-p", String(pid)]),
+        execFileAsync("ps", ["-o", "ppid=", "-p", String(pid)]),
+      ]);
+      if (doesCommandLineMatch(recordedCommand, commandLine.trim())) return true;
+      const parentPid = normalizeLocalServicePid(parentPidText.trim());
+      pid = parentPid !== null && parentPid !== pid && parentPid > 1 ? parentPid : null;
+    } catch {
+      return false;
+    }
+  }
+  return false;
 }
 
 export async function findAdoptableLocalService(input: {

@@ -4430,7 +4430,11 @@ describe("readLocalServicePortOwner", () => {
           { pid: -1, processGroupId: null },
           { forceAfterMs: 0 },
         );
-        expect(kill).not.toHaveBeenCalled();
+        // `terminateLocalService` may probe liveness with signal 0; the safety
+        // boundary is that no terminating signal is sent when our own PGID
+        // cannot be resolved.
+        const signalCalls = kill.mock.calls.filter(([, signal]) => signal !== 0);
+        expect(signalCalls).toEqual([]);
       } finally {
         kill.mockRestore();
       }
