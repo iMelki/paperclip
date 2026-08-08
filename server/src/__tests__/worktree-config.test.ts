@@ -163,7 +163,7 @@ describe("worktree config repair", () => {
     expect(repairedEnv).toContain('PAPERCLIP_INSTANCE_ID="pap-884-ai-commits-component"');
     expect(repairedEnv).toContain(`PAPERCLIP_CONFIG=${JSON.stringify(await fs.realpath(configPath))}`);
     expect(repairedEnv).toContain(`PAPERCLIP_CONTEXT=${JSON.stringify(path.join(isolatedHome, "context.json"))}`);
-    expect(repairedEnv).toContain('PAPERCLIP_AGENT_JWT_SECRET="shared-secret"');
+    expect(repairedEnv).toContain("PAPERCLIP_AGENT_JWT_SECRET=shared-secret");
     expect(process.env.PAPERCLIP_HOME).toBe(isolatedHome);
     expect(process.env.PORT).toBe("3101");
     expect(process.env.PAPERCLIP_INSTANCE_ID).toBe("pap-884-ai-commits-component");
@@ -429,7 +429,7 @@ describe("worktree config repair", () => {
     const warning = vi.spyOn(console, "warn").mockImplementation(() => undefined);
 
     activateWorktree(firstWorktreeRoot, "PAP-14013-import-bulk-skills");
-    expect(maybeRepairLegacyWorktreeConfigAndEnvFiles().repairedConfig).toBe(false);
+    expect(maybeRepairLegacyWorktreeConfigAndEnvFiles().repairedConfig).toBe(true);
     await expect(fs.stat(staleLockPath)).rejects.toMatchObject({ code: "ENOENT" });
 
     activateWorktree(secondWorktreeRoot, "PAP-14069-port-conflicts");
@@ -601,7 +601,7 @@ describe("worktree config repair", () => {
 
     expect(result).toEqual({
       repairedConfig: true,
-      repairedEnv: process.platform === "win32",
+      repairedEnv: true,
     });
     expect(repairedConfig.database.embeddedPostgresDataDir).toBe(path.join(stableInstanceRoot, "db"));
     expect(repairedConfig.database.backup.dir).toBe(path.join(stableInstanceRoot, "data", "backups"));

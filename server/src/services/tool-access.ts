@@ -3346,7 +3346,11 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
     const existingByName = new Map(existingRows.map((entry) => [entry.toolName, entry]));
     const updatedEntries: ToolCatalogEntry[] = [];
     let quarantinedCount = 0;
-    const quarantineOnRefresh = shouldQuarantineNewEntries(connection) && connection.status === "active";
+    // Discovery happens while a gallery connection is still a draft. Keep the
+    // configured quarantine boundary active for that first catalog as well as
+    // later refreshes; otherwise newly discovered write tools briefly become
+    // active before the operator can review them.
+    const quarantineOnRefresh = shouldQuarantineNewEntries(connection);
     const safeDefault = asRecord(connection.config).safeDefault === true;
     const sourceTemplateKey = typeof asRecord(connection.config).sourceTemplateKey === "string"
       ? String(asRecord(connection.config).sourceTemplateKey)

@@ -5097,6 +5097,7 @@ describeEmbeddedPostgres("tool access service", () => {
     const finish = await service.finishGalleryAppConnection(company.id, connect.connectionId, {
       enabledCatalogEntryIds: [listEntry.id, updateEntry.id],
       askFirstCatalogEntryIds: [updateEntry.id],
+      reviewedCatalogEntryIds: [listEntry.id, updateEntry.id],
       access: { agentIds: [agent.id] },
     }, { actorType: "user", actorId: "board" });
 

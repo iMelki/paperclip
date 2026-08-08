@@ -2528,7 +2528,7 @@ describeEmbeddedPostgres("issueService.findOpenAncestorCreatedByAgent", () => {
     db = createDb(tempDb.connectionString);
     svc = issueService(db);
     await ensureIssueRelationsTable(db);
-  }, 20_000);
+  }, EMBEDDED_POSTGRES_TEST_SETUP_TIMEOUT_MS);
 
   afterEach(async () => {
     await db.delete(issues);
