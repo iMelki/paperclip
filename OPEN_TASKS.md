@@ -83,7 +83,9 @@ This file is the durable local index for active `paperclip` issues.
 - [#26 - Day-0 software-factory promotion PR](https://github.com/iMelki/paperclip/pull/26)
   - Real non-draft PR `dev → master`, head `bd5a64776`, with required CI run
     `31262062577` fully green (including all three E2E shards), fresh history
-    Gitleaks green, and native runtime provenance read back. Never merge until
+    Gitleaks green, and native runtime provenance read back. Current docs head
+    is `97fdc237`; runtime was restarted from that exact SHA at
+    `2026-08-08T14:55:33.182Z`. Never merge until
     formal independent review, the MCK #135/#136 bridge gates, a fresh
     Builder→Validator→Reviewer→release receipt, and MCK #46 evidence are
     complete.

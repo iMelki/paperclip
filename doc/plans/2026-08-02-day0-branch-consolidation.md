@@ -439,10 +439,12 @@ deny-by-default until reviewed. A fresh Gitleaks history scan covered 7,258
 commits / 250.06 MB with no leaks (`_factory-work/paperclip-gitleaks-history-
 bd5a64776.log`).
 
-The native loopback instance `assistants-factory-win` was restarted from that
-exact SHA and `/api/health` read back `ok`, private, `authReady=true`, process
-start `2026-08-08T14:31:51.919Z`, version `2026.722.0+393.git.bd5a64776`, and
-backup `paperclip-20260808-151056.sql.gz`. Formal independent review, MCK
+The native loopback instance `assistants-factory-win` was restarted again from
+the current docs head `97fdc237b7eea69239a243f667dd0ff3a59f3699` and
+`/api/health` read back `ok`, private, `authReady=true`, full SHA `97fdc237`,
+process start `2026-08-08T14:55:33.182Z`, version
+`2026.722.0+394.git.97fdc237b`, and backup
+`paperclip-20260808-151056.sql.gz`. Formal independent review, MCK
 #135/#136 host and v2 bridge evidence, a fresh role-chain receipt, WSL parity,
 and MCK #46's natural scheduled run remain open gates. The later FK/deadlock
 messages are tracked separately in [#42](https://github.com/iMelki/paperclip/issues/42)

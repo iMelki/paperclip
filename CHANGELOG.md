@@ -4,6 +4,10 @@ All notable changes to this repository should be recorded here.
 
 ## Unreleased
 
+- Restarted the loopback-only `assistants-factory-win` instance from current
+  `origin/dev` SHA `97fdc237b7eea69239a243f667dd0ff3a59f3699`; health, auth,
+  backup, branch, and full-SHA provenance read back cleanly at
+  `2026-08-08T14:55:33.182Z`.
 - Completed the explicit catalog-review contract in the MCP E2E connected
   fixture (`reviewedCatalogEntryIds`) after draft discovery was correctly
   quarantined by the Tool Gateway policy. Paperclip CI run `31262062577`
