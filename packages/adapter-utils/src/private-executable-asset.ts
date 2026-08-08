@@ -16,6 +16,14 @@ const INHERIT_ONLY = 2;
 const WINDOWS_COMMAND_TIMEOUT_MS = 10_000;
 const WINDOWS_COMMAND_MAX_BUFFER_BYTES = 128 * 1024;
 const PRIVATE_ASSET_PREFIX = /^[A-Za-z0-9._-]{1,96}$/;
+// Raw %LOCALAPPDATA%/%TEMP% are not reliably safe default parents: hosts
+// running AppContainer-sandboxed tooling (or anything else that stamps a
+// foreign SID with DELETE_SUBDIRECTORIES_AND_FILES on those directories)
+// legitimately fail assertParentCannotDeletePrivateChildren on BOTH of
+// them. A persistent, protected-DACL bootstrap directory underneath
+// LOCALAPPDATA sidesteps that -- it evaluates its own exact policy, not
+// whatever the shared user-profile directory happens to carry.
+const PRIVATE_ASSET_BOOTSTRAP_PARENT_NAME = "paperclip-private-assets";
 
 interface PathIdentity {
   dev: bigint;
@@ -430,6 +438,41 @@ async function cleanupEmptyDirectoryAfterFailedCreation(input: {
 }
 
 /**
+ * Resolves (bootstrapping on first use) a persistent, protected-DACL
+ * directory under %LOCALAPPDATA% to serve as the default Windows parent for
+ * createPrivateExecutableAssetDirectory, in place of raw %LOCALAPPDATA%
+ * itself. A pre-existing bootstrap directory is verified against the exact
+ * expected policy on every call, never trusted blindly -- a directory found
+ * at the expected path is only as safe as its actual current DACL.
+ */
+async function ensureWindowsPrivateAssetParentDirectory(): Promise<string> {
+  const localAppData = process.env.LOCALAPPDATA;
+  if (!localAppData) {
+    throw new Error("Private executable-asset parent bootstrap requires LOCALAPPDATA.");
+  }
+  // currentUserSid is this process's own identity, not a property of any
+  // particular directory -- readWindowsDirectorySecurity(localAppData) is
+  // used here purely to obtain it, not to validate LOCALAPPDATA's own ACL.
+  const { currentUserSid } = await readWindowsDirectorySecurity(localAppData);
+  const target = path.join(localAppData, PRIVATE_ASSET_BOOTSTRAP_PARENT_NAME);
+  if (await pathIsMissing(target)) {
+    try {
+      await createWindowsPrivateDirectory(target, currentUserSid);
+    } catch (error) {
+      // Another process may have won a create race between the check above
+      // and this call; only swallow the error if the target now exists --
+      // any other failure (e.g. a real permission problem) still surfaces.
+      if (await pathIsMissing(target)) throw error;
+    }
+  }
+  assertExactWindowsPrivateDirectoryPolicy(
+    await readWindowsDirectorySecurity(target),
+    currentUserSid,
+  );
+  return target;
+}
+
+/**
  * Creates a randomized, private temporary directory for locally generated
  * executable assets.
  *
@@ -447,7 +490,9 @@ export async function createPrivateExecutableAssetDirectory(
   }
 
   const parentDirectory = options.parentDirectory
-    ?? (process.platform === "win32" ? process.env.LOCALAPPDATA : os.tmpdir());
+    ?? (process.platform === "win32"
+      ? await ensureWindowsPrivateAssetParentDirectory()
+      : os.tmpdir());
   if (!parentDirectory) {
     throw new Error("Private executable-asset parent is unavailable.");
   }

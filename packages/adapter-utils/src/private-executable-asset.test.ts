@@ -316,4 +316,40 @@ describe("createPrivateExecutableAssetDirectory", () => {
     },
     20_000,
   );
+
+  it.runIf(process.platform === "win32")(
+    "bootstraps a protected default parent when raw LOCALAPPDATA carries an untrusted DELETE_CHILD ACE",
+    async () => {
+      // Raw %LOCALAPPDATA% is not a reliable default parent on hosts running
+      // AppContainer-sandboxed tooling (or anything else that stamps a
+      // foreign SID with DeleteSubdirectoriesAndFiles there) -- the default
+      // now bootstraps a persistent, protected-DACL directory underneath it
+      // instead of using LOCALAPPDATA directly. Two calls prove both the
+      // first-use create path and the already-exists reuse path.
+      //
+      // The parent's dirname is checked structurally (basename + that both
+      // calls resolve to the identical parent), not against a literal
+      // LOCALAPPDATA-joined string: fs.realpath() in
+      // createPrivateExecutableAssetDirectory resolves AppContainer's
+      // transparent per-package path virtualization, which can legitimately
+      // differ from the literal env-var path on a sandboxed host.
+      const first = await createPrivateExecutableAssetDirectory({ prefix: "bootstrap-a-" });
+      cleanupPaths.add(first.directoryPath);
+      const bootstrapParent = path.win32.dirname(first.directoryPath);
+      expect(path.win32.basename(bootstrapParent)).toBe("paperclip-private-assets");
+      await first.assertIntegrity();
+      await first.cleanup();
+      cleanupPaths.delete(first.directoryPath);
+
+      const second = await createPrivateExecutableAssetDirectory({ prefix: "bootstrap-b-" });
+      cleanupPaths.add(second.directoryPath);
+      expect(path.win32.dirname(second.directoryPath)).toBe(
+        path.win32.dirname(first.directoryPath),
+      );
+      await second.assertIntegrity();
+      await second.cleanup();
+      cleanupPaths.delete(second.directoryPath);
+    },
+    20_000,
+  );
 });
