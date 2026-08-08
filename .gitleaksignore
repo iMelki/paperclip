@@ -82,3 +82,15 @@ f712cedbc2e0c86ffa606018609831167641766a:ui/src/pages/apps/gateways/panels/Token
 fd2f82ac5bba6ce2db0c5d17c573733af5f2bbb8:scripts/smoke/hermes-gateway-e2e.sh:curl-auth-header:610
 fd2f82ac5bba6ce2db0c5d17c573733af5f2bbb8:server/src/__tests__/invite-accept-gateway-defaults.test.ts:generic-api-key:155
 fd2f82ac5bba6ce2db0c5d17c573733af5f2bbb8:server/src/__tests__/invite-accept-gateway-defaults.test.ts:generic-api-key:178
+
+# Historical review 2026-08-08: the seven exact matches below are literal
+# REDACTED skill-key placeholders in a superseded test-only commit. The file
+# is not present in the current tree; keep these fingerprints narrow so new
+# values, paths, and commits remain detectable.
+49307b05dfcf345f71320ee4aefaf9db6f1d299a:server/src/services/skill-usage-events.test.ts:generic-api-key:15
+49307b05dfcf345f71320ee4aefaf9db6f1d299a:server/src/services/skill-usage-events.test.ts:generic-api-key:23
+49307b05dfcf345f71320ee4aefaf9db6f1d299a:server/src/services/skill-usage-events.test.ts:generic-api-key:60
+49307b05dfcf345f71320ee4aefaf9db6f1d299a:server/src/services/skill-usage-events.test.ts:generic-api-key:61
+49307b05dfcf345f71320ee4aefaf9db6f1d299a:server/src/services/skill-usage-events.test.ts:generic-api-key:62
+49307b05dfcf345f71320ee4aefaf9db6f1d299a:server/src/services/skill-usage-events.test.ts:generic-api-key:63
+49307b05dfcf345f71320ee4aefaf9db6f1d299a:server/src/services/skill-usage-events.test.ts:generic-api-key:77
