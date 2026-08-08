@@ -48,7 +48,16 @@ This file is the durable local index for active `paperclip` issues.
     bounded 30-second and 20-second limits and pass together, while explicit
     dependency globs prevent spurious Windows watcher restarts. Keep this issue
     open until the fresh
-    complete-suite receipt is green with zero surviving fixtures.
+    complete-suite receipt is green with zero surviving fixtures. The POSIX
+    runtime-service adoption fallback now bounds its full `ps` parent-lineage
+    walk to two seconds, including hung command/parent probes; the regression
+    test uses a deliberately non-returning `ps` executable. The nine recovery
+    tests omitted during upstream conflict resolution remain a separate,
+    explicitly tracked follow-up and are not restored by this slice. The
+    workspace-busy retry handoff now keeps the source run non-terminal until
+    its `scheduled_retry` child is inserted and linked, closing the
+    cancelled-without-retry race covered by the existing heartbeat assertions
+    at lines 569, 667, and 858.
 
 - [#22 - Make complete validation and package builds Windows-portable](https://github.com/iMelki/paperclip/issues/22)
   - The portable Node filesystem helper, validated direct package-manager
@@ -96,11 +105,12 @@ This file is the durable local index for active `paperclip` issues.
     called clean.
 
 - Historical Gitleaks inventory
-  - Refreshed 2026-08-08 with Gitleaks 8.30.1: 7,262 commits / 250.07 MB,
+  - Refreshed 2026-08-08 at current `dev` head `902118b6` with Gitleaks 8.30.1:
+    7,263 commits / 250.07 MB,
     64 reviewed synthetic/history-only findings, zero unignored leaks. Exact
     inventory and fingerprints are in `doc/security/gitleaks-history-inventory-2026-08-02.md`;
-    the current report is the paired `paperclip-gitleaks-history-4565.stdout.log` /
-    `paperclip-gitleaks-history-4565.stderr.log` artifacts under
+    the current report is the paired `paperclip-gitleaks-history-902118b6.stdout.log` /
+    `paperclip-gitleaks-history-902118b6.stderr.log` artifacts under
     `S:\source\CCAI\Assistants\_factory-work`;
     no active credential rotation was warranted.
 

@@ -4,10 +4,19 @@ All notable changes to this repository should be recorded here.
 
 ## Unreleased
 
+- Bounded the POSIX runtime-service adoption fallback for #20: the `ps`
+  command/parent-lineage walk now has a two-second total deadline and explicit
+  child-process timeouts, with a regression fixture proving a non-returning
+  `ps` cannot hold adoption indefinitely. The nine omitted upstream recovery
+  tests remain a separate follow-up.
+- Fixed the #20 workspace-busy retry handoff race: the source heartbeat run
+  stays non-terminal until its `scheduled_retry` child is inserted and linked,
+  so observers cannot see a cancelled run without its retry. Existing
+  heartbeat-workspace-busy coverage now passes all 15 tests.
 - Restarted the loopback-only `assistants-factory-win` instance from current
-  `origin/dev` SHA `97fdc237b7eea69239a243f667dd0ff3a59f3699`; health, auth,
+  `origin/dev` SHA `902118b6670642ba3111c20118949c9578d00ea4`; health, auth,
   backup, branch, and full-SHA provenance read back cleanly at
-  `2026-08-08T14:55:33.182Z`.
+  `2026-08-08T16:45:58.856Z`.
 - Completed the explicit catalog-review contract in the MCP E2E connected
   fixture (`reviewedCatalogEntryIds`) after draft discovery was correctly
   quarantined by the Tool Gateway policy. Paperclip CI run `31262062577`
