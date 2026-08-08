@@ -4476,7 +4476,11 @@ describe("readLocalServicePortOwner", () => {
           },
           { forceAfterMs: 0, trustedProcessGroup: true },
         );
-        expect(kill).not.toHaveBeenCalled();
+        // `terminateLocalService` may probe liveness with signal 0; the safety
+        // invariant is that no terminating signal is sent when the own process
+        // group cannot be resolved.
+        const signalCalls = kill.mock.calls.filter(([, signal]) => signal !== 0);
+        expect(signalCalls).toEqual([]);
       } finally {
         if (originalPath === undefined) delete process.env.PATH;
         else process.env.PATH = originalPath;
