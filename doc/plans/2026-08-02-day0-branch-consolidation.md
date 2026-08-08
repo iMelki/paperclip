@@ -429,8 +429,31 @@ policy-gateway, stream-deck-agent, Memory, and search-api repositories.
 
 ## Continuation evidence (2026-08-08)
 
-Paperclip `dev` is now `bd5a64776a04fd002c092e41808dd172caada817`, pushed and
-read back at `origin/dev`. The real promotion PR [#26](https://github.com/iMelki/paperclip/pull/26)
+### Current integration readback (later 2026-08-08 checkpoint)
+
+Paperclip `dev` now reads `b6141a1c059233bfdb2ae4cf0f5562f4ce40dd4d` at
+`origin/dev`; PR #26's current required workflow run `31263575833` is complete
+and green (Storybook visual regression is intentionally skipped). The PR remains
+open and review-only: formal independent approval, current-host factory receipt,
+MCK #135/#136, WSL parity, and MCK #46 natural-run evidence are still required.
+
+Mission Control's exact `dev` delivery is `4cfad0a7` (implementation
+`8dc1579` plus tracking `4cfad0a`), with TypeScript, production build, and the
+18-file/131-test suite green. Its signed webhook fixture matrix remains tracked
+in Mission Control #74 with 11 legacy expectation/timeout failures; it is not
+reported as green. MCK hardening is pushed as `62e3bac7` and issue #136 now
+records 36/36 bridge tests plus 19/19 factory-webhook tests green, while the
+authoritative v2/envelope/host/live-receipt gates remain open.
+
+The report-only workspace branch audit at
+`_factory-work/topology-20260808-branch-audit-r4/` found 92 sources / 93
+worktrees, 37 dirty, 1 detached, and no locked/prunable worktrees. All 49
+merged-PR branch candidates remain retained pending owner approval, exact
+ancestry, no open PR/worktree, clean state, and remote readback. No branch,
+worktree, reset, stash, or force-push mutation was performed.
+
+Earlier green evidence at `bd5a64776a04fd002c092e41808dd172caada817` remains
+preserved in the receipts below. The real promotion PR [#26](https://github.com/iMelki/paperclip/pull/26)
 is non-draft and remains review-only. Required workflow run
 [`31262062577`](https://github.com/iMelki/paperclip/actions/runs/31262062577)
 is fully green, including all three E2E shards; the repaired fixture explicitly
@@ -439,8 +462,8 @@ deny-by-default until reviewed. A fresh Gitleaks history scan covered 7,258
 commits / 250.06 MB with no leaks (`_factory-work/paperclip-gitleaks-history-
 bd5a64776.log`).
 
-The native loopback instance `assistants-factory-win` was restarted again from
-the current docs head `97fdc237b7eea69239a243f667dd0ff3a59f3699` and
+The native loopback instance `assistants-factory-win` was restarted from
+the docs head `97fdc237b7eea69239a243f667dd0ff3a59f3699` and
 `/api/health` read back `ok`, private, `authReady=true`, full SHA `97fdc237`,
 process start `2026-08-08T14:55:33.182Z`, version
 `2026.722.0+394.git.97fdc237b`, and backup
