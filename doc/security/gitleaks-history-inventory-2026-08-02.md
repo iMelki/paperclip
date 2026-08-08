@@ -4,7 +4,7 @@
 
 The Paperclip `dev` history was scanned with Gitleaks 8.30.1 using the same
 `git --all --redact --exit-code 2` mode used by CI. The current scan on
-2026-08-08 at `f8b2212d` covered 7,260 commits and completed with zero
+2026-08-08 at `4565e1a86` covered 7,262 commits / 250.07 MB and completed with zero
 unignored leaks. The inventory contains 64 reviewed findings: the previously
 reviewed 57 plus seven exact matches discovered in the superseded
 `49307b05dfcf345f71320ee4aefaf9db6f1d299a` test commit. Those seven values are
@@ -46,9 +46,10 @@ rotated/revoked, and tracked separately before merge.
 node scripts/verify-gitleaks.mjs --history
 ```
 
-The current scan report is retained at
-`S:\source\CCAI\Assistants\_factory-work\paperclip-gitleaks-history-f8b2212d.log`.
-The prior 7,151-commit artifact is historical evidence only; it is intentionally
+The current scan report is retained as paired stdout/stderr artifacts at
+`S:\source\CCAI\Assistants\_factory-work\paperclip-gitleaks-history-4565.stdout.log`
+and `paperclip-gitleaks-history-4565.stderr.log`.
+The prior 7,260-commit artifact is historical evidence only; it is intentionally
 outside the repository because these logs contain detector
 metadata and commit references that are represented by the exact ignore
 entries.
