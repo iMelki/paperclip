@@ -1880,7 +1880,7 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
         stopped: true,
         stopReason: UNMANAGED_BACKGROUND_TASK_STOP_REASON,
         reason: UNMANAGED_BACKGROUND_TASK_LIVENESS_REASON,
-        processPid: orphan.processPid,
+        processPid: null,
         processGroupId: orphan.processGroupId,
       },
     });
