@@ -3,8 +3,9 @@
 ## Scope and method
 
 The Paperclip `dev` history was scanned with Gitleaks 8.30.1 using the same
-`git --all --redact --exit-code 2` mode used by CI. The refreshed scan on
-2026-08-08 covered 7,151 commits and reported 64 findings: the previously
+`git --all --redact --exit-code 2` mode used by CI. The current scan on
+2026-08-08 at `f8b2212d` covered 7,260 commits and completed with zero
+unignored leaks. The inventory contains 64 reviewed findings: the previously
 reviewed 57 plus seven exact matches discovered in the superseded
 `49307b05dfcf345f71320ee4aefaf9db6f1d299a` test commit. Those seven values are
 literal `REDACTED` skill-key placeholders. Findings were reviewed by commit,
@@ -19,7 +20,7 @@ file, detector, and source content. No value was copied into this document.
 | Documentation/log examples | 5 | Deployment docs and parity logs explicitly describe revoked/example IDs or redacted placeholders. | Keep exact fingerprint ignores; do not treat as credentials. |
 | Redacted smoke-test command examples | 3 | Hermes smoke script uses environment variables and literal placeholder auth examples; runtime output is redacted. | Keep exact fingerprint ignores; runtime secrets remain environment-owned. |
 
-The 57 findings are therefore reviewed synthetic/history-only matches, not
+The 64 findings are therefore reviewed synthetic/history-only matches, not
 confirmed active credentials. No rotation or revocation action is warranted
 from this evidence. If a future scan exposes a non-placeholder value or an
 active provider reference, the finding must be removed from the ignore list,
@@ -45,8 +46,9 @@ rotated/revoked, and tracked separately before merge.
 node scripts/verify-gitleaks.mjs --history
 ```
 
-The refreshed scan report is retained at
-`S:\source\CCAI\Assistants\_factory-work\paperclip-gitleaks-history-20260808.log`.
-It is intentionally outside the repository because it contains detector
+The current scan report is retained at
+`S:\source\CCAI\Assistants\_factory-work\paperclip-gitleaks-history-f8b2212d.log`.
+The prior 7,151-commit artifact is historical evidence only; it is intentionally
+outside the repository because these logs contain detector
 metadata and commit references that are represented by the exact ignore
 entries.
