@@ -261,7 +261,9 @@ export function assertSyncOperationsConfined(
 ): void {
   const confine = (candidate: string, allowed: string[], label: string): void => {
     if (!isConfinedAbsolutePath(candidate, allowed)) {
-      throw new Error(`sync operation ${label} path is not a confined absolute path: ${candidate}`);
+      throw new Error(
+        `sync operation ${label} path escapes its confinement root or is not a confined absolute path: ${candidate}`,
+      );
     }
   };
   for (const operation of operations) {
