@@ -262,7 +262,7 @@ async function spawnOrphanedProcessGroup() {
       "-e",
       [
         "const { spawn } = require('node:child_process');",
-        "const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });",
+        "const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { detached: true, stdio: 'ignore' }); child.unref();",
         "process.stdout.write(String(child.pid));",
         "setTimeout(() => process.exit(0), 25);",
       ].join(" "),
