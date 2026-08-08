@@ -216,6 +216,7 @@ async function seedConnectedFixture(request: APIRequestContext, label: string) {
     data: {
       enabledCatalogEntryIds: enabled,
       askFirstCatalogEntryIds: askFirst,
+      reviewedCatalogEntryIds: enabled,
       access: { agentIds: [scout.id] },
     },
   }));
