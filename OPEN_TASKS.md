@@ -1,6 +1,6 @@
 # Paperclip Open Tasks
 
-Last updated: 2026-08-02
+Last updated: 2026-08-08
 
 This file is the durable local index for active `paperclip` issues.
 
@@ -61,8 +61,9 @@ This file is the durable local index for active `paperclip` issues.
 
 - [#19 - Make headless onboarding and doctor failures automation-safe](https://github.com/iMelki/paperclip/issues/19)
   - Implemented explicit config-only `onboard --yes --no-run` behavior and
-    nonzero failed-doctor process status. Close after the committed CLI is used
-    to materialize and diagnose the loopback-only factory instance.
+    nonzero failed-doctor process status. The recorded Windows instance is
+    currently stopped/stale; close only after the committed CLI materializes
+    config, doctor, controlled restart, and provenance readback all pass.
 
 - [#16 - Configure the Assistants day-0 software factory](https://github.com/iMelki/paperclip/issues/16)
   - Configure the local company, goals, budgets, role agents, execution policy,
@@ -78,6 +79,17 @@ This file is the durable local index for active `paperclip` issues.
 - [#15 - Provision native and WSL Paperclip factory runtimes](https://github.com/iMelki/paperclip/issues/15)
   - Prove the loopback-only Windows instance first, then the Ubuntu 24.04
     Bubblewrap shadow instance with pinned Node, pnpm, and Codex versions.
+
+- [#26 - Day-0 software-factory promotion PR](https://github.com/iMelki/paperclip/pull/26)
+  - Real non-draft PR `dev → master`, current head tracked in Projects Ops
+    #102. Never merge until the complete required matrix, independent review,
+    release receipt, and runtime readback are green.
+
+- Historical Gitleaks inventory
+  - Refreshed 2026-08-08 with Gitleaks 8.30.1: 7,151 commits / 240.71 MB,
+    64 reviewed synthetic/history-only findings, zero unignored leaks. Exact
+    inventory and fingerprints are in `doc/security/gitleaks-history-inventory-2026-08-02.md`;
+    no active credential rotation was warranted.
 
 - [#13 - Replace inert secrets-filter attributes with enforced secret scanning](https://github.com/iMelki/paperclip/issues/13)
   - 2026-07-14: selected explicit scanning-only policy, removed the six inert
