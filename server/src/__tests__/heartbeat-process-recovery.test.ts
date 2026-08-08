@@ -1849,7 +1849,10 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
 
     const { agentId, runId, issueId } = await seedRunFixture({
       agentStatus: "idle",
-      processPid: orphan.processPid,
+      // The leader has exited before the fixture is persisted. Keep only the
+      // process-group identity so a recycled PID cannot make the test treat a
+      // different process as the original parent.
+      processPid: null,
       processGroupId: orphan.processGroupId,
     });
     const heartbeat = heartbeatService(db);
