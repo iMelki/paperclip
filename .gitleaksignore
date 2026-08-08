@@ -94,3 +94,13 @@ fd2f82ac5bba6ce2db0c5d17c573733af5f2bbb8:server/src/__tests__/invite-accept-gate
 49307b05dfcf345f71320ee4aefaf9db6f1d299a:server/src/services/skill-usage-events.test.ts:generic-api-key:62
 49307b05dfcf345f71320ee4aefaf9db6f1d299a:server/src/services/skill-usage-events.test.ts:generic-api-key:63
 49307b05dfcf345f71320ee4aefaf9db6f1d299a:server/src/services/skill-usage-events.test.ts:generic-api-key:77
+
+# Historical review 2026-08-08: staged-scan fingerprints for literal synthetic
+# decision/auth test secrets. These values are test fixtures, not credentials;
+# keep the file/rule/line matches exact so new values remain detectable.
+packages/db/src/decision-queue-migrations.test.ts:generic-api-key:12
+server/src/__tests__/server-startup-feedback-export.test.ts:generic-api-key:355
+server/src/__tests__/server-startup-feedback-export.test.ts:generic-api-key:356
+server/src/__tests__/server-startup-feedback-export.test.ts:generic-api-key:588
+server/src/__tests__/server-startup-feedback-export.test.ts:generic-api-key:635
+server/src/__tests__/decisions-service.test.ts:generic-api-key:50

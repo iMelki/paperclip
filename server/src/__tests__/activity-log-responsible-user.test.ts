@@ -14,6 +14,7 @@ import {
 import {
   logActivity,
   resolveResponsibleUserIdForActivity,
+  type ActivityPublication,
   type LogActivityInput,
 } from "../services/activity-log.js";
 import {
@@ -215,6 +216,7 @@ describeEmbeddedPostgres("logActivity responsible-user stamping", () => {
       responsibleUserId: "key-user",
     });
 
+    const postCommitPublications: ActivityPublication[] = [];
     await logActivity(db, activityInput({
       companyId,
       actorId: agentId,
@@ -222,7 +224,17 @@ describeEmbeddedPostgres("logActivity responsible-user stamping", () => {
       entityType: "agent",
       entityId: agentId,
       agentApiKeyId,
-    }));
+    }), postCommitPublications);
+
+    expect(postCommitPublications).toHaveLength(1);
+    expect(postCommitPublications[0]).toMatchObject({
+      companyId,
+      payload: {
+        action: "issue.updated",
+        entityType: "agent",
+        entityId: agentId,
+      },
+    });
 
     const row = await db
       .select({ responsibleUserId: activityLog.responsibleUserId })

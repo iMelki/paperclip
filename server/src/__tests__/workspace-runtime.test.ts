@@ -1424,24 +1424,22 @@ describe("realizeExecutionWorkspace", () => {
       const envContents = await fs.readFile(envPath, "utf8");
       const configContents = JSON.parse(await fs.readFile(configPath, "utf8"));
       const configStats = await fs.lstat(configPath);
-      const expectedInstanceId = "pap-885-show-worktree-banner";
-      const expectedInstanceRoot = path.join(
-        isolatedWorktreeHome,
-        "instances",
-        expectedInstanceId,
-      );
-
       expect(configStats.isSymbolicLink()).toBe(false);
-      expect(configContents.database.embeddedPostgresDataDir).toBe(path.join(expectedInstanceRoot, "db"));
       expect(configContents.database.embeddedPostgresDataDir).not.toBe(path.join(sharedConfigDir, "db"));
       expect(configContents.server.port).not.toBe(3100);
-      expect(configContents.secrets.localEncrypted.keyFilePath).toBe(
-        path.join(expectedInstanceRoot, "secrets", "master.key"),
-      );
       expect(envContents).not.toContain("DATABASE_URL=");
       const envVars = parseEnvContents(envContents);
       expect(envVars.PAPERCLIP_HOME).toBe(isolatedWorktreeHome);
-      expect(envVars.PAPERCLIP_INSTANCE_ID).toBe(expectedInstanceId);
+      expect(envVars.PAPERCLIP_INSTANCE_ID).toMatch(/^pap-885-show-worktree-banner-[a-f0-9]{12}$/);
+      const expectedInstanceRoot = path.join(
+        isolatedWorktreeHome,
+        "instances",
+        envVars.PAPERCLIP_INSTANCE_ID!,
+      );
+      expect(configContents.database.embeddedPostgresDataDir).toBe(path.join(expectedInstanceRoot, "db"));
+      expect(configContents.secrets.localEncrypted.keyFilePath).toBe(
+        path.join(expectedInstanceRoot, "secrets", "master.key"),
+      );
       expect(await fs.realpath(envVars.PAPERCLIP_CONFIG!)).toBe(await fs.realpath(configPath));
       expect(envVars.PAPERCLIP_IN_WORKTREE).toBe("true");
       expect(envVars.PAPERCLIP_WORKTREE_NAME).toBe("PAP-885-show-worktree-banner");
@@ -2810,7 +2808,7 @@ describe("realizeExecutionWorkspace", () => {
             eligible: false,
             attempted: false,
             succeeded: false,
-            reason: "expected branch does not exist",
+            reason: "forward reconciliation adoption requires database access to audit after workspace realization",
           }),
         }),
       },

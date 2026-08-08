@@ -6,6 +6,7 @@ import {
   createTarballFromDirectory,
   prepareSandboxManagedRuntime,
   type PreparedSandboxManagedRuntime,
+  type SandboxAdditionalSource,
   type SandboxManagedRuntimeAsset,
   type SandboxManagedRuntimeClient,
   type SandboxRemoteExecutionSpec,
@@ -15,7 +16,8 @@ import {
 import { preferredShellForSandbox, shellCommandArgs } from "./sandbox-shell.js";
 import type { RunProcessResult } from "./server-utils.js";
 import type { RuntimeProgressSink, RuntimeStatusSink } from "./runtime-progress.js";
-import { dirnamePortablePath } from "./shell-path.js";
+import { dirnamePortablePath, shellQuotePath } from "./shell-path.js";
+import type { RuntimeSpanRunner } from "./acpx-engine/startup-timing.js";
 
 export interface CommandManagedRuntimeRunner {
   /**
@@ -25,25 +27,6 @@ export interface CommandManagedRuntimeRunner {
    * and let the caller choose a chunked upload path when progress is requested.
    */
   supportsSingleStreamStdinProgress?: boolean;
-  /**
-   * Cumulative count of host→sandbox `execute` round-trips this runner has
-   * performed (Open Q1). Present only on runners that instrument the single
-   * exec seam (the sandbox runner); the per-step delta is emitted as
-   * `run.startup.step` `payload.roundTrips`. A `() => number` reader, never the
-   * runner itself, is threaded into `measureStartupStep` so the timing helper
-   * stays runner-agnostic.
-   */
-  execCount?(): number;
-  /**
-   * Cumulative provider-reported wall-time (ms) for the `executeCommand` REST
-   * call ({@link providerExecMs}) vs the `client.get` sandbox re-fetch that
-   * precedes it ({@link providerGetMs}), accumulated across every `execute`
-   * round-trip (Open Q1, finer attribution). Present only when the provider
-   * surfaces these durations on its result metadata; the per-step deltas are
-   * emitted as `payload.providerExecMs` / `payload.providerGetMs`.
-   */
-  providerExecMs?(): number;
-  providerGetMs?(): number;
   execute(input: {
     command: string;
     args?: string[];
@@ -53,6 +36,27 @@ export interface CommandManagedRuntimeRunner {
     timeoutMs?: number;
     onLog?: (stream: "stdout" | "stderr", chunk: string) => Promise<void>;
     onSpawn?: (meta: { pid: number; startedAt: string }) => Promise<void>;
+    /**
+     * Run this command through the lease's persistent session even when no run
+     * step is active. A sandbox provider opens the session on the first
+     * non-bypassed command; the ACP process session bridge sets this so the
+     * long-lived agent command streams its output through the session log
+     * stream. The default keeps the context-based session selection.
+     */
+    useSession?: boolean;
+    /**
+     * Run this command outside the lease's persistent session even when a run
+     * step is active. The persistent session is a single serialized shell. In
+     * streamed mode the agent runs as one long-lived foreground command that
+     * holds the session for the whole run. The bridge control-plane execs
+     * (input delivery, output read, callback relay, and the queue/setup
+     * bookkeeping) must run concurrently with the agent, so they run as
+     * independent one-shot commands. On the session they queue behind the agent
+     * command that never returns — a permanent deadlock. An explicit bypass
+     * always wins over the context-based session selection and over
+     * `useSession`. The default keeps the context-based session selection.
+     */
+    bypassSession?: boolean;
   }): Promise<RunProcessResult>;
   /**
    * Optional native inbound file transfer. Present only when the sandbox
@@ -76,9 +80,11 @@ export interface CommandManagedRuntimeSpec {
 
 export type CommandManagedRuntimeAsset = SandboxManagedRuntimeAsset;
 
-function shellQuote(value: string) {
+function shellQuoteLegacy(value: string) {
   return `'${value.replace(/'/g, `'"'"'`)}'`;
 }
+
+const shellQuote = shellQuotePath;
 
 function mergeRuntimeExcludes(entries: string[] | undefined): string[] {
   return [...new Set([".paperclip-runtime", ...(entries ?? [])])];
@@ -361,8 +367,7 @@ export function createCommandManagedRuntimeClient(input: {
   // replace untar for directories, direct `writeFile` for single files), then run
   // the operation's ordered `postUploadCommands` fail-fast. Byte-for-byte
   // behavior-equivalent to the caller-inlined tar path it will replace. All exec
-  // rides the shared `execute` seam so `execCount`/`providerExecMs` still
-  // attribute (Open Q1).
+  // rides the shared `execute` seam.
   const fallbackSyncIn = async (operations: SandboxSyncOperation[]): Promise<SandboxSyncResult> => {
     const resultOperations: SandboxSyncResult["operations"] = [];
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-syncin-fallback-"));
@@ -475,6 +480,8 @@ export async function prepareCommandManagedRuntime(input: {
   workspaceExclude?: string[];
   preserveAbsentOnRestore?: string[];
   assets?: CommandManagedRuntimeAsset[];
+  /** Referenced (additional) projects to stage into the sandbox as plain, read-only trees. */
+  additionalSources?: SandboxAdditionalSource[];
   installCommand?: string | null;
   /** When provided alongside `installCommand`, skip the install if `command -v <detectCommand>` succeeds. */
   detectCommand?: string | null;
@@ -482,6 +489,10 @@ export async function prepareCommandManagedRuntime(input: {
   // task wires it into the byte-counting writeFile/readFile transport.
   onProgress?: RuntimeProgressSink;
   onRuntimeProgress?: RuntimeStatusSink;
+  // Optional host span runner for the workspace tarball build. Forwarded to
+  // prepareSandboxManagedRuntime so the host pack time rides one `pack` span
+  // under the `stage.sync` step. The default is a no-op.
+  runtimeSpan?: RuntimeSpanRunner;
 }): Promise<PreparedSandboxManagedRuntime> {
   const timeoutMs = input.spec.timeoutMs && input.spec.timeoutMs > 0 ? input.spec.timeoutMs : 300_000;
   const workspaceRemoteDir = input.workspaceRemoteDir ?? input.spec.remoteCwd;
@@ -530,8 +541,10 @@ export async function prepareCommandManagedRuntime(input: {
           workspaceExclude: mergeRuntimeExcludes(input.workspaceExclude),
           preserveAbsentOnRestore: input.preserveAbsentOnRestore,
           assets: input.assets,
+          additionalSources: input.additionalSources,
           onProgress: input.onProgress,
           onRuntimeProgress: input.onRuntimeProgress,
+          runtimeSpan: input.runtimeSpan,
         });
       }
     }
@@ -567,7 +580,9 @@ export async function prepareCommandManagedRuntime(input: {
     workspaceExclude: mergeRuntimeExcludes(input.workspaceExclude),
     preserveAbsentOnRestore: input.preserveAbsentOnRestore,
     assets: input.assets,
+    additionalSources: input.additionalSources,
     onProgress: input.onProgress,
     onRuntimeProgress: input.onRuntimeProgress,
+    runtimeSpan: input.runtimeSpan,
   });
 }

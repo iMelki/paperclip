@@ -3,6 +3,7 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { applyPendingMigrations, ensurePostgresDatabase } from "./client.js";
+import { createEmbeddedPostgresLogBuffer, formatEmbeddedPostgresError as formatEmbeddedPostgresErrorDetails } from "./embedded-postgres-error.js";
 import { prepareEmbeddedPostgresNativeRuntime } from "./embedded-postgres-native.js";
 import { reapWindowsTestProcessTree } from "./test-windows-process-tree.js";
 
@@ -48,10 +49,24 @@ function getReservedTestPorts(): Set<number> {
   return new Set(configuredPorts.filter((port) => Number.isInteger(port) && port > 0 && port <= 65535));
 }
 
-async function getEmbeddedPostgresCtor(): Promise<EmbeddedPostgresCtor> {
+type EmbeddedPostgresCtorProvider = () => Promise<EmbeddedPostgresCtor>;
+
+async function loadEmbeddedPostgresCtor(): Promise<EmbeddedPostgresCtor> {
   const mod = await import("embedded-postgres");
   await prepareEmbeddedPostgresNativeRuntime();
   return mod.default as EmbeddedPostgresCtor;
+}
+
+let embeddedPostgresCtorProvider: EmbeddedPostgresCtorProvider = loadEmbeddedPostgresCtor;
+
+export function __setEmbeddedPostgresCtorProviderForTests(
+  provider: EmbeddedPostgresCtorProvider | null,
+): void {
+  embeddedPostgresCtorProvider = provider ?? loadEmbeddedPostgresCtor;
+}
+
+async function getEmbeddedPostgresCtor(): Promise<EmbeddedPostgresCtor> {
+  return await embeddedPostgresCtorProvider();
 }
 
 async function getAvailablePort(): Promise<number> {
@@ -89,17 +104,7 @@ async function createEmbeddedPostgresTestInstance(tempDirPrefix: string) {
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), tempDirPrefix));
   const port = await getAvailablePort();
   const EmbeddedPostgres = await getEmbeddedPostgresCtor();
-  // embedded-postgres rejects with an empty error on some startup refusals
-  // (e.g. postgres.exe declining to run under an elevated Windows token) while
-  // the actual explanation only ever appears on the log callbacks. Retain a
-  // bounded tail of that output so failure reasons can quote it.
-  const recentOutput: string[] = [];
-  const captureOutput = (message: unknown) => {
-    const text = String(message).trim();
-    if (text.length === 0) return;
-    recentOutput.push(text);
-    if (recentOutput.length > 20) recentOutput.shift();
-  };
+  const logBuffer = createEmbeddedPostgresLogBuffer();
   const instance = new EmbeddedPostgres({
     databaseDir: dataDir,
     user: "paperclip",
@@ -107,11 +112,11 @@ async function createEmbeddedPostgresTestInstance(tempDirPrefix: string) {
     port,
     persistent: true,
     initdbFlags: ["--encoding=UTF8", "--locale=C", "--lc-messages=C"],
-    onLog: captureOutput,
-    onError: captureOutput,
+    onLog: (message) => logBuffer.append(message),
+    onError: (message) => logBuffer.append(message),
   });
 
-  return { dataDir, port, instance, recentOutput };
+  return { dataDir, port, instance, getRecentLogs: () => logBuffer.getRecentLogs() };
 }
 
 function cleanupEmbeddedPostgresTestDirs(dataDir: string) {
@@ -225,39 +230,57 @@ async function stopEmbeddedPostgresBounded(
   void stopped.finally(cleanupOnce);
 }
 
-function formatEmbeddedPostgresError(error: unknown, recentOutput?: string[]): string {
-  let message = "embedded Postgres startup failed";
-  if (error instanceof Error && error.message.length > 0) message = error.message;
-  else if (typeof error === "string" && error.length > 0) message = error;
-  if (recentOutput && recentOutput.length > 0) {
-    message += `; last server output: ${recentOutput.slice(-5).join(" | ")}`;
+const EMBEDDED_POSTGRES_START_MAX_ATTEMPTS = 5;
+
+async function startEmbeddedPostgresWithRetry(tempDirPrefix: string): Promise<{
+  port: number;
+  dataDir: string;
+  instance: EmbeddedPostgresInstance;
+  getRecentLogs: () => string[];
+}> {
+  let lastError = new Error("embedded Postgres startup failed");
+  for (let attempt = 1; attempt <= EMBEDDED_POSTGRES_START_MAX_ATTEMPTS; attempt += 1) {
+    const created = await createEmbeddedPostgresTestInstance(tempDirPrefix);
+    try {
+      await created.instance.initialise();
+      await created.instance.start();
+      return created;
+    } catch (error) {
+      lastError = new Error(formatEmbeddedPostgresError(error, created.getRecentLogs()));
+      await stopEmbeddedPostgresBounded(created.instance, created.dataDir, () => {
+        cleanupEmbeddedPostgresTestDirs(created.dataDir);
+      });
+    }
   }
-  return message;
+  throw new Error(
+    `Failed to start embedded PostgreSQL test database after ${EMBEDDED_POSTGRES_START_MAX_ATTEMPTS} attempts: ${lastError.message}`,
+  );
+}
+
+export const __startEmbeddedPostgresWithRetryForTests = startEmbeddedPostgresWithRetry;
+export const __embeddedPostgresStartMaxAttemptsForTests = EMBEDDED_POSTGRES_START_MAX_ATTEMPTS;
+
+function formatEmbeddedPostgresError(error: unknown, recentLogs: string[] = []): string {
+  return formatEmbeddedPostgresErrorDetails(error, {
+    fallbackMessage: "embedded Postgres startup failed",
+    recentLogs,
+  }).message;
 }
 
 async function probeEmbeddedPostgresSupport(): Promise<EmbeddedPostgresTestSupport> {
-  let dataDir: string | null = null;
-  let instance: EmbeddedPostgresInstance | null = null;
-  let recentOutput: string[] | undefined;
+  let started: { dataDir: string; instance: EmbeddedPostgresInstance } | null = null;
 
   try {
-    const created = await createEmbeddedPostgresTestInstance(
-      "paperclip-embedded-postgres-probe-",
-    );
-    dataDir = created.dataDir;
-    instance = created.instance;
-    recentOutput = created.recentOutput;
-    await instance.initialise();
-    await instance.start();
+    started = await startEmbeddedPostgresWithRetry("paperclip-embedded-postgres-probe-");
     return { supported: true };
   } catch (error) {
     return {
       supported: false,
-      reason: formatEmbeddedPostgresError(error, recentOutput),
+      reason: formatEmbeddedPostgresError(error),
     };
   } finally {
-    await stopEmbeddedPostgresBounded(instance, dataDir, () => {
-      if (dataDir) cleanupEmbeddedPostgresTestDirs(dataDir);
+    await stopEmbeddedPostgresBounded(started?.instance ?? null, started?.dataDir ?? null, () => {
+      if (started?.dataDir) cleanupEmbeddedPostgresTestDirs(started.dataDir);
     });
   }
 }
@@ -274,16 +297,12 @@ export async function startEmbeddedPostgresTestDatabase(
 ): Promise<EmbeddedPostgresTestDatabase> {
   let dataDir: string | null = null;
   let instance: EmbeddedPostgresInstance | null = null;
-  let recentOutput: string[] | undefined;
 
   try {
-    const created = await createEmbeddedPostgresTestInstance(tempDirPrefix);
+    const created = await startEmbeddedPostgresWithRetry(tempDirPrefix);
     dataDir = created.dataDir;
     instance = created.instance;
-    recentOutput = created.recentOutput;
     const { port } = created;
-    await instance.initialise();
-    await instance.start();
 
     const adminConnectionString = `postgres://paperclip:paperclip@127.0.0.1:${port}/postgres`;
     await ensurePostgresDatabase(adminConnectionString, "paperclip");
@@ -303,7 +322,7 @@ export async function startEmbeddedPostgresTestDatabase(
       if (dataDir) cleanupEmbeddedPostgresTestDirs(dataDir);
     });
     throw new Error(
-      `Failed to start embedded PostgreSQL test database: ${formatEmbeddedPostgresError(error, recentOutput)}`,
+      `Failed to start embedded PostgreSQL test database: ${formatEmbeddedPostgresError(error)}`,
     );
   }
 }

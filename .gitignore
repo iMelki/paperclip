@@ -14,6 +14,9 @@ drizzle/meta/
 .vite/
 coverage/
 .DS_Store
+._*
+.AppleDouble
+.LSOverride
 data/
 .paperclip/
 .pnpm-store/
