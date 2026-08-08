@@ -290,7 +290,7 @@ async function spawnOrphanedProcessGroup() {
 
   return {
     processPid: leader.pid ?? null,
-    processGroupId: leader.pid ?? null,
+    processGroupId: descendantPid,
     descendantPid,
   };
 }

@@ -1,5 +1,4 @@
 import fs from "node:fs/promises";
-import { readFileSync } from "node:fs";
 import path from "node:path";
 import { execFile as execFileCallback } from "node:child_process";
 import { promisify } from "node:util";
@@ -5683,17 +5682,6 @@ function isProcessAlive(pid: number | null | undefined) {
   if (typeof pid !== "number" || !Number.isInteger(pid) || pid <= 0) return false;
   try {
     process.kill(pid, 0);
-    if (process.platform === "linux") {
-      try {
-        const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
-        const closeParen = stat.lastIndexOf(")");
-        const state = closeParen >= 0 ? stat.slice(closeParen + 2).split(" ", 1)[0] : "";
-        if (state === "Z") return false;
-      } catch {
-        // A process can exit between kill(0) and /proc inspection; treat the
-        // missing record as dead and preserve the existing fail-closed path.
-      }
-    }
     return true;
   } catch (error) {
     const code = (error as NodeJS.ErrnoException | undefined)?.code;
