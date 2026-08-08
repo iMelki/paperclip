@@ -10,6 +10,7 @@ import {
   companySkills,
   createDb,
   toolApplications,
+  toolCatalogEntries,
   toolConnectionInstalls,
   toolConnections,
   toolProfileBindings,
@@ -364,6 +365,7 @@ describeEmbeddedPostgres("heartbeat runtime skill version pins", () => {
         transport: "mcp_remote",
         status: "active",
         enabled: true,
+        healthStatus: "ok",
         config: { url: "https://installed.example.test/mcp" },
       },
       {
@@ -374,9 +376,28 @@ describeEmbeddedPostgres("heartbeat runtime skill version pins", () => {
         transport: "mcp_remote",
         status: "active",
         enabled: true,
+        healthStatus: "ok",
         config: { url: "https://uninstalled.example.test/mcp" },
       },
     ]).returning();
+    // getEffectiveProfilesForAgent resolves allowedTools against toolCatalogEntries,
+    // not toolConnections directly -- a "connection" selector still matches by
+    // connectionId against a cataloged tool row (profileEntryMatchesCatalog in
+    // tool-access.ts), so at least one catalog entry must exist for the
+    // installed connection or buildPaperclipRuntimeMcpServers finds zero
+    // expectedTools and skips the connection entirely.
+    await db.insert(toolCatalogEntries).values({
+      companyId,
+      applicationId: application!.id,
+      connectionId: installed!.id,
+      name: "issues_read",
+      toolName: "issues_read",
+      entryKind: "tool",
+      status: "active",
+      versionHash: "a".repeat(64),
+      schemaHash: "b".repeat(64),
+      reviewedAt: new Date(),
+    });
     const [profile] = await db.insert(toolProfiles).values({
       companyId,
       profileKey: `app:${installed!.id}`,
@@ -413,7 +434,9 @@ describeEmbeddedPostgres("heartbeat runtime skill version pins", () => {
     expect(captured?.mcpServers).toHaveLength(1);
     expect(captured?.mcpServers[0]).toMatchObject({
       connectionId: installed!.id,
-      name: installed!.name,
+      // gateway.name is synthesized as `Runtime <connection name> <shortAgentId>
+      // <shortCapability>` (runtime-mcp-gateway.ts), not the raw connection name.
+      name: expect.stringMatching(new RegExp(`^Runtime ${installed!.name} `)),
       token: expect.stringMatching(/^pcgw_/),
       url: expect.stringContaining("/api/tool-gateway/gateways/"),
     });

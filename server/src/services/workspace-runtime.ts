@@ -181,16 +181,23 @@ type ProcessOutputAccumulator = {
   finish(): ProcessOutputCapture;
 };
 
-export async function resetRuntimeServicesForTests() {
+export async function resetRuntimeServicesForTests(options?: { preserveProcesses?: boolean }) {
   // Forgetting a record without stopping its process leaks the real service
   // (and every descendant its shell wrapper spawned) as an orphan: nothing
   // else in the process ever holds a reference to it again once the maps
   // below are cleared. Route every live record through the same termination
   // stopRuntimeService already uses in production so tests actually observe
   // the service go away, not just Paperclip's bookkeeping about it.
-  const serviceIds = [...runtimeServicesById.keys()];
-  for (const serviceId of serviceIds) {
-    await stopRuntimeService(serviceId).catch(() => undefined);
+  //
+  // preserveProcesses is the deliberate exception: tests that simulate a
+  // Paperclip restart (bookkeeping wiped, real OS process left running) need
+  // the process to survive so reconcilePersistedRuntimeServicesOnStartup has
+  // something live to adopt back.
+  if (!options?.preserveProcesses) {
+    const serviceIds = [...runtimeServicesById.keys()];
+    for (const serviceId of serviceIds) {
+      await stopRuntimeService(serviceId).catch(() => undefined);
+    }
   }
   for (const record of runtimeServicesById.values()) {
     clearIdleTimer(record);
@@ -4227,10 +4234,21 @@ async function stopRuntimeService(serviceId: string) {
   } else if (record.providerRef) {
     const pid = Number.parseInt(record.providerRef, 10);
     if (Number.isInteger(pid) && pid > 0) {
-      await terminateLocalService({
-        pid,
-        processGroupId: record.processGroupId,
-      });
+      // record.providerRef came from an adopted local-service registry entry
+      // (a bare pid string, not a ChildProcess this process holds a handle
+      // to), so it cannot carry trustedPid. record.startedAt is the same
+      // registry entry's own recorded creation moment, established when the
+      // service was first spawned -- passing it lets terminateLocalService
+      // verify the live process's actual creation time still matches before
+      // attempting a kill. Without either, the Windows branch always returns
+      // outcome:"untrusted_identity" and never attempts a kill at all.
+      await terminateLocalService(
+        {
+          pid,
+          processGroupId: record.processGroupId,
+        },
+        { expectedStartedAt: record.startedAt },
+      );
     }
   }
   await removeLocalServiceRegistryRecord(record.serviceKey);
