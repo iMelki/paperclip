@@ -1,6 +1,7 @@
 import { execFile } from "node:child_process";
 import path from "node:path";
 import { promisify } from "node:util";
+import type { WindowsTestJobCustody } from "./windows-test-job-warden.js";
 
 const execFileAsync = promisify(execFile);
 const windowsPowerShellCommand = path.join(
@@ -29,7 +30,9 @@ export type ReapWindowsTestProcessTreeResult = {
     | "untrusted_root"
     | "snapshot_failed"
     | "still_running"
-    | "advisory_only_without_job_object";
+    | "advisory_only_without_job_object"
+    | "job_terminate_unconfirmed"
+    | "job_containment_incomplete";
   rootPid: number;
   capturedPids: number[];
   attemptedPids: number[];
@@ -252,6 +255,14 @@ export async function reapWindowsTestProcessTree(input: {
   ownerMarkers: string[];
   expectedRootIdentity?: WindowsTestProcessIdentity;
   timeoutMs?: number;
+  // Launch-time Job Object custody (windows-test-job-warden.ts) is the only
+  // mechanism that may promote a CIM snapshot from advisory to authoritative:
+  // TerminateJobObject + a post-terminate ActiveProcesses==0 read is a kernel
+  // statement that every process ever assigned to the job (including
+  // descendants created after assignment, since breakaway is denied) has
+  // exited -- unlike the snapshot below, it closes the PID-reuse and
+  // unobserved-intermediate races described in the comment further down.
+  jobCustody?: WindowsTestJobCustody;
 }): Promise<ReapWindowsTestProcessTreeResult> {
   const rootPid = Number.isInteger(input.rootPid) && input.rootPid > 0
     ? input.rootPid
@@ -354,6 +365,51 @@ export async function reapWindowsTestProcessTree(input: {
       snapshots,
     };
   }
+  const ownedPids = owned
+    .map((item) => item.pid)
+    .sort((left, right) => left - right);
+
+  if (input.jobCustody) {
+    // A pre-terminate cross-check of owned pids against the job's own pid
+    // list (catching an escapee spawned before custody was assigned) needs
+    // real QueryInformationJobObject(BasicProcessIdList) marshaling in the
+    // warden, deferred out of this first slice -- see windows-test-job-warden.ts.
+    // terminate() itself is still authoritative for everything IN the job: it
+    // is a kernel statement (TerminateJobObject + a post-terminate
+    // ActiveProcesses==0 read) that every process ever assigned to it,
+    // including descendants created after assignment (breakaway is denied),
+    // has exited.
+    const termination = await input.jobCustody.terminate(
+      Math.max(500, deadline - Date.now()),
+    );
+    if (termination.ok) {
+      return {
+        rootPid,
+        attempted: true,
+        confirmedStopped: true,
+        reason: "reaped",
+        capturedPids: ownedPids,
+        // termination.receipt.jobPidsBeforeTerminate is empty until the
+        // warden's own PID-list marshaling lands (see the comment above);
+        // ownedPids is the CIM-observed set that was subject to the
+        // terminate attempt and is meaningful regardless.
+        attemptedPids: ownedPids,
+        remainingPids: [],
+        snapshots,
+      };
+    }
+    return {
+      rootPid,
+      attempted: true,
+      confirmedStopped: false,
+      reason: "job_terminate_unconfirmed",
+      capturedPids: ownedPids,
+      attemptedPids: ownedPids,
+      remainingPids: ownedPids,
+      snapshots,
+    };
+  }
+
   // CIM PID/creation/lineage snapshots are advisory observations. A process can
   // exit and have its PID reused after this snapshot but before a bare-PID kill,
   // and an unobserved intermediate can leave a reparented descendant. Without a
@@ -364,13 +420,9 @@ export async function reapWindowsTestProcessTree(input: {
     attempted: false,
     confirmedStopped: false,
     reason: "advisory_only_without_job_object",
-    capturedPids: owned
-      .map((item) => item.pid)
-      .sort((left, right) => left - right),
+    capturedPids: ownedPids,
     attemptedPids: [],
-    remainingPids: owned
-      .map((item) => item.pid)
-      .sort((left, right) => left - right),
+    remainingPids: ownedPids,
     snapshots,
   };
 }

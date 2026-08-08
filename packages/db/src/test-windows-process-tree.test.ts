@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import {
   readWindowsTestProcessIdentity,
   parseWindowsTestProcessSnapshot,
@@ -10,6 +10,10 @@ import {
   selectOwnedWindowsTestProcessTree,
   type WindowsTestProcessIdentity,
 } from "./test-windows-process-tree.js";
+import {
+  acquireWindowsTestJobCustody,
+  shutdownWindowsTestJobWardenForTests,
+} from "./windows-test-job-warden.js";
 
 const windowsOnly = process.platform === "win32" ? it : it.skip;
 
@@ -250,5 +254,66 @@ describe("Windows test process tree selection", () => {
       }
     },
     15_000,
+  );
+
+  afterEach(async () => {
+    await shutdownWindowsTestJobWardenForTests();
+  });
+
+  windowsOnly(
+    "kernel-confirms a stop and kills a grandchild spawned after custody was assigned, given jobCustody",
+    async () => {
+      // Root blocks on stdin before spawning anything, mirroring the
+      // production release-gate (containment-from-birth): the grandchild
+      // must not exist until custody is already assigned to root.
+      const root = spawn(
+        process.execPath,
+        [
+          "-e",
+          "const cp=require('child_process');const fs=require('fs');"
+          + "fs.readSync(0,Buffer.alloc(1),0,1,null);"
+          + "const c=cp.spawn(process.execPath,['-e','setInterval(()=>{},1000);'],{stdio:'ignore',detached:true});"
+          + "c.unref();setInterval(()=>{},1000);",
+        ],
+        { stdio: ["pipe", "ignore", "ignore"], windowsHide: true },
+      );
+      const rootExit = new Promise<void>((resolve) => {
+        root.once("exit", () => resolve());
+      });
+
+      try {
+        const custody = await acquireWindowsTestJobCustody("job-warden-integration-test", root);
+        expect(custody).not.toBeNull();
+        root.stdin!.write("go\n"); // release the gate only after custody is kernel-established
+        // Give the grandchild a moment to spawn inside the now-assigned job.
+        await new Promise((resolve) => setTimeout(resolve, 1_500));
+
+        const rootIdentity = await readWindowsTestProcessIdentity(root.pid!);
+        expect(rootIdentity).not.toBeNull();
+        const result = await reapWindowsTestProcessTree({
+          rootPid: root.pid!,
+          ownerMarkers: [],
+          expectedRootIdentity: rootIdentity!,
+          timeoutMs: 8_000,
+          jobCustody: custody!,
+        });
+        expect(result).toMatchObject({
+          attempted: true,
+          confirmedStopped: true,
+          reason: "reaped",
+          remainingPids: [],
+        });
+        expect(result.attemptedPids).toContain(root.pid!);
+        await waitForFixtureExit(rootExit, 4_000);
+        expect(root.exitCode !== null || root.signalCode !== null).toBe(true);
+      } finally {
+        if (root.exitCode === null && root.signalCode === null) {
+          root.stdin?.end();
+          root.kill("SIGKILL");
+        }
+        await waitForFixtureExit(rootExit);
+      }
+    },
+    20_000,
   );
 });

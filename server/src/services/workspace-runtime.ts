@@ -6,8 +6,9 @@ import { createHash, randomUUID } from "node:crypto";
 import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import type { AdapterRuntimeServiceReport } from "@paperclipai/adapter-utils";
-import type { Db } from "@paperclipai/db";
+import type { Db, WindowsTestJobCustody } from "@paperclipai/db";
 import {
+  acquireWindowsTestJobCustody,
   executionWorkspaces,
   issueComments,
   issues,
@@ -192,6 +193,11 @@ interface RuntimeServiceRecord extends RuntimeServiceRef {
   profileKind: string;
   processGroupId: number | null;
   launchClaim: LocalServiceLaunchClaim | null;
+  // Windows Job Object custody for this process's tree, acquired right after
+  // spawn when available (test/win32 gated). When present, test cleanup can
+  // get a kernel-confirmed stop instead of the CIM-snapshot-only advisory
+  // path -- see windows-test-job-warden.ts and reapWindowsTestProcessTree.
+  windowsJobCustody?: WindowsTestJobCustody | null;
 }
 
 type LocalRuntimeServiceStart = {
@@ -263,6 +269,7 @@ export async function resetRuntimeServicesForTests(options?: { preserveProcesses
               ownerMarkers: [],
               expectedRootIdentity: windowsProcessIdentity!,
               timeoutMs: 8_000,
+              jobCustody: record.windowsJobCustody ?? undefined,
             })
           : await terminateRuntimeServiceProcess(record);
       if (
@@ -4175,13 +4182,27 @@ async function spawnLocalRuntimeService(input: StartLocalRuntimeServiceInput): P
   const runtimeServiceId = stoppedReuseCandidate?.id ?? randomUUID();
   const nowIso = new Date().toISOString();
   const shell = resolveShell();
+  // Win32 test runs only: gate the shell on one stdin line before it runs
+  // `command` at all, so Job Object custody (acquired below, right after
+  // spawn) is assigned to the shell BEFORE it can fork the real service --
+  // Windows Job Object membership only propagates to processes CREATED AFTER
+  // assignment, so a child forked during the async custody round-trip would
+  // otherwise escape the job invisibly. `exec` replaces the shell's own
+  // process image (no extra fork), so the already-custodied pid becomes the
+  // real service directly. Gated to test mode -- an always-on warden sidecar
+  // for every real server process is a separate, larger decision this fix
+  // does not make.
+  const useWindowsJobCustodyGate = process.platform === "win32" && process.env.VITEST === "true";
+  const spawnedCommand = useWindowsJobCustodyGate
+    ? `read -r __paperclip_job_custody_go; exec ${command}`
+    : command;
   let child: ChildProcess;
   try {
-    child = spawn(shell, ["-lc", command], {
+    child = spawn(shell, ["-lc", spawnedCommand], {
       cwd: serviceCwd,
       env: resolveShellEnvironment(shell, env),
       detached: process.platform !== "win32",
-      stdio: ["ignore", "pipe", "pipe"],
+      stdio: useWindowsJobCustodyGate ? ["pipe", "pipe", "pipe"] : ["ignore", "pipe", "pipe"],
     });
   } catch (error) {
     try {
@@ -4194,6 +4215,18 @@ async function spawnLocalRuntimeService(input: StartLocalRuntimeServiceInput): P
       );
     }
     throw error;
+  }
+  // A failed/unavailable warden degrades to the existing advisory-only path;
+  // it never blocks the spawn itself -- the gate is released either way.
+  const windowsJobCustody = useWindowsJobCustodyGate
+    ? await acquireWindowsTestJobCustody(runtimeServiceId, child)
+    : null;
+  if (useWindowsJobCustodyGate) {
+    child.stdin?.write("go\n");
+    // stdin's only purpose was releasing the gate above; leaving it open
+    // would let the child hold the pipe (an inherited handle) and change its
+    // stdio surface from the non-gated path.
+    child.stdin?.end();
   }
   const spawnErrorPromise = new Promise<never>((_, reject) => {
     child.once("error", (err) => {
@@ -4266,6 +4299,7 @@ async function spawnLocalRuntimeService(input: StartLocalRuntimeServiceInput): P
     profileKind: "workspace-runtime",
     processGroupId: spawnedProcessGroupId,
     launchClaim,
+    windowsJobCustody,
   };
   registerRuntimeService(input.registryDb ?? input.db, record);
   try {
