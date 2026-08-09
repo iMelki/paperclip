@@ -3,7 +3,7 @@ import express from "express";
 import request from "supertest";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { companies, createDb, invites, joinRequests } from "@paperclipai/db";
-import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
+import { EMBEDDED_POSTGRES_TEST_SETUP_TIMEOUT_MS, getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 import { accessRoutes } from "../routes/access.js";
 import { errorHandler } from "../middleware/index.js";
 
@@ -44,7 +44,7 @@ describeEmbeddedPostgres("GET /companies/:companyId/invites", () => {
   beforeAll(async () => {
     tempDb = await startEmbeddedPostgresTestDatabase("paperclip-invite-list-route-");
     db = createDb(tempDb.connectionString);
-  }, 20_000);
+  }, EMBEDDED_POSTGRES_TEST_SETUP_TIMEOUT_MS);
 
   beforeEach(async () => {
     companyId = randomUUID();

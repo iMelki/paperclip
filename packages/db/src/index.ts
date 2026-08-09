@@ -2,6 +2,7 @@ export {
   createDb,
   getPostgresDataDirectory,
   ensurePostgresDatabase,
+  resetPostgresDatabase,
   inspectMigrations,
   applyPendingMigrations,
   reconcilePendingMigrationHistory,
@@ -12,11 +13,20 @@ export {
   type Db,
 } from "./client.js";
 export {
+  EMBEDDED_POSTGRES_TEST_SETUP_TIMEOUT_MS,
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
   type EmbeddedPostgresTestDatabase,
   type EmbeddedPostgresTestSupport,
 } from "./test-embedded-postgres.js";
+export {
+  reapWindowsTestProcessTree,
+  readWindowsTestProcessIdentity,
+  selectOwnedWindowsTestProcessTree,
+  snapshotWindowsTestProcesses,
+  type ReapWindowsTestProcessTreeResult,
+  type WindowsTestProcessIdentity,
+} from "./test-windows-process-tree.js";
 export {
   runDatabaseBackup,
   runDatabaseRestore,
@@ -30,6 +40,10 @@ export {
   createEmbeddedPostgresLogBuffer,
   formatEmbeddedPostgresError,
 } from "./embedded-postgres-error.js";
+export {
+  ensureLinuxSharedLibraryAliases,
+  prepareEmbeddedPostgresNativeRuntime,
+} from "./embedded-postgres-native.js";
 export { issueRelations } from "./schema/issue_relations.js";
 export { issueReferenceMentions } from "./schema/issue_reference_mentions.js";
 export * from "./schema/index.js";

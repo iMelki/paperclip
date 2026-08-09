@@ -29,6 +29,14 @@ my-company/
 - **SKILL.md** files are compatible with the Agent Skills ecosystem.
 - **.paperclip.yaml** holds Paperclip-specific config (adapter types, env inputs, budgets) as an optional sidecar.
 
+## Export & Import in the App
+
+Both flows are also available in the web UI as company settings pages: **Export** and **Import** appear in the company settings navigation.
+
+The **Export** page lets you pick exactly which files go into the bundle before downloading it. Above the file tree it shows a **"Not included in this export"** panel — the export fidelity report — listing data the bundle will not carry (for example attachments, approvals, cost history, or activity log entries), with blocking issues highlighted.
+
+The **Import** page previews the package, lets you resolve name collisions and adapter assignments, and applies the import. A **"Start imported agents and routines paused"** checkbox (on by default) makes imported agents and routines land paused instead of live. After the import finishes, an **"Activate imported agents and routines"** panel lists everything that was imported paused so you can resume the agents and activate the routines you select — nothing starts running until you say so.
+
 ## Exporting a Company
 
 Export a company into a portable folder:
@@ -102,6 +110,7 @@ paperclipai company import org/repo/companies/acme
 | `--include <values>` | Comma-separated set: `company`, `agents`, `projects`, `issues`, `tasks`, `skills` | auto-detected |
 | `--agents <list>` | Comma-separated agent slugs to import, or `all` | `all` |
 | `--collision <mode>` | How to handle name conflicts: `rename`, `skip`, or `replace` | `rename` |
+| `--adapter-strategy <mode>` | `portable-defaults` rewrites portable Process placeholders to the local default; `preserve` keeps every exported adapter type exactly | `portable-defaults` |
 | `--ref <value>` | Git ref for GitHub imports (branch, tag, or commit) | default branch |
 | `--dry-run` | Preview what would be imported without applying | `false` |
 | `--yes` | Skip the interactive confirmation prompt | `false` |
@@ -142,6 +151,20 @@ The preview shows:
 
 Imported agents always land with timer heartbeats disabled. Assignment/on-demand wake behavior from the package is preserved, but scheduled runs stay off until a board operator re-enables them.
 
+The default `portable-defaults` adapter strategy preserves historical CLI
+behavior: selected agents exported with the generic `process` adapter are
+changed to `claude_local`, and both text and JSON preview output list every
+change. Use `--adapter-strategy preserve` only when the package intentionally
+contains executable Process adapters and you have reviewed their commands.
+Preserve mode sends no adapter overrides, so the exported adapter type,
+executable `command`, and `args` remain Process adapter inputs. The server may
+still normalize other adapter fields and apply current defaults during import;
+preview and read back the imported agent before enabling it. JSON preview and
+result output record `preservedExecutableAgentSlugs`; text output lists the
+same slugs so a headless release receipt can prove exactly which executable
+agents used the opt-in path.
+Imports can additionally request `pauseAutomations` (the default in the app's Import page) so imported agents and routines land fully paused. Use the post-import activation panel — or resume the agents and activate the routines individually — when you are ready for them to run.
+
 ### Common Workflows
 
 **Clone a company template from GitHub:**
@@ -173,6 +196,7 @@ paperclipai company import org/repo --ref v2.0.0 --dry-run
 ```sh
 paperclipai company import ./package \
   --target new \
+  --adapter-strategy preserve \
   --yes \
   --json
 ```
@@ -184,10 +208,13 @@ The CLI commands use these API endpoints under the hood:
 | Action | Endpoint |
 |--------|----------|
 | Export company | `POST /api/companies/{companyId}/export` |
+| Export fidelity report | `GET /api/companies/{companyId}/export/fidelity` |
 | Preview import (existing company) | `POST /api/companies/{companyId}/imports/preview` |
 | Apply import (existing company) | `POST /api/companies/{companyId}/imports/apply` |
 | Preview import (new company) | `POST /api/companies/import/preview` |
 | Apply import (new company) | `POST /api/companies/import` |
+
+Import apply requests accept `pauseAutomations: true` to create imported agents and routines in a paused state.
 
 CEO agents can also use the safe import routes (`/imports/preview` and `/imports/apply`) which enforce non-destructive rules: `replace` is rejected, collisions resolve with `rename` or `skip`, and issues are always created as new.
 

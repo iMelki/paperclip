@@ -14,6 +14,7 @@ import {
 } from "@paperclipai/db";
 import { ISSUE_CONTINUATION_SUMMARY_DOCUMENT_KEY } from "@paperclipai/shared";
 import {
+  EMBEDDED_POSTGRES_TEST_SETUP_TIMEOUT_MS,
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
@@ -54,7 +55,7 @@ describeEmbeddedPostgres("activity service", () => {
   beforeAll(async () => {
     tempDb = await startEmbeddedPostgresTestDatabase("paperclip-activity-service-");
     db = createDb(tempDb.connectionString);
-  }, 20_000);
+  }, EMBEDDED_POSTGRES_TEST_SETUP_TIMEOUT_MS);
 
   afterEach(async () => {
     await db.delete(activityLog);
@@ -212,6 +213,7 @@ describeEmbeddedPostgres("activity service", () => {
       lastUsefulActionAt: new Date("2026-04-18T19:59:00.000Z"),
       nextAction: "Review the completed output.",
     });
+    expect(runs[0]).not.toHaveProperty("contextSnapshot");
   });
 
   it("backfills missing liveness for completed issue runs before returning the ledger", async () => {

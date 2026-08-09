@@ -7,6 +7,7 @@ import { writeConfig } from "../config/store.js";
 import type { PaperclipConfig } from "../config/schema.js";
 
 const ORIGINAL_ENV = { ...process.env };
+const ORIGINAL_EXIT_CODE = process.exitCode;
 
 function createTempConfig(): string {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "paperclip-doctor-"));
@@ -84,6 +85,7 @@ describe("doctor", () => {
 
   afterEach(() => {
     process.env = { ...ORIGINAL_ENV };
+    process.exitCode = ORIGINAL_EXIT_CODE;
   });
 
   it("re-runs repairable checks so repaired failures do not remain blocking", async () => {
@@ -96,7 +98,17 @@ describe("doctor", () => {
     });
 
     expect(summary.failed).toBe(0);
-    expect(summary.warned).toBe(0);
+    expect(summary.warned).toBe(process.platform === "win32" ? 1 : 0);
     expect(process.env.PAPERCLIP_AGENT_JWT_SECRET).toBeTruthy();
+  });
+
+  it("sets a failing process exit code when a critical diagnostic fails", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "paperclip-doctor-missing-"));
+    const configPath = path.join(root, "missing", "config.json");
+
+    const summary = await doctor({ config: configPath });
+
+    expect(summary.failed).toBeGreaterThan(0);
+    expect(process.exitCode).toBe(1);
   });
 });

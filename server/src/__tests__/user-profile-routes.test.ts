@@ -14,6 +14,7 @@ import {
   issues,
 } from "@paperclipai/db";
 import {
+  EMBEDDED_POSTGRES_TEST_SETUP_TIMEOUT_MS,
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
@@ -39,7 +40,7 @@ describeEmbeddedPostgres("GET /companies/:companyId/users/:userSlug/profile", ()
   beforeAll(async () => {
     tempDb = await startEmbeddedPostgresTestDatabase("paperclip-user-profile-route-");
     db = createDb(tempDb.connectionString);
-  }, 20_000);
+  }, EMBEDDED_POSTGRES_TEST_SETUP_TIMEOUT_MS);
 
   beforeEach(async () => {
     vi.resetModules();

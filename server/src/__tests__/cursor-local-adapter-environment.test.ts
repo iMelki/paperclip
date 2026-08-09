@@ -54,6 +54,27 @@ console.log(JSON.stringify({
   await fs.chmod(commandPath, 0o755);
 }
 
+function toShellPath(value: string): string {
+  if (process.platform !== "win32") return value;
+  const match = /^([A-Za-z]):[\\/](.*)$/.exec(value);
+  if (!match) return value.replace(/\\/g, "/");
+  const [, drive, rest] = match;
+  return `/${drive.toLowerCase()}/${rest.replace(/\\/g, "/")}`;
+}
+
+function fromShellPath(value: string): string {
+  if (process.platform !== "win32") return value;
+  const driveMatch = /^\/([A-Za-z])\/(.*)$/.exec(value);
+  if (driveMatch) {
+    const [, drive, rest] = driveMatch;
+    return `${drive.toUpperCase()}:\\${rest.replace(/\//g, "\\")}`;
+  }
+  if (value.startsWith("/tmp/")) {
+    return path.join(os.tmpdir(), value.slice("/tmp/".length).replace(/\//g, path.sep));
+  }
+  return value;
+}
+
 function createLocalSandboxRunner() {
   let counter = 0;
   return {
@@ -68,8 +89,10 @@ function createLocalSandboxRunner() {
       onSpawn?: (meta: { pid: number; startedAt: string }) => Promise<void>;
     }) => {
       counter += 1;
-      return await runChildProcess(`cursor-sandbox-env-${counter}`, input.command, input.args ?? [], {
-        cwd: input.cwd ?? process.cwd(),
+      const command = fromShellPath(input.command);
+      const cwd = fromShellPath(input.cwd ?? process.cwd());
+      return await runChildProcess(`cursor-sandbox-env-${counter}`, command, input.args ?? [], {
+        cwd,
         env: input.env ?? {},
         stdin: input.stdin,
         timeoutSec: Math.max(1, Math.ceil((input.timeoutMs ?? 30_000) / 1000)),
@@ -186,10 +209,11 @@ describe("cursor environment diagnostics", () => {
       `paperclip-cursor-sandbox-probe-${Date.now()}-${Math.random().toString(16).slice(2)}`,
     );
     const homeDir = path.join(root, "home");
-    const remoteCwd = path.join(root, "workspace");
+    const remoteCwdLocal = path.join(root, "workspace");
+    const remoteCwd = toShellPath(remoteCwdLocal);
     const argsCapturePath = path.join(root, "args.json");
     const cursorAgentPath = path.join(homeDir, ".local", "bin", "cursor-agent");
-    await fs.mkdir(remoteCwd, { recursive: true });
+    await fs.mkdir(remoteCwdLocal, { recursive: true });
     await writeFakeCursorAgentCommand(cursorAgentPath);
 
     const previousHome = process.env.HOME;
@@ -223,7 +247,10 @@ describe("cursor environment diagnostics", () => {
         path: string;
       };
       expect(capture.command).toBe(cursorAgentPath);
-      expect(capture.path.split(":")[0]).toBe(path.join(homeDir, ".local", "bin"));
+      const expectedSandboxLocalBin = process.platform === "win32"
+        ? `/tmp/${path.basename(root)}/home/.local/bin`
+        : path.join(homeDir, ".local", "bin");
+      expect(capture.path).toContain(`${expectedSandboxLocalBin}:`);
     } finally {
       if (previousHome === undefined) delete process.env.HOME;
       else process.env.HOME = previousHome;

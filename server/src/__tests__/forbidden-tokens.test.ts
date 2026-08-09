@@ -1,10 +1,13 @@
+import { createRequire } from "node:module";
+import { resolve } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 
+const require = createRequire(resolve(process.cwd(), "server/src/__tests__/forbidden-tokens.test.ts"));
 const {
   resolveDynamicForbiddenTokens,
   resolveForbiddenTokens,
   runForbiddenTokenCheck,
-} = await import("../../../scripts/check-forbidden-tokens.mjs");
+} = require(resolve(process.cwd(), "scripts/check-forbidden-tokens-core.cjs"));
 
 describe("forbidden token check", () => {
   it("derives username tokens without relying on whoami", () => {

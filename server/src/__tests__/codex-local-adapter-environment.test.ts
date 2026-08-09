@@ -26,6 +26,7 @@ describe("codex_local environment diagnostics", () => {
       companyId: "company-1",
       adapterType: "codex_local",
       config: {
+        engine: "cli",
         command: process.execPath,
         cwd,
       },
@@ -57,6 +58,7 @@ describe("codex_local environment diagnostics", () => {
         companyId: "company-1",
         adapterType: "codex_local",
         config: {
+          engine: "cli",
           command: process.execPath,
           cwd,
           env: { CODEX_HOME: codexHome },
@@ -86,6 +88,7 @@ describe("codex_local environment diagnostics", () => {
         companyId: "company-1",
         adapterType: "codex_local",
         config: {
+          engine: "cli",
           command: process.execPath,
           cwd,
           env: { CODEX_HOME: codexHome },
@@ -124,6 +127,7 @@ describe("codex_local environment diagnostics", () => {
         companyId: "company-1",
         adapterType: "codex_local",
         config: {
+          engine: "cli",
           command: "codex",
           cwd,
           env: {
@@ -133,7 +137,7 @@ describe("codex_local environment diagnostics", () => {
         },
       });
 
-      expect(result.status).toBe("pass");
+      expect(result.status, JSON.stringify(result.checks, null, 2)).toBe("pass");
       expect(result.checks.some((check) => check.code === "codex_hello_probe_passed")).toBe(true);
     } finally {
       await fs.rm(root, { recursive: true, force: true });

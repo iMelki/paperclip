@@ -52,7 +52,14 @@ Non-interactive defaults + immediate start (opens browser on server listen):
 pnpm paperclipai onboard --yes
 ```
 
+Non-interactive config and key material without starting a server:
+
+```sh
+pnpm paperclipai onboard --yes --no-run
+```
+
 On an existing install, `--yes` now preserves the current config and just starts Paperclip with that setup.
+Add `--no-run` when a service manager owns process startup.
 
 ## `paperclipai doctor`
 
@@ -63,11 +70,15 @@ pnpm paperclipai doctor
 pnpm paperclipai doctor --repair
 ```
 
+The command exits nonzero whenever a critical check fails, so automation can
+use its process status as the blocking-health result.
+
 Validates:
 
 - Server configuration
 - Database connectivity
-- Secrets adapter configuration
+- Secrets adapter configuration, including AWS Secrets Manager non-secret env
+  config when selected
 - Storage configuration
 - Missing key files
 
@@ -80,6 +91,13 @@ pnpm paperclipai configure --section server
 pnpm paperclipai configure --section secrets
 pnpm paperclipai configure --section storage
 ```
+
+`--section secrets` updates the deployment-level provider used as the fallback
+for secrets that do not target a specific company vault. Per-company provider
+vaults (named instances, default vault selection, multiple vaults per provider,
+coming-soon GCP/Vault) live in the board UI under
+`Company Settings → Secrets → Provider vaults` and the
+`/api/companies/{companyId}/secret-provider-configs` API.
 
 ## `paperclipai env`
 

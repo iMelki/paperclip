@@ -5,16 +5,20 @@ import {
   agents,
   companies,
   createDb,
+  documentRevisions,
+  documents,
   executionWorkspaces,
   heartbeatRuns,
   issues,
   projectWorkspaces,
   projects,
+  routineDocuments,
   routineRuns,
   routines,
   routineTriggers,
 } from "@paperclipai/db";
 import {
+  EMBEDDED_POSTGRES_TEST_SETUP_TIMEOUT_MS,
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
@@ -48,13 +52,16 @@ describeEmbeddedPostgres("routine run telemetry", () => {
   beforeAll(async () => {
     tempDb = await startEmbeddedPostgresTestDatabase("paperclip-routine-telemetry-");
     db = createDb(tempDb.connectionString);
-  }, 20_000);
+  }, EMBEDDED_POSTGRES_TEST_SETUP_TIMEOUT_MS);
 
   afterEach(async () => {
     vi.clearAllMocks();
     await db.delete(routineRuns);
     await db.delete(routineTriggers);
+    await db.delete(routineDocuments);
     await db.delete(routines);
+    await db.delete(documents);
+    await db.delete(documentRevisions);
     await db.delete(heartbeatRuns);
     await db.delete(issues);
     await db.delete(executionWorkspaces);
@@ -78,6 +85,7 @@ describeEmbeddedPostgres("routine run telemetry", () => {
       name: "Paperclip",
       issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
       requireBoardApprovalForNewAgents: false,
+      defaultResponsibleUserId: "responsible-user",
     });
 
     await db.insert(agents).values({

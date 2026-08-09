@@ -9,13 +9,17 @@ import {
   deploymentAuthCheck,
   llmCheck,
   logCheck,
+  managedInstallChecks,
+  nodeRuntimeCheck,
   portCheck,
   secretsCheck,
+  serviceHealthChecks,
   storageCheck,
   type CheckResult,
 } from "../checks/index.js";
 import { loadPaperclipEnvFile } from "../config/env.js";
 import { printPaperclipCliBanner } from "../utils/banner.js";
+import { printUpdateNotice } from "../update-notice.js";
 
 const STATUS_ICON = {
   pass: pc.green("✓"),
@@ -28,6 +32,7 @@ export async function doctor(opts: {
   repair?: boolean;
   yes?: boolean;
 }): Promise<{ passed: number; warned: number; failed: number }> {
+  await printUpdateNotice(opts.config);
   printPaperclipCliBanner();
   p.intro(pc.bgCyan(pc.black(" paperclip doctor ")));
 
@@ -120,6 +125,21 @@ export async function doctor(opts: {
   results.push(portResult);
   printResult(portResult);
 
+  // 10. Runtime and managed install checks
+  const nodeResult = nodeRuntimeCheck();
+  results.push(nodeResult);
+  printResult(nodeResult);
+  for (const result of managedInstallChecks()) {
+    results.push(result);
+    printResult(result);
+  }
+
+  // 11. Background service checks
+  for (const result of await serviceHealthChecks(config)) {
+    results.push(result);
+    printResult(result);
+  }
+
   // Summary
   return printSummary(results);
 }
@@ -192,6 +212,7 @@ function printSummary(results: CheckResult[]): { passed: number; warned: number;
   p.note(parts.join(", "), "Summary");
 
   if (failed > 0) {
+    process.exitCode = 1;
     p.outro(pc.red("Some checks failed. Fix the issues above and re-run doctor."));
   } else if (warned > 0) {
     p.outro(pc.yellow("All critical checks passed with some warnings."));

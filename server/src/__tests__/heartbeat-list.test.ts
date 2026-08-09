@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { agents, companies, createDb, heartbeatRuns } from "@paperclipai/db";
 import {
+  EMBEDDED_POSTGRES_TEST_SETUP_TIMEOUT_MS,
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
@@ -23,7 +24,7 @@ describeEmbeddedPostgres("heartbeat list", () => {
   beforeAll(async () => {
     tempDb = await startEmbeddedPostgresTestDatabase("paperclip-heartbeat-list-");
     db = createDb(tempDb.connectionString);
-  }, 20_000);
+  }, EMBEDDED_POSTGRES_TEST_SETUP_TIMEOUT_MS);
 
   afterEach(async () => {
     await db.delete(heartbeatRuns);
@@ -142,6 +143,85 @@ describeEmbeddedPostgres("heartbeat list", () => {
     expect(run?.resultJson).toEqual({
       summary: "done",
       structured: { ok: true },
+    });
+  });
+
+  it("returns summary list rows without heavy run detail fields", async () => {
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    const issueId = randomUUID();
+    const runId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+
+    await db.insert(agents).values({
+      id: agentId,
+      companyId,
+      name: "CodexCoder",
+      role: "engineer",
+      status: "running",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+
+    await db.insert(heartbeatRuns).values({
+      id: runId,
+      companyId,
+      agentId,
+      invocationSource: "assignment",
+      status: "failed",
+      error: "Failed after doing useful work",
+      usageJson: {
+        provider: "openai",
+        model: "gpt-5",
+        inputTokens: 123,
+      },
+      resultJson: {
+        summary: "large run summary",
+        stdout: "x".repeat(20_000),
+      },
+      sessionIdBefore: "session-before",
+      sessionIdAfter: "session-after",
+      logStore: "local",
+      logRef: "logs/run.log",
+      logSha256: "abc123",
+      externalRunId: "external-run",
+      processPid: 12345,
+      contextSnapshot: {
+        issueId,
+        wakeReason: "issue_assigned",
+      },
+    });
+
+    const runs = await heartbeatService(db).list(companyId, undefined, 5, { summary: true });
+
+    expect(runs).toHaveLength(1);
+    expect(runs[0]).toMatchObject({
+      id: runId,
+      companyId,
+      agentId,
+      status: "failed",
+      error: "Failed after doing useful work",
+      usageJson: null,
+      resultJson: null,
+      sessionIdBefore: null,
+      sessionIdAfter: null,
+      logStore: null,
+      logRef: null,
+      logSha256: null,
+      externalRunId: null,
+      processPid: null,
+      contextSnapshot: {
+        issueId,
+        wakeReason: "issue_assigned",
+      },
     });
   });
 

@@ -13,6 +13,7 @@ import {
   issues,
 } from "@paperclipai/db";
 import {
+  EMBEDDED_POSTGRES_TEST_SETUP_TIMEOUT_MS,
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
@@ -35,7 +36,7 @@ describeEmbeddedPostgres("issueTreeControlService", () => {
   beforeAll(async () => {
     tempDb = await startEmbeddedPostgresTestDatabase("paperclip-issue-tree-control-");
     db = createDb(tempDb.connectionString);
-  }, 20_000);
+  }, EMBEDDED_POSTGRES_TEST_SETUP_TIMEOUT_MS);
 
   afterEach(async () => {
     await db.delete(issueTreeHoldMembers);
@@ -170,6 +171,55 @@ describeEmbeddedPostgres("issueTreeControlService", () => {
     await expect(svc.preview(otherCompanyId, rootIssueId, { mode: "pause" })).rejects.toMatchObject({
       status: 404,
     });
+  });
+
+  it("previews a human-owned handoff as static work with no affected agent execution", async () => {
+    const companyId = randomUUID();
+    const rootIssueId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(issues).values({
+      id: rootIssueId,
+      companyId,
+      title: "Human validation handoff",
+      status: "in_progress",
+      priority: "medium",
+      assigneeAgentId: null,
+      assigneeUserId: "local-board",
+      createdAt: new Date("2026-04-21T10:10:00.000Z"),
+    });
+
+    const svc = issueTreeControlService(db);
+    const preview = await svc.preview(companyId, rootIssueId, { mode: "pause" });
+
+    expect(preview.issues).toEqual([
+      expect.objectContaining({
+        id: rootIssueId,
+        status: "in_progress",
+        assigneeAgentId: null,
+        assigneeUserId: "local-board",
+        activeRun: null,
+        skipped: false,
+        skipReason: null,
+      }),
+    ]);
+    expect(preview.totals).toMatchObject({
+      totalIssues: 1,
+      affectedIssues: 1,
+      skippedIssues: 0,
+      activeRuns: 0,
+      queuedRuns: 0,
+      affectedAgents: 0,
+    });
+    expect(preview.activeRuns).toEqual([]);
+    expect(preview.affectedAgents).toEqual([]);
+    expect(preview.warnings.map((warning) => warning.code)).not.toContain("running_runs_present");
+    expect(preview.warnings.map((warning) => warning.code)).not.toContain("queued_runs_present");
   });
 
   it("creates and releases normalized hold snapshots", async () => {

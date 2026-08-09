@@ -15,12 +15,29 @@ const lockPollMs = 100;
 const buildTargets = [
   {
     name: "@paperclipai/shared",
-    output: path.join(rootDir, "packages/shared/dist/index.js"),
+    outputs: [
+      path.join(rootDir, "packages/shared/dist/index.js"),
+      path.join(rootDir, "packages/shared/dist/index.d.ts"),
+    ],
+    inputs: [
+      path.join(rootDir, "packages/shared/src"),
+      path.join(rootDir, "packages/shared/tsconfig.json"),
+      path.join(rootDir, "packages/shared/package.json"),
+    ],
     tsconfig: path.join(rootDir, "packages/shared/tsconfig.json"),
   },
   {
     name: "@paperclipai/plugin-sdk",
-    output: path.join(rootDir, "packages/plugins/sdk/dist/index.js"),
+    outputs: [
+      path.join(rootDir, "packages/plugins/sdk/dist/index.js"),
+      path.join(rootDir, "packages/plugins/sdk/dist/index.d.ts"),
+      path.join(rootDir, "packages/plugins/sdk/dist/types.d.ts"),
+    ],
+    inputs: [
+      path.join(rootDir, "packages/plugins/sdk/src"),
+      path.join(rootDir, "packages/plugins/sdk/tsconfig.json"),
+      path.join(rootDir, "packages/plugins/sdk/package.json"),
+    ],
     tsconfig: path.join(rootDir, "packages/plugins/sdk/tsconfig.json"),
   },
 ];
@@ -29,8 +46,37 @@ if (!fs.existsSync(tscCliPath)) {
   throw new Error(`TypeScript CLI not found at ${tscCliPath}`);
 }
 
-function allOutputsExist() {
-  return buildTargets.every((target) => fs.existsSync(target.output));
+function newestInputMtimeMs(inputPath) {
+  if (!fs.existsSync(inputPath)) return 0;
+  const inputStats = fs.statSync(inputPath);
+  if (!inputStats.isDirectory()) return inputStats.mtimeMs;
+
+  let newest = 0;
+
+  function visit(dir) {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const entryPath = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        visit(entryPath);
+        continue;
+      }
+      newest = Math.max(newest, fs.statSync(entryPath).mtimeMs);
+    }
+  }
+
+  visit(inputPath);
+  return Math.max(newest, inputStats.mtimeMs);
+}
+
+function needsBuild(target) {
+  if (!target.outputs.every((output) => fs.existsSync(output))) return true;
+  const newestInput = Math.max(...target.inputs.map((input) => newestInputMtimeMs(input)));
+  const oldestOutput = Math.min(...target.outputs.map((output) => fs.statSync(output).mtimeMs));
+  return newestInput > oldestOutput;
+}
+
+function allOutputsCurrent() {
+  return buildTargets.every((target) => !needsBuild(target));
 }
 
 function sleep(ms) {
@@ -43,7 +89,7 @@ function waitForLockRelease() {
     if (!fs.existsSync(lockDir)) {
       return;
     }
-    if (allOutputsExist()) {
+    if (allOutputsCurrent()) {
       return;
     }
     sleep(lockPollMs);
@@ -52,7 +98,7 @@ function waitForLockRelease() {
   throw new Error(`Timed out waiting for plugin build dependency lock at ${lockDir}`);
 }
 
-if (allOutputsExist()) {
+if (allOutputsCurrent()) {
   process.exit(0);
 }
 
@@ -67,7 +113,7 @@ try {
   } catch (error) {
     if (error && typeof error === "object" && "code" in error && error.code === "EEXIST") {
       waitForLockRelease();
-      if (!allOutputsExist()) {
+      if (!allOutputsCurrent()) {
         throw new Error("Plugin build dependency lock released before all outputs were created");
       }
       process.exit(0);
@@ -76,7 +122,7 @@ try {
   }
 
   for (const target of buildTargets) {
-    if (fs.existsSync(target.output)) {
+    if (!needsBuild(target)) {
       continue;
     }
 
