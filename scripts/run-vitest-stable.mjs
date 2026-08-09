@@ -11,9 +11,6 @@ import {
 import { loadShardDurations, selectGeneralServerShard } from "./general-server-shard.mjs";
 import { cleanStaleTestTempDirs } from "./clean-stale-test-temp.mjs";
 
-// Self-heal stale fixture temp dirs from previous killed/aborted runs (#33).
-cleanStaleTestTempDirs({ log: (message) => console.log(`[test:run] ${message}`) });
-
 const repoRoot = process.cwd();
 const gitLocalEnvironmentVariableNames = resolveGitLocalEnvironmentVariableNames({ cwd: repoRoot });
 const scriptsDir = path.dirname(fileURLToPath(import.meta.url));
@@ -460,6 +457,11 @@ if (options.dryRun) {
   );
   process.exit(0);
 }
+
+// Self-heal stale fixture temp dirs from previous killed/aborted runs (#33).
+// Deliberately after the dry-run branch: --dry-run's contract is stdout is
+// nothing but the JSON plan, and this log line would break that.
+cleanStaleTestTempDirs({ log: (message) => console.log(`[test:run] ${message}`) });
 
 if (options.mode === generalModeName || options.mode === allModeName) {
   if (options.group) {
