@@ -175,3 +175,11 @@ This file is the durable local index for active `paperclip` issues.
 - [AGENTS.md](AGENTS.md)
 - [CONTRIBUTING.md](CONTRIBUTING.md)
 - [.github/labels.yml](.github/labels.yml)
+
+## Active GitHub Issues
+
+- [#48 Expand UI/UX Awwwards report (2026-08-09) into practical tasks](https://github.com/iMelki/paperclip/issues/48)
+  - Fleet-wide code-only audit scored this app 7.8/10 against the shared
+    Awwwards rubric. Full report: `docs/uiux-awwwards-report-2026-08-09.md`.
+    Scores are code-inspection estimates pending a Frontend Proof Bundle.
+    Fleet rollup: iMelki/agent-settings#586.
