@@ -1,4 +1,4 @@
-# Paperclip — Getting Started Guide for Ilan Melki
+# Paperclip — Getting Started Guide
 
 **Date:** 2026-05-04  
 **Repo:** `tools/paperclip/` (upstream: `paperclipai/paperclip`, local: `iMelki/paperclip`)  
