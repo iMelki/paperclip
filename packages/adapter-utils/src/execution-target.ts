@@ -22,10 +22,13 @@ import {
   createSandboxCallbackBridgeAsset,
   createSandboxCallbackBridgeToken,
   DEFAULT_SANDBOX_CALLBACK_BRIDGE_MAX_BODY_BYTES,
+  SandboxCallbackBridgeLaunchAmbiguousError,
   sandboxCallbackBridgeDirectories,
   startSandboxCallbackBridgeServer,
   startSandboxCallbackBridgeWorker,
   syncRemoteTextFileWithHashSkip,
+  type SandboxCallbackBridgeCancellationController,
+  type SandboxCallbackBridgeProcessIdentity,
 } from "./sandbox-callback-bridge.js";
 import {
   createSandboxRunLogTailFactory,
@@ -44,6 +47,7 @@ import { preferredShellForSandbox, shellCommandArgs } from "./sandbox-shell.js";
 import { shellQuotePath } from "./shell-path.js";
 import type { RuntimeProgressSink, RuntimeStatusSink } from "./runtime-progress.js";
 import type { LocalProcessSandboxOptions } from "./local-process-sandbox.js";
+import type { AdapterRuntimeEvent } from "./types.js";
 
 export type { RuntimeProgressSink } from "./runtime-progress.js";
 
@@ -150,6 +154,8 @@ export interface AdapterExecutionTargetShellOptions {
 
 export interface AdapterExecutionTargetPaperclipBridgeHandle {
   env: Record<string, string>;
+  launchIdentity: AdapterExecutionTargetPaperclipBridgeLaunchIdentity;
+  processIdentity: SandboxCallbackBridgeProcessIdentity;
   /**
    * Present when the sandbox target opted into run-log streaming
    * (`streamRunLogs`). Create one handle per CLI attempt and pass it to
@@ -159,12 +165,504 @@ export interface AdapterExecutionTargetPaperclipBridgeHandle {
   stop(): Promise<void>;
 }
 
-export interface AdapterExecutionTargetProcessSessionBridgeHandle {
-  agentCommand: string;
+export const PAPERCLIP_CALLBACK_BRIDGE_LAUNCH_AMBIGUOUS =
+  "PAPERCLIP_CALLBACK_BRIDGE_LAUNCH_AMBIGUOUS";
+export const PAPERCLIP_CALLBACK_BRIDGE_DISABLED = "PAPERCLIP_CALLBACK_BRIDGE_DISABLED";
+export const PAPERCLIP_EXECUTION_TARGET_INVALID = "PAPERCLIP_EXECUTION_TARGET_INVALID";
+export const PAPERCLIP_CALLBACK_BRIDGE_LAUNCH_EVENT = "paperclip.callback_bridge.launch";
+const PAPERCLIP_CALLBACK_BRIDGE_INSTANCE_MANIFEST_SCHEMA =
+  "paperclip-callback-bridge-instance/v1";
+
+const paperclipCallbackBridgeTestCapability = Object.freeze({
+  authority: "paperclip-callback-bridge-test-only",
+  nonce: randomUUID(),
+});
+
+export interface PaperclipCallbackBridgeTestCapability {
+  readonly authority: "paperclip-callback-bridge-test-only";
+  readonly nonce: string;
+}
+
+export class PaperclipCallbackBridgeDisabledError extends Error {
+  readonly code = PAPERCLIP_CALLBACK_BRIDGE_DISABLED;
+  readonly retryable = false;
+  readonly needsHuman = true;
+
+  constructor() {
+    super(
+      "Remote Paperclip callback execution is disabled until issue #41 proves restart-safe cancellation, dependent cleanup, and replay fencing.",
+    );
+    this.name = "PaperclipCallbackBridgeDisabledError";
+  }
+}
+
+export class PaperclipExecutionTargetInvalidError extends Error {
+  readonly code = PAPERCLIP_EXECUTION_TARGET_INVALID;
+  readonly retryable = false;
+  readonly needsHuman = true;
+
+  constructor() {
+    super(
+      "Adapter execution target is invalid; refusing workspace materialization, provider dispatch, or host/local fallback.",
+    );
+    this.name = "PaperclipExecutionTargetInvalidError";
+  }
+}
+
+export function isPaperclipCallbackBridgeDisabledError(
+  error: unknown,
+): error is PaperclipCallbackBridgeDisabledError {
+  if (error instanceof PaperclipCallbackBridgeDisabledError) return true;
+  const candidate = error as Partial<PaperclipCallbackBridgeDisabledError> | null;
+  return Boolean(
+    candidate &&
+      candidate.code === PAPERCLIP_CALLBACK_BRIDGE_DISABLED &&
+      candidate.retryable === false &&
+      candidate.needsHuman === true,
+  );
+}
+
+export function isPaperclipExecutionTargetInvalidError(
+  error: unknown,
+): error is PaperclipExecutionTargetInvalidError {
+  if (error instanceof PaperclipExecutionTargetInvalidError) return true;
+  const candidate = error as Partial<PaperclipExecutionTargetInvalidError> | null;
+  return Boolean(
+    candidate &&
+      candidate.code === PAPERCLIP_EXECUTION_TARGET_INVALID &&
+      candidate.retryable === false &&
+      candidate.needsHuman === true,
+  );
+}
+
+export function issuePaperclipCallbackBridgeTestCapability(): PaperclipCallbackBridgeTestCapability {
+  if (process.env.NODE_ENV !== "test") throw new PaperclipCallbackBridgeDisabledError();
+  return paperclipCallbackBridgeTestCapability;
+}
+
+export function assertPaperclipCallbackBridgeEnabled(
+  capability?: PaperclipCallbackBridgeTestCapability | null,
+): asserts capability is PaperclipCallbackBridgeTestCapability {
+  if (
+    process.env.NODE_ENV !== "test" ||
+    capability !== paperclipCallbackBridgeTestCapability
+  ) {
+    throw new PaperclipCallbackBridgeDisabledError();
+  }
+}
+
+export interface AdapterExecutionTargetPaperclipBridgeLaunchIdentity {
+  runId: string;
+  adapterKey: string;
+  instanceId: string;
+  instanceNonce: string;
+  transport: "ssh" | "sandbox";
+  providerKey: string | null;
+  environmentId: string | null;
+  leaseId: string | null;
+  remoteCwd: string;
+  instanceDir: string;
+  queueDir: string;
+  assetRemoteDir: string;
+  manifestPath: string;
+}
+
+export interface AdapterExecutionTargetPaperclipBridgeLaunchState {
+  status: "launching" | "accepted" | "not_started" | "released" | "needs_human";
+  acceptedStart: "unknown" | "accepted";
+  retryable: boolean;
+  launchIdentity: AdapterExecutionTargetPaperclipBridgeLaunchIdentity;
+  processIdentity: SandboxCallbackBridgeProcessIdentity | null;
+}
+
+export function adapterExecutionTargetPaperclipBridgeLaunchEvent(
+  state: AdapterExecutionTargetPaperclipBridgeLaunchState,
+): AdapterRuntimeEvent {
+  return {
+    eventType: PAPERCLIP_CALLBACK_BRIDGE_LAUNCH_EVENT,
+    stream: "system",
+    level: state.status === "needs_human" ? "error" : state.status === "launching" ? "warn" : "info",
+    message:
+      state.status === "launching"
+        ? "Paperclip callback bridge launch intent durably fenced before remote dispatch"
+        : state.status === "accepted"
+          ? "Paperclip callback bridge launch accepted; replay fence remains active until exact stop reconciliation"
+          : state.status === "needs_human"
+            ? "Paperclip callback bridge launch requires exact cancellation reconciliation"
+            : state.status === "released"
+              ? "Paperclip callback bridge cancellation and retained cleanup verified"
+              : "Paperclip callback bridge launch was proven not started",
+    payload: {
+      status: state.status,
+      acceptedStart: state.acceptedStart,
+      retryable: state.retryable,
+      needsHuman: state.status === "needs_human",
+      ...state.launchIdentity,
+      processIdentity: state.processIdentity,
+    },
+  };
+}
+
+export class AdapterExecutionTargetPaperclipBridgeLaunchAmbiguousError extends AggregateError {
+  readonly code = PAPERCLIP_CALLBACK_BRIDGE_LAUNCH_AMBIGUOUS;
+  readonly retryable = false;
+  readonly needsHuman = true;
+  readonly acceptedStart: "unknown" | "accepted";
+
+  constructor(
+    readonly launchIdentity: AdapterExecutionTargetPaperclipBridgeLaunchIdentity,
+    readonly processIdentity: SandboxCallbackBridgeProcessIdentity | null,
+    detail: string,
+    causes: readonly unknown[],
+    acceptedStart: "unknown" | "accepted" = "unknown",
+  ) {
+    const frozenCauses = Object.freeze([...causes]);
+    super(
+      frozenCauses,
+      `Paperclip callback bridge launch ${launchIdentity.instanceId} has ambiguous cleanup authority; ` +
+        `do not replay run ${launchIdentity.runId} or release lease ${launchIdentity.leaseId ?? "unknown"} ` +
+        `until exact reconciliation succeeds. ${detail}`,
+      { cause: frozenCauses.at(-1) },
+    );
+    this.name = "AdapterExecutionTargetPaperclipBridgeLaunchAmbiguousError";
+    this.acceptedStart = acceptedStart;
+  }
+}
+
+export function isAdapterExecutionTargetPaperclipBridgeLaunchAmbiguousError(
+  error: unknown,
+): error is AdapterExecutionTargetPaperclipBridgeLaunchAmbiguousError {
+  if (error instanceof AdapterExecutionTargetPaperclipBridgeLaunchAmbiguousError) return true;
+  const candidate = error as Partial<AdapterExecutionTargetPaperclipBridgeLaunchAmbiguousError> | null;
+  return Boolean(
+    candidate &&
+      candidate.code === PAPERCLIP_CALLBACK_BRIDGE_LAUNCH_AMBIGUOUS &&
+      candidate.retryable === false &&
+      candidate.needsHuman === true &&
+      (candidate.acceptedStart === "unknown" || candidate.acceptedStart === "accepted") &&
+      candidate.launchIdentity &&
+      typeof candidate.launchIdentity === "object",
+  );
+}
+
+interface PaperclipBridgeReconciliationStep {
+  label: string;
+  run: () => Promise<void>;
+  complete: boolean;
+}
+
+interface PaperclipBridgeReconciliationReleaseStep {
+  label: string;
+  run: () => void;
+  complete: boolean;
+}
+
+interface PaperclipBridgeReconciliationEntry {
+  identity: AdapterExecutionTargetPaperclipBridgeLaunchIdentity;
+  processIdentity: SandboxCallbackBridgeProcessIdentity | null;
+  acceptedStart: "unknown" | "accepted";
+  cancelRemote: (() => Promise<void>) | null;
+  remoteCancelled: boolean;
+  cleanupSteps: PaperclipBridgeReconciliationStep[];
+  releaseSteps: PaperclipBridgeReconciliationReleaseStep[];
+  dependentRegistrationIds: Set<string>;
+  onLaunchState: (state: AdapterExecutionTargetPaperclipBridgeLaunchState) => Promise<void>;
+  registrationOpen: boolean;
+  registrationSealed: boolean;
+  identityConflict: string | null;
+  revision: number;
+  reconcilePromise: Promise<AdapterExecutionTargetPaperclipBridgeReconciliationResult> | null;
+}
+
+export interface AdapterExecutionTargetPaperclipBridgeReconciliationResult {
+  found: boolean;
+  controllerFound: boolean;
+  remoteCancelled: boolean;
+  cleanupComplete: boolean;
+  released: boolean;
+}
+
+const paperclipBridgeReconciliationEntries = new Map<
+  string,
+  PaperclipBridgeReconciliationEntry
+>();
+
+function paperclipBridgeReconciliationKey(input: { runId: string; instanceId: string }): string {
+  return `${input.runId}:${input.instanceId}`;
+}
+
+function paperclipBridgeLaunchIdentityConflict(
+  expected: AdapterExecutionTargetPaperclipBridgeLaunchIdentity,
+  actual: AdapterExecutionTargetPaperclipBridgeLaunchIdentity,
+): string | null {
+  for (const field of [
+    "runId",
+    "adapterKey",
+    "instanceId",
+    "instanceNonce",
+    "transport",
+    "providerKey",
+    "environmentId",
+    "leaseId",
+    "remoteCwd",
+    "instanceDir",
+    "queueDir",
+    "assetRemoteDir",
+    "manifestPath",
+  ] as const) {
+    if (expected[field] !== actual[field]) return field;
+  }
+  return null;
+}
+
+function paperclipBridgeProcessIdentityConflict(
+  expected: SandboxCallbackBridgeProcessIdentity | null,
+  actual: SandboxCallbackBridgeProcessIdentity | null,
+): string | null {
+  if (!expected || !actual) return null;
+  for (const field of [
+    "schema",
+    "platform",
+    "pid",
+    "bootIdentity",
+    "osStartIdentity",
+    "executablePath",
+    "scriptMarker",
+    "instanceNonce",
+  ] as const) {
+    if (expected[field] !== actual[field]) return field;
+  }
+  return null;
+}
+
+function registerPaperclipBridgeReconciliationEntry(input: {
+  identity: AdapterExecutionTargetPaperclipBridgeLaunchIdentity;
+  processIdentity: SandboxCallbackBridgeProcessIdentity | null;
+  acceptedStart: "unknown" | "accepted";
+  cancelRemote: (() => Promise<void>) | null;
+  remoteCancelled: boolean;
+  cleanupSteps: PaperclipBridgeReconciliationStep[];
+  onLaunchState: (state: AdapterExecutionTargetPaperclipBridgeLaunchState) => Promise<void>;
+  registrationSealed: boolean;
+}): PaperclipBridgeReconciliationEntry {
+  const key = paperclipBridgeReconciliationKey(input.identity);
+  const existing = paperclipBridgeReconciliationEntries.get(key);
+  if (existing) {
+    const identityConflict = paperclipBridgeLaunchIdentityConflict(existing.identity, input.identity);
+    const processConflict = paperclipBridgeProcessIdentityConflict(
+      existing.processIdentity,
+      input.processIdentity,
+    );
+    if (identityConflict || processConflict) {
+      existing.identityConflict = identityConflict
+        ? `launchIdentity.${identityConflict}`
+        : `processIdentity.${processConflict}`;
+      existing.registrationOpen = false;
+      existing.revision += 1;
+      return existing;
+    }
+    if (!existing.registrationOpen) return existing;
+    existing.registrationSealed = existing.registrationSealed && input.registrationSealed;
+    if (!existing.cancelRemote && input.cancelRemote) existing.cancelRemote = input.cancelRemote;
+    existing.remoteCancelled = existing.remoteCancelled || input.remoteCancelled;
+    existing.processIdentity ??= input.processIdentity;
+    if (input.acceptedStart === "accepted") existing.acceptedStart = "accepted";
+    for (const step of input.cleanupSteps) {
+      if (!existing.cleanupSteps.some((candidate) => candidate.label === step.label)) {
+        existing.cleanupSteps.push(step);
+      }
+    }
+    existing.revision += 1;
+    return existing;
+  }
+  const entry: PaperclipBridgeReconciliationEntry = {
+    ...input,
+    releaseSteps: [],
+    dependentRegistrationIds: new Set(),
+    registrationOpen: true,
+    registrationSealed: input.registrationSealed,
+    identityConflict: null,
+    revision: 1,
+    reconcilePromise: null,
+  };
+  paperclipBridgeReconciliationEntries.set(key, entry);
+  return entry;
+}
+
+export function retainAdapterExecutionTargetPaperclipBridgeDependentResources(input: {
+  runId: string;
+  instanceId: string;
+  registrationId: string;
+  cleanupSteps?: Array<{ label: string; run: () => Promise<void> }>;
+  releaseSteps?: Array<{ label: string; run: () => void }>;
+}): boolean {
+  const entry = paperclipBridgeReconciliationEntries.get(paperclipBridgeReconciliationKey(input));
+  if (!entry || !entry.registrationOpen || entry.identityConflict) return false;
+  const registrationId = input.registrationId.trim();
+  if (!registrationId) return false;
+  if (entry.dependentRegistrationIds.has(registrationId)) return true;
+  entry.dependentRegistrationIds.add(registrationId);
+  entry.cleanupSteps.push(
+    ...(input.cleanupSteps ?? []).map((step) => ({ ...step, complete: false })),
+  );
+  entry.releaseSteps.push(
+    ...(input.releaseSteps ?? []).map((step) => ({ ...step, complete: false })),
+  );
+  entry.revision += 1;
+  return true;
+}
+
+export function sealAdapterExecutionTargetPaperclipBridgeDependentResources(input: {
+  runId: string;
+  instanceId: string;
+}): boolean {
+  const entry = paperclipBridgeReconciliationEntries.get(paperclipBridgeReconciliationKey(input));
+  if (!entry || !entry.registrationOpen || entry.identityConflict) return false;
+  if (!entry.registrationSealed) {
+    entry.registrationSealed = true;
+    entry.revision += 1;
+  }
+  return true;
+}
+
+export function retainAndSealAdapterExecutionTargetPaperclipBridgeDependentResources(input: {
+  error: unknown;
+  registrationId: string;
+  cleanupSteps: Array<{ label: string; run: () => Promise<void> }>;
+}): boolean {
+  if (!isAdapterExecutionTargetPaperclipBridgeLaunchAmbiguousError(input.error)) return false;
+  const retained = retainAdapterExecutionTargetPaperclipBridgeDependentResources({
+    runId: input.error.launchIdentity.runId,
+    instanceId: input.error.launchIdentity.instanceId,
+    registrationId: input.registrationId,
+    cleanupSteps: input.cleanupSteps,
+  });
+  return retained && sealAdapterExecutionTargetPaperclipBridgeDependentResources({
+    runId: input.error.launchIdentity.runId,
+    instanceId: input.error.launchIdentity.instanceId,
+  });
+}
+
+export async function reconcileAndReleaseAdapterExecutionTargetPaperclipBridgeLaunch(input: {
+  runId: string;
+  instanceId: string;
+}): Promise<AdapterExecutionTargetPaperclipBridgeReconciliationResult> {
+  const key = paperclipBridgeReconciliationKey(input);
+  const entry = paperclipBridgeReconciliationEntries.get(key);
+  if (!entry) {
+    return {
+      found: false,
+      controllerFound: false,
+      remoteCancelled: false,
+      cleanupComplete: false,
+      released: false,
+    };
+  }
+  if (entry.reconcilePromise) return entry.reconcilePromise;
+  const active = (async () => {
+    for (;;) {
+      const revision = entry.revision;
+      if (entry.identityConflict) {
+        return {
+          found: true,
+          controllerFound: false,
+          remoteCancelled: false,
+          cleanupComplete: false,
+          released: false,
+        };
+      }
+      if (!entry.remoteCancelled) {
+        if (!entry.cancelRemote) {
+          return {
+            found: true,
+            controllerFound: false,
+            remoteCancelled: false,
+            cleanupComplete: false,
+            released: false,
+          };
+        }
+        await entry.cancelRemote();
+        entry.remoteCancelled = true;
+      }
+      for (const step of entry.cleanupSteps) {
+        if (step.complete) continue;
+        await step.run();
+        step.complete = true;
+      }
+      if (entry.revision !== revision) continue;
+      if (!entry.registrationSealed) {
+        return {
+          found: true,
+          controllerFound: entry.cancelRemote !== null,
+          remoteCancelled: entry.remoteCancelled,
+          cleanupComplete: false,
+          released: false,
+        };
+      }
+      // The owning consumer explicitly seals only after attaching every
+      // dependent capability. Release callbacks are synchronous, so no other
+      // task can interleave a new cleanup bundle after this point.
+      entry.registrationOpen = false;
+      if (
+        entry.identityConflict ||
+        entry.revision !== revision ||
+        !entry.remoteCancelled ||
+        entry.cleanupSteps.some((step) => !step.complete)
+      ) {
+        continue;
+      }
+      for (const step of entry.releaseSteps) {
+        if (step.complete) continue;
+        step.run();
+        step.complete = true;
+      }
+      await entry.onLaunchState({
+        status: "released",
+        acceptedStart: entry.acceptedStart,
+        retryable: true,
+        launchIdentity: entry.identity,
+        processIdentity: entry.processIdentity,
+      });
+      if (
+        entry.revision === revision &&
+        entry.cleanupSteps.every((step) => step.complete) &&
+        entry.releaseSteps.every((step) => step.complete) &&
+        paperclipBridgeReconciliationEntries.get(key) === entry
+      ) {
+        paperclipBridgeReconciliationEntries.delete(key);
+        return {
+          found: true,
+          controllerFound: entry.cancelRemote !== null,
+          remoteCancelled: true,
+          cleanupComplete: true,
+          released: true,
+        };
+      }
+    }
+  })();
+  entry.reconcilePromise = active;
+  try {
+    const result = await active;
+    if (!result.released && entry.reconcilePromise === active) {
+      entry.reconcilePromise = null;
+    }
+    return result;
+  } catch (error) {
+    if (entry.reconcilePromise === active) entry.reconcilePromise = null;
+    throw error;
+  }
+}
+
+export interface AdapterExecutionTargetAcceptedProcessSessionController {
   launchIdentity: AdapterExecutionTargetProcessSessionLaunchIdentity;
   reconcileTerminal(): Promise<boolean>;
-  treeCustody: "unverified";
   stop(): Promise<void>;
+}
+
+export interface AdapterExecutionTargetProcessSessionBridgeHandle
+  extends AdapterExecutionTargetAcceptedProcessSessionController {
+  agentCommand: string;
+  treeCustody: "unverified";
 }
 
 export const ACP_PROCESS_SESSION_LAUNCH_AMBIGUOUS = "ACP_PROCESS_SESSION_LAUNCH_AMBIGUOUS";
@@ -209,6 +707,7 @@ export class AdapterExecutionTargetProcessSessionLaunchAmbiguousError extends Er
   readonly needsHuman = true;
   readonly acceptedStart: "unknown" | "accepted";
   readonly reconcileTerminal: (() => Promise<boolean>) | null;
+  readonly acceptedProcessSessionController: AdapterExecutionTargetAcceptedProcessSessionController | null;
   readonly cleanupAcceptedHostResources: (() => Promise<void>) | null;
 
   constructor(
@@ -218,6 +717,7 @@ export class AdapterExecutionTargetProcessSessionLaunchAmbiguousError extends Er
       cause?: unknown;
       acceptedStart?: "unknown" | "accepted";
       reconcileTerminal?: () => Promise<boolean>;
+      acceptedProcessSessionController?: AdapterExecutionTargetAcceptedProcessSessionController;
       cleanupAcceptedHostResources?: () => Promise<void>;
     } = {},
   ) {
@@ -229,6 +729,7 @@ export class AdapterExecutionTargetProcessSessionLaunchAmbiguousError extends Er
     this.name = "AdapterExecutionTargetProcessSessionLaunchAmbiguousError";
     this.acceptedStart = options.acceptedStart ?? "unknown";
     this.reconcileTerminal = options.reconcileTerminal ?? null;
+    this.acceptedProcessSessionController = options.acceptedProcessSessionController ?? null;
     this.cleanupAcceptedHostResources = options.cleanupAcceptedHostResources ?? null;
   }
 }
@@ -1191,6 +1692,35 @@ export function readAdapterExecutionTarget(input: {
   );
 }
 
+export function readAdapterExecutionTargetFailClosed(input: {
+  executionTarget?: unknown;
+  legacyRemoteExecution?: unknown;
+}): AdapterExecutionTarget | null {
+  const raw = input.executionTarget;
+  const explicitTarget =
+    raw == null
+      ? null
+      : isAdapterExecutionTargetInstance(raw)
+        ? raw
+        : parseAdapterExecutionTarget(raw);
+  const legacyRemoteIntent = input.legacyRemoteExecution != null;
+  const legacyTarget = legacyRemoteIntent
+    ? adapterExecutionTargetFromRemoteExecution(input.legacyRemoteExecution)
+    : null;
+
+  // Validate each supplied contract independently. An invalid explicit target
+  // must never be hidden by a valid legacy fallback (or vice versa), because
+  // doing so silently changes the selected host/provider authority.
+  if (
+    (raw != null && !explicitTarget) ||
+    (legacyRemoteIntent && !legacyTarget) ||
+    (legacyRemoteIntent && explicitTarget?.kind === "local")
+  ) {
+    throw new PaperclipExecutionTargetInvalidError();
+  }
+  return explicitTarget ?? legacyTarget;
+}
+
 export async function prepareAdapterExecutionTargetRuntime(input: {
   runId: string;
   target: AdapterExecutionTarget | null | undefined;
@@ -1910,6 +2440,83 @@ export async function startAdapterExecutionTargetProcessSessionBridge(input: {
       { reconcileTerminal: reconcileTerminalReceipt },
     );
   }
+  // Remote stop authority must exist as soon as a launch is accepted. It cannot
+  // depend on the host TCP proxy being created successfully: a local setup or
+  // accepted-fence callback failure still leaves a real wrapper and child that
+  // the retained run controller must be able to stop without replaying launch.
+  let stdinSeq = 0;
+  let inboundWriteChain: Promise<void> = Promise.resolve();
+  let acceptedStopPromise: Promise<void> | null = null;
+  let acceptedStdinEndCheckpointed = false;
+  let stdinEndWritePromise: Promise<void> | null = null;
+  const enqueueRemoteStdinEvent = (event: { type: "stdin"; data: string } | { type: "stdinEnd" }) => {
+    stdinSeq += 1;
+    const name = `${String(stdinSeq).padStart(12, "0")}.json`;
+    const write = inboundWriteChain.then(async () => {
+      await client.writeTextFile(path.posix.join(stdinDir, name), jsonLine(event));
+    });
+    // Preserve receipt order while keeping the queue available for an explicit
+    // stop retry after an individual provider-backed write fails.
+    inboundWriteChain = write.catch(() => undefined);
+    return write;
+  };
+  const checkpointRemoteStdinEnd = (): Promise<void> => {
+    if (acceptedStdinEndCheckpointed) return Promise.resolve();
+    if (stdinEndWritePromise) return stdinEndWritePromise;
+    stdinEndWritePromise = enqueueRemoteStdinEvent({ type: "stdinEnd" })
+      .then(() => {
+        acceptedStdinEndCheckpointed = true;
+      })
+      .catch((error) => {
+        stdinEndWritePromise = null;
+        throw error;
+      });
+    return stdinEndWritePromise;
+  };
+  const acceptedProcessSessionController: AdapterExecutionTargetAcceptedProcessSessionController = {
+    launchIdentity: ambiguousLaunchIdentity,
+    reconcileTerminal: reconcileTerminalReceipt,
+    stop: async () => {
+      if (acceptedStopPromise) return acceptedStopPromise;
+      acceptedStopPromise = (async () => {
+        await inboundWriteChain;
+        if (!acceptedStdinEndCheckpointed) {
+          try {
+            await checkpointRemoteStdinEnd();
+          } catch (error) {
+            await onLog(
+              "stderr",
+              `[paperclip] Failed to checkpoint ACP process session stdinEnd; preserving ${sessionDir}: ${
+                error instanceof Error ? error.message : String(error)
+              }\n`,
+            );
+            throw error;
+          }
+        }
+
+        const deadline = Date.now() + 5_000;
+        let terminal = false;
+        do {
+          terminal = await reconcileTerminalReceipt();
+          if (terminal) return;
+          if (Date.now() < deadline) {
+            await new Promise((resolve) => setTimeout(resolve, 50));
+          }
+        } while (Date.now() < deadline);
+
+        throw new Error(
+          `ACP process session ${sessionId} (${launchId}) stop was not verified: ` +
+          `stdinEndCheckpointed=${String(acceptedStdinEndCheckpointed)}, ` +
+          `launcherPid=${remoteProcessSessionLauncherPid}, wrapperPid=${remoteProcessSessionWrapperPid}, ` +
+          `terminalReconciled=${String(terminal)}. Durable remote evidence was preserved and release remains fenced.`,
+        );
+      })().catch((error) => {
+        acceptedStopPromise = null;
+        throw error;
+      });
+      return acceptedStopPromise;
+    },
+  };
   try {
     await input.onLaunchState?.({
       status: "accepted",
@@ -1923,7 +2530,12 @@ export async function startAdapterExecutionTargetProcessSessionBridge(input: {
     throw new AdapterExecutionTargetProcessSessionLaunchAmbiguousError(
       ambiguousLaunchIdentity,
       `The accepted launch could not be durably checkpointed: ${error instanceof Error ? error.message : String(error)}`,
-      { cause: error, acceptedStart: "accepted", reconcileTerminal: reconcileTerminalReceipt },
+      {
+        cause: error,
+        acceptedStart: "accepted",
+        reconcileTerminal: reconcileTerminalReceipt,
+        acceptedProcessSessionController,
+      },
     );
   }
 
@@ -1931,21 +2543,42 @@ export async function startAdapterExecutionTargetProcessSessionBridge(input: {
   let acceptedProxyServer: net.Server | null = null;
   let acceptedProxySockets: Set<net.Socket> | null = null;
   let pollTimer: NodeJS.Timeout | null = null;
+  let pollInFlight: Promise<void> | null = null;
+  let stopping = false;
+  let acceptedProxyServerClosed = false;
+  let acceptedProxyAssetCleaned = false;
   const cleanupAcceptedHostResources = async (): Promise<void> => {
+    stopping = true;
     if (pollTimer) clearTimeout(pollTimer);
     for (const liveSocket of acceptedProxySockets ?? []) liveSocket.destroy();
-    const cleanupSteps: Promise<unknown>[] = [];
-    if (acceptedProxyServer?.listening) {
-      cleanupSteps.push(
-        new Promise<void>((resolve, reject) =>
+    const cleanupSteps: Array<{ run: () => Promise<unknown>; mark: () => void }> = [];
+    if (pollInFlight) cleanupSteps.push({ run: () => pollInFlight!, mark: () => {} });
+    if (!acceptedProxyServerClosed && acceptedProxyServer?.listening) {
+      cleanupSteps.push({
+        run: () => new Promise<void>((resolve, reject) =>
           acceptedProxyServer!.close((closeError) =>
             closeError ? reject(closeError) : resolve(),
           ),
         ),
-      );
+        mark: () => {
+          acceptedProxyServerClosed = true;
+        },
+      });
+    } else if (!acceptedProxyServer?.listening) {
+      acceptedProxyServerClosed = true;
     }
-    if (acceptedProxyAsset) cleanupSteps.push(acceptedProxyAsset.cleanup());
-    const results = await Promise.allSettled(cleanupSteps);
+    if (!acceptedProxyAssetCleaned && acceptedProxyAsset) {
+      cleanupSteps.push({
+        run: () => acceptedProxyAsset!.cleanup(),
+        mark: () => {
+          acceptedProxyAssetCleaned = true;
+        },
+      });
+    }
+    const results = await Promise.allSettled(cleanupSteps.map((step) => step.run()));
+    results.forEach((result, index) => {
+      if (result.status === "fulfilled") cleanupSteps[index]?.mark();
+    });
     const failures = rejectedReasons(results);
     if (failures.length > 0) {
       throw new AggregateError(failures, "Accepted host proxy capability cleanup was not verified.");
@@ -1953,10 +2586,6 @@ export async function startAdapterExecutionTargetProcessSessionBridge(input: {
   };
   try {
   let socket: net.Socket | null = null;
-  let stopping = false;
-  let remoteTerminalSeen = false;
-  let stdinSeq = 0;
-  let inboundWriteChain: Promise<void> = Promise.resolve();
   const pendingRemoteEvents: Array<{
     type?: string;
     stream?: "stdout" | "stderr";
@@ -1988,9 +2617,6 @@ export async function startAdapterExecutionTargetProcessSessionBridge(input: {
   };
 
   const deliverRemoteEvent = (event: (typeof pendingRemoteEvents)[number]) => {
-    if (event.type === "exit" || event.type === "error") {
-      remoteTerminalSeen = true;
-    }
     if (socket) {
       writeRemoteEventToSocket(event);
       return;
@@ -2007,19 +2633,6 @@ export async function startAdapterExecutionTargetProcessSessionBridge(input: {
       const event = pendingRemoteEvents.shift();
       if (event) writeRemoteEventToSocket(event);
     }
-  };
-
-  const enqueueRemoteStdinEvent = (event: { type: "stdin"; data: string } | { type: "stdinEnd" }) => {
-    stdinSeq += 1;
-    const name = `${String(stdinSeq).padStart(12, "0")}.json`;
-    const write = inboundWriteChain.then(async () => {
-      await client.writeTextFile(path.posix.join(stdinDir, name), jsonLine(event));
-    });
-    // Preserve receipt order even when a provider-backed write spans several
-    // remote commands. Keep the queue usable after an individual write fails;
-    // the caller-facing branch below still reports that failure to the proxy.
-    inboundWriteChain = write.catch(() => undefined);
-    return write;
   };
 
   const liveSockets = new Set<net.Socket>();
@@ -2070,7 +2683,7 @@ export async function startAdapterExecutionTargetProcessSessionBridge(input: {
         const queuedWrite = message.type === "stdin" && typeof message.data === "string"
           ? enqueueRemoteStdinEvent({ type: "stdin", data: message.data })
           : message.type === "stdinEnd"
-            ? enqueueRemoteStdinEvent({ type: "stdinEnd" })
+            ? checkpointRemoteStdinEnd()
             : null;
         void queuedWrite?.catch((error) => {
           nextSocket.write(jsonLine({ type: "error", message: error instanceof Error ? error.message : String(error) }));
@@ -2080,6 +2693,17 @@ export async function startAdapterExecutionTargetProcessSessionBridge(input: {
     });
   });
   acceptedProxyServer = server;
+
+  const schedulePoll = () => {
+    pollTimer = setTimeout(() => {
+      const activePoll = poll();
+      pollInFlight = activePoll;
+      void activePoll.finally(() => {
+        if (pollInFlight === activePoll) pollInFlight = null;
+      }).catch(() => undefined);
+    }, 100);
+    pollTimer.unref?.();
+  };
 
   const poll = async () => {
     if (stopping) return;
@@ -2104,8 +2728,7 @@ export async function startAdapterExecutionTargetProcessSessionBridge(input: {
       return;
     } finally {
       if (!stopping) {
-        pollTimer = setTimeout(() => void poll(), 100);
-        pollTimer.unref?.();
+        schedulePoll();
       }
     }
   };
@@ -2113,11 +2736,8 @@ export async function startAdapterExecutionTargetProcessSessionBridge(input: {
   const port = await waitForLocalServerListen(server);
   const agentCommand = await writeProcessSessionProxyScript(proxyDir, port, token);
   await proxyAsset.assertIntegrity();
-  pollTimer = setTimeout(() => void poll(), 100);
-  pollTimer.unref?.();
+  schedulePoll();
   let stopPromise: Promise<void> | null = null;
-  let stopServerClosed = false;
-  let stopStdinEndCheckpointed = false;
 
   return {
     agentCommand,
@@ -2127,104 +2747,30 @@ export async function startAdapterExecutionTargetProcessSessionBridge(input: {
     stop: async () => {
       if (stopPromise) return stopPromise;
       stopPromise = (async () => {
-      stopping = true;
-      if (pollTimer) clearTimeout(pollTimer);
-      for (const liveSocket of liveSockets) liveSocket.destroy();
-      const serverClosed = stopServerClosed || !server.listening
-        ? Promise.resolve()
-        : new Promise<void>((resolve, reject) =>
-            server.close((closeError) => (closeError ? reject(closeError) : resolve())),
-          );
-      await inboundWriteChain;
-      stdinSeq += 1;
-      let stdinEndWritten = stopStdinEndCheckpointed;
-      if (!stopStdinEndCheckpointed) {
+        // Revoke the local bearer-capability first, but still request remote
+        // stop when local cleanup is partially degraded. Both operations are
+        // independently retryable and release remains fenced until both pass.
+        const failures: unknown[] = [];
         try {
-          await client.writeTextFile(
-            path.posix.join(stdinDir, `${String(stdinSeq).padStart(12, "0")}.json`),
-            jsonLine({ type: "stdinEnd" }),
-          );
-          stopStdinEndCheckpointed = true;
-          stdinEndWritten = true;
+          await cleanupAcceptedHostResources();
         } catch (error) {
-          stdinEndWritten = false;
-          await onLog(
-            "stderr",
-            `[paperclip] Failed to checkpoint ACP process session stdinEnd; preserving ${sessionDir}: ${error instanceof Error ? error.message : String(error)}\n`,
+          failures.push(error);
+        }
+        try {
+          await acceptedProcessSessionController.stop();
+        } catch (error) {
+          failures.push(error);
+        }
+        if (failures.length > 0) {
+          throw new AggregateError(
+            failures,
+            `ACP process session ${sessionId} (${launchId}) stop and local capability revocation were not both verified.`,
           );
         }
-      }
-      await serverClosed;
-      stopServerClosed = true;
-      // The remote helper consumes stdin events on a short polling cadence. Do
-      // not delete its queue immediately after writing stdinEnd: doing so can
-      // strand the child with its cwd open (EBUSY on Windows) and erase the only
-      // graceful-stop signal. Drain until a terminal receipt or a bounded grace
-      // deadline, then preserve the existing best-effort cleanup behavior.
-      const stopDeadline = Date.now() + 2_000;
-      while (!remoteTerminalSeen && Date.now() < stopDeadline) {
-        const events = await readRemoteJsonFiles({ client, dir: eventsDir }).catch(() => []);
-        for (const event of events) {
-          const parsed = JSON.parse(event.body) as (typeof pendingRemoteEvents)[number];
-          deliverRemoteEvent(parsed);
-        }
-        if (!remoteTerminalSeen) {
-          await new Promise((resolve) => setTimeout(resolve, 50));
-        }
-      }
-      // A terminal child event does not prove that the remote Node wrapper has
-      // released its cwd and queue handles. Fence cleanup on that wrapper's
-      // actual process identity; if it cannot be proven stopped, preserve the
-      // session directory for recovery instead of racing a destructive remove.
-      const wrapperExitProbeSource = [
-        "const pids = JSON.parse(process.argv[1]);",
-        "const deadline = Date.now() + 5000;",
-        "const isAlive = (pid) => {",
-        "  try { process.kill(pid, 0); return true; }",
-        "  catch (error) { return !(error && error.code === 'ESRCH'); }",
-        "};",
-        "const poll = () => {",
-        "  if (!pids.some(isAlive)) process.exit(0);",
-        "  if (Date.now() >= deadline) process.exit(1);",
-        "  setTimeout(poll, 50);",
-        "};",
-        "poll();",
-      ].join("\n");
-      const wrapperExit = await runner.execute({
-        command: "node",
-        args: [
-          "-e",
-          wrapperExitProbeSource,
-          JSON.stringify([...new Set([remoteProcessSessionLauncherPid, remoteProcessSessionWrapperPid].map(Number))]),
-        ],
-        cwd: target.remoteCwd,
-        env: {
-          PAPERCLIP_SANDBOX_EXEC_CHANNEL: "bridge",
-        },
-        timeoutMs: 10_000,
-      }).catch((error) => ({
-        exitCode: 1,
-        timedOut: false,
-        stderr: error instanceof Error ? error.message : String(error),
-      }));
-      const wrapperExitProven = !wrapperExit.timedOut && (wrapperExit.exitCode ?? 1) === 0;
-      if (stdinEndWritten && wrapperExitProven) {
         await onLog(
           "stderr",
-          `[paperclip] ACP process session ${sessionDir} reached direct-wrapper terminal proof; preserving durable evidence until post-DB acknowledgment and process-tree custody are available.\n`,
+          `[paperclip] ACP process session ${sessionDir} reached exact terminal reconciliation; preserving durable evidence until post-DB acknowledgment and process-tree custody are available.\n`,
         );
-      } else if (!wrapperExitProven) {
-        await onLog(
-          "stderr",
-          `[paperclip] ACP process session wrapper ${remoteProcessSessionWrapperPid} (launcher ${remoteProcessSessionLauncherPid}) did not exit within the cleanup grace; preserving ${sessionDir}.\n`,
-        );
-      } else {
-        await onLog(
-          "stderr",
-          `[paperclip] ACP process session wrapper exited but stdinEnd checkpoint was not verified; preserving ${sessionDir}.\n`,
-        );
-      }
-      await proxyAsset.cleanup();
       })().catch((error) => {
         stopPromise = null;
         throw error;
@@ -2257,6 +2803,7 @@ export async function startAdapterExecutionTargetProcessSessionBridge(input: {
           : error,
         acceptedStart: "accepted",
         reconcileTerminal: reconcileTerminalReceipt,
+        acceptedProcessSessionController,
         cleanupAcceptedHostResources: proxyCleanupError
           ? cleanupAcceptedHostResources
           : undefined,
@@ -2471,6 +3018,62 @@ process.exit(0);
 `;
 }
 
+async function persistPaperclipBridgeInstanceManifest(input: {
+  runner: CommandManagedRuntimeRunner;
+  remoteCwd: string;
+  timeoutMs: number | null | undefined;
+  identity: AdapterExecutionTargetPaperclipBridgeLaunchIdentity;
+}): Promise<void> {
+  const manifest = {
+    schema: PAPERCLIP_CALLBACK_BRIDGE_INSTANCE_MANIFEST_SCHEMA,
+    runId: input.identity.runId,
+    adapterKey: input.identity.adapterKey,
+    instanceId: input.identity.instanceId,
+    instanceNonce: input.identity.instanceNonce,
+    transport: input.identity.transport,
+    providerKey: input.identity.providerKey,
+    environmentId: input.identity.environmentId,
+    leaseId: input.identity.leaseId,
+    remoteCwd: input.identity.remoteCwd,
+    instanceDir: input.identity.instanceDir,
+    queueDir: input.identity.queueDir,
+    assetRemoteDir: input.identity.assetRemoteDir,
+    createdAt: new Date().toISOString(),
+  };
+  const source = [
+    'const fs = require("node:fs");',
+    'const path = require("node:path");',
+    "const input = JSON.parse(Buffer.from(process.argv[1], 'base64').toString('utf8'));",
+    "fs.mkdirSync(input.instanceDir, { recursive: true, mode: 0o700 });",
+    "try { fs.chmodSync(input.instanceDir, 0o700); } catch {}",
+    "if (fs.existsSync(input.manifestPath)) throw new Error('Paperclip callback bridge instance manifest already exists; refusing overwrite.');",
+    "const tempPath = input.manifestPath + '.tmp-' + process.pid;",
+    "const fd = fs.openSync(tempPath, 'wx', 0o600);",
+    "try { fs.writeFileSync(fd, input.body, 'utf8'); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }",
+    "try { fs.linkSync(tempPath, input.manifestPath); } finally { fs.rmSync(tempPath, { force: true }); }",
+    "try { fs.chmodSync(input.manifestPath, 0o600); } catch {}",
+    "if (fs.readFileSync(input.manifestPath, 'utf8') !== input.body) throw new Error('Paperclip callback bridge instance manifest readback mismatch.');",
+  ].join("\n");
+  const encoded = Buffer.from(JSON.stringify({
+    instanceDir: input.identity.instanceDir,
+    manifestPath: input.identity.manifestPath,
+    body: jsonLine(manifest),
+  }), "utf8").toString("base64");
+  const result = await input.runner.execute({
+    command: "node",
+    args: ["-e", source, encoded],
+    cwd: input.remoteCwd,
+    env: { PAPERCLIP_SANDBOX_EXEC_CHANNEL: "bridge" },
+    timeoutMs: input.timeoutMs ?? 30_000,
+  });
+  if (result.timedOut || (result.exitCode ?? 1) !== 0) {
+    throw new Error(
+      `Failed to persist immutable Paperclip callback bridge instance manifest at ${input.identity.manifestPath}: ` +
+        `${result.stderr.trim() || `exit ${String(result.exitCode)}`}`,
+    );
+  }
+}
+
 export async function startAdapterExecutionTargetPaperclipBridge(input: {
   runId: string;
   target: AdapterExecutionTarget | null | undefined;
@@ -2480,6 +3083,11 @@ export async function startAdapterExecutionTargetPaperclipBridge(input: {
   hostApiToken: string | null | undefined;
   hostApiUrl?: string | null;
   onLog?: (stream: "stdout" | "stderr", chunk: string) => Promise<void>;
+  onLaunchState: (state: AdapterExecutionTargetPaperclipBridgeLaunchState) => Promise<void>;
+  /** Owning consumers with dependent capabilities must attach and explicitly seal them. */
+  deferDependentResourceRegistration?: boolean;
+  /** Exact module-owned capability; accepted only while NODE_ENV=test. */
+  testOnlyCapability?: PaperclipCallbackBridgeTestCapability | null;
   maxBodyBytes?: number | null;
 }): Promise<AdapterExecutionTargetPaperclipBridgeHandle | null> {
   if (!adapterExecutionTargetUsesPaperclipBridge(input.target)) {
@@ -2488,6 +3096,10 @@ export async function startAdapterExecutionTargetPaperclipBridge(input: {
   if (!input.target || input.target.kind !== "remote") {
     return null;
   }
+
+  // Production NO-GO for issue #41. This must remain before token handling,
+  // logs/events, manifest/asset creation, worker startup, or any runner call.
+  assertPaperclipCallbackBridgeEnabled(input.testOnlyCapability);
 
   const target = input.target;
   const onLog = input.onLog ?? (async () => {});
@@ -2501,8 +3113,31 @@ export async function startAdapterExecutionTargetPaperclipBridge(input: {
       ? input.runtimeRootDir.trim()
       : path.posix.join(target.remoteCwd, ".paperclip-runtime", input.adapterKey);
   const bridgeRuntimeDir = path.posix.join(runtimeRootDir, "paperclip-bridge");
-  const queueDir = path.posix.join(bridgeRuntimeDir, "queue");
-  const assetRemoteDir = path.posix.join(bridgeRuntimeDir, "server");
+  // Every accepted bridge launch owns a disjoint namespace. Cancellation and
+  // terminal receipts intentionally outlive a stopped server, so reusing one
+  // queue/server directory would make the next launch conflict with stale
+  // custody evidence and would let concurrent runs erase or consume each
+  // other's files.
+  const bridgeInstanceId = randomUUID();
+  const bridgeInstanceDir = path.posix.join(bridgeRuntimeDir, "instances", bridgeInstanceId);
+  const queueDir = path.posix.join(bridgeInstanceDir, "queue");
+  const assetRemoteDir = path.posix.join(bridgeInstanceDir, "server");
+  const launchIdentity: AdapterExecutionTargetPaperclipBridgeLaunchIdentity = Object.freeze({
+    runId: input.runId,
+    adapterKey: input.adapterKey,
+    instanceId: bridgeInstanceId,
+    instanceNonce: bridgeInstanceId,
+    transport: target.transport,
+    providerKey:
+      target.transport === "sandbox" ? target.providerKey?.trim() || null : null,
+    environmentId: target.environmentId?.trim() || null,
+    leaseId: target.leaseId?.trim() || null,
+    remoteCwd: target.remoteCwd,
+    instanceDir: bridgeInstanceDir,
+    queueDir,
+    assetRemoteDir,
+    manifestPath: path.posix.join(bridgeInstanceDir, "instance.json"),
+  });
   const bridgeToken = createSandboxCallbackBridgeToken();
   const maxBodyBytes =
     typeof input.maxBodyBytes === "number" && Number.isFinite(input.maxBodyBytes) && input.maxBodyBytes > 0
@@ -2519,16 +3154,63 @@ export async function startAdapterExecutionTargetPaperclipBridge(input: {
     typeof input.timeoutSec === "number" && Number.isFinite(input.timeoutSec) && input.timeoutSec > 0
       ? Math.trunc(input.timeoutSec * 1000)
       : adapterExecutionTargetTimeoutMs(target);
+  const reconciliationRegistrationSealed = input.deferDependentResourceRegistration !== true;
 
   await onLog(
     "stdout",
-    `[paperclip] Starting sandbox callback bridge for ${input.adapterKey} in ${bridgeRuntimeDir}.\n`,
+    `[paperclip] Starting sandbox callback bridge for ${input.adapterKey} in ${bridgeInstanceDir}.\n`,
   );
 
-  const bridgeAsset = await createSandboxCallbackBridgeAsset();
+  await input.onLaunchState({
+    status: "launching",
+    acceptedStart: "unknown",
+    retryable: false,
+    launchIdentity,
+    processIdentity: null,
+  });
+  try {
+    await persistPaperclipBridgeInstanceManifest({
+      runner,
+      remoteCwd: target.remoteCwd,
+      timeoutMs: bridgeTimeoutMs,
+      identity: launchIdentity,
+    });
+  } catch (error) {
+    try {
+      await input.onLaunchState({
+        status: "not_started",
+        acceptedStart: "unknown",
+        retryable: true,
+        launchIdentity,
+        processIdentity: null,
+      });
+    } catch (fenceError) {
+      registerPaperclipBridgeReconciliationEntry({
+        identity: launchIdentity,
+        processIdentity: null,
+        acceptedStart: "unknown",
+        cancelRemote: null,
+        remoteCancelled: true,
+        cleanupSteps: [],
+        onLaunchState: input.onLaunchState,
+        registrationSealed: reconciliationRegistrationSealed,
+      });
+      throw new AdapterExecutionTargetPaperclipBridgeLaunchAmbiguousError(
+        launchIdentity,
+        null,
+        "The immutable instance manifest failed before dispatch and the durable launching fence could not be cleared.",
+        [error, fenceError],
+      );
+    }
+    throw error;
+  }
+
+  let bridgeAsset: Awaited<ReturnType<typeof createSandboxCallbackBridgeAsset>> | null = null;
   let server: Awaited<ReturnType<typeof startSandboxCallbackBridgeServer>> | null = null;
   let worker: Awaited<ReturnType<typeof startSandboxCallbackBridgeWorker>> | null = null;
+  let serverLaunchAttempted = false;
   try {
+    bridgeAsset = await createSandboxCallbackBridgeAsset();
     const client = createCommandManagedSandboxCallbackBridgeQueueClient({
       runner,
       remoteCwd: target.remoteCwd,
@@ -2580,6 +3262,7 @@ export async function startAdapterExecutionTargetPaperclipBridge(input: {
         };
       },
     });
+    serverLaunchAttempted = true;
     server = await startSandboxCallbackBridgeServer({
       runner,
       remoteCwd: target.remoteCwd,
@@ -2587,21 +3270,118 @@ export async function startAdapterExecutionTargetPaperclipBridge(input: {
       queueDir,
       bridgeToken,
       bridgeAsset,
+      instanceNonce: bridgeInstanceId,
       timeoutMs: bridgeTimeoutMs,
       maxBodyBytes,
       shellCommand,
     });
+    await input.onLaunchState({
+      status: "accepted",
+      acceptedStart: "accepted",
+      retryable: false,
+      launchIdentity,
+      processIdentity: server.processIdentity,
+    });
   } catch (error) {
-    const cleanupResults = await Promise.allSettled([
-      server?.stop(),
-      worker?.stop(),
-      bridgeAsset.cleanup(),
-    ]);
+    const lowLevelAmbiguity =
+      error instanceof SandboxCallbackBridgeLaunchAmbiguousError ? error : null;
+    const cleanupSteps = [
+      {
+        label: "callback-server-cancellation",
+        run: async () => {
+          if (server) await server.stop();
+          else if (lowLevelAmbiguity) await lowLevelAmbiguity.cancellationController.reconcile();
+        },
+        applicable: Boolean(server || lowLevelAmbiguity),
+      },
+      {
+        label: "callback-worker-stop",
+        run: async () => worker?.stop(),
+        applicable: Boolean(worker),
+      },
+      {
+        label: "callback-private-asset-cleanup",
+        run: async () => bridgeAsset?.cleanup(),
+        applicable: Boolean(bridgeAsset),
+      },
+    ];
+    const cleanupResults = await Promise.allSettled(
+      cleanupSteps.map((step) => (step.applicable ? step.run() : Promise.resolve())),
+    );
+    const remoteCancelled =
+      cleanupResults[0]?.status === "fulfilled" &&
+      (Boolean(server || lowLevelAmbiguity) || !server);
+    const retainedCleanupSteps = cleanupSteps.flatMap((step, index) =>
+      step.applicable && cleanupResults[index]?.status === "rejected"
+        ? [{ label: step.label, run: step.run, complete: false }]
+        : [],
+    );
     const cleanupFailures = rejectedReasons(cleanupResults);
-    if (cleanupFailures.length > 0) {
-      throw new AggregateError(
+    const processIdentity = server?.processIdentity ?? lowLevelAmbiguity?.acceptedProcessIdentity ?? null;
+    const acceptedStart = server || lowLevelAmbiguity?.acceptedStart === "accepted"
+      ? "accepted" as const
+      : "unknown" as const;
+    if (!remoteCancelled || retainedCleanupSteps.length > 0) {
+      registerPaperclipBridgeReconciliationEntry({
+        identity: launchIdentity,
+        processIdentity,
+        acceptedStart,
+        cancelRemote:
+          server
+            ? () => server!.stop()
+            : lowLevelAmbiguity
+              ? () => lowLevelAmbiguity.cancellationController.reconcile().then(() => undefined)
+              : null,
+        remoteCancelled,
+        cleanupSteps: retainedCleanupSteps,
+        onLaunchState: input.onLaunchState,
+        registrationSealed: reconciliationRegistrationSealed,
+      });
+      await input.onLaunchState({
+        status: "needs_human",
+        acceptedStart,
+        retryable: false,
+        launchIdentity,
+        processIdentity,
+      }).catch(() => undefined);
+      throw new AdapterExecutionTargetPaperclipBridgeLaunchAmbiguousError(
+        launchIdentity,
+        processIdentity,
+        "Remote cancellation or complete host capability cleanup was not verified; the retained controller is the only reconciliation authority.",
         [error, ...cleanupFailures],
-        "Sandbox callback bridge startup failed and capability revocation was not verified.",
+        acceptedStart,
+      );
+    }
+    // The low-level launcher self-cancels every ordinary post-dispatch error.
+    // It may not expose an accepted process identity when readiness validation
+    // itself failed, so record verified release (acceptedStart remains unknown)
+    // rather than the false claim that no launch was attempted.
+    const safeStatus = server || serverLaunchAttempted ? "released" as const : "not_started" as const;
+    try {
+      await input.onLaunchState({
+        status: safeStatus,
+        acceptedStart,
+        retryable: true,
+        launchIdentity,
+        processIdentity,
+      });
+    } catch (fenceError) {
+      registerPaperclipBridgeReconciliationEntry({
+        identity: launchIdentity,
+        processIdentity,
+        acceptedStart,
+        cancelRemote: null,
+        remoteCancelled: true,
+        cleanupSteps: [],
+        onLaunchState: input.onLaunchState,
+        registrationSealed: reconciliationRegistrationSealed,
+      });
+      throw new AdapterExecutionTargetPaperclipBridgeLaunchAmbiguousError(
+        launchIdentity,
+        processIdentity,
+        "Remote and host cleanup succeeded, but the durable launch fence could not be cleared.",
+        [error, fenceError],
+        acceptedStart,
       );
     }
     throw error;
@@ -2618,6 +3398,134 @@ export async function startAdapterExecutionTargetPaperclipBridge(input: {
     await onLog("stdout", "[paperclip] Sandbox run log streaming enabled for this run.\n");
   }
 
+  let serverStopped = false;
+  let workerStopped = false;
+  let bridgeAssetCleaned = false;
+  let stopPromise: Promise<void> | null = null;
+  const stop = async (): Promise<void> => {
+    if (stopPromise) return stopPromise;
+    stopPromise = (async () => {
+      const retainedEntry = paperclipBridgeReconciliationEntries.get(
+        paperclipBridgeReconciliationKey(launchIdentity),
+      );
+      if (retainedEntry) {
+        const reconciliation = await reconcileAndReleaseAdapterExecutionTargetPaperclipBridgeLaunch({
+          runId: launchIdentity.runId,
+          instanceId: launchIdentity.instanceId,
+        });
+        if (!reconciliation.released) {
+          throw new AdapterExecutionTargetPaperclipBridgeLaunchAmbiguousError(
+            launchIdentity,
+            server!.processIdentity,
+            "The retained reconciliation controller could not yet verify every cleanup and release step.",
+            [],
+            "accepted",
+          );
+        }
+        serverStopped = true;
+        workerStopped = true;
+        bridgeAssetCleaned = true;
+        return;
+      }
+      const serverStopResults = serverStopped
+        ? []
+        : await Promise.allSettled([server?.stop()]);
+      if (serverStopResults[0]?.status === "fulfilled") serverStopped = true;
+
+      const remainingSteps: Array<{
+        run: () => Promise<void>;
+        mark: () => void;
+      }> = [];
+      if (!workerStopped) {
+        remainingSteps.push({
+          run: () => worker?.stop() ?? Promise.resolve(),
+          mark: () => {
+            workerStopped = true;
+          },
+        });
+      }
+      if (!bridgeAssetCleaned) {
+        remainingSteps.push({
+          run: () => bridgeAsset!.cleanup(),
+          mark: () => {
+            bridgeAssetCleaned = true;
+          },
+        });
+      }
+      const remainingStopResults = await Promise.allSettled(
+        remainingSteps.map((step) => step.run()),
+      );
+      remainingStopResults.forEach((result, index) => {
+        if (result.status === "fulfilled") remainingSteps[index]?.mark();
+      });
+      const stopFailures = rejectedReasons([...serverStopResults, ...remainingStopResults]);
+      if (stopFailures.length > 0) {
+        registerPaperclipBridgeReconciliationEntry({
+          identity: launchIdentity,
+          processIdentity: server!.processIdentity,
+          acceptedStart: "accepted",
+          cancelRemote: serverStopped ? null : () => server!.stop(),
+          remoteCancelled: serverStopped,
+          cleanupSteps: [
+            ...(!workerStopped && worker
+              ? [{ label: "callback-worker-stop", run: () => worker!.stop(), complete: false }]
+              : []),
+            ...(!bridgeAssetCleaned
+              ? [{ label: "callback-private-asset-cleanup", run: () => bridgeAsset!.cleanup(), complete: false }]
+              : []),
+          ],
+          onLaunchState: input.onLaunchState,
+          registrationSealed: reconciliationRegistrationSealed,
+        });
+        await input.onLaunchState({
+          status: "needs_human",
+          acceptedStart: "accepted",
+          retryable: false,
+          launchIdentity,
+          processIdentity: server!.processIdentity,
+        }).catch(() => undefined);
+        throw new AdapterExecutionTargetPaperclipBridgeLaunchAmbiguousError(
+          launchIdentity,
+          server!.processIdentity,
+          "Normal stop did not verify remote cancellation and every host cleanup step.",
+          stopFailures,
+          "accepted",
+        );
+      }
+      try {
+        await input.onLaunchState({
+          status: "released",
+          acceptedStart: "accepted",
+          retryable: true,
+          launchIdentity,
+          processIdentity: server!.processIdentity,
+        });
+      } catch (fenceError) {
+        registerPaperclipBridgeReconciliationEntry({
+          identity: launchIdentity,
+          processIdentity: server!.processIdentity,
+          acceptedStart: "accepted",
+          cancelRemote: null,
+          remoteCancelled: true,
+          cleanupSteps: [],
+          onLaunchState: input.onLaunchState,
+          registrationSealed: reconciliationRegistrationSealed,
+        });
+        throw new AdapterExecutionTargetPaperclipBridgeLaunchAmbiguousError(
+          launchIdentity,
+          server!.processIdentity,
+          "Capability cleanup succeeded, but the durable accepted fence could not be cleared.",
+          [fenceError],
+          "accepted",
+        );
+      }
+    })().catch((error) => {
+      stopPromise = null;
+      throw error;
+    });
+    return stopPromise;
+  };
+
   return {
     env: {
       PAPERCLIP_API_URL: server.baseUrl,
@@ -2625,22 +3533,9 @@ export async function startAdapterExecutionTargetPaperclipBridge(input: {
       PAPERCLIP_API_BRIDGE_MODE: "queue_v1",
       PAPERCLIP_BRIDGE_QUEUE_DIR: queueDir,
     },
+    launchIdentity,
+    processIdentity: server.processIdentity,
     runLogTail,
-    stop: async () => {
-      const serverStopResults = await Promise.allSettled([
-        server?.stop(),
-      ]);
-      const remainingStopResults = await Promise.allSettled([
-        worker?.stop(),
-        bridgeAsset.cleanup(),
-      ]);
-      const stopFailures = rejectedReasons([...serverStopResults, ...remainingStopResults]);
-      if (stopFailures.length > 0) {
-        throw new AggregateError(
-          stopFailures,
-          "Sandbox callback bridge capability revocation was not verified.",
-        );
-      }
-    },
+    stop,
   };
 }

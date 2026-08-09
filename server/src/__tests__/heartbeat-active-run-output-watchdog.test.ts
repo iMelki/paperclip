@@ -795,6 +795,7 @@ describeEmbeddedPostgres("active-run output watchdog", () => {
       ageMs: ACTIVE_RUN_OUTPUT_CRITICAL_THRESHOLD_MS + 60_000,
       sourceStatus: "done",
       sameRunTerminalEvidence: "activity",
+      adapterType: "openclaw_gateway",
     });
     const evaluationIssueId = randomUUID();
     await db.insert(issues).values({

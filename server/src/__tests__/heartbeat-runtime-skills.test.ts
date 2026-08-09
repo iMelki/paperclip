@@ -386,9 +386,14 @@ describeEmbeddedPostgres("heartbeat runtime skill version pins", () => {
         transport: "mcp_remote",
         status: "active",
         enabled: true,
+        healthStatus: "ok",
         config: { url: "https://uninstalled.example.test/mcp" },
       },
     ]).returning();
+    // Effective profiles resolve allowed tools against catalog entries rather
+    // than raw connections. Keep one reviewed row for the installed connection
+    // and bind the profile to that exact entry; the uncatalogued installed
+    // connection below must remain excluded.
     const [installedCatalog] = await db.insert(toolCatalogEntries).values({
       companyId,
       applicationId: application!.id,
@@ -446,7 +451,9 @@ describeEmbeddedPostgres("heartbeat runtime skill version pins", () => {
     expect(captured?.mcpServers).toHaveLength(1);
     expect(captured?.mcpServers[0]).toMatchObject({
       connectionId: installed!.id,
-      name: expect.stringContaining(installed!.name),
+      // gateway.name is synthesized as `Runtime <connection name> <shortAgentId>
+      // <shortCapability>` (runtime-mcp-gateway.ts), not the raw connection name.
+      name: expect.stringMatching(new RegExp(`^Runtime ${installed!.name} `)),
       token: expect.stringMatching(/^pcgw_/),
       url: expect.stringContaining("/api/tool-gateway/gateways/"),
     });

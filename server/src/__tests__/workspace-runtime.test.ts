@@ -8,7 +8,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { parse as parseEnvContents } from "dotenv";
-import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   activityLog,
   agents,
@@ -22,6 +22,7 @@ import {
   projects,
   workspaceRuntimeServices,
 } from "@paperclipai/db";
+import * as paperclipDb from "@paperclipai/db";
 import { eq } from "drizzle-orm";
 import { shellQuotePath } from "@paperclipai/adapter-utils/shell-path";
 import { resolveTestShellCommand } from "@paperclipai/adapter-utils/test-shell";
@@ -63,6 +64,7 @@ import {
   terminateLocalService,
   writeLocalServiceRegistryRecord,
 } from "../services/local-service-supervisor.ts";
+import { claimLocalServiceLaunchOrAdopt } from "../services/dev-runner-registry.ts";
 import {
   buildWorkspaceRealizationRecord,
   buildWorkspaceRealizationRequest,
@@ -79,6 +81,149 @@ import {
 } from "./helpers/embedded-postgres.js";
 
 const execFileAsync = promisify(execFile);
+
+const RUNTIME_TEST_ENV_KEYS = [
+  "PAPERCLIP_CONFIG",
+  "PAPERCLIP_HOME",
+  "PAPERCLIP_INSTANCE_ID",
+  "PAPERCLIP_WORKTREES_DIR",
+  "DATABASE_URL",
+] as const;
+type RuntimeTestEnvKey = (typeof RUNTIME_TEST_ENV_KEYS)[number];
+
+function captureRuntimeTestEnvironment(): Record<RuntimeTestEnvKey, string | undefined> {
+  return Object.fromEntries(
+    RUNTIME_TEST_ENV_KEYS.map((key) => [key, process.env[key]]),
+  ) as Record<RuntimeTestEnvKey, string | undefined>;
+}
+
+const INHERITED_RUNNER_ENV = captureRuntimeTestEnvironment();
+let STABLE_RUNNER_ENV = INHERITED_RUNNER_ENV;
+let suiteRunnerHome: string | null = null;
+
+function applyRuntimeTestEnvironment(
+  environment: Record<RuntimeTestEnvKey, string | undefined>,
+) {
+  for (const key of RUNTIME_TEST_ENV_KEYS) {
+    const value = environment[key];
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
+}
+
+function restoreStableRunnerEnvironment() {
+  applyRuntimeTestEnvironment(STABLE_RUNNER_ENV);
+}
+
+async function cleanupIsolatedRuntimeTestRow(
+  rowHome: string,
+  beforeResetActions: Array<() => void | Promise<void>> = [],
+) {
+  let preparationError: unknown = null;
+  for (const action of beforeResetActions) {
+    try {
+      await action();
+    } catch (error) {
+      preparationError ??= error;
+    }
+  }
+
+  let resetError: unknown = null;
+  try {
+    await resetRuntimeServicesForTests();
+  } catch (error) {
+    resetError = error;
+  }
+
+  // Keep the exact row environment and root intact when any authoritative
+  // cleanup step fails. The global afterEach can retry the same identity, and
+  // the next row's baseline fence prevents contaminated execution.
+  if (resetError) throw resetError;
+  if (preparationError) throw preparationError;
+  restoreStableRunnerEnvironment();
+  await fs.rm(rowHome, { recursive: true, force: true });
+}
+
+beforeAll(async () => {
+  suiteRunnerHome = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-workspace-runtime-suite-"));
+  // Own the registry root and instance for the whole file, but preserve the
+  // runner's config/worktree settings. Several workspace tests intentionally
+  // verify cwd-local config discovery and must not be shadowed by a suite-level
+  // PAPERCLIP_CONFIG override.
+  STABLE_RUNNER_ENV = {
+    ...INHERITED_RUNNER_ENV,
+    PAPERCLIP_HOME: suiteRunnerHome,
+    PAPERCLIP_INSTANCE_ID: `workspace-runtime-suite-${randomUUID()}`,
+  };
+  restoreStableRunnerEnvironment();
+});
+
+beforeEach(() => {
+  if (
+    process.env.PAPERCLIP_HOME !== STABLE_RUNNER_ENV.PAPERCLIP_HOME
+    || process.env.PAPERCLIP_INSTANCE_ID !== STABLE_RUNNER_ENV.PAPERCLIP_INSTANCE_ID
+  ) {
+    throw new Error(
+      "Workspace runtime test row refused to start because PAPERCLIP_HOME or "
+      + "PAPERCLIP_INSTANCE_ID does not match the suite-owned baseline.",
+    );
+  }
+});
+
+afterAll(async () => {
+  // If a row-level reset failed, its environment still selects the retained
+  // registry. Retry that exact identity before restoring inherited values.
+  await resetRuntimeServicesForTests();
+  await paperclipDb.shutdownWindowsTestJobWardenForTests();
+  applyRuntimeTestEnvironment(INHERITED_RUNNER_ENV);
+  if (suiteRunnerHome) {
+    await fs.rm(suiteRunnerHome, { recursive: true, force: true });
+    suiteRunnerHome = null;
+  }
+});
+
+type RegistryFileSnapshot = {
+  relativePath: string;
+  byteSize: number;
+  modifiedAtMs: number;
+  sha256: string;
+};
+
+async function snapshotRegistryFiles(root: string): Promise<RegistryFileSnapshot[]> {
+  const snapshots: RegistryFileSnapshot[] = [];
+  async function walk(current: string) {
+    let entries;
+    try {
+      entries = await fs.readdir(current, { withFileTypes: true });
+    } catch (error) {
+      const code = typeof error === "object" && error !== null && "code" in error
+        ? String((error as { code?: unknown }).code ?? "")
+        : "";
+      if (code === "ENOENT") return;
+      throw error;
+    }
+    for (const entry of entries.sort((left, right) => left.name.localeCompare(right.name))) {
+      const entryPath = path.join(current, entry.name);
+      if (entry.isDirectory()) {
+        await walk(entryPath);
+        continue;
+      }
+      if (!entry.isFile()) continue;
+      const [bytes, stat] = await Promise.all([
+        fs.readFile(entryPath),
+        fs.stat(entryPath),
+      ]);
+      snapshots.push({
+        relativePath: path.relative(root, entryPath),
+        byteSize: stat.size,
+        modifiedAtMs: stat.mtimeMs,
+        sha256: createHash("sha256").update(bytes).digest("hex"),
+      });
+    }
+  }
+  await walk(root);
+  return snapshots.sort((left, right) => left.relativePath.localeCompare(right.relativePath));
+}
 
 function stableStringifyForTest(value: unknown): string {
   if (Array.isArray(value)) {
@@ -370,7 +515,7 @@ function createWorkspaceOperationRecorderDouble() {
   return { recorder, operations };
 }
 
-afterEach(async () => {
+async function cleanupWorkspaceRuntimeTestState() {
   const runIds = Array.from(leasedRunIds);
   const cleanupErrors: unknown[] = [];
   try {
@@ -391,14 +536,116 @@ afterEach(async () => {
       }
     }));
   } finally {
-    delete process.env.PAPERCLIP_CONFIG;
-    delete process.env.PAPERCLIP_HOME;
-    delete process.env.PAPERCLIP_INSTANCE_ID;
-    delete process.env.PAPERCLIP_WORKTREES_DIR;
-    delete process.env.DATABASE_URL;
+    // Runtime registry paths are environment-derived. Reset while the row's
+    // exact environment still selects its isolated registry. Restore the
+    // suite-owned runner environment only after reset succeeds: if it fails,
+    // the retained in-memory records still belong to the row registry and a
+    // retry must keep resolving that same identity.
     await resetRuntimeServicesForTests();
+    // A successful reset proves every row-owned Job has an exact zero-active
+    // receipt. Retire that row's now-empty warden before the next test so a
+    // long idle gap cannot poison later custody acquisition. If reset throws,
+    // this is deliberately unreachable and the existing warden/fence stays
+    // available for an exact retry.
+    await paperclipDb.shutdownWindowsTestJobWardenForTests();
+    restoreStableRunnerEnvironment();
   }
   if (cleanupErrors.length > 0) throw cleanupErrors[0];
+}
+
+afterEach(async () => {
+  await cleanupWorkspaceRuntimeTestState();
+});
+
+describe("workspace runtime test harness isolation", () => {
+  it("resets the row registry before restoring all stable runner env and leaves the stable registry unchanged", async () => {
+    const rowHome = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-runtime-env-row-"));
+    const rowInstance = `env-row-${randomUUID()}`;
+    const rowRegistryRoot = path.join(
+      rowHome,
+      "instances",
+      rowInstance,
+      "runtime-services",
+    );
+    const stableRegistryRoot = path.join(
+      STABLE_RUNNER_ENV.PAPERCLIP_HOME!,
+      "instances",
+      STABLE_RUNNER_ENV.PAPERCLIP_INSTANCE_ID!,
+      "runtime-services",
+    );
+    await fs.mkdir(stableRegistryRoot, { recursive: true });
+    await fs.writeFile(
+      path.join(stableRegistryRoot, "stable-runner-sentinel.txt"),
+      "must remain unchanged\n",
+      "utf8",
+    );
+    const stableRegistryBefore = await snapshotRegistryFiles(stableRegistryRoot);
+    const runId = `run-env-row-${randomUUID()}`;
+    let cleanupConfirmed = false;
+
+    process.env.PAPERCLIP_CONFIG = path.join(rowHome, "config.json");
+    process.env.PAPERCLIP_HOME = rowHome;
+    process.env.PAPERCLIP_INSTANCE_ID = rowInstance;
+    process.env.PAPERCLIP_WORKTREES_DIR = path.join(rowHome, "worktrees");
+    process.env.DATABASE_URL = "postgres://runtime-env-fixture.invalid/paperclip";
+    leasedRunIds.add(runId);
+
+    try {
+      const services = await ensureRuntimeServicesForRun({
+        runId,
+        agent: {
+          id: "agent-env-row",
+          name: "Environment Isolation Agent",
+          companyId: "company-env-row",
+        },
+        issue: null,
+        workspace: buildWorkspace(rowHome),
+        config: {
+          workspaceRuntime: {
+            services: [
+              {
+                name: "env-row-web",
+                command:
+                  "node -e \"require('node:http').createServer((req,res)=>res.end('ok')).listen(Number(process.env.PORT), '127.0.0.1')\"",
+                port: { type: "auto" },
+                readiness: {
+                  type: "http",
+                  urlTemplate: "http://127.0.0.1:{{port}}",
+                  timeoutSec: 10,
+                  intervalMs: 100,
+                },
+                expose: {
+                  type: "url",
+                  urlTemplate: "http://127.0.0.1:{{port}}",
+                },
+                lifecycle: "shared",
+                stopPolicy: { type: "manual" },
+              },
+            ],
+          },
+        },
+        adapterEnv: {},
+      });
+      expect(services).toHaveLength(1);
+      expect(await snapshotRegistryFiles(rowRegistryRoot)).not.toEqual([]);
+
+      await cleanupWorkspaceRuntimeTestState();
+      cleanupConfirmed = true;
+
+      expect(captureRuntimeTestEnvironment()).toEqual(STABLE_RUNNER_ENV);
+      expect(await snapshotRegistryFiles(rowRegistryRoot)).toEqual([]);
+      expect(await snapshotRegistryFiles(stableRegistryRoot)).toEqual(stableRegistryBefore);
+    } finally {
+      if (!cleanupConfirmed) {
+        await cleanupWorkspaceRuntimeTestState();
+        cleanupConfirmed = true;
+      }
+      restoreStableRunnerEnvironment();
+      if (cleanupConfirmed) {
+        await fs.rm(rowHome, { recursive: true, force: true });
+      }
+    }
+  }, 30_000);
 });
 
 describe("sanitizeRuntimeServiceBaseEnv", () => {
@@ -3518,7 +3765,7 @@ describe("ensureRuntimeServicesForRun", () => {
   );
 
   it.skipIf(process.platform !== "win32")(
-    "retains tracking when a live wrapper exits through an unobserved intermediate with a surviving grandchild",
+    "uses retained Job custody to stop a surviving grandchild after its wrapper exits",
     async () => {
       const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-runtime-grandchild-escape-"));
       const grandchildPidPath = path.join(workspaceRoot, "grandchild.pid");
@@ -3609,18 +3856,13 @@ describe("ensureRuntimeServicesForRun", () => {
         await expect(stopRuntimeServicesForExecutionWorkspace({
           executionWorkspaceId,
           workspaceCwd: workspaceRoot,
-        })).rejects.toThrow(/termination could not be verified|identity_unavailable/i);
-        await expect(readLocalServiceRegistryRecord(serviceKey!)).resolves.not.toBeNull();
-        expect(isPidAlive(grandchildPid)).toBe(true);
-        await expect(releaseRuntimeServicesForRun(runId)).rejects.toThrow(
-          /termination could not be verified|identity_unavailable/i,
-        );
-        // A failed final release must retain both the record lease and the
-        // run-to-service index, so a retry cannot silently become a no-op.
-        await expect(releaseRuntimeServicesForRun(runId)).rejects.toThrow(
-          /termination could not be verified|identity_unavailable/i,
-        );
-        expect(isPidAlive(grandchildPid)).toBe(true);
+        })).resolves.toBeUndefined();
+        await expect.poll(() => isPidAlive(grandchildPid!), { timeout: 5_000 }).toBe(false);
+        await expect(readLocalServiceRegistryRecord(serviceKey!)).resolves.toBeNull();
+        await expect(releaseRuntimeServicesForRun(runId)).resolves.toBeUndefined();
+        // The run-to-service index is retired with the authoritative stop, so
+        // a duplicate release is an idempotent no-op rather than a replay.
+        await expect(releaseRuntimeServicesForRun(runId)).resolves.toBeUndefined();
       } finally {
         if (grandchildPid && isPidAlive(grandchildPid)) {
           await fs.writeFile(grandchildStopPath, "stop\n", "utf8");
@@ -3774,7 +4016,9 @@ describe("ensureRuntimeServicesForRun", () => {
           executionWorkspaceId,
           config,
           adapterEnv: {},
-        })).rejects.toThrow(/invalid registry record.*retained for human review/i);
+        })).rejects.toThrow(
+          /invalid pre-existing registry evidence \(malformed_json\).*retained for human review/i,
+        );
         await expect(fs.readFile(inspection.filePath, "utf8")).resolves.toBe(malformedBytes);
         expect(isPidAlive(servicePid)).toBe(true);
       } finally {
@@ -4001,6 +4245,13 @@ describe("ensureRuntimeServicesForRun", () => {
     expect(first[0]?.url).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/);
     const response = await fetch(first[0]!.url!);
     expect(await response.text()).toBe("ok");
+    const firstRegistry = await findLocalServiceRegistryRecordByRuntimeServiceId({
+      runtimeServiceId: first[0]!.id,
+      profileKind: "workspace-runtime",
+    });
+    expect(firstRegistry).not.toBeNull();
+    const firstRegistryInspection = await inspectLocalServiceRegistryRecord(firstRegistry!.serviceKey);
+    expect(firstRegistryInspection.state).toBe("valid");
 
     const second = await ensureRuntimeServicesForRun({
       runId: run2,
@@ -4023,6 +4274,10 @@ describe("ensureRuntimeServicesForRun", () => {
     leasedRunIds.delete(run1);
     await releaseRuntimeServicesForRun(run2);
     leasedRunIds.delete(run2);
+    expect(await inspectLocalServiceRegistryRecord(firstRegistry!.serviceKey)).toMatchObject({
+      state: "absent",
+    });
+    expect(existsSync(`${firstRegistryInspection.filePath}.launch-claim`)).toBe(false);
 
     const run3 = "run-3";
     leasedRunIds.add(run3);
@@ -4103,6 +4358,360 @@ describe("ensureRuntimeServicesForRun", () => {
       }, { timeout: 5_000 })
       .toBe(false);
   }, 20_000);
+
+  it.skipIf(process.platform !== "win32")(
+    "fails before provider exec and proves the blocked child terminal when Job custody is unavailable",
+    async () => {
+      const rowHome = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-runtime-custody-unavailable-"));
+      const rowInstance = `custody-unavailable-${randomUUID()}`;
+      const providerMarker = path.join(rowHome, "provider-command-ran.txt");
+      const runId = `run-custody-unavailable-${randomUUID()}`;
+      let blockedChild: Parameters<typeof paperclipDb.acquireWindowsTestJobCustody>[1] | null = null;
+      let exactChildTerminal = false;
+      let custodyEvidenceAbsent = false;
+      let providerStayedGated = false;
+      const acquireCustody = vi
+        .spyOn(paperclipDb, "acquireWindowsTestJobCustody")
+        .mockImplementation(async (_serviceId, child) => {
+          blockedChild = child;
+          return null;
+        });
+
+      process.env.PAPERCLIP_HOME = rowHome;
+      process.env.PAPERCLIP_INSTANCE_ID = rowInstance;
+
+      try {
+        const providerScript = `require('node:fs').writeFileSync(${JSON.stringify(providerMarker)}, 'ran');setInterval(()=>{},1000);`;
+        await expect(ensureRuntimeServicesForRun({
+          runId,
+          agent: {
+            id: "agent-custody-unavailable",
+            name: "Custody Unavailable Agent",
+            companyId: "company-custody-unavailable",
+          },
+          issue: null,
+          workspace: buildWorkspace(rowHome),
+          config: {
+            workspaceRuntime: {
+              services: [{
+                name: "custody-unavailable",
+                command: `${shellQuotePath(process.execPath)} -e ${shellQuotePath(providerScript)}`,
+                lifecycle: "shared",
+                stopPolicy: { type: "manual" },
+              }],
+            },
+          },
+          adapterEnv: {},
+        })).rejects.toThrow(/Windows test Job Object custody could not be acquired/i);
+
+        expect(acquireCustody).toHaveBeenCalledOnce();
+        expect(blockedChild).not.toBeNull();
+        exactChildTerminal =
+          blockedChild!.exitCode !== null || blockedChild!.signalCode !== null;
+        expect(exactChildTerminal).toBe(true);
+        providerStayedGated = !existsSync(providerMarker);
+        expect(providerStayedGated).toBe(true);
+        custodyEvidenceAbsent = (await listLocalServiceRegistryInspections()).length === 0;
+        expect(custodyEvidenceAbsent).toBe(true);
+      } finally {
+        await cleanupIsolatedRuntimeTestRow(rowHome, [
+          () => acquireCustody.mockRestore(),
+        ]);
+      }
+    },
+    20_000,
+  );
+
+  it.skipIf(process.platform !== "win32")(
+    "retains the exact blocked child and claim when custody-denial termination is unconfirmed",
+    async () => {
+      const rowHome = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-runtime-custody-retry-"));
+      const rowInstance = `custody-retry-${randomUUID()}`;
+      const providerMarker = path.join(rowHome, "provider-command-ran.txt");
+      let blockedChild: ChildProcess | null = null;
+      let restoreExactKill: (() => void) | null = null;
+      const acquireCustody = vi
+        .spyOn(paperclipDb, "acquireWindowsTestJobCustody")
+        .mockImplementation(async (_serviceId, child) => {
+          blockedChild = child as ChildProcess;
+          const exactKill = blockedChild.kill.bind(blockedChild);
+          blockedChild.kill = (() => false) as ChildProcess["kill"];
+          restoreExactKill = () => {
+            blockedChild!.kill = exactKill;
+          };
+          return null;
+        });
+
+      process.env.PAPERCLIP_HOME = rowHome;
+      process.env.PAPERCLIP_INSTANCE_ID = rowInstance;
+
+      try {
+        const providerScript = `require('node:fs').writeFileSync(${JSON.stringify(providerMarker)}, 'ran');setInterval(()=>{},1000);`;
+        await expect(ensureRuntimeServicesForRun({
+          runId: `run-custody-retry-${randomUUID()}`,
+          agent: {
+            id: "agent-custody-retry",
+            name: "Custody Retry Agent",
+            companyId: "company-custody-retry",
+          },
+          issue: null,
+          workspace: buildWorkspace(rowHome),
+          config: {
+            workspaceRuntime: {
+              services: [{
+                name: "custody-retry",
+                command: `${shellQuotePath(process.execPath)} -e ${shellQuotePath(providerScript)}`,
+                lifecycle: "shared",
+                stopPolicy: { type: "manual" },
+              }],
+            },
+          },
+          adapterEnv: {},
+        })).rejects.toThrow(/exact ChildProcess and launch claim remain registered for retry/i);
+
+        expect(blockedChild).not.toBeNull();
+        expect(blockedChild!.exitCode).toBeNull();
+        expect(blockedChild!.signalCode).toBeNull();
+        expect(existsSync(providerMarker)).toBe(false);
+        expect(await listLocalServiceRegistryInspections()).toContainEqual(
+          expect.objectContaining({ state: "invalid", entryKind: "launch_claim" }),
+        );
+
+        restoreExactKill!();
+        restoreExactKill = null;
+        await expect(resetRuntimeServicesForTests()).resolves.toBeUndefined();
+        expect(blockedChild!.exitCode !== null || blockedChild!.signalCode !== null).toBe(true);
+        expect(await listLocalServiceRegistryInspections()).toEqual([]);
+      } finally {
+        await cleanupIsolatedRuntimeTestRow(rowHome, [
+          () => acquireCustody.mockRestore(),
+          () => {
+            restoreExactKill?.();
+            restoreExactKill = null;
+          },
+        ]);
+      }
+    },
+    25_000,
+  );
+
+  it.skipIf(process.platform !== "win32")(
+    "retains the exact terminal child and claim when custody-denial claim release fails",
+    async () => {
+      const rowHome = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-runtime-claim-retry-"));
+      const rowInstance = `claim-retry-${randomUUID()}`;
+      const runtimeRegistryRoot = path.join(rowHome, "instances", rowInstance, "runtime-services");
+      const providerMarker = path.join(rowHome, "provider-command-ran.txt");
+      let blockedChild: ChildProcess | null = null;
+      let claimPath: string | null = null;
+      let originalClaimBytes: Buffer | null = null;
+      const acquireCustody = vi
+        .spyOn(paperclipDb, "acquireWindowsTestJobCustody")
+        .mockImplementation(async (_serviceId, child) => {
+          blockedChild = child as ChildProcess;
+          const claimName = (await fs.readdir(runtimeRegistryRoot))
+            .find((name) => name.endsWith(".launch-claim"));
+          if (!claimName) throw new Error("Expected the registered pre-custody launch claim.");
+          claimPath = path.join(runtimeRegistryRoot, claimName);
+          originalClaimBytes = await fs.readFile(claimPath);
+          await fs.appendFile(claimPath, "tampered-after-registration\n", "utf8");
+          return null;
+        });
+
+      process.env.PAPERCLIP_HOME = rowHome;
+      process.env.PAPERCLIP_INSTANCE_ID = rowInstance;
+
+      try {
+        const providerScript = `require('node:fs').writeFileSync(${JSON.stringify(providerMarker)}, 'ran');setInterval(()=>{},1000);`;
+        await expect(ensureRuntimeServicesForRun({
+          runId: `run-claim-retry-${randomUUID()}`,
+          agent: {
+            id: "agent-claim-retry",
+            name: "Claim Retry Agent",
+            companyId: "company-claim-retry",
+          },
+          issue: null,
+          workspace: buildWorkspace(rowHome),
+          config: {
+            workspaceRuntime: {
+              services: [{
+                name: "claim-retry",
+                command: `${shellQuotePath(process.execPath)} -e ${shellQuotePath(providerScript)}`,
+                lifecycle: "shared",
+                stopPolicy: { type: "manual" },
+              }],
+            },
+          },
+          adapterEnv: {},
+        })).rejects.toThrow(/remain registered because claim release failed/i);
+
+        expect(blockedChild).not.toBeNull();
+        expect(blockedChild!.exitCode !== null || blockedChild!.signalCode !== null).toBe(true);
+        expect(existsSync(providerMarker)).toBe(false);
+        expect(claimPath).not.toBeNull();
+        expect(existsSync(claimPath!)).toBe(true);
+
+        await fs.writeFile(claimPath!, originalClaimBytes!);
+        await expect(resetRuntimeServicesForTests()).resolves.toBeUndefined();
+        expect(await listLocalServiceRegistryInspections()).toEqual([]);
+      } finally {
+        await cleanupIsolatedRuntimeTestRow(rowHome, [
+          () => acquireCustody.mockRestore(),
+          async () => {
+            if (claimPath && originalClaimBytes && existsSync(claimPath)) {
+              await fs.writeFile(claimPath, originalClaimBytes);
+            }
+          },
+        ]);
+      }
+    },
+    20_000,
+  );
+
+  it.skipIf(process.platform !== "win32")(
+    "reuses an exact Job Object receipt when registry finalization retries",
+    async () => {
+      const rowHome = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-runtime-receipt-retry-"));
+      const rowInstance = `receipt-retry-${randomUUID()}`;
+      const workspace = buildWorkspace(rowHome);
+      const runId = `run-receipt-retry-${randomUUID()}`;
+      let registryPath: string | null = null;
+      let originalRegistryBytes: Buffer | null = null;
+
+      process.env.PAPERCLIP_HOME = rowHome;
+      process.env.PAPERCLIP_INSTANCE_ID = rowInstance;
+
+      try {
+        const services = await ensureRuntimeServicesForRun({
+          runId,
+          agent: {
+            id: "agent-receipt-retry",
+            name: "Receipt Retry Agent",
+            companyId: "company-receipt-retry",
+          },
+          issue: null,
+          workspace,
+          config: {
+            workspaceRuntime: {
+              services: [
+                {
+                  name: "receipt-retry-web",
+                  command:
+                    "node -e \"require('node:http').createServer((req,res)=>res.end('ok')).listen(Number(process.env.PORT), '127.0.0.1')\"",
+                  port: { type: "auto" },
+                  readiness: {
+                    type: "http",
+                    urlTemplate: "http://127.0.0.1:{{port}}",
+                    timeoutSec: 10,
+                    intervalMs: 100,
+                  },
+                  expose: {
+                    type: "url",
+                    urlTemplate: "http://127.0.0.1:{{port}}",
+                  },
+                  lifecycle: "shared",
+                  stopPolicy: { type: "manual" },
+                },
+              ],
+            },
+          },
+          adapterEnv: {},
+        });
+        expect(services).toHaveLength(1);
+        const service = services[0]!;
+        await expect(fetch(service.url!)).resolves.toMatchObject({ ok: true });
+
+        const registryRecord = await findLocalServiceRegistryRecordByRuntimeServiceId({
+          runtimeServiceId: service.id,
+          profileKind: "workspace-runtime",
+        });
+        expect(registryRecord).not.toBeNull();
+        const registryInspection = await inspectLocalServiceRegistryRecord(registryRecord!.serviceKey);
+        expect(registryInspection.state).toBe("valid");
+        registryPath = registryInspection.filePath;
+        originalRegistryBytes = await fs.readFile(registryPath);
+        await fs.writeFile(registryPath, "{malformed-registry-fixture\n", "utf8");
+
+        await expect(resetRuntimeServicesForTests()).rejects.toThrow(
+          /registry evidence is invalid \(malformed_json\).*retained/i,
+        );
+        await expect.poll(async () => {
+          try {
+            await fetch(service.url!);
+            return true;
+          } catch {
+            return false;
+          }
+        }, { timeout: 5_000 }).toBe(false);
+
+        // Restore the exact same registry inode/bytes. The retry must reuse the
+        // checkpointed zero-active kernel receipt instead of terminating the
+        // already-consumed Job Object a second time, then finalize once.
+        await fs.writeFile(registryPath, originalRegistryBytes);
+        await expect(resetRuntimeServicesForTests()).resolves.toBeUndefined();
+        expect(await inspectLocalServiceRegistryRecord(registryRecord!.serviceKey)).toMatchObject({
+          state: "absent",
+        });
+        await expect(resetRuntimeServicesForTests()).resolves.toBeUndefined();
+      } finally {
+        await cleanupIsolatedRuntimeTestRow(rowHome, [
+          async () => {
+            if (registryPath && originalRegistryBytes && existsSync(registryPath)) {
+              await fs.writeFile(registryPath, originalRegistryBytes);
+            }
+          },
+        ]);
+      }
+    },
+    30_000,
+  );
+
+  it("fences a mismatched active launch claim and releases its exact identity once", async () => {
+    const rowHome = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-runtime-claim-fence-"));
+    const rowInstance = `claim-fence-${randomUUID()}`;
+    const serviceKey = `workspace-runtime-claim-fence-${randomUUID()}`;
+    let claimPath: string | null = null;
+    let releaseClaimForCleanup: (() => Promise<void>) | null = null;
+
+    process.env.PAPERCLIP_HOME = rowHome;
+    process.env.PAPERCLIP_INSTANCE_ID = rowInstance;
+
+    try {
+      const gate = await claimLocalServiceLaunchOrAdopt({
+        serviceKey,
+        profileKind: "workspace-runtime",
+        serviceName: "claim-fence",
+        command: "node claim-fence.js",
+        cwd: rowHome,
+        envFingerprint: "claim-fence",
+        port: null,
+        url: null,
+      });
+      expect(gate.adopted).toBeNull();
+      const claim = gate.launchClaim!;
+      claimPath = claim.filePath;
+      releaseClaimForCleanup = claim.release;
+
+      await expect(removeLocalServiceRegistryRecord(serviceKey, {
+        launchClaimNonce: randomUUID(),
+      })).rejects.toThrow(/matching claim coordination identity/i);
+      expect(existsSync(claimPath)).toBe(true);
+
+      await expect(removeLocalServiceRegistryRecord(serviceKey, {
+        launchClaimNonce: claim.generationId,
+      })).resolves.toBeUndefined();
+      expect(existsSync(claimPath)).toBe(true);
+      await expect(claim.release()).resolves.toBeUndefined();
+      expect(existsSync(claimPath)).toBe(false);
+      await expect(claim.release()).resolves.toBeUndefined();
+    } finally {
+      await cleanupIsolatedRuntimeTestRow(rowHome, [
+        async () => {
+          await releaseClaimForCleanup?.();
+        },
+      ]);
+    }
+  });
 
   it("does not reuse project-scoped shared services across different workspace launch contexts", async () => {
     const primaryWorkspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-runtime-primary-"));
@@ -4991,7 +5600,12 @@ describe("readLocalServicePortOwner", () => {
         if (childPid) {
           await expect.poll(() => isPidAlive(childPid!), { timeout: 5_000 }).toBe(false);
         }
-        await fs.rm(tempDir, { recursive: true, force: true });
+        await fs.rm(tempDir, {
+          recursive: true,
+          force: true,
+          maxRetries: 10,
+          retryDelay: 100,
+        });
       }
     },
     20_000,
@@ -5054,7 +5668,9 @@ describe("readLocalServicePortOwner", () => {
           outcome: "still_running",
           error: "windows_process_tree_absence_unproven_without_job_object",
         });
-        expect(isPidAlive(child.pid!)).toBe(false);
+        await expect
+          .poll(() => isPidAlive(child.pid!), { timeout: 5_000 })
+          .toBe(false);
       } finally {
         if (isPidAlive(child.pid!)) child.kill("SIGKILL");
       }
@@ -6735,7 +7351,7 @@ describeEmbeddedPostgres("workspace runtime service control persistence", () => 
     }
   }, 15_000);
 
-  it("retains a spawn-identity claim when a later service rolls back the startup transaction", async () => {
+  it("authoritatively cleans any spawned service when a later service rolls back the startup transaction", async () => {
     const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-runtime-control-rollback-"));
     const paperclipHome = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-runtime-control-rollback-home-"));
     const pidPath = path.join(workspaceRoot, "runtime.pid");
@@ -6748,7 +7364,6 @@ describeEmbeddedPostgres("workspace runtime service control persistence", () => 
     const projectWorkspaceId = randomUUID();
     const executionWorkspaceId = randomUUID();
     let servicePid: number | null = null;
-    let registryRootPid: number | null = null;
 
     process.env.PAPERCLIP_HOME = paperclipHome;
     process.env.PAPERCLIP_INSTANCE_ID = `control-rollback-${randomUUID()}`;
@@ -6845,50 +7460,54 @@ describeEmbeddedPostgres("workspace runtime service control persistence", () => 
     });
 
     try {
-      await expect(start()).rejects.toThrow(/spawned service trees could not be authoritatively finalized/i);
-      await expect.poll(() => existsSync(pidPath), { timeout: 5_000 }).toBe(true);
-      servicePid = Number.parseInt(await fs.readFile(pidPath, "utf8"), 10);
-      expect(isPidAlive(servicePid)).toBe(true);
+      await expect(start()).rejects.toThrow(/invalid-second-service.*missing command/i);
+      // Validation of the later service can win the race with the first
+      // service's marker write. If the first process did start far enough to
+      // publish its PID, rollback must still prove that exact process absent.
+      if (existsSync(pidPath)) {
+        servicePid = Number.parseInt(await fs.readFile(pidPath, "utf8"), 10);
+        await expect.poll(() => isPidAlive(servicePid!), { timeout: 5_000 }).toBe(false);
+      }
 
       const persistedRows = await db
         .select()
         .from(workspaceRuntimeServices)
         .where(eq(workspaceRuntimeServices.executionWorkspaceId, executionWorkspaceId));
-      // The startup transaction rolled back its `starting` row. Unverified
-      // cleanup then projects a fresh failed row through the outer connection,
-      // preserving custody instead of making the spawned tree look absent.
+      // The control row is durable audit history. Exact tree termination turns
+      // it terminal; it must not remain active or disappear with the registry.
       expect(persistedRows).toHaveLength(1);
       expect(persistedRows[0]).toMatchObject({
         serviceName: "rollback-held",
-        status: "failed",
-        healthStatus: "unhealthy",
-        stoppedAt: null,
+        status: "stopped",
+        healthStatus: "unknown",
+        stoppedAt: expect.any(Date),
       });
-
-      const retainedRegistry = (await listLocalServiceRegistryRecords({
-        profileKind: "workspace-runtime",
-      })).find((record) => record.serviceName === "rollback-held") ?? null;
-      expect(retainedRegistry).not.toBeNull();
-      registryRootPid = retainedRegistry!.pid;
-      const inspection = await inspectLocalServiceRegistryRecord(retainedRegistry!.serviceKey);
-      const claimJournal = (await fs.readFile(`${inspection.filePath}.launch-claim`, "utf8"))
-        .trimEnd()
-        .split("\n")
-        .map((line) => JSON.parse(line) as Record<string, unknown>);
-      expect(claimJournal).toHaveLength(2);
-      expect(claimJournal[0]).toMatchObject({
-        serviceKey: retainedRegistry!.serviceKey,
-        spawn: null,
+      expect(await listLocalServiceRegistryRecords({ profileKind: "workspace-runtime" })).toEqual([]);
+      expect(await listLocalServiceRegistryInspections()).toEqual([]);
+      // A second attempt reaches the same configuration error, proving the
+      // first rollback consumed its exact launch claim instead of fencing a
+      // safe retry behind stale evidence.
+      await expect(start()).rejects.toThrow(/invalid-second-service.*missing command/i);
+      if (existsSync(pidPath)) {
+        servicePid = Number.parseInt(await fs.readFile(pidPath, "utf8"), 10);
+        await expect.poll(() => isPidAlive(servicePid!), { timeout: 5_000 }).toBe(false);
+      }
+      // Let the deferred readiness rejection observe the rollback. It must not
+      // overwrite the already-authoritative stopped projection after the fact.
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      const retryRows = await db
+        .select()
+        .from(workspaceRuntimeServices)
+        .where(eq(workspaceRuntimeServices.executionWorkspaceId, executionWorkspaceId));
+      expect(retryRows).toHaveLength(1);
+      expect(retryRows[0]).toMatchObject({
+        id: persistedRows[0]!.id,
+        serviceName: "rollback-held",
+        status: "stopped",
+        healthStatus: "unknown",
+        stoppedAt: expect.any(Date),
       });
-      expect(claimJournal[1]).toMatchObject({
-        serviceKey: retainedRegistry!.serviceKey,
-        spawn: {
-          pid: registryRootPid,
-          processGroupId: process.platform === "win32" ? null : registryRootPid,
-          startedAt: expect.any(String),
-        },
-      });
-      await expect(start()).rejects.toThrow(/launch claim already exists/i);
+      expect(await listLocalServiceRegistryInspections()).toEqual([]);
     } finally {
       await fs.writeFile(stopPath, "stop\n", "utf8");
       if (!servicePid && existsSync(pidPath)) {
@@ -6896,9 +7515,6 @@ describeEmbeddedPostgres("workspace runtime service control persistence", () => 
       }
       if (servicePid && isPidAlive(servicePid)) {
         await expect.poll(() => isPidAlive(servicePid!), { timeout: 5_000 }).toBe(false);
-      }
-      if (registryRootPid) {
-        await expect.poll(() => isPidAlive(registryRootPid!), { timeout: 5_000 }).toBe(false);
       }
       await resetRuntimeServicesForTests();
       if (previousPaperclipHome === undefined) delete process.env.PAPERCLIP_HOME;
@@ -7386,7 +8002,12 @@ describeEmbeddedPostgres("workspace runtime startup reconciliation", () => {
         await fs.writeFile(childStopPath, "stop\n", "utf8");
         await expect.poll(() => isPidAlive(childPid!), { timeout: 5_000 }).toBe(false);
       }
-      await fs.rm(workspaceRoot, { recursive: true, force: true });
+      await fs.rm(workspaceRoot, {
+        recursive: true,
+        force: true,
+        maxRetries: 10,
+        retryDelay: 100,
+      });
     }
   }, 30_000);
 
@@ -7789,6 +8410,8 @@ describeEmbeddedPostgres("workspace runtime startup reconciliation", () => {
         healthStatus: "unknown",
       });
       expect(retainedRow?.stoppedAt).not.toBeNull();
+      const retainedInspection = await inspectLocalServiceRegistryRecord(staleServiceKey);
+      expect(existsSync(`${retainedInspection.filePath}.launch-claim`)).toBe(false);
     } finally {
       leasedRunIds.delete(runId);
       await releaseRuntimeServicesForRun(runId);
@@ -7813,13 +8436,14 @@ describeEmbeddedPostgres("workspace runtime startup reconciliation", () => {
     }
   }, 20_000);
 
-  it("does not adopt a live registry process from another workspace with the same runtime service ID", async () => {
+  it("retains a live registry process from another workspace for human reconciliation", async () => {
     const companyId = randomUUID();
     const runtimeServiceId = randomUUID();
     const startedAt = new Date("2026-04-04T17:00:00.000Z");
     const updatedAt = new Date("2026-04-04T17:10:00.000Z");
     const projectId = randomUUID();
     const projectWorkspaceId = randomUUID();
+    const serviceKey = "workspace-runtime-paperclip-dev-stale";
 
     await db.insert(companies).values({
       id: companyId,
@@ -7873,7 +8497,7 @@ describeEmbeddedPostgres("workspace runtime startup reconciliation", () => {
     });
     await writeLocalServiceRegistryRecord({
       version: 1,
-      serviceKey: "workspace-runtime-paperclip-dev-stale",
+      serviceKey,
       profileKind: "workspace-runtime",
       serviceName: "paperclip-dev",
       command: "pnpm dev",
@@ -7891,16 +8515,29 @@ describeEmbeddedPostgres("workspace runtime startup reconciliation", () => {
       metadata: null,
     }, { state: "absent" });
 
-    const result = await reconcilePersistedRuntimeServicesOnStartup(db);
+    try {
+      const result = await reconcilePersistedRuntimeServicesOnStartup(db);
 
-    expect(result).toMatchObject({ reconciled: 1, adopted: 0, stopped: 1 });
-    const persisted = await db
-      .select()
-      .from(workspaceRuntimeServices)
-      .where(eq(workspaceRuntimeServices.id, runtimeServiceId))
-      .then((rows) => rows[0] ?? null);
-    expect(persisted?.status).toBe("stopped");
-    expect(persisted?.stoppedAt).not.toBeNull();
+      expect(result).toMatchObject({
+        reconciled: 1,
+        adopted: 0,
+        stopped: 0,
+        needsHuman: 1,
+      });
+      const persisted = await db
+        .select()
+        .from(workspaceRuntimeServices)
+        .where(eq(workspaceRuntimeServices.id, runtimeServiceId))
+        .then((rows) => rows[0] ?? null);
+      expect(persisted).toMatchObject({
+        status: "failed",
+        healthStatus: "unhealthy",
+        stoppedAt: null,
+      });
+      await expect(readLocalServiceRegistryRecord(serviceKey)).resolves.not.toBeNull();
+    } finally {
+      await removeLocalServiceRegistryRecord(serviceKey);
+    }
   });
 
   it("adopts identity-verifiable stopped services and rejects Windows no-port registry pids", async () => {

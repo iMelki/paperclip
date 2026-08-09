@@ -13,6 +13,7 @@ import {
 import {
   acquireWindowsTestJobCustody,
   shutdownWindowsTestJobWardenForTests,
+  type WindowsTestJobCustody,
 } from "./windows-test-job-warden.js";
 
 const windowsOnly = process.platform === "win32" ? it : it.skip;
@@ -261,6 +262,79 @@ describe("Windows test process tree selection", () => {
   });
 
   windowsOnly(
+    "does not invoke Job Object termination when custody is not bound to the requested root",
+    async () => {
+      let terminateCalls = 0;
+      const custody: WindowsTestJobCustody = {
+        serviceId: "mismatched-root-custody",
+        rootPid: 2_000_002,
+        async terminate() {
+          terminateCalls += 1;
+          return { ok: false, reason: "should_not_run", activeProcesses: null };
+        },
+        async listPids() {
+          return [];
+        },
+      };
+
+      const result = await reapWindowsTestProcessTree({
+        rootPid: 2_000_001,
+        ownerMarkers: [],
+        jobCustody: custody,
+      });
+
+      expect(result).toMatchObject({
+        attempted: false,
+        confirmedStopped: false,
+        reason: "job_containment_incomplete",
+      });
+      expect(terminateCalls).toBe(0);
+    },
+  );
+
+  windowsOnly(
+    "rejects a successful Job Object response whose kernel receipt does not match custody",
+    async () => {
+      const rootPid = 2_000_003;
+      const custody: WindowsTestJobCustody = {
+        serviceId: "mismatched-receipt-custody",
+        rootPid,
+        async terminate() {
+          return {
+            ok: true,
+            receipt: {
+              authority: "job_object_kernel",
+              authoritative: true,
+              serviceId: "different-service",
+              rootPid,
+              jobPidsBeforeTerminate: [],
+              activeProcessesAfter: 0,
+              terminateError: null,
+              waitMs: 0,
+            },
+          };
+        },
+        async listPids() {
+          return [];
+        },
+      };
+
+      const result = await reapWindowsTestProcessTree({
+        rootPid,
+        ownerMarkers: [],
+        jobCustody: custody,
+      });
+
+      expect(result).toMatchObject({
+        attempted: true,
+        confirmedStopped: false,
+        reason: "job_terminate_unconfirmed",
+      });
+      expect(result.jobReceipt).toBeUndefined();
+    },
+  );
+
+  windowsOnly(
     "kernel-confirms a stop and kills a grandchild spawned after custody was assigned, given jobCustody",
     async () => {
       // Root blocks on stdin before spawning anything, mirroring the
@@ -270,10 +344,12 @@ describe("Windows test process tree selection", () => {
         process.execPath,
         [
           "-e",
-          "const cp=require('child_process');const fs=require('fs');"
-          + "fs.readSync(0,Buffer.alloc(1),0,1,null);"
+          "const cp=require('child_process');const readline=require('readline');"
+          + "const rl=readline.createInterface({input:process.stdin,crlfDelay:Infinity});let released=false;"
+          + "process.stdin.once('end',()=>{if(!released)process.exit(3);});"
+          + "rl.once('line',(line)=>{if(line!=='go')process.exit(2);released=true;rl.close();"
           + "const c=cp.spawn(process.execPath,['-e','setInterval(()=>{},1000);'],{stdio:'ignore',detached:true});"
-          + "c.unref();setInterval(()=>{},1000);",
+          + "c.unref();setInterval(()=>{},1000);});",
         ],
         { stdio: ["pipe", "ignore", "ignore"], windowsHide: true },
       );
@@ -302,18 +378,130 @@ describe("Windows test process tree selection", () => {
           confirmedStopped: true,
           reason: "reaped",
           remainingPids: [],
+          jobReceipt: {
+            authority: "job_object_kernel",
+            authoritative: true,
+            serviceId: "job-warden-integration-test",
+            rootPid: root.pid,
+            activeProcessesAfter: 0,
+          },
         });
-        expect(result.attemptedPids).toContain(root.pid!);
+        expect(result.attemptedPids).toEqual([]);
+        expect(result.snapshots).toBe(0);
         await waitForFixtureExit(rootExit, 4_000);
         expect(root.exitCode !== null || root.signalCode !== null).toBe(true);
       } finally {
         if (root.exitCode === null && root.signalCode === null) {
-          root.stdin?.end();
           root.kill("SIGKILL");
+          await waitForFixtureExit(rootExit);
         }
+        root.stdin?.end();
         await waitForFixtureExit(rootExit);
       }
     },
     20_000,
+  );
+
+  windowsOnly(
+    "kernel-confirms a native descendant stop after its MSYS-style root has already exited",
+    async () => {
+      const serviceId = `dead-root-job-warden-${randomUUID()}`;
+      const root = spawn(
+        process.execPath,
+        [
+          "-e",
+          "const cp=require('child_process');const readline=require('readline');"
+          + "const rl=readline.createInterface({input:process.stdin,crlfDelay:Infinity});let released=false;"
+          + "process.stdin.once('end',()=>{if(!released)process.exit(3);});"
+          + "rl.once('line',(line)=>{if(line!=='go')process.exit(2);released=true;rl.close();"
+          + "const c=cp.spawn(process.execPath,['-e','setInterval(()=>{},1000);'],{stdio:'ignore',windowsHide:true,detached:true});"
+          + "process.stdout.write(String(c.pid)+'\\n');c.unref();setTimeout(()=>{},500);});",
+        ],
+        { stdio: ["pipe", "pipe", "ignore"], windowsHide: true },
+      );
+      const rootExit = new Promise<void>((resolve) => {
+        root.once("exit", () => resolve());
+      });
+      const childPidPromise = new Promise<number>((resolve, reject) => {
+        let stdout = "";
+        let settled = false;
+        root.stdout!.setEncoding("utf8");
+        root.stdout!.on("data", (chunk: string) => {
+          if (settled) return;
+          stdout += chunk;
+          const match = /^(\d+)\r?\n/.exec(stdout);
+          if (!match) return;
+          settled = true;
+          resolve(Number.parseInt(match[1]!, 10));
+        });
+        root.stdout!.once("error", (error) => {
+          if (settled) return;
+          settled = true;
+          reject(error);
+        });
+        root.once("exit", () => {
+          if (settled) return;
+          settled = true;
+          reject(new Error("The root exited without reporting its native child PID."));
+        });
+      });
+      let custody: WindowsTestJobCustody | null = null;
+      let confirmedStopped = false;
+      let childPid: number | null = null;
+
+      try {
+        custody = await acquireWindowsTestJobCustody(serviceId, root);
+        expect(custody).not.toBeNull();
+        const rootIdentity = await readWindowsTestProcessIdentity(root.pid!);
+        expect(rootIdentity).not.toBeNull();
+
+        root.stdin!.end("go\n");
+        childPid = await childPidPromise;
+        expect(childPid).toBeGreaterThan(0);
+        await waitForFixtureExit(rootExit, 4_000);
+        expect(root.exitCode !== null || root.signalCode !== null).toBe(true);
+        await expect.poll(
+          async () => (await readWindowsTestProcessIdentity(childPid!)) !== null,
+          { timeout: 4_000 },
+        ).toBe(true);
+
+        const result = await reapWindowsTestProcessTree({
+          rootPid: root.pid!,
+          ownerMarkers: [],
+          expectedRootIdentity: rootIdentity!,
+          timeoutMs: 8_000,
+          jobCustody: custody!,
+        });
+        expect(result).toMatchObject({
+          attempted: true,
+          confirmedStopped: true,
+          reason: "reaped",
+          remainingPids: [],
+          jobReceipt: {
+            authority: "job_object_kernel",
+            authoritative: true,
+            serviceId,
+            rootPid: root.pid,
+            activeProcessesAfter: 0,
+          },
+        });
+        confirmedStopped = true;
+        await expect.poll(
+          async () => (await readWindowsTestProcessIdentity(childPid!)) === null,
+          { timeout: 4_000 },
+        ).toBe(true);
+      } finally {
+        if (!confirmedStopped && custody) {
+          await custody.terminate(8_000);
+        }
+        if (root.exitCode === null && root.signalCode === null) {
+          root.kill("SIGKILL");
+          await waitForFixtureExit(rootExit);
+        }
+        root.stdin?.end();
+        await waitForFixtureExit(rootExit);
+      }
+    },
+    25_000,
   );
 });

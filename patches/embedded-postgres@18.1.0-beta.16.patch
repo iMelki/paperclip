@@ -28,3 +28,18 @@ diff --git a/dist/index.js b/dist/index.js
                  // Connect to stderr, as that is where the messages get sent
                  (_a = this.process.stderr) === null || _a === void 0 ? void 0 : _a.on('data', (chunk) => {
                      // Parse the data as a string and log it
+@@ -218,9 +218,12 @@
+                     if (!((_b = this.process) === null || _b === void 0 ? void 0 : _b.pid)) {
+                         throw new Error('Could not find process PID');
+                     }
+-                    // Actually kill the process using the Windows taskkill command
+-                    spawn('taskkill', ['/pid', this.process.pid.toString(), '/f', '/t']);
++                    // Actually kill the process using the Windows taskkill command,
++                    // resolved via SystemRoot rather than PATH so a host with a
++                    // damaged Machine PATH cannot fail the spawn with ENOENT.
++                    const systemRoot = globalThis.process.env.SystemRoot || globalThis.process.env.windir;
++                    spawn(systemRoot ? path.join(systemRoot, 'System32', 'taskkill.exe') : 'taskkill', ['/pid', this.process.pid.toString(), '/f', '/t']);
+                 }
+                 else {
+                     // If on a sane OS, simply kill using SIGINT
+                     (_c = this.process) === null || _c === void 0 ? void 0 : _c.kill('SIGINT');

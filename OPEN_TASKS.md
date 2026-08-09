@@ -1,10 +1,61 @@
 # Paperclip Open Tasks
 
-Last updated: 2026-08-03
+Last updated: 2026-08-08
 
 This file is the durable local index for active `paperclip` issues.
 
 ## Active Issues
+
+- [#41 - Retain callback-bridge launch ambiguity across adapter and heartbeat cleanup](https://github.com/iMelki/paperclip/issues/41)
+  - Accepted remote callback launch ambiguity is not yet retained through the
+    six direct adapters, ACPX partial-start cleanup, or heartbeat issue/
+    environment/runtime release. Per-instance directories and low-level exact
+    cancellation are necessary but do not supply a restart-safe run fence.
+    The checkpoint therefore rejects every production remote callback-backed
+    direct or ACPX execution, attended
+    or unattended and over SSH or sandbox, before any launch event, manifest,
+    runner call, process, or provider dispatch. Direct adapters throw
+    `PAPERCLIP_CALLBACK_BRIDGE_DISABLED`; ACPX returns a terminal
+    `phase=preflight` configuration result with the same code. Malformed
+    non-null target input fails with `PAPERCLIP_EXECUTION_TARGET_INVALID`
+    instead of falling back to local execution. There is no production
+    override; only the exact module-owned capability issued while
+    `NODE_ENV=test` passes the application/high-level adapter seam. The
+    exported low-level server
+    primitive remains reachable for protocol research tests and is not a
+    production-safe bypass; a static call-site allowlist must prove that the
+    gated seam is its only application caller. Keep this default-off gate until
+    run/adapter/instance/nonce manifest, durable lifecycle event, retry-safe
+    reconciliation authority, heartbeat release guards, terminal-ack adoption,
+    and host-loss tests all pass. Never replay or release from missing in-memory
+    state. Focused evidence is green for the frozen low-level protocol (41/41),
+    all six direct remote-adapter suites (67/67), the execution-target suite
+    (53/53), and the heartbeat configuration-fence matrix (4/4). Full ACPX is
+    degraded: successive broad runs ended 92 passed / 2 failed / 4 skipped,
+    93 / 1 / 4, and 88 / 6 / 4. The three isolated timeout rows passed alone,
+    but the final broad run first retained an accepted session because terminal
+    reconciliation was not proven and then hit five later timeouts. All timeout
+    relaxations trialed for those three observed rows were reverted; an earlier
+    separately justified Windows platform budget remains elsewhere in the
+    suite. Diagnosis proved that the Windows Git-Bash fixture mixed MSYS shell
+    and native Node pid namespaces, so it cannot authoritatively attest
+    process-tree custody. The local runner no longer advertises that custody on
+    Windows. Thirty real runner-backed lifecycle rows now skip only on Windows
+    and remain mandatory on Ubuntu CI; deterministic preflight, parser, gate,
+    controller, and local behavior tests continue to run on Windows. The final
+    truthful Windows ACPX receipt passed 67 and skipped 34, including four
+    pre-existing platform skips. Preserve the earlier red receipts under
+    #20/#41. The ACPX test harness now assigns every implicit-cwd execution a
+    stable, registered temporary workspace for that test and guards the
+    invocation checkout's `.claude/settings.local.json` bytes before and after
+    every row. The final focused run left both previously generated checkout-
+    local settings files byte- and timestamp-stable; those existing untracked
+    files remain preserved for owner classification rather than being deleted
+    or staged. This fixture correction does not satisfy the Ubuntu lifecycle,
+    restart, residue, or release gates. The green 131/10/0 workspace-runtime
+    receipt covers local test custody only and does not satisfy a callback-bridge
+    adoption gate. Production unattended remote mutation remains NO-GO under
+    #41.
 
 - [#31 - Bug: refresh heartbeat MCP fixture after catalog-only authorization hardening](https://github.com/iMelki/paperclip/issues/31)
   - The positive heartbeat fixture now includes the active catalog entry while
@@ -52,6 +103,18 @@ This file is the durable local index for active `paperclip` issues.
     native journal's cursor/checkpoint/replay authority or backend accepted-task
     authority. Reconcile both before replay, and never treat a Paperclip outage
     as replay authorization.
+  - The coordination WIP is now reconciled with current `dev` without rebasing
+    or discarding either line of work. The read model remains observe-only: no
+    claim/control write route, unattended controller, or Paperclip-owned native
+    cursor authority has been enabled. Release still requires a reviewed PR,
+    exact-head hosted checks, and the #29 write-authority gates.
+  - Workspace-runtime startup now registers the exact child/claim before custody,
+    releases provider execution only after kernel custody plus accepted-child
+    checkpointing, retains the claim through readiness commit, and passes the
+    active claim nonce through restart-adoption identity refresh. The isolated
+    workspace-runtime suite is green at 131 passed / 10 skipped / 0 failed in
+    206.82s with zero suite-root survivors. This is custody/readiness evidence
+    only; it does not enable a claim/control write route or unattended execution.
 
 - [Day-0 branch/worktree consolidation plan](doc/plans/2026-08-02-day0-branch-consolidation.md)
   - Preserve concurrent dirty branches and locked worktrees. Consolidate only
@@ -159,7 +222,39 @@ This file is the durable local index for active `paperclip` issues.
     `%LOCALAPPDATA%\Temp\paperclip-runtime-control-rollback-VFP9fd` and
     `%LOCALAPPDATA%\Temp\paperclip-runtime-control-rollback-home-UPv21H`.
     They must not be deleted or signalled without a separate identity-safe
-    reconciliation. The complete-suite zero-survivor receipt remains open.
+    reconciliation. Those historical evidence roots remain preserved. A later
+    isolated workspace-runtime run passed 131 / skipped 10 / failed 0 in 206.82s
+    and left zero survivors in its own test root; the complete repository hook/
+    global process-delta receipt remains open.
+  - The 2026-08-08 bridge investigation found additional false-success and
+    identity-reuse paths. Git-for-Windows `$!` and the native parent pid are
+    diagnostic observations only. Callback stop authority is the exact server
+    birth identity plus its instance nonce and cooperative cancellation
+    acknowledgement; a parent process is never signalled or required to exit.
+    Same-nonce evidence with any conflicting birth field is preserved and fails
+    closed. ACP process-session stop rejects when stdin-end or wrapper-exit proof
+    is missing, awaits an in-flight event poll, and refuses to return success
+    while exact tree custody or retained-resource release is false. Windows
+    parent-directory power-loss durability and the #41 restart-safe lifecycle/
+    heartbeat fence remain open adoption gates. The frozen post-review
+    workspace-runtime cohort is now final at 131 passed / 10 skipped / 0 failed
+    in 206.82s, with zero suite-root survivors. The complete repository hook and
+    uncontaminated global process receipt remain release gates. ACPX test
+    executions without an explicit
+    cwd now receive one registered per-test temporary workspace, and a suite
+    guard rejects any checkout-local Claude-settings mutation. Two settings
+    files generated before that repair are preserved untracked for owner
+    classification; they are excluded from the checkpoint commit. One P2 remains
+    in the general lifecycle path: `stopRuntimeService` is not yet single-flight,
+    so simultaneous stop/reset/rollback callers can enter termination/
+    finalization twice. Add a per-service in-flight stop promise plus concurrent
+    success/failure/retry regressions before #20 closes.
+  - The two company import/export E2E cases now skip explicitly on Windows and
+    remain mandatory on Ubuntu CI. Repeated focused runs showed that the
+    long-lived PowerShell Job custodian could not return a stable terminal
+    receipt on this host; retaining a red or advisory cleanup claim would be
+    misleading. The fixture's synthetic Claude agent is now unassigned, which
+    prevents assignment-triggered provider work during this archive-only test.
 
 - [#22 - Make complete validation and package builds Windows-portable](https://github.com/iMelki/paperclip/issues/22)
   - The portable Node filesystem helper, validated direct package-manager
@@ -181,8 +276,9 @@ This file is the durable local index for active `paperclip` issues.
     the source script through one shell namespace. Valid UNC paths convert to
     double-slash shell paths, while malformed and device-namespace UNC forms
     fail closed; focused command-managed coverage includes spaces, apostrophes,
-    confinement, and prefix escapes. The obsolete workspace-diff
-    editor props that failed the first hook are removed. The normal hook does
+    confinement, and prefix escapes. The workspace-diff imperative hook now
+    passes the `editorOptions` and non-editable `edit` values required by the
+    installed `@pierre/diffs` 1.3.5 API. The normal hook does
     not include `pnpm build`. The second hook's only suite failure exposed a
     missing emitted-test JSON asset; the portable server build now copies the
     pinned contract into `dist`, and source/built regressions pass 5/5 and 4/4

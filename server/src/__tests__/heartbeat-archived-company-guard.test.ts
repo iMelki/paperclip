@@ -19,6 +19,10 @@ import { heartbeatService } from "../services/heartbeat.ts";
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
 
+// Invalid-org-chain coverage exercises queued-run cancellation, not local child cleanup.
+// Sessioned local adapters without authoritative process custody must fail closed.
+const NON_LOCAL_CANCELLATION_TEST_ADAPTER = "openclaw_gateway";
+
 if (!embeddedPostgresSupport.supported) {
   console.warn(
     `Skipping embedded Postgres archived-company heartbeat guard tests on this host: ${embeddedPostgresSupport.reason ?? "unsupported environment"}`,
@@ -118,7 +122,7 @@ describeEmbeddedPostgres("heartbeat archived-company guard", () => {
         role: "engineer",
         reportsTo: managerId,
         status: "idle",
-        adapterType: "codex_local",
+        adapterType: NON_LOCAL_CANCELLATION_TEST_ADAPTER,
         adapterConfig: {},
         runtimeConfig: {
           heartbeat: {

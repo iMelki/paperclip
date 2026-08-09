@@ -6,20 +6,25 @@ import { buildCodexAuthInboundProvision } from "./codex-auth-merge-scripts.js";
 import { copyBackCodexAuth } from "./codex-auth-copyback.js";
 import {
   adapterExecutionTargetIsRemote,
+  adapterExecutionTargetPaperclipBridgeLaunchEvent,
   adapterExecutionTargetRemoteCwd,
   overrideAdapterExecutionTargetRemoteCwd,
   adapterExecutionTargetSessionIdentity,
   adapterExecutionTargetSessionMatches,
   adapterExecutionTargetUsesPaperclipBridge,
+  assertPaperclipCallbackBridgeEnabled,
   describeAdapterExecutionTarget,
   ensureAdapterExecutionTargetCommandResolvable,
   ensureAdapterExecutionTargetRuntimeCommandInstalled,
   prepareAdapterExecutionTargetRuntime,
   readAdapterExecutionTarget,
+  readAdapterExecutionTargetFailClosed,
   resolveAdapterExecutionTargetTimeout,
   resolveAdapterExecutionTargetCommandForLogs,
   runAdapterExecutionTargetProcess,
   runAdapterExecutionTargetShellCommand,
+  isAdapterExecutionTargetPaperclipBridgeLaunchAmbiguousError,
+  retainAndSealAdapterExecutionTargetPaperclipBridgeDependentResources,
   startAdapterExecutionTargetPaperclipBridge,
 } from "@paperclipai/adapter-utils/execution-target";
 import {
@@ -443,6 +448,15 @@ export async function ensureCodexSkillsInjected(
 }
 
 export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExecutionResult> {
+  const executionTarget = readAdapterExecutionTargetFailClosed({
+    executionTarget: ctx.executionTarget,
+    legacyRemoteExecution: ctx.executionTransport?.remoteExecution,
+  });
+  const executionTargetIsRemote = adapterExecutionTargetIsRemote(executionTarget);
+  if (executionTargetIsRemote && adapterExecutionTargetUsesPaperclipBridge(executionTarget)) {
+    assertPaperclipCallbackBridgeEnabled();
+  }
+
   const engineSelection = await resolveCodexExecutionEngineForRun(ctx);
   if (engineSelection.engine === "acp") {
     try {
@@ -495,10 +509,6 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       )
     : [];
   const runtimePrimaryUrl = asString(context.paperclipRuntimePrimaryUrl, "");
-  const executionTarget = readAdapterExecutionTarget({
-    executionTarget: ctx.executionTarget,
-    legacyRemoteExecution: ctx.executionTransport?.remoteExecution,
-  });
   const targetWorkspaceRealization = executionTarget?.workspaceRealization ?? null;
   const configuredCwd = asString(config.cwd, "");
   const useConfiguredInsteadOfAgentHome = workspaceSource === "agent_home" && configuredCwd.length > 0;
@@ -507,7 +517,6 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     : useConfiguredInsteadOfAgentHome ? "" : workspaceCwd;
   const cwd = effectiveWorkspaceCwd || configuredCwd || process.cwd();
   const envConfig = parseObject(config.env);
-  const executionTargetIsRemote = adapterExecutionTargetIsRemote(executionTarget);
   const configuredCodexHome =
     typeof envConfig.CODEX_HOME === "string" && envConfig.CODEX_HOME.trim().length > 0
       ? path.resolve(envConfig.CODEX_HOME.trim())
@@ -581,6 +590,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   // here so the outer `finally` can remove it on every exit path (teardown and
   // error), never only the happy path.
   let stagedCodexHomeDir: string | null = null;
+  let paperclipDependentCleanupRetained = false;
   try {
     for (const note of preparedRuntimeConfig.notes) {
       await onLog("stdout", `[paperclip] ${note}\n`);
@@ -703,6 +713,28 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       ? () => preparedExecutionTargetRuntime.restoreWorkspace((line) => onLog("stdout", line))
       : null;
     let paperclipBridge: Awaited<ReturnType<typeof startAdapterExecutionTargetPaperclipBridge>> = null;
+    const retainPaperclipDependentCleanup = (error: unknown) => {
+      if (!isAdapterExecutionTargetPaperclipBridgeLaunchAmbiguousError(error)) return false;
+      paperclipDependentCleanupRetained = true;
+      return retainAndSealAdapterExecutionTargetPaperclipBridgeDependentResources({
+        error,
+        registrationId: `adapter:codex:${runId}`,
+        cleanupSteps: [
+          ...(restoreRemoteWorkspace
+            ? [{ label: "codex-restore-remote-workspace", run: restoreRemoteWorkspace }]
+            : []),
+          ...(stagedCodexHomeDir
+            ? [{
+                label: "codex-remove-staged-home",
+                run: async () => {
+                  await fs.rm(stagedCodexHomeDir!, { recursive: true, force: true });
+                },
+              }]
+            : []),
+          { label: "codex-runtime-config-cleanup", run: preparedRuntimeConfig.cleanup },
+        ],
+      });
+    };
     const remoteCodexHome = executionTargetIsRemote
       ? preparedExecutionTargetRuntime?.assetDirs.home ??
         path.posix.join(effectiveExecutionCwd, ".paperclip-runtime", "codex", "home")
@@ -801,7 +833,13 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       env.PAPERCLIP_API_KEY = authToken;
     }
     if (executionTargetIsRemote && adapterExecutionTargetUsesPaperclipBridge(runtimeExecutionTarget)) {
-      paperclipBridge = await startAdapterExecutionTargetPaperclipBridge({
+      if (!onEvent) {
+        throw new Error(
+          "Remote Codex callback execution requires a durable adapter event sink before provider dispatch.",
+        );
+      }
+      try {
+        paperclipBridge = await startAdapterExecutionTargetPaperclipBridge({
         runId,
         target: runtimeExecutionTarget,
         runtimeRootDir: preparedExecutionTargetRuntime?.runtimeRootDir,
@@ -809,7 +847,15 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         timeoutSec,
         hostApiToken: env.PAPERCLIP_API_KEY,
         onLog,
-      });
+        deferDependentResourceRegistration: true,
+        onLaunchState: async (state) => {
+          await onEvent(adapterExecutionTargetPaperclipBridgeLaunchEvent(state));
+        },
+        });
+      } catch (error) {
+        retainPaperclipDependentCleanup(error);
+        throw error;
+      }
       if (paperclipBridge) {
         Object.assign(env, paperclipBridge.env);
       }
@@ -1424,7 +1470,12 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       return toResult(initial, false, false);
     } finally {
       if (paperclipBridge) {
-        await paperclipBridge.stop();
+        try {
+          await paperclipBridge.stop();
+        } catch (error) {
+          retainPaperclipDependentCleanup(error);
+          throw error;
+        }
       }
       if (restoreRemoteWorkspace) {
         await onLog(
@@ -1438,7 +1489,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     // Remove the staged CODEX_HOME allowlist temp dir on every exit path
     // (teardown AND error), never only the happy path. Cleanup failure is
     // logged, not fatal — a leaked temp dir must not crash the run.
-    if (stagedCodexHomeDir) {
+    if (!paperclipDependentCleanupRetained && stagedCodexHomeDir) {
       await fs.rm(stagedCodexHomeDir, { recursive: true, force: true }).catch(async (error) => {
         await onLog(
           "stderr",
@@ -1456,6 +1507,8 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     // If the process dies before reaching this, the next
     // prepareCodexRuntimeConfig restores the original from the pre-run backup
     // written at prepare time.
-    await preparedRuntimeConfig.cleanup();
+    if (!paperclipDependentCleanupRetained) {
+      await preparedRuntimeConfig.cleanup();
+    }
   }
 }

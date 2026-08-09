@@ -84,6 +84,15 @@ test("the unsharded general-server lane transports exclusions outside Windows ar
   );
 });
 
+test("every stable Vitest child receives one isolated temp root through all platform variables", () => {
+  const plan = dryRunJson(["--mode", "general", "--group", "general-server"]);
+  assert.deepEqual(
+    plan.isolatedTempEnvironmentVariableNames,
+    ["TEMP", "TMP", "TMPDIR"],
+    "Windows Node reads TEMP/TMP before TMPDIR, so all three names must share the run root",
+  );
+});
+
 test("shard flags are rejected for the parallel workspace groups", () => {
   const result = dryRun(["--mode", "general", "--group", "general-workspaces-a", "--shard-index", "0", "--shard-count", "3"]);
   assert.notEqual(result.status, 0, "workspace groups must not accept shard flags");

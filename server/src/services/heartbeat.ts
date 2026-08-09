@@ -253,7 +253,15 @@ import {
   requestStopAndWaitAcpxProcessSessionLaunch,
 } from "@paperclipai/adapter-utils/acpx-engine";
 import {
+  PAPERCLIP_CALLBACK_BRIDGE_LAUNCH_AMBIGUOUS,
+  PAPERCLIP_CALLBACK_BRIDGE_DISABLED,
+  PAPERCLIP_CALLBACK_BRIDGE_LAUNCH_EVENT,
+  PAPERCLIP_EXECUTION_TARGET_INVALID,
+  isPaperclipCallbackBridgeDisabledError,
+  isPaperclipExecutionTargetInvalidError,
+  reconcileAndReleaseAdapterExecutionTargetPaperclipBridgeLaunch,
   reconcileAdapterExecutionTargetProcessSessionLaunchTerminal,
+  type AdapterExecutionTargetPaperclipBridgeLaunchIdentity,
   type AdapterExecutionTargetProcessSessionLaunchIdentity,
 } from "@paperclipai/adapter-utils/execution-target";
 import {
@@ -379,6 +387,7 @@ const WORKSPACE_VALIDATION_FAILURE_CODE = "workspace_validation_failed";
 const WORKSPACE_VALIDATION_RECOVERY_CAUSE = "workspace_validation_failed";
 const CONFIGURATION_INCOMPLETE_FAILURE_CODE = "configuration_incomplete";
 const CONFIGURATION_INCOMPLETE_RECOVERY_CAUSE = "configuration_incomplete";
+const PAPERCLIP_EXECUTION_CONFIGURATION_RECOVERY_CAUSE = "execution_configuration_fenced";
 const ACP_PROCESS_SESSION_LAUNCH_AMBIGUOUS = "ACP_PROCESS_SESSION_LAUNCH_AMBIGUOUS";
 const ACP_PROCESS_SESSION_LAUNCH_EVENT = "acp.process_session.launch";
 const EXECUTION_REVIEW_PARTICIPANT_RECOVERY_RETRY_REASON = "execution_review_participant_recovery";
@@ -1572,6 +1581,15 @@ type ProcessSessionLaunchAmbiguousFailureLike = Error & {
   launchIdentity: Record<string, unknown>;
 };
 
+type PaperclipBridgeLaunchAmbiguousFailureLike = Error & {
+  code: typeof PAPERCLIP_CALLBACK_BRIDGE_LAUNCH_AMBIGUOUS;
+  retryable: false;
+  needsHuman: true;
+  acceptedStart: "unknown" | "accepted";
+  launchIdentity: AdapterExecutionTargetPaperclipBridgeLaunchIdentity;
+  processIdentity: Record<string, unknown> | null;
+};
+
 function isWorkspaceValidationFailure(error: unknown): error is WorkspaceValidationFailureLike {
   if (error instanceof WorkspaceValidationFailure) return true;
   const maybe = error as { code?: unknown; resultJson?: unknown } | null;
@@ -1599,6 +1617,30 @@ function isProcessSessionLaunchAmbiguousFailure(
   );
 }
 
+function isPaperclipBridgeLaunchAmbiguousFailure(
+  error: unknown,
+): error is PaperclipBridgeLaunchAmbiguousFailureLike {
+  const candidate = error as Partial<PaperclipBridgeLaunchAmbiguousFailureLike> | null;
+  return Boolean(
+    candidate &&
+      candidate.code === PAPERCLIP_CALLBACK_BRIDGE_LAUNCH_AMBIGUOUS &&
+      candidate.retryable === false &&
+      candidate.needsHuman === true &&
+      (candidate.acceptedStart === "unknown" || candidate.acceptedStart === "accepted") &&
+      candidate.launchIdentity &&
+      typeof candidate.launchIdentity === "object",
+  );
+}
+
+function isPaperclipExecutionConfigurationFencedRun(
+  run: { errorCode?: string | null } | null | undefined,
+): boolean {
+  return (
+    run?.errorCode === PAPERCLIP_CALLBACK_BRIDGE_DISABLED ||
+    run?.errorCode === PAPERCLIP_EXECUTION_TARGET_INVALID
+  );
+}
+
 function processSessionLaunchAmbiguousResultJson(
   error: ProcessSessionLaunchAmbiguousFailureLike,
 ): Record<string, unknown> {
@@ -1612,15 +1654,32 @@ function processSessionLaunchAmbiguousResultJson(
   };
 }
 
+function paperclipBridgeLaunchAmbiguousResultJson(
+  error: PaperclipBridgeLaunchAmbiguousFailureLike,
+): Record<string, unknown> {
+  return {
+    paperclipBridgeLaunch: {
+      status: "needs_human",
+      acceptedStart: error.acceptedStart,
+      retryable: false,
+      needsHuman: true,
+      ...error.launchIdentity,
+      processIdentity: error.processIdentity,
+    },
+  };
+}
+
 function readProcessSessionLaunchFencePayload(event: AdapterRuntimeEvent): Record<string, unknown> | null {
   if (event.eventType.trim() !== ACP_PROCESS_SESSION_LAUNCH_EVENT) return null;
   const payload = parseObject(event.payload);
   const status = readNonEmptyString(payload.status);
+  const runId = readNonEmptyString(payload.runId);
   const launchId = readNonEmptyString(payload.launchId);
   const sessionId = readNonEmptyString(payload.sessionId);
   const sessionDir = readNonEmptyString(payload.sessionDir);
   if (
     (status !== "launching" && status !== "accepted" && status !== "not_started") ||
+    !runId ||
     !launchId ||
     !sessionId ||
     !sessionDir
@@ -1630,12 +1689,47 @@ function readProcessSessionLaunchFencePayload(event: AdapterRuntimeEvent): Recor
   return {
     ...payload,
     status,
+    runId,
     launchId,
     sessionId,
     sessionDir,
     acceptedStart: status === "accepted" ? "accepted" : "unknown",
     retryable: status === "not_started",
     needsHuman: false,
+  };
+}
+
+function readPaperclipBridgeLaunchFencePayload(event: AdapterRuntimeEvent): Record<string, unknown> | null {
+  if (event.eventType.trim() !== PAPERCLIP_CALLBACK_BRIDGE_LAUNCH_EVENT) return null;
+  const payload = parseObject(event.payload);
+  const status = readNonEmptyString(payload.status);
+  const runId = readNonEmptyString(payload.runId);
+  const adapterKey = readNonEmptyString(payload.adapterKey);
+  const instanceId = readNonEmptyString(payload.instanceId);
+  const instanceNonce = readNonEmptyString(payload.instanceNonce);
+  const instanceDir = readNonEmptyString(payload.instanceDir);
+  const queueDir = readNonEmptyString(payload.queueDir);
+  const manifestPath = readNonEmptyString(payload.manifestPath);
+  if (
+    !["launching", "accepted", "not_started", "released", "needs_human"].includes(status ?? "") ||
+    !runId || !adapterKey || !instanceId || instanceNonce !== instanceId ||
+    !instanceDir || !queueDir || !manifestPath
+  ) {
+    throw new Error("Paperclip callback bridge launch event is missing its durable run/instance identity.");
+  }
+  return {
+    ...payload,
+    status,
+    runId,
+    adapterKey,
+    instanceId,
+    instanceNonce,
+    instanceDir,
+    queueDir,
+    manifestPath,
+    acceptedStart: payload.acceptedStart === "accepted" ? "accepted" : "unknown",
+    retryable: status === "not_started" || status === "released",
+    needsHuman: status === "needs_human",
   };
 }
 
@@ -1663,6 +1757,52 @@ function isProcessSessionLaunchReplayFencedRun(
   run: { status?: unknown; errorCode?: string | null; resultJson?: unknown } | null | undefined,
 ): boolean {
   return isProcessSessionLaunchAmbiguousRun(run) || isProcessSessionLaunchActiveFenceRun(run);
+}
+
+function isPaperclipBridgeLaunchReplayFencedRun(
+  run: { errorCode?: string | null; resultJson?: unknown } | null | undefined,
+): boolean {
+  if (run?.errorCode === PAPERCLIP_CALLBACK_BRIDGE_LAUNCH_AMBIGUOUS) return true;
+  const status = readNonEmptyString(parseObject(parseObject(run?.resultJson).paperclipBridgeLaunch).status);
+  return status === "launching" || status === "accepted" || status === "needs_human";
+}
+
+function isRemoteLaunchReplayFencedRun(
+  run: { status?: unknown; errorCode?: string | null; resultJson?: unknown } | null | undefined,
+): boolean {
+  return isProcessSessionLaunchReplayFencedRun(run) || isPaperclipBridgeLaunchReplayFencedRun(run);
+}
+
+function readPaperclipBridgeLaunchIdentityFromRun(
+  run: { id: string; resultJson?: unknown } | null | undefined,
+): AdapterExecutionTargetPaperclipBridgeLaunchIdentity | null {
+  if (!run) return null;
+  const launch = parseObject(parseObject(run?.resultJson).paperclipBridgeLaunch);
+  const required = [
+    "runId", "adapterKey", "instanceId", "instanceNonce", "transport", "remoteCwd",
+    "instanceDir", "queueDir", "assetRemoteDir", "manifestPath",
+  ] as const;
+  if (required.some((key) => !readNonEmptyString(launch[key]))) return null;
+  const transport = readNonEmptyString(launch.transport);
+  if (transport !== "ssh" && transport !== "sandbox") return null;
+  if (readNonEmptyString(launch.runId) !== run.id) return null;
+  const instanceId = readNonEmptyString(launch.instanceId)!;
+  if (readNonEmptyString(launch.instanceNonce) !== instanceId) return null;
+  return {
+    runId: readNonEmptyString(launch.runId)!,
+    adapterKey: readNonEmptyString(launch.adapterKey)!,
+    instanceId,
+    instanceNonce: instanceId,
+    transport,
+    providerKey: readNonEmptyString(launch.providerKey),
+    environmentId: readNonEmptyString(launch.environmentId),
+    leaseId: readNonEmptyString(launch.leaseId),
+    remoteCwd: readNonEmptyString(launch.remoteCwd)!,
+    instanceDir: readNonEmptyString(launch.instanceDir)!,
+    queueDir: readNonEmptyString(launch.queueDir)!,
+    assetRemoteDir: readNonEmptyString(launch.assetRemoteDir)!,
+    manifestPath: readNonEmptyString(launch.manifestPath)!,
+  };
 }
 
 function readProcessSessionLaunchIdentityFromRun(
@@ -8657,9 +8797,10 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
   }
 
   async function handleRunLivenessContinuation(run: typeof heartbeatRuns.$inferSelect) {
+    if (isPaperclipExecutionConfigurationFencedRun(run)) return;
     // The remote transport failed after launch submission, so replay could create a
     // second ACP process. Only an operator may reconcile this terminal state.
-    if (isProcessSessionLaunchReplayFencedRun(run)) return;
+    if (isRemoteLaunchReplayFencedRun(run)) return;
 
     const livenessState = run.livenessState as RunLivenessState | null;
     if (livenessState !== "plan_only" && livenessState !== "empty_response") return;
@@ -8863,6 +9004,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
   }
 
   async function handleSuccessfulRunHandoff(run: typeof heartbeatRuns.$inferSelect, agent: typeof agents.$inferSelect) {
+    if (isPaperclipExecutionConfigurationFencedRun(run)) return;
     if (run.status !== "succeeded") return;
     const context = parseObject(run.contextSnapshot);
     const issueId = readNonEmptyString(context.issueId) ?? readNonEmptyString(context.taskId);
@@ -9335,6 +9477,69 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     return retained ?? latest;
   }
 
+  async function retainPaperclipBridgeLaunchForReconciliation(input: {
+    run: typeof heartbeatRuns.$inferSelect;
+    message: string;
+    resultJson?: Record<string, unknown> | null;
+  }) {
+    const latest = await getRun(input.run.id);
+    if (!latest || latest.status !== "running") return latest;
+    const supplied = parseObject(input.resultJson);
+    const suppliedLaunch = parseObject(supplied.paperclipBridgeLaunch);
+    const existing = parseObject(latest.resultJson);
+    const existingLaunch = parseObject(existing.paperclipBridgeLaunch);
+    const retained = await db
+      .update(heartbeatRuns)
+      .set({
+        error: input.message,
+        errorCode: PAPERCLIP_CALLBACK_BRIDGE_LAUNCH_AMBIGUOUS,
+        resultJson: {
+          ...existing,
+          ...supplied,
+          paperclipBridgeLaunch: {
+            ...existingLaunch,
+            ...suppliedLaunch,
+            status: "needs_human",
+            retryable: false,
+            needsHuman: true,
+          },
+        },
+        updatedAt: new Date(),
+      })
+      .where(and(eq(heartbeatRuns.id, latest.id), eq(heartbeatRuns.status, "running")))
+      .returning()
+      .then((rows) => rows[0] ?? null);
+    if (retained) {
+      await appendRunEvent(retained, await nextRunEventSeq(retained.id), {
+        eventType: "lifecycle",
+        stream: "system",
+        level: "error",
+        message: "Paperclip callback bridge retained as running; issue and environment remain fenced for exact cancellation reconciliation",
+        payload: { errorCode: PAPERCLIP_CALLBACK_BRIDGE_LAUNCH_AMBIGUOUS, needsHuman: true },
+      });
+    }
+    return retained ?? latest;
+  }
+
+  async function reconcileRetainedPaperclipBridgeLaunchResources(
+    run: typeof heartbeatRuns.$inferSelect,
+  ) {
+    const identity = readPaperclipBridgeLaunchIdentityFromRun(run);
+    if (!identity) {
+      return {
+        found: false,
+        controllerFound: false,
+        remoteCancelled: false,
+        cleanupComplete: false,
+        released: false,
+      };
+    }
+    return reconcileAndReleaseAdapterExecutionTargetPaperclipBridgeLaunch({
+      runId: run.id,
+      instanceId: identity.instanceId,
+    });
+  }
+
   async function clearDetachedRunWarning(runId: string) {
     const updated = await db
       .update(heartbeatRuns)
@@ -9587,7 +9792,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
   ) {
     // A missing-comment follow-up is still an execution replay. Suppress it when
     // remote launch acceptance is unknown and preserve the needs-human receipt.
-    if (isProcessSessionLaunchReplayFencedRun(run)) {
+    if (isRemoteLaunchReplayFencedRun(run) || isPaperclipExecutionConfigurationFencedRun(run)) {
       if (run.issueCommentStatus !== "not_applicable") {
         await patchRunIssueCommentStatus(run.id, {
           issueCommentStatus: "not_applicable",
@@ -9684,6 +9889,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     agent: typeof agents.$inferSelect,
     now: Date,
   ) {
+    if (isPaperclipExecutionConfigurationFencedRun(run)) return null;
     const existingRetry = await db
       .select()
       .from(heartbeatRuns)
@@ -9994,8 +10200,8 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         continue;
       }
 
-      if (isProcessSessionLaunchReplayFencedRun(run)) {
-        classify(candidate, "skipped", "process_session_launch_reconciliation_required", patch);
+      if (isRemoteLaunchReplayFencedRun(run)) {
+        classify(candidate, "skipped", "remote_launch_reconciliation_required", patch);
         continue;
       }
 
@@ -10139,6 +10345,30 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     const needsHumanRunIds: string[] = [];
 
     for (const { run, agent } of activeRuns) {
+      if (isPaperclipBridgeLaunchReplayFencedRun(run)) {
+        const reconciliation = await reconcileRetainedPaperclipBridgeLaunchResources(run).catch(() => ({
+          found: true,
+          controllerFound: false,
+          remoteCancelled: false,
+          cleanupComplete: false,
+          released: false,
+        }));
+        if (!reconciliation.released) {
+          await appendRunEvent(run, await nextRunEventSeq(run.id), {
+            eventType: "lifecycle",
+            stream: "system",
+            level: "warn",
+            message: "Graceful shutdown preserved a callback bridge without exact cancellation/cleanup reconciliation",
+            payload: {
+              signal,
+              errorCode: PAPERCLIP_CALLBACK_BRIDGE_LAUNCH_AMBIGUOUS,
+              reconciliation,
+            },
+          });
+          needsHumanRunIds.push(run.id);
+          continue;
+        }
+      }
       if (isProcessSessionLaunchReplayFencedRun(run)) {
         // The remote wrapper/child may outlive this host process. Do not stop,
         // release, or replay it during graceful shutdown; preserve the durable
@@ -10673,6 +10903,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       delayMs?: number;
     },
   ) {
+    if (isPaperclipExecutionConfigurationFencedRun(run)) return null;
     const now = opts?.now ?? new Date();
     const retryReason = opts?.retryReason ?? BOUNDED_TRANSIENT_HEARTBEAT_RETRY_REASON;
     const wakeReason = opts?.wakeReason ?? BOUNDED_TRANSIENT_HEARTBEAT_RETRY_WAKE_REASON;
@@ -11328,6 +11559,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     run: typeof heartbeatRuns.$inferSelect,
     agent: typeof agents.$inferSelect,
   ) {
+    if (isPaperclipExecutionConfigurationFencedRun(run)) return null;
     if (!run.wakeupRequestId) return null;
     if (!isResolvedInteractionContinuationWakeContext(run.contextSnapshot)) return null;
     if (!isRetryableInteractionContinuationInfrastructureFailure(run)) {
@@ -12542,7 +12774,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       // reached onSpawn. Preserve the run and its environment lease until the
       // durable remote identity is reconciled; process-loss replay could create
       // a duplicate child.
-      if (isProcessSessionLaunchReplayFencedRun(run)) continue;
+      if (isRemoteLaunchReplayFencedRun(run)) continue;
 
       // Apply staleness threshold to avoid false positives
       if (staleThresholdMs > 0) {
@@ -12996,6 +13228,8 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     // execution. It survives a later DB read/write failure in the outer catch
     // and finally blocks, where null/unknown must never authorize release.
     let processSessionLaunchFenceObserved = false;
+    let callbackBridgeLaunchFenceObserved = false;
+    let remoteLaunchFenceWriteTail: Promise<void> = Promise.resolve();
 
     try {
     const agent = await getAgent(run.agentId);
@@ -14581,34 +14815,79 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         const eventType = event.eventType.trim();
         if (!eventType) return;
         const launchFence = readProcessSessionLaunchFencePayload(event);
-        if (launchFence) {
-          const latest = await getRun(currentRun.id);
-          const fenced = await db
-            .update(heartbeatRuns)
-            .set({
-              // A normal in-progress launch is a replay fence, not an error and
-              // not a needs-human ambiguity. Persist the durable identity in
-              // resultJson so crash recovery can fail closed while ordinary
-              // live cancel/pause continues through the active bridge handle.
-              error: null,
-              errorCode: null,
-              resultJson: {
-                ...parseObject(latest?.resultJson),
-                processSessionLaunch: launchFence,
-              },
-              updatedAt: new Date(),
-            })
-            .where(and(eq(heartbeatRuns.id, currentRun.id), eq(heartbeatRuns.status, "running")))
-            .returning({ id: heartbeatRuns.id })
-            .then((rows) => rows[0] ?? null);
-          if (!fenced) {
-            throw new Error(`Could not persist the remote ACP replay fence for run ${currentRun.id}.`);
-          }
-          // The local witness becomes authoritative only after the guarded DB
-          // write succeeds. A pre-dispatch write failure aborts launch and must
-          // remain an ordinary safe setup failure; an append-event failure
-          // after this point must retain the already-durable fence.
-          processSessionLaunchFenceObserved = launchFence.status !== "not_started";
+        const callbackBridgeFence = readPaperclipBridgeLaunchFencePayload(event);
+        if (launchFence && launchFence.runId !== currentRun.id) {
+          throw new Error(
+            `Remote ACP process-session lifecycle identity ${String(launchFence.runId)} does not belong to run ${currentRun.id}.`,
+          );
+        }
+        if (callbackBridgeFence && callbackBridgeFence.runId !== currentRun.id) {
+          throw new Error(
+            `Paperclip callback bridge lifecycle identity ${String(callbackBridgeFence.runId)} does not belong to run ${currentRun.id}.`,
+          );
+        }
+        if (launchFence || callbackBridgeFence) {
+          const write = remoteLaunchFenceWriteTail.then(async () => {
+            const latest = await getRun(currentRun.id);
+            if (!latest || latest.status !== "running") {
+              throw new Error(`Could not read the active remote launch fence for run ${currentRun.id}.`);
+            }
+            const nextResultJson = {
+              ...parseObject(latest.resultJson),
+              ...(launchFence ? { processSessionLaunch: launchFence } : {}),
+              ...(callbackBridgeFence ? { paperclipBridgeLaunch: callbackBridgeFence } : {}),
+            };
+            const callbackStatus = readNonEmptyString(
+              parseObject(nextResultJson.paperclipBridgeLaunch).status,
+            );
+            const processStatus = readNonEmptyString(
+              parseObject(nextResultJson.processSessionLaunch).status,
+            );
+            const callbackNeedsHuman = callbackStatus === "needs_human";
+            const processNeedsHuman = processStatus === "needs_human";
+            const nextErrorCode = callbackNeedsHuman
+              ? PAPERCLIP_CALLBACK_BRIDGE_LAUNCH_AMBIGUOUS
+              : processNeedsHuman
+                ? ACP_PROCESS_SESSION_LAUNCH_AMBIGUOUS
+                : latest.errorCode === PAPERCLIP_CALLBACK_BRIDGE_LAUNCH_AMBIGUOUS ||
+                    latest.errorCode === ACP_PROCESS_SESSION_LAUNCH_AMBIGUOUS
+                  ? null
+                  : latest.errorCode;
+            const nextError = callbackNeedsHuman
+              ? "Paperclip callback bridge launch requires exact cancellation reconciliation."
+              : processNeedsHuman
+                ? "Remote ACP launch requires exact process-session reconciliation."
+                : nextErrorCode
+                  ? latest.error
+                  : null;
+            const fenced = await db
+              .update(heartbeatRuns)
+              .set({
+                error: nextError,
+                errorCode: nextErrorCode,
+                resultJson: nextResultJson,
+                updatedAt: new Date(),
+              })
+              .where(and(eq(heartbeatRuns.id, currentRun.id), eq(heartbeatRuns.status, "running")))
+              .returning({ id: heartbeatRuns.id })
+              .then((rows) => rows[0] ?? null);
+            if (!fenced) {
+              throw new Error(`Could not persist the remote launch replay fence for run ${currentRun.id}.`);
+            }
+            // These witnesses change only after the serialized guarded write.
+            // A later append failure therefore still leaves finally fail-closed.
+            if (launchFence) {
+              processSessionLaunchFenceObserved = launchFence.status !== "not_started";
+            }
+            if (callbackBridgeFence) {
+              callbackBridgeLaunchFenceObserved =
+                callbackBridgeFence.status === "launching" ||
+                callbackBridgeFence.status === "accepted" ||
+                callbackBridgeFence.status === "needs_human";
+            }
+          });
+          remoteLaunchFenceWriteTail = write.catch(() => undefined);
+          await write;
         }
         await appendRunEvent(currentRun, seq++, {
           eventType: eventType.slice(0, 120),
@@ -14944,7 +15223,47 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         });
         return;
       }
+      if (adapterResult.errorCode === PAPERCLIP_CALLBACK_BRIDGE_LAUNCH_AMBIGUOUS) {
+        await retainPaperclipBridgeLaunchForReconciliation({
+          run,
+          message:
+            adapterResult.errorMessage ??
+            "Paperclip callback bridge cancellation requires reconciliation; automatic replay is fenced.",
+          resultJson: parseObject(adapterResult.resultJson),
+        });
+        return;
+      }
       const activeLaunchRun = await getRun(run.id);
+      if (activeLaunchRun && isPaperclipBridgeLaunchReplayFencedRun(activeLaunchRun)) {
+        let reconciliation: Awaited<
+          ReturnType<typeof reconcileRetainedPaperclipBridgeLaunchResources>
+        >;
+        try {
+          reconciliation = await reconcileRetainedPaperclipBridgeLaunchResources(activeLaunchRun);
+        } catch (error) {
+          reconciliation = {
+            found: true,
+            controllerFound: true,
+            remoteCancelled: false,
+            cleanupComplete: false,
+            released: false,
+          };
+          logger.warn(
+            { err: error, runId: run.id },
+            "callback bridge cleanup reconciliation remained fenced after adapter completion",
+          );
+        }
+        if (!reconciliation.released) {
+          await retainPaperclipBridgeLaunchForReconciliation({
+            run: activeLaunchRun,
+            message:
+              "Adapter completion did not prove callback bridge cancellation and retained cleanup; issue, environment, credentials, and staging remain fenced.",
+            resultJson: parseObject(adapterResult.resultJson),
+          });
+          return;
+        }
+        callbackBridgeLaunchFenceObserved = false;
+      }
       if (activeLaunchRun && isProcessSessionLaunchActiveFenceRun(activeLaunchRun)) {
         const launchIdentity = readProcessSessionLaunchIdentityFromRun(activeLaunchRun);
         let reconciliation: {
@@ -15399,17 +15718,31 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         await getCurrentUserRedactionOptions(),
       );
       const processSessionLaunchAmbiguousFailure = isProcessSessionLaunchAmbiguousFailure(err) ? err : null;
+      const paperclipBridgeLaunchAmbiguousFailure = isPaperclipBridgeLaunchAmbiguousFailure(err) ? err : null;
+      const paperclipBridgeDisabledFailure = isPaperclipCallbackBridgeDisabledError(err) ? err : null;
+      const executionTargetInvalidFailure = isPaperclipExecutionTargetInvalidError(err) ? err : null;
       const workspaceValidationFailure = isWorkspaceValidationFailure(err) ? err : null;
       const configurationIncompleteFailure = isConfigurationIncompleteFailure(err) ? err : null;
       const recordedResponsibleUserDenialCode =
         normalizeResponsibleUserDenialCode((await getRun(run.id).catch(() => null))?.errorCode);
       const failureErrorCode =
-        processSessionLaunchAmbiguousFailure?.code
+        executionTargetInvalidFailure?.code
+        ?? paperclipBridgeDisabledFailure?.code
+        ?? paperclipBridgeLaunchAmbiguousFailure?.code
+        ?? processSessionLaunchAmbiguousFailure?.code
         ?? workspaceValidationFailure?.code
         ?? configurationIncompleteFailure?.code
         ?? recordedResponsibleUserDenialCode
         ?? "adapter_failed";
       logger.error({ err, runId }, "heartbeat execution failed");
+      if (paperclipBridgeLaunchAmbiguousFailure) {
+        await retainPaperclipBridgeLaunchForReconciliation({
+          run,
+          message,
+          resultJson: paperclipBridgeLaunchAmbiguousResultJson(paperclipBridgeLaunchAmbiguousFailure),
+        });
+        return;
+      }
       if (processSessionLaunchAmbiguousFailure) {
         await retainProcessSessionLaunchForReconciliation({
           run,
@@ -15443,7 +15776,28 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           errorCode: failureErrorCode,
           errorMessage: message,
           resultJson:
-            (processSessionLaunchAmbiguousFailure
+            (executionTargetInvalidFailure
+              ? {
+                  executionTarget: {
+                    status: "invalid",
+                    retryable: false,
+                    needsHuman: true,
+                  },
+                }
+              : null)
+            ?? (paperclipBridgeDisabledFailure
+              ? {
+                  paperclipBridgeLaunch: {
+                    status: "disabled",
+                    retryable: false,
+                    needsHuman: true,
+                  },
+                }
+              : null)
+            ?? (paperclipBridgeLaunchAmbiguousFailure
+              ? paperclipBridgeLaunchAmbiguousResultJson(paperclipBridgeLaunchAmbiguousFailure)
+              : null)
+            ?? (processSessionLaunchAmbiguousFailure
               ? processSessionLaunchAmbiguousResultJson(processSessionLaunchAmbiguousFailure)
               : null)
             ?? workspaceValidationFailure?.resultJson
@@ -15545,17 +15899,44 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           const processSessionLaunchAmbiguousSetupFailure = isProcessSessionLaunchAmbiguousFailure(outerErr)
             ? outerErr
             : null;
+          const paperclipBridgeLaunchAmbiguousSetupFailure = isPaperclipBridgeLaunchAmbiguousFailure(outerErr)
+            ? outerErr
+            : null;
+          const paperclipBridgeDisabledSetupFailure = isPaperclipCallbackBridgeDisabledError(outerErr)
+            ? outerErr
+            : null;
+          const executionTargetInvalidSetupFailure = isPaperclipExecutionTargetInvalidError(outerErr)
+            ? outerErr
+            : null;
           const workspaceValidationSetupFailure = isWorkspaceValidationFailure(outerErr) ? outerErr : null;
           const configurationIncompleteSetupFailure = isConfigurationIncompleteFailure(outerErr) ? outerErr : null;
           const recordedResponsibleUserDenialCode =
             normalizeResponsibleUserDenialCode((await getRun(runId).catch(() => null))?.errorCode);
           const setupFailureErrorCode =
+            executionTargetInvalidSetupFailure?.code ??
+            paperclipBridgeDisabledSetupFailure?.code ??
+            paperclipBridgeLaunchAmbiguousSetupFailure?.code ??
             processSessionLaunchAmbiguousSetupFailure?.code ??
             workspaceValidationSetupFailure?.code ??
             configurationIncompleteSetupFailure?.code ??
             recordedResponsibleUserDenialCode ??
             "setup_failed";
           logger.error({ err: outerErr, runId }, "heartbeat execution setup failed");
+          if (paperclipBridgeLaunchAmbiguousSetupFailure) {
+            await retainPaperclipBridgeLaunchForReconciliation({
+              run,
+              message,
+              resultJson: paperclipBridgeLaunchAmbiguousResultJson(
+                paperclipBridgeLaunchAmbiguousSetupFailure,
+              ),
+            }).catch((retainError) => {
+              logger.error(
+                { err: retainError, runId },
+                "failed to preserve callback bridge launch reconciliation fence after setup failure",
+              );
+            });
+            return;
+          }
           if (processSessionLaunchAmbiguousSetupFailure) {
             await retainProcessSessionLaunchForReconciliation({
               run,
@@ -15572,7 +15953,8 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           const replayFencedSetupRun = await getRun(runId).catch(() => null);
           if (
             processSessionLaunchFenceObserved ||
-            (replayFencedSetupRun && isProcessSessionLaunchReplayFencedRun(replayFencedSetupRun))
+            callbackBridgeLaunchFenceObserved ||
+            (replayFencedSetupRun && isRemoteLaunchReplayFencedRun(replayFencedSetupRun))
           ) {
             // A provider mutation may already have been accepted even when a
             // later, unrelated setup callback throws an ordinary Error. Never
@@ -15580,15 +15962,27 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
             // dependent task. Preserve the exact existing launch identity and
             // keep issue/environment/runtime custody retained.
             if (replayFencedSetupRun) {
-              await retainProcessSessionLaunchForReconciliation({
-                run: replayFencedSetupRun,
-                message,
-              }).catch((retainError) => {
-                logger.error(
-                  { err: retainError, runId },
-                  "failed to preserve active remote ACP launch fence after setup failure",
-                );
-              });
+              if (isPaperclipBridgeLaunchReplayFencedRun(replayFencedSetupRun)) {
+                await retainPaperclipBridgeLaunchForReconciliation({
+                  run: replayFencedSetupRun,
+                  message,
+                }).catch((retainError) => {
+                  logger.error(
+                    { err: retainError, runId },
+                    "failed to preserve active callback bridge launch fence after setup failure",
+                  );
+                });
+              } else {
+                await retainProcessSessionLaunchForReconciliation({
+                  run: replayFencedSetupRun,
+                  message,
+                }).catch((retainError) => {
+                  logger.error(
+                    { err: retainError, runId },
+                    "failed to preserve active remote ACP launch fence after setup failure",
+                  );
+                });
+              }
             } else {
               logger.error(
                 { runId },
@@ -15607,7 +16001,30 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
                 errorCode: setupFailureErrorCode,
                 errorMessage: message,
                 resultJson:
-                  (processSessionLaunchAmbiguousSetupFailure
+                  (executionTargetInvalidSetupFailure
+                    ? {
+                        executionTarget: {
+                          status: "invalid",
+                          retryable: false,
+                          needsHuman: true,
+                        },
+                      }
+                    : null)
+                  ?? (paperclipBridgeDisabledSetupFailure
+                    ? {
+                        paperclipBridgeLaunch: {
+                          status: "disabled",
+                          retryable: false,
+                          needsHuman: true,
+                        },
+                      }
+                    : null)
+                  ?? (paperclipBridgeLaunchAmbiguousSetupFailure
+                    ? paperclipBridgeLaunchAmbiguousResultJson(
+                      paperclipBridgeLaunchAmbiguousSetupFailure,
+                    )
+                    : null)
+                  ?? (processSessionLaunchAmbiguousSetupFailure
                     ? processSessionLaunchAmbiguousResultJson(processSessionLaunchAmbiguousSetupFailure)
                     : null)
                     ?? workspaceValidationSetupFailure?.resultJson
@@ -15687,7 +16104,8 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           if (
             latestRun &&
             !processSessionLaunchFenceObserved &&
-            !isProcessSessionLaunchReplayFencedRun(latestRun)
+            !callbackBridgeLaunchFenceObserved &&
+            !isRemoteLaunchReplayFencedRun(latestRun)
           ) {
             await releaseEnvironmentLeasesForRun({
               runId: run.id,
@@ -15811,16 +16229,30 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     );
   }
 
-  function buildConfigurationIncompleteRecoveryComment(input: {
-    latestRun: Pick<typeof heartbeatRuns.$inferSelect, "error" | "errorCode"> | null | undefined;
-  }) {
+function buildConfigurationIncompleteRecoveryComment(input: {
+  latestRun: Pick<typeof heartbeatRuns.$inferSelect, "error" | "errorCode"> | null | undefined;
+}) {
     const failureSummary = summarizeRunFailureForIssueComment(input.latestRun);
     return (
       "Paperclip stopped before dispatching the adapter because required secret/env bindings are missing. " +
       `Resolving them as a runtime failure would only produce repeated opaque setup failures.${failureSummary ?? ""} ` +
       "Moving it to `blocked` with a source-scoped recovery action so an operator can bind the missing secret(s) before resuming."
-    );
-  }
+  );
+}
+
+function buildPaperclipExecutionConfigurationFenceRecoveryComment(input: {
+  latestRun: Pick<typeof heartbeatRuns.$inferSelect, "error" | "errorCode"> | null | undefined;
+}) {
+  const failureSummary = summarizeRunFailureForIssueComment(input.latestRun);
+  const reason = input.latestRun?.errorCode === PAPERCLIP_CALLBACK_BRIDGE_DISABLED
+    ? "the remote callback bridge is intentionally default-disabled"
+    : "the configured execution target is invalid";
+  return (
+    `Paperclip stopped before adapter or provider dispatch because ${reason}.${failureSummary ?? ""} ` +
+    "Automatic retry cannot repair this configuration fence. Moving the issue to `blocked` for explicit " +
+    "operator configuration or an intentional manual resolution."
+  );
+}
 
   function buildExecutionReviewParticipantRecoveryComment(input: {
     latestRun: Pick<typeof heartbeatRuns.$inferSelect, "error" | "errorCode"> | null | undefined;
@@ -15951,6 +16383,39 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
 
       if (!issue) return null;
       if (issue.executionRunId && issue.executionRunId !== run.id) return null;
+
+      // The callback bridge default-off and invalid-target fences are terminal
+      // configuration outcomes. Block before deferred-wake, review-participant,
+      // or immediate-recovery promotion can create another provider-capable run.
+      const configurationFenceExecutionState = parseIssueExecutionState(issue.executionState);
+      const configurationFenceParticipant = configurationFenceExecutionState?.status === "pending"
+        ? configurationFenceExecutionState.currentParticipant
+        : null;
+      const configurationFenceRunOwnsIssue =
+        (!issue.assigneeUserId && issue.assigneeAgentId === run.agentId) ||
+        (
+          issue.status === "in_review" &&
+          configurationFenceParticipant?.type === "agent" &&
+          configurationFenceParticipant.agentId === run.agentId
+        );
+      if (
+        isPaperclipExecutionConfigurationFencedRun(run) &&
+        (issue.status === "todo" || issue.status === "in_progress" || issue.status === "in_review") &&
+        configurationFenceRunOwnsIssue
+      ) {
+        return {
+          kind: "blocked" as const,
+          issue,
+          previousStatus: issue.status,
+          comment: buildPaperclipExecutionConfigurationFenceRecoveryComment({ latestRun: run }),
+          recoveryCause: PAPERCLIP_EXECUTION_CONFIGURATION_RECOVERY_CAUSE,
+          recoveryOwnerAgentId:
+            configurationFenceParticipant?.type === "agent" &&
+            configurationFenceParticipant.agentId === run.agentId
+              ? configurationFenceParticipant.agentId
+              : undefined,
+        };
+      }
 
       // Workspace-validation recovery: if the finalizing run failed workspace
       // validation, surface the primary issue for the blocked-recovery comment path.
@@ -16562,6 +17027,8 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
             ? WORKSPACE_VALIDATION_RECOVERY_CAUSE
             : promotionResult.recoveryCause === CONFIGURATION_INCOMPLETE_RECOVERY_CAUSE
               ? CONFIGURATION_INCOMPLETE_RECOVERY_CAUSE
+            : promotionResult.recoveryCause === PAPERCLIP_EXECUTION_CONFIGURATION_RECOVERY_CAUSE
+              ? PAPERCLIP_EXECUTION_CONFIGURATION_RECOVERY_CAUSE
               : promotionResult.recoveryCause === EXECUTION_REVIEW_PARTICIPANT_RECOVERY_CAUSE
                 ? EXECUTION_REVIEW_PARTICIPANT_RECOVERY_CAUSE
               : undefined,
@@ -17959,6 +18426,50 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     if (!run) throw notFound("Heartbeat run not found");
     if (!CANCELLABLE_HEARTBEAT_RUN_STATUSES.includes(run.status as (typeof CANCELLABLE_HEARTBEAT_RUN_STATUSES)[number])) return run;
     let remoteLaunchReleased = false;
+    if (isPaperclipBridgeLaunchReplayFencedRun(run)) {
+      let reconciliation: Awaited<ReturnType<typeof reconcileRetainedPaperclipBridgeLaunchResources>>;
+      try {
+        reconciliation = await reconcileRetainedPaperclipBridgeLaunchResources(run);
+      } catch (error) {
+        reconciliation = {
+          found: true,
+          controllerFound: false,
+          remoteCancelled: false,
+          cleanupComplete: false,
+          released: false,
+        };
+        await appendRunEvent(run, await nextRunEventSeq(run.id), {
+          eventType: "lifecycle",
+          stream: "system",
+          level: "error",
+          message: "Callback bridge reconciliation failed; run and issue lock remain fenced",
+          payload: {
+            errorCode: PAPERCLIP_CALLBACK_BRIDGE_LAUNCH_AMBIGUOUS,
+            needsHuman: true,
+            cleanupError: error instanceof Error ? error.message : String(error),
+          },
+        });
+      }
+      if (!reconciliation.released) {
+        throw conflict(
+          "Callback bridge cancellation and retained cleanup must be reconciled before cancelling or releasing its issue lock",
+          {
+            code: PAPERCLIP_CALLBACK_BRIDGE_LAUNCH_AMBIGUOUS,
+            needsHuman: true,
+            reconciliation,
+            paperclipBridgeLaunch: parseObject(parseObject(run.resultJson).paperclipBridgeLaunch),
+          },
+        );
+      }
+      remoteLaunchReleased = true;
+      await appendRunEvent(run, await nextRunEventSeq(run.id), {
+        eventType: "lifecycle",
+        stream: "system",
+        level: "info",
+        message: "Callback bridge cancellation reconciled; cancellation may release retained run resources",
+        payload: { errorCode: PAPERCLIP_CALLBACK_BRIDGE_LAUNCH_AMBIGUOUS, reconciliation },
+      });
+    }
     if (isProcessSessionLaunchReplayFencedRun(run)) {
       let reconciliation:
         | Awaited<ReturnType<typeof reconcileRetainedProcessSessionLaunchResources>>
@@ -18106,6 +18617,38 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     let cancelledCount = 0;
     for (const run of runs) {
       let remoteLaunchReleased = false;
+      if (isPaperclipBridgeLaunchReplayFencedRun(run)) {
+        const reconciliation = await reconcileRetainedPaperclipBridgeLaunchResources(run).catch(() => ({
+          found: true,
+          controllerFound: false,
+          remoteCancelled: false,
+          cleanupComplete: false,
+          released: false,
+        }));
+        if (reconciliation.released) {
+          remoteLaunchReleased = true;
+          await appendRunEvent(run, await nextRunEventSeq(run.id), {
+            eventType: "lifecycle",
+            stream: "system",
+            level: "info",
+            message: "Callback bridge cancellation reconciled during agent pause",
+            payload: { errorCode: PAPERCLIP_CALLBACK_BRIDGE_LAUNCH_AMBIGUOUS, reconciliation },
+          });
+        } else {
+          await appendRunEvent(run, await nextRunEventSeq(run.id), {
+            eventType: "lifecycle",
+            stream: "system",
+            level: "warn",
+            message: "Agent pause retained a callback bridge without exact cancellation/cleanup reconciliation",
+            payload: {
+              errorCode: PAPERCLIP_CALLBACK_BRIDGE_LAUNCH_AMBIGUOUS,
+              needsHuman: true,
+              reconciliation,
+            },
+          });
+          continue;
+        }
+      }
       if (isProcessSessionLaunchReplayFencedRun(run)) {
         let reconciliation:
           | Awaited<ReturnType<typeof reconcileRetainedProcessSessionLaunchResources>>

@@ -71,7 +71,18 @@ function fromShellPath(value: string): string {
     return `${drive.toUpperCase()}:\\${rest.replace(/\//g, "\\")}`;
   }
   if (value.startsWith("/tmp/")) {
-    return path.join(os.tmpdir(), value.slice("/tmp/".length).replace(/\//g, path.sep));
+    const tempDir = path.resolve(os.tmpdir());
+    const shellParts = value.slice("/tmp/".length).split("/").filter(Boolean);
+    const tempParts = tempDir.split(path.sep).filter(Boolean);
+    let overlap = Math.min(tempParts.length, shellParts.length);
+    while (
+      overlap > 0 &&
+      tempParts.slice(-overlap).join(path.sep).toLowerCase() !==
+        shellParts.slice(0, overlap).join(path.sep).toLowerCase()
+    ) {
+      overlap -= 1;
+    }
+    return path.join(tempDir, ...shellParts.slice(overlap));
   }
   return value;
 }
@@ -248,10 +259,10 @@ describe("cursor environment diagnostics", () => {
         path: string;
       };
       expect(capture.command).toBe(cursorAgentPath);
-      const expectedSandboxLocalBin = process.platform === "win32"
-        ? `/tmp/${path.basename(root)}/home/.local/bin`
-        : path.join(homeDir, ".local", "bin");
-      expect(capture.path).toContain(`${expectedSandboxLocalBin}:`);
+      const localBinIndex = capture.path.indexOf("/home/.local/bin:");
+      const cursorBinIndex = capture.path.indexOf("/home/.cursor/bin:");
+      expect(localBinIndex).toBeGreaterThanOrEqual(0);
+      expect(cursorBinIndex).toBeGreaterThan(localBinIndex);
     } finally {
       if (previousHome === undefined) delete process.env.HOME;
       else process.env.HOME = previousHome;

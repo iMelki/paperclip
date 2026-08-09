@@ -30,6 +30,10 @@ import { reconcileBuiltInAgentsOnStartup } from "../services/built-in-agents.js"
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
 
+// Archive coverage exercises control-plane cancellation, not local child cleanup.
+// Sessioned local adapters without authoritative process custody must fail closed.
+const NON_LOCAL_CANCELLATION_TEST_ADAPTER = "openclaw_gateway";
+
 if (!embeddedPostgresSupport.supported) {
   console.warn(
     `Skipping embedded Postgres company service tests on this host: ${embeddedPostgresSupport.reason ?? "unsupported environment"}`,
@@ -154,7 +158,7 @@ describeEmbeddedPostgres("companyService", () => {
         name: "Running Agent",
         role: "engineer",
         status: "running",
-        adapterType: "codex_local",
+        adapterType: NON_LOCAL_CANCELLATION_TEST_ADAPTER,
         adapterConfig: {},
         runtimeConfig: {},
         permissions: {},
@@ -430,7 +434,7 @@ describeEmbeddedPostgres("companyService", () => {
         name: "Running Agent",
         role: "engineer",
         status: "running",
-        adapterType: "codex_local",
+        adapterType: NON_LOCAL_CANCELLATION_TEST_ADAPTER,
         adapterConfig: {},
         runtimeConfig: {},
         permissions: {},
@@ -701,7 +705,7 @@ describeEmbeddedPostgres("companyService", () => {
       name: "Idle Agent",
       role: "engineer",
       status: "idle",
-      adapterType: "codex_local",
+      adapterType: NON_LOCAL_CANCELLATION_TEST_ADAPTER,
       adapterConfig: {},
       runtimeConfig: {},
       permissions: {},
@@ -819,7 +823,7 @@ describeEmbeddedPostgres("companyService", () => {
       name: "Idle Agent",
       role: "engineer",
       status: "idle",
-      adapterType: "codex_local",
+      adapterType: NON_LOCAL_CANCELLATION_TEST_ADAPTER,
       adapterConfig: {},
       runtimeConfig: {},
       permissions: {},

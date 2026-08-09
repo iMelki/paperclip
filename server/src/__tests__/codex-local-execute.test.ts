@@ -2,9 +2,53 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+
+const callbackBridgeTestControl = vi.hoisted(() => ({ enabled: false }));
+
+vi.mock("@paperclipai/adapter-utils/execution-target", async () => {
+  const actual = await vi.importActual<
+    typeof import("@paperclipai/adapter-utils/execution-target")
+  >("@paperclipai/adapter-utils/execution-target");
+  const testCapability = actual.issuePaperclipCallbackBridgeTestCapability();
+
+  return {
+    ...actual,
+    assertPaperclipCallbackBridgeEnabled: (
+      capability?: Parameters<typeof actual.assertPaperclipCallbackBridgeEnabled>[0],
+    ) => actual.assertPaperclipCallbackBridgeEnabled(
+      callbackBridgeTestControl.enabled ? testCapability : capability,
+    ),
+    startAdapterExecutionTargetPaperclipBridge: (
+      input: Parameters<typeof actual.startAdapterExecutionTargetPaperclipBridge>[0],
+    ) => actual.startAdapterExecutionTargetPaperclipBridge({
+      ...input,
+      testOnlyCapability: callbackBridgeTestControl.enabled
+        ? testCapability
+        : input.testOnlyCapability,
+    }),
+  };
+});
+
+import {
+  createPrivateExecutableAssetDirectory,
+  type PrivateExecutableAssetDirectory,
+} from "@paperclipai/adapter-utils/private-executable-asset";
+import { PAPERCLIP_CALLBACK_BRIDGE_DISABLED } from "@paperclipai/adapter-utils/execution-target";
 import { runChildProcess } from "@paperclipai/adapter-utils/server-utils";
 import { resolveTestShellCommand } from "@paperclipai/adapter-utils/test-shell";
 import { execute } from "@paperclipai/adapter-codex-local/server";
+
+async function withCallbackBridgeTestCapability<T>(run: () => Promise<T>): Promise<T> {
+  if (callbackBridgeTestControl.enabled) {
+    throw new Error("Callback bridge test capability is already active.");
+  }
+  callbackBridgeTestControl.enabled = true;
+  try {
+    return await run();
+  } finally {
+    callbackBridgeTestControl.enabled = false;
+  }
+}
 
 async function writeFakeCodexCommand(commandPath: string): Promise<void> {
   const script = `#!/usr/bin/env node
@@ -66,17 +110,35 @@ type LogEntry = {
 const fakeCodexAuthJson = JSON.stringify({ OPENAI_API_KEY: "sk-test-codex-local" });
 
 const codexHomeOverrides: Array<string | undefined> = [];
+const privateCodexHomeAssets = new Set<PrivateExecutableAssetDirectory>();
 
-afterEach(() => {
+afterEach(async () => {
+  callbackBridgeTestControl.enabled = false;
   while (codexHomeOverrides.length > 0) {
     const previous = codexHomeOverrides.pop();
     if (previous === undefined) delete process.env.CODEX_HOME;
     else process.env.CODEX_HOME = previous;
   }
+  for (const asset of privateCodexHomeAssets) {
+    await asset.cleanup();
+  }
+  privateCodexHomeAssets.clear();
 });
 
 async function seedSharedCodexAuth(homeRoot: string): Promise<void> {
-  const sharedCodexHome = path.join(homeRoot, ".codex");
+  // The Windows copy-back path intentionally requires its host CODEX_HOME to
+  // prevent untrusted parent DELETE_CHILD authority. `%TEMP%` on this host does
+  // not satisfy that production contract, so use the same private-directory
+  // primitive as the adapter tests rather than weakening custody for fixtures.
+  const sharedCodexHome = process.platform === "win32"
+    ? await (async () => {
+        const asset = await createPrivateExecutableAssetDirectory({
+          prefix: "paperclip-codex-execute-host-home-test-",
+        });
+        privateCodexHomeAssets.add(asset);
+        return asset.directoryPath;
+      })()
+    : path.join(homeRoot, ".codex");
   codexHomeOverrides.push(process.env.CODEX_HOME);
   process.env.CODEX_HOME = sharedCodexHome;
   await fs.mkdir(sharedCodexHome, { recursive: true });
@@ -461,7 +523,71 @@ describe("codex execute", () => {
     }
   });
 
-  it("injects bridge env into sandbox-managed remote runs", async () => {
+  it("denies sandbox callback execution without the exact test capability and performs no effects", async () => {
+    const sideEffectPath = path.join(
+      os.tmpdir(),
+      `paperclip-codex-disabled-${process.pid}-${Date.now()}`,
+    );
+    const runnerExecute = vi.fn(async () => {
+      throw new Error("sandbox runner must not execute while the callback bridge is disabled");
+    });
+    const onLog = vi.fn(async () => undefined);
+    const onMeta = vi.fn(async () => undefined);
+    const onEvent = vi.fn(async () => undefined);
+    const onSpawn = vi.fn(async () => undefined);
+
+    await expect(execute({
+      runId: "run-sandbox-disabled",
+      agent: {
+        id: "agent-1",
+        companyId: "company-1",
+        name: "Codex Coder",
+        adapterType: "codex_local",
+        adapterConfig: { engine: "cli" },
+      },
+      runtime: {
+        sessionId: null,
+        sessionParams: null,
+        sessionDisplayId: null,
+        taskKey: null,
+      },
+      config: {
+        engine: "cli",
+        command: "codex",
+        cwd: sideEffectPath,
+      },
+      context: {
+        paperclipWorkspace: { cwd: sideEffectPath, source: "project_primary" },
+      },
+      executionTarget: {
+        kind: "remote",
+        transport: "sandbox",
+        providerKey: "fixture",
+        environmentId: "env-1",
+        leaseId: "lease-1",
+        remoteCwd: "/remote/workspace",
+        runner: { execute: runnerExecute },
+      },
+      authToken: "run-jwt-token",
+      onLog,
+      onMeta,
+      onEvent,
+      onSpawn,
+    })).rejects.toMatchObject({
+      code: PAPERCLIP_CALLBACK_BRIDGE_DISABLED,
+      retryable: false,
+      needsHuman: true,
+    });
+
+    expect(runnerExecute).not.toHaveBeenCalled();
+    expect(onLog).not.toHaveBeenCalled();
+    expect(onMeta).not.toHaveBeenCalled();
+    expect(onEvent).not.toHaveBeenCalled();
+    expect(onSpawn).not.toHaveBeenCalled();
+    await expect(fs.access(sideEffectPath)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("injects bridge env into sandbox-managed remote runs with the exact test capability", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-codex-execute-sandbox-"));
     const localWorkspace = path.join(root, "workspace");
     const remoteWorkspace = path.join(root, "sandbox");
@@ -481,7 +607,7 @@ describe("codex execute", () => {
     await seedSharedCodexAuth(root);
 
     try {
-      const result = await execute({
+      const result = await withCallbackBridgeTestCapability(() => execute({
         runId: "run-sandbox-auth",
         agent: {
           id: "agent-1",
@@ -518,7 +644,8 @@ describe("codex execute", () => {
         },
         authToken: "run-jwt-token",
         onLog: async () => {},
-      });
+        onEvent: async () => {},
+      }));
 
       expect(result.exitCode).toBe(0);
       expect(result.errorMessage).toBeNull();
@@ -535,7 +662,7 @@ describe("codex execute", () => {
       else process.env.PATH = previousPath;
       await fs.rm(root, { recursive: true, force: true });
     }
-  });
+  }, process.platform === "win32" ? 30_000 : 10_000);
 
   it("injects structured Paperclip wake payloads into env and prompt", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-codex-execute-wake-"));

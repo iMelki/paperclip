@@ -15,19 +15,28 @@ import type {
 import {
   ACP_PROCESS_SESSION_LAUNCH_AMBIGUOUS,
   ACP_PROCESS_SESSION_LAUNCH_EVENT,
+  PAPERCLIP_CALLBACK_BRIDGE_DISABLED,
   AdapterExecutionTargetProcessSessionLaunchAmbiguousError,
   adapterExecutionTargetSessionIdentity,
+  adapterExecutionTargetPaperclipBridgeLaunchEvent,
+  assertPaperclipCallbackBridgeEnabled,
   describeAdapterExecutionTarget,
   formatAdapterExecutionTimeoutErrorMessage,
   formatAdapterExecutionTimeoutStartLogLine,
   isAdapterExecutionTargetProcessSessionLaunchAmbiguousError,
+  isAdapterExecutionTargetPaperclipBridgeLaunchAmbiguousError,
+  isPaperclipCallbackBridgeDisabledError,
   prepareAdapterExecutionTargetRuntime,
-  readAdapterExecutionTarget,
+  readAdapterExecutionTargetFailClosed,
   resolveAdapterExecutionTargetTimeout,
+  retainAdapterExecutionTargetPaperclipBridgeDependentResources,
+  sealAdapterExecutionTargetPaperclipBridgeDependentResources,
   startAdapterExecutionTargetPaperclipBridge,
   startAdapterExecutionTargetProcessSessionBridge,
   type AdapterExecutionTarget,
+  type AdapterExecutionTargetAcceptedProcessSessionController,
   type AdapterExecutionTargetPaperclipBridgeHandle,
+  type PaperclipCallbackBridgeTestCapability,
   type AdapterExecutionTargetProcessSessionLaunchIdentity,
   type AdapterExecutionTargetProcessSessionBridgeHandle,
   type AdapterExecutionTargetTimeoutResolution,
@@ -289,6 +298,8 @@ export interface AcpxEngineExecutorOptions {
    * Production remote ACP process-session dispatch remains hard-disabled.
    */
   testOnlyEnableRemoteProcessSessionReleaseProtocol?: boolean;
+  /** Exact module-owned callback capability. Rejected outside NODE_ENV=test. */
+  testOnlyPaperclipCallbackBridgeCapability?: PaperclipCallbackBridgeTestCapability;
   now?: () => number;
   warmHandles?: Map<string, RuntimeCacheEntry>;
   /**
@@ -409,6 +420,7 @@ interface ProcessSessionLaunchReconciliationResources {
   runId: string;
   launchId: string;
   processSessionBridge: AdapterExecutionTargetProcessSessionBridgeHandle | null;
+  acceptedProcessSessionController: AdapterExecutionTargetAcceptedProcessSessionController | null;
   paperclipBridge: AdapterExecutionTargetPaperclipBridgeHandle | null;
   acceptedHostResourceCleanup: (() => Promise<void>) | null;
   remoteManagedHomeTeardown: (() => Promise<void>) | null;
@@ -428,6 +440,8 @@ interface ProcessSessionLaunchReconciliationResources {
 
 interface ProcessSessionLaunchReconciliationResourceEntry {
   bundles: ProcessSessionLaunchReconciliationResources[];
+  revision: number;
+  registrationOpen: boolean;
   stopPromise: Promise<void> | null;
   releasePromise: Promise<boolean> | null;
 }
@@ -454,60 +468,101 @@ async function releaseAcpxProcessSessionLaunchReconciliationResources(input: {
   const key = processSessionLaunchReconciliationResourceKey(input);
   const entry = processSessionLaunchReconciliationResources.get(key);
   if (!entry) return false;
-  if (entry.releasePromise) return entry.releasePromise;
+  if (entry.releasePromise) {
+    const active = entry.releasePromise;
+    const result = await active;
+    if (!result && entry.releasePromise === active) entry.releasePromise = null;
+    return result;
+  }
 
   entry.releasePromise = (async () => {
-    const failures: unknown[] = [];
-    for (const resources of entry.bundles) {
+    for (;;) {
+      const revision = entry.revision;
+      const bundleCount = entry.bundles.length;
+      const failures: unknown[] = [];
+      if (entry.bundles.some((resources) =>
+        !resources.completion.processBridgeStopped ||
+        !resources.completion.paperclipBridgeStopped ||
+        !resources.completion.acceptedHostResourcesCleaned
+      )) {
+        return false;
+      }
+      for (const resources of entry.bundles) {
+        if (
+          resources.remoteManagedHomeTeardown &&
+          !resources.completion.managedHomeTeardownComplete
+        ) {
+          try {
+            await resources.remoteManagedHomeTeardown();
+            resources.completion.managedHomeTeardownComplete = true;
+          } catch (error) {
+            failures.push(error);
+            continue;
+          }
+        }
+        if (resources.remoteStagingDispose && !resources.completion.stagingDisposeComplete) {
+          try {
+            await resources.remoteStagingDispose();
+            resources.completion.stagingDisposeComplete = true;
+          } catch (error) {
+            failures.push(error);
+          }
+        }
+      }
+
+      if (failures.length > 0) {
+        throw new AggregateError(failures, `Failed to complete retained ACP cleanup for ${key}`);
+      }
+
+      // Do not release a staging lease until all asynchronously registered
+      // cleanup bundles have reached a stable revision. Once sealed, every
+      // release callback below runs synchronously in the same JS turn, so a
+      // concurrent registration cannot interleave after the first release.
+      if (entry.revision !== revision || entry.bundles.length !== bundleCount) continue;
+      await Promise.resolve();
+      if (entry.revision !== revision || entry.bundles.length !== bundleCount) continue;
+      entry.registrationOpen = false;
+
+      for (const resources of entry.bundles) {
+        const release = resources.sessionStagingLeaseRelease;
+        if (!release || resources.completion.leaseReleased) continue;
+        try {
+          release();
+          resources.completion.leaseReleased = true;
+        } catch (error) {
+          failures.push(error);
+        }
+      }
+
+      if (failures.length > 0) {
+        throw new AggregateError(failures, `Failed to release all reconciled ACP staging leases for ${key}`);
+      }
+      const allComplete = entry.bundles.every((resources) =>
+        resources.completion.processBridgeStopped &&
+        resources.completion.paperclipBridgeStopped &&
+        resources.completion.acceptedHostResourcesCleaned &&
+        resources.completion.managedHomeTeardownComplete &&
+        resources.completion.stagingDisposeComplete &&
+        resources.completion.leaseReleased
+      );
+      if (!allComplete) return false;
       if (
-        resources.remoteManagedHomeTeardown &&
-        !resources.completion.managedHomeTeardownComplete
+        entry.revision === revision &&
+        entry.bundles.length === bundleCount &&
+        processSessionLaunchReconciliationResources.get(key) === entry
       ) {
-        try {
-          await resources.remoteManagedHomeTeardown();
-          resources.completion.managedHomeTeardownComplete = true;
-        } catch (error) {
-          failures.push(error);
-          continue;
-        }
-      }
-      if (resources.remoteStagingDispose && !resources.completion.stagingDisposeComplete) {
-        try {
-          await resources.remoteStagingDispose();
-          resources.completion.stagingDisposeComplete = true;
-        } catch (error) {
-          failures.push(error);
-        }
+        processSessionLaunchReconciliationResources.delete(key);
+        return true;
       }
     }
-
-    if (failures.length > 0) {
-      throw new AggregateError(failures, `Failed to complete retained ACP cleanup for ${key}`);
-    }
-
-    for (const resources of entry.bundles) {
-      const release = resources.sessionStagingLeaseRelease;
-      if (!release || resources.completion.leaseReleased) continue;
-      try {
-        release();
-        resources.completion.leaseReleased = true;
-      } catch (error) {
-        failures.push(error);
-      }
-    }
-
-    if (failures.length > 0) {
-      throw new AggregateError(failures, `Failed to release all reconciled ACP staging leases for ${key}`);
-    }
-    if (processSessionLaunchReconciliationResources.get(key) === entry) {
-      processSessionLaunchReconciliationResources.delete(key);
-    }
-    return true;
   })().catch((error) => {
     entry.releasePromise = null;
     throw error;
   });
-  return entry.releasePromise;
+  const active = entry.releasePromise;
+  const result = await active;
+  if (!result && entry.releasePromise === active) entry.releasePromise = null;
+  return result;
 }
 
 export interface AcpxProcessSessionLaunchReconciliationResult {
@@ -550,59 +605,73 @@ async function stopAcpxProcessSessionLaunchResources(input: {
   const entry = processSessionLaunchReconciliationResources.get(key);
   if (!entry) return false;
   if (entry.stopPromise) {
-    await entry.stopPromise;
-    return true;
+    const active = entry.stopPromise;
+    await active;
+    if (entry.bundles.every((resources) =>
+      resources.completion.processBridgeStopped &&
+      resources.completion.paperclipBridgeStopped &&
+      resources.completion.acceptedHostResourcesCleaned
+    )) return true;
+    if (entry.stopPromise === active) entry.stopPromise = null;
   }
   entry.stopPromise = (async () => {
-    const failures: unknown[] = [];
-    for (const resources of entry.bundles) {
-      const steps: Array<{ run: () => Promise<void>; mark: () => void }> = [];
-      if (
-        resources.processSessionBridge &&
-        !resources.completion.processBridgeStopped
-      ) {
-        steps.push({
-          run: () => resources.processSessionBridge!.stop(),
-          mark: () => {
-            resources.completion.processBridgeStopped = true;
-          },
+    for (;;) {
+      const revision = entry.revision;
+      const bundleCount = entry.bundles.length;
+      const failures: unknown[] = [];
+      for (const resources of entry.bundles) {
+        const steps: Array<{ run: () => Promise<void>; mark: () => void }> = [];
+        if (
+          (resources.processSessionBridge || resources.acceptedProcessSessionController) &&
+          !resources.completion.processBridgeStopped
+        ) {
+          const controller = resources.processSessionBridge ?? resources.acceptedProcessSessionController!;
+          steps.push({
+            run: () => controller.stop(),
+            mark: () => {
+              resources.completion.processBridgeStopped = true;
+            },
+          });
+        }
+        if (resources.paperclipBridge && !resources.completion.paperclipBridgeStopped) {
+          steps.push({
+            run: () => resources.paperclipBridge!.stop(),
+            mark: () => {
+              resources.completion.paperclipBridgeStopped = true;
+            },
+          });
+        }
+        if (
+          resources.acceptedHostResourceCleanup &&
+          !resources.completion.acceptedHostResourcesCleaned
+        ) {
+          steps.push({
+            run: () => resources.acceptedHostResourceCleanup!(),
+            mark: () => {
+              resources.completion.acceptedHostResourcesCleaned = true;
+            },
+          });
+        }
+        const results = await Promise.allSettled(steps.map((step) => step.run()));
+        results.forEach((result, index) => {
+          if (result.status === "fulfilled") steps[index]?.mark();
         });
+        for (const result of results) {
+          if (result.status === "rejected") failures.push(result.reason);
+        }
       }
-      if (resources.paperclipBridge && !resources.completion.paperclipBridgeStopped) {
-        steps.push({
-          run: () => resources.paperclipBridge!.stop(),
-          mark: () => {
-            resources.completion.paperclipBridgeStopped = true;
-          },
-        });
+      if (failures.length > 0) {
+        throw new AggregateError(failures, `Failed to stop all ACP launch resources for ${key}`);
       }
-      if (
-        resources.acceptedHostResourceCleanup &&
-        !resources.completion.acceptedHostResourcesCleaned
-      ) {
-        steps.push({
-          run: () => resources.acceptedHostResourceCleanup!(),
-          mark: () => {
-            resources.completion.acceptedHostResourcesCleaned = true;
-          },
-        });
-      }
-      const results = await Promise.allSettled(steps.map((step) => step.run()));
-      results.forEach((result, index) => {
-        if (result.status === "fulfilled") steps[index]?.mark();
-      });
-      for (const result of results) {
-        if (result.status === "rejected") failures.push(result.reason);
-      }
-    }
-    if (failures.length > 0) {
-      throw new AggregateError(failures, `Failed to stop all ACP launch resources for ${key}`);
+      if (entry.revision === revision && entry.bundles.length === bundleCount) return;
     }
   })().catch((error) => {
     entry.stopPromise = null;
     throw error;
   });
-  await entry.stopPromise;
+  const active = entry.stopPromise;
+  await active;
+  if (entry.stopPromise === active) entry.stopPromise = null;
   return true;
 }
 
@@ -627,58 +696,65 @@ export async function reconcileAndReleaseAcpxProcessSessionLaunchResources(input
       released: false,
     };
   }
-  await revokeAcpxPaperclipBridgeResources(input);
-  if (entry.bundles.some((resources) => !resources.reconcileTerminal)) {
-    return {
-      found: true,
-      terminal: false,
-      treeCustodyVerified: false,
-      cleanupComplete: false,
-      released: false,
-    };
-  }
+  for (;;) {
+    const revision = entry.revision;
+    const bundles = [...entry.bundles];
+    await revokeAcpxPaperclipBridgeResources(input);
+    if (bundles.some((resources) => !resources.reconcileTerminal)) {
+      return {
+        found: true,
+        terminal: false,
+        treeCustodyVerified: false,
+        cleanupComplete: false,
+        released: false,
+      };
+    }
 
-  const reconciliations = await Promise.allSettled(
-    entry.bundles.map((resources) => resources.reconcileTerminal!()),
-  );
-  const terminal = reconciliations.every(
-    (result) => result.status === "fulfilled" && result.value === true,
-  );
-  if (!terminal) {
-    return {
-      found: true,
-      terminal: false,
-      treeCustodyVerified: false,
-      cleanupComplete: false,
-      released: false,
-    };
-  }
+    const reconciliations = await Promise.allSettled(
+      bundles.map((resources) => resources.reconcileTerminal!()),
+    );
+    const terminal = reconciliations.every(
+      (result) => result.status === "fulfilled" && result.value === true,
+    );
+    if (!terminal) {
+      return {
+        found: true,
+        terminal: false,
+        treeCustodyVerified: false,
+        cleanupComplete: false,
+        released: false,
+      };
+    }
+    if (entry.revision !== revision || entry.bundles.length !== bundles.length) continue;
 
-  const treeCustodyChecks = await Promise.allSettled(
-    entry.bundles.map((resources) => resources.reconcileTreeCustody?.() ?? Promise.resolve(false)),
-  );
-  const treeCustodyVerified = treeCustodyChecks.every(
-    (result) => result.status === "fulfilled" && result.value === true,
-  );
-  if (!treeCustodyVerified) {
+    const treeCustodyChecks = await Promise.allSettled(
+      bundles.map((resources) => resources.reconcileTreeCustody?.() ?? Promise.resolve(false)),
+    );
+    const treeCustodyVerified = treeCustodyChecks.every(
+      (result) => result.status === "fulfilled" && result.value === true,
+    );
+    if (!treeCustodyVerified) {
+      return {
+        found: true,
+        terminal: true,
+        treeCustodyVerified: false,
+        cleanupComplete: false,
+        released: false,
+      };
+    }
+    if (entry.revision !== revision || entry.bundles.length !== bundles.length) continue;
+
+    await stopAcpxProcessSessionLaunchResources(input);
+    if (entry.revision !== revision || entry.bundles.length !== bundles.length) continue;
+    const released = await releaseAcpxProcessSessionLaunchReconciliationResources(input);
     return {
       found: true,
       terminal: true,
-      treeCustodyVerified: false,
-      cleanupComplete: false,
-      released: false,
+      treeCustodyVerified: true,
+      cleanupComplete: released,
+      released,
     };
   }
-
-  await stopAcpxProcessSessionLaunchResources(input);
-  const released = await releaseAcpxProcessSessionLaunchReconciliationResources(input);
-  return {
-    found: true,
-    terminal: true,
-    treeCustodyVerified: true,
-    cleanupComplete: released,
-    released,
-  };
 }
 
 export async function requestStopAndWaitAcpxProcessSessionLaunch(input: {
@@ -705,7 +781,8 @@ function registerProcessSessionLaunchReconciliationResources(
   const registered: ProcessSessionLaunchReconciliationResources = {
     ...resources,
     completion: {
-      processBridgeStopped: resources.processSessionBridge === null,
+      processBridgeStopped:
+        resources.processSessionBridge === null && resources.acceptedProcessSessionController === null,
       paperclipBridgeStopped: resources.paperclipBridge === null,
       acceptedHostResourcesCleaned: resources.acceptedHostResourceCleanup === null,
       managedHomeTeardownComplete: resources.remoteManagedHomeTeardown === null,
@@ -715,15 +792,21 @@ function registerProcessSessionLaunchReconciliationResources(
   };
   const existing = processSessionLaunchReconciliationResources.get(key);
   if (existing) {
+    if (!existing.registrationOpen) {
+      throw new Error(
+        `Cannot attach ACP launch resources for ${key} after staging-lease release was sealed.`,
+      );
+    }
     // Never overwrite and lose a prior cleanup authority. A duplicate identity
     // is unexpected, but retaining both bundles keeps reconciliation complete.
     existing.bundles.push(registered);
-    existing.stopPromise = null;
-    existing.releasePromise = null;
+    existing.revision += 1;
     return;
   }
   processSessionLaunchReconciliationResources.set(key, {
     bundles: [registered],
+    revision: 1,
+    registrationOpen: true,
     stopPromise: null,
     releasePromise: null,
   });
@@ -1658,22 +1741,10 @@ async function buildRuntime(input: {
   const useConfiguredInsteadOfAgentHome = workspaceSource === "agent_home" && configuredCwd.length > 0;
   const effectiveWorkspaceCwd = useConfiguredInsteadOfAgentHome ? "" : workspaceCwd;
   const cwd = effectiveWorkspaceCwd || configuredCwd || process.cwd();
-  const executionTarget = readAdapterExecutionTarget({
+  const executionTarget = readAdapterExecutionTargetFailClosed({
     executionTarget: input.ctx.executionTarget,
     legacyRemoteExecution: input.ctx.executionTransport?.remoteExecution,
   });
-  const rawExecutionTarget = input.ctx.executionTarget as unknown;
-  const directRemoteIntent =
-    typeof rawExecutionTarget === "object" &&
-    rawExecutionTarget !== null &&
-    !Array.isArray(rawExecutionTarget) &&
-    (rawExecutionTarget as Record<string, unknown>).kind === "remote";
-  const legacyRemoteIntent = input.ctx.executionTransport?.remoteExecution != null;
-  if ((directRemoteIntent || legacyRemoteIntent) && executionTarget?.kind !== "remote") {
-    throw new Error(
-      "Remote ACP execution target is invalid; refusing workspace materialization, provider dispatch, or host/local fallback.",
-    );
-  }
   const runnerBackedRemoteSandbox =
     executionTarget?.kind === "remote" &&
     executionTarget.transport === "sandbox" &&
@@ -1694,6 +1765,11 @@ async function buildRuntime(input: {
       "Remote ACP execution is disabled: the two-phase durable cleanup acknowledgement protocol " +
         "is incomplete (Paperclip #22), so no remote staging, launch, or host/local fallback is permitted.",
     );
+  }
+  if (remoteProcessSessionReleaseProtocolEnabled) {
+    // Issue #41 production NO-GO. This must precede cwd/state/skill/settings
+    // materialization as well as both concurrent callback/provider launches.
+    assertPaperclipCallbackBridgeEnabled(input.deps.testOnlyPaperclipCallbackBridgeCapability);
   }
   const remoteExecutionIdentity = adapterExecutionTargetSessionIdentity(executionTarget);
   const effectiveExecutionCwd =
@@ -2190,6 +2266,11 @@ async function buildRuntime(input: {
   let runtimeEnv: Record<string, string> = {};
   try {
     if (useRemoteProcessSession) {
+      if (!input.ctx.onEvent) {
+        throw new Error(
+          "Remote ACPX callback execution requires a durable adapter event sink before provider dispatch.",
+        );
+      }
       // Steps 5 + 6 — bring up BOTH host-side sandbox bridges concurrently. Their
       // remote subtrees are disjoint (`…/paperclip-bridge/…` vs
       // `…/process-sessions/…`), so the env-INDEPENDENT setup of each overlaps,
@@ -2213,6 +2294,11 @@ async function buildRuntime(input: {
           timeoutSec,
           hostApiToken: env.PAPERCLIP_API_KEY,
           onLog: input.ctx.onLog,
+          deferDependentResourceRegistration: true,
+          testOnlyCapability: input.deps.testOnlyPaperclipCallbackBridgeCapability,
+          onLaunchState: async (state) => {
+            await input.ctx.onEvent!(adapterExecutionTargetPaperclipBridgeLaunchEvent(state));
+          },
         }),
         concurrentBridgeStepMetrics,
       );
@@ -2282,6 +2368,40 @@ async function buildRuntime(input: {
       runtimeEnv = resolveRuntimeEnv(env);
     }
   } catch (err) {
+    if (isAdapterExecutionTargetPaperclipBridgeLaunchAmbiguousError(err)) {
+      const retained = retainAdapterExecutionTargetPaperclipBridgeDependentResources({
+        runId: err.launchIdentity.runId,
+        instanceId: err.launchIdentity.instanceId,
+        registrationId: `acpx:${err.launchIdentity.runId}:${err.launchIdentity.instanceId}`,
+        cleanupSteps: [
+          ...(processSessionBridge
+            ? [{ label: "acpx-process-session-bridge-stop", run: () => processSessionBridge!.stop() }]
+            : []),
+          ...(remoteManagedHomeTeardown
+            ? [{ label: "acpx-managed-home-teardown", run: remoteManagedHomeTeardown }]
+            : []),
+          ...(remoteStagingDispose
+            ? [{ label: "acpx-staged-runtime-dispose", run: remoteStagingDispose }]
+            : []),
+        ],
+        releaseSteps: [
+          ...(sessionStagingLeaseRelease
+            ? [{ label: "acpx-session-staging-lease-release", run: sessionStagingLeaseRelease }]
+            : []),
+        ],
+      });
+      const sealed = retained && sealAdapterExecutionTargetPaperclipBridgeDependentResources({
+        runId: err.launchIdentity.runId,
+        instanceId: err.launchIdentity.instanceId,
+      });
+      await input.ctx.onLog(
+        "stderr",
+        retained && sealed
+          ? `[paperclip] Preserving ACPX staging resources for callback bridge reconciliation (${err.launchIdentity.instanceId}).\n`
+          : `[paperclip] Callback bridge reconciliation controller was unavailable; preserving the ACPX session lease and requiring host-loss recovery (${err.launchIdentity.instanceId}).\n`,
+      );
+      throw err;
+    }
     if (
       !isAdapterExecutionTargetProcessSessionLaunchAmbiguousError(err) &&
       processSessionBridge?.launchIdentity
@@ -2322,6 +2442,7 @@ async function buildRuntime(input: {
             runId: err.launchIdentity.runId,
             launchId: err.launchIdentity.launchId,
             processSessionBridge,
+            acceptedProcessSessionController: err.acceptedProcessSessionController,
             paperclipBridge,
             acceptedHostResourceCleanup: err.cleanupAcceptedHostResources,
             remoteManagedHomeTeardown,
@@ -2342,6 +2463,7 @@ async function buildRuntime(input: {
               cause: stopError,
               acceptedStart: err.acceptedStart,
               reconcileTerminal: err.reconcileTerminal ?? undefined,
+              acceptedProcessSessionController: err.acceptedProcessSessionController ?? undefined,
               cleanupAcceptedHostResources: err.cleanupAcceptedHostResources ?? undefined,
             },
           );
@@ -2351,6 +2473,7 @@ async function buildRuntime(input: {
         runId: err.launchIdentity.runId,
         launchId: err.launchIdentity.launchId,
         processSessionBridge,
+        acceptedProcessSessionController: err.acceptedProcessSessionController,
         paperclipBridge: retainedPaperclipBridge,
         acceptedHostResourceCleanup: err.cleanupAcceptedHostResources,
         remoteManagedHomeTeardown,
@@ -2399,6 +2522,7 @@ async function buildRuntime(input: {
       runId: processSessionBridge.launchIdentity.runId,
       launchId: processSessionBridge.launchIdentity.launchId,
       processSessionBridge,
+      acceptedProcessSessionController: null,
       paperclipBridge,
       acceptedHostResourceCleanup: null,
       remoteManagedHomeTeardown,
@@ -2588,6 +2712,14 @@ async function cleanupRemoteBridges(
         runId: identity.runId,
         launchId: identity.launchId,
       });
+      if (!reconciliation.released) {
+        throw new Error(
+          "ACP process-session cleanup remained fenced after stop reconciliation: " +
+          `found=${String(reconciliation.found)}, terminal=${String(reconciliation.terminal)}, ` +
+          `treeCustodyVerified=${String(reconciliation.treeCustodyVerified)}, ` +
+          `cleanupComplete=${String(reconciliation.cleanupComplete)}, released=${String(reconciliation.released)}.`,
+        );
+      }
       return reconciliation;
     } catch (error) {
       throw new AdapterExecutionTargetProcessSessionLaunchAmbiguousError(
@@ -2607,7 +2739,37 @@ async function cleanupRemoteBridges(
     // Heartbeat observes the still-active launch fence and persists the durable
     // needs-human state before any issue/environment release.
   }
-  await prepared.paperclipBridge?.stop();
+  try {
+    await prepared.paperclipBridge?.stop();
+  } catch (error) {
+    if (isAdapterExecutionTargetPaperclipBridgeLaunchAmbiguousError(error)) {
+      const retained = retainAdapterExecutionTargetPaperclipBridgeDependentResources({
+        runId: error.launchIdentity.runId,
+        instanceId: error.launchIdentity.instanceId,
+        registrationId: `acpx-cleanup:${error.launchIdentity.runId}:${error.launchIdentity.instanceId}`,
+        cleanupSteps: [
+          ...(prepared.remoteManagedHomeTeardown
+            ? [{ label: "acpx-managed-home-teardown", run: prepared.remoteManagedHomeTeardown }]
+            : []),
+          ...(prepared.remoteStagingDispose
+            ? [{ label: "acpx-staged-runtime-dispose", run: prepared.remoteStagingDispose }]
+            : []),
+        ],
+        releaseSteps: [
+          ...(prepared.sessionStagingLeaseRelease
+            ? [{ label: "acpx-session-staging-lease-release", run: prepared.sessionStagingLeaseRelease }]
+            : []),
+        ],
+      });
+      if (retained) {
+        sealAdapterExecutionTargetPaperclipBridgeDependentResources({
+          runId: error.launchIdentity.runId,
+          instanceId: error.launchIdentity.instanceId,
+        });
+      }
+    }
+    throw error;
+  }
   // Runs AFTER the bridges stop (mirrors the CLI finally: stop bridge → restore
   // workspace). Fires the codex auth copy-back via `restoreWorkspace()`. This
   // is an authority boundary: a failed single-use-token copyback must reject so
@@ -3271,6 +3433,45 @@ export function createAcpxEngineExecutor(deps: AcpxEngineExecutorOptions = {}) {
   const engine = resolveEngineSettings(deps);
 
   return async function executeAcpxEngine(ctx: AdapterExecutionContext): Promise<AdapterExecutionResult> {
+    // Fail closed before billing lookup, idle-handle cleanup, logging, cwd/state
+    // materialization, staging, or any provider/runner operation. The same
+    // exact module-owned capability is checked again at the common bridge seam.
+    const preflightExecutionTarget = readAdapterExecutionTargetFailClosed({
+      executionTarget: ctx.executionTarget,
+      legacyRemoteExecution: ctx.executionTransport?.remoteExecution,
+    });
+    if (preflightExecutionTarget?.kind === "remote") {
+      try {
+        assertPaperclipCallbackBridgeEnabled(deps.testOnlyPaperclipCallbackBridgeCapability);
+      } catch (error) {
+        if (!isPaperclipCallbackBridgeDisabledError(error)) throw error;
+        return {
+          exitCode: 1,
+          signal: null,
+          timedOut: false,
+          errorMessage: error.message,
+          errorCode: PAPERCLIP_CALLBACK_BRIDGE_DISABLED,
+          errorMeta: {
+            category: "configuration",
+            errorName: error.name,
+            acpCode: error.code,
+            retryable: false,
+            needsHuman: true,
+          },
+          clearSession: true,
+          resultJson: {
+            phase: "preflight",
+            paperclipBridgeLaunch: {
+              status: "disabled",
+              retryable: false,
+              needsHuman: true,
+            },
+          },
+          summary: error.message,
+        };
+      }
+    }
+
     let billingIdentity: AcpxEngineBillingIdentity | null = null;
     try {
       billingIdentity = (await deps.resolveBillingIdentity?.(ctx)) ?? null;
@@ -3296,6 +3497,36 @@ export function createAcpxEngineExecutor(deps: AcpxEngineExecutorOptions = {}) {
     try {
       prepared = await buildRuntime({ ctx, engine, deps });
     } catch (error) {
+      if (isPaperclipCallbackBridgeDisabledError(error)) {
+        await ctx.onLog(
+          "stderr",
+          `[paperclip] ${PAPERCLIP_CALLBACK_BRIDGE_DISABLED}: remote callback execution is disabled pending issue #41 recovery proof.\n`,
+        );
+        return {
+          exitCode: 1,
+          signal: null,
+          timedOut: false,
+          errorMessage: error.message,
+          errorCode: PAPERCLIP_CALLBACK_BRIDGE_DISABLED,
+          errorMeta: {
+            category: "configuration",
+            errorName: error.name,
+            acpCode: error.code,
+            retryable: false,
+            needsHuman: true,
+          },
+          clearSession: true,
+          resultJson: {
+            phase: "setup",
+            paperclipBridgeLaunch: {
+              status: "disabled",
+              retryable: false,
+              needsHuman: true,
+            },
+          },
+          summary: error.message,
+        };
+      }
       if (!isAdapterExecutionTargetProcessSessionLaunchAmbiguousError(error)) throw error;
       const message = error.message;
       await ctx.onLog(
@@ -3766,7 +3997,10 @@ export function createAcpxEngineExecutor(deps: AcpxEngineExecutorOptions = {}) {
       };
     } catch (err) {
       if (timeout) clearTimeout(timeout);
-      if (isAdapterExecutionTargetProcessSessionLaunchAmbiguousError(err)) throw err;
+      if (
+        isAdapterExecutionTargetProcessSessionLaunchAmbiguousError(err) ||
+        isAdapterExecutionTargetPaperclipBridgeLaunchAmbiguousError(err)
+      ) throw err;
       const messageOverride = timedOut
         ? formatAdapterExecutionTimeoutErrorMessage(prepared.timeoutResolution)
         : undefined;

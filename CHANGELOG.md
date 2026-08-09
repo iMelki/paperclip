@@ -4,6 +4,68 @@ All notable changes to this repository should be recorded here.
 
 ## Unreleased
 
+- Strengthened the still-unreleased remote callback/process-session custody
+  work for #20/#28/#41. Callback launches now use an instance-scoped namespace,
+  caller-bound nonce, exact server birth identity, and cooperative cancellation
+  tombstone/acknowledgement; the native parent pid and shell `$!` value are
+  diagnostic observations only, never shutdown authority. Exact process
+  evidence is preserved on mismatch or unavailable proof, and successful stop
+  is coalesced and retry-safe. File evidence is atomically visible and flushed;
+  POSIX parent-directory fsync is attempted, while Windows parent-directory
+  power-loss durability remains an explicit adoption limitation. ACP process-
+  session stop rejects when stdin-end or wrapper-exit proof is missing, awaits
+  any in-flight event poll, and cannot turn a `released:false` reconciliation
+  into exit code 0. A protected Windows Codex-home fixture replaces the unsafe
+  `%TEMP%` parent assumption. Every remote callback-backed direct or ACPX
+  execution, attended or unattended and over SSH or sandbox transport, is now
+  production-disabled before any launch log/event, manifest write, runner call,
+  worker/process start, or provider dispatch. Each direct adapter throws the
+  stable `PAPERCLIP_CALLBACK_BRIDGE_DISABLED` error. The ACPX entry point
+  returns a terminal configuration result with the same error code,
+  `phase=preflight`, `retryable=false`, and `needsHuman=true`. Neither path has
+  a production override. Any non-null malformed direct or legacy execution
+  target also fails closed with the stable, non-retryable
+  `PAPERCLIP_EXECUTION_TARGET_INVALID` error instead of falling back to local
+  execution.
+  Only the exact module-owned capability issued while `NODE_ENV=test` can pass
+  the application/high-level adapter seam; booleans, strings, structural clones,
+  config, payload, CLI, database, and environment inputs cannot enable it. The
+  exported low-level server primitive remains directly reachable for protocol
+  research tests, is not a production-safe bypass, and therefore requires a
+  static production call-site allowlist proving that the gated high-level seam
+  is its only application caller. The gate remains until
+  #41 proves a durable pre-dispatch run/adapter/instance manifest, lifecycle
+  sink, restart reconciliation, and release/replay fences across all adapters,
+  ACPX, and heartbeat. The frozen low-level callback protocol suite passes
+  41/41 tests, and the six direct remote-adapter suites pass 67/67 tests with
+  SSH/sandbox denial, malformed-input, zero-side-effect, and filesystem-absence
+  coverage. The execution-target suite passes 53/53 and the focused heartbeat
+  configuration-fence matrix passes 4/4, including a reviewer distinct from
+  the source assignee. Full ACPX remains degraded: one run passed 92, failed
+  two default-30-second cases, and skipped four; both failed rows then passed
+  alone. A fresh run passed 93, failed one different default-30-second case,
+  and skipped four; that row also passed alone. A final run passed 88, failed
+  six, and skipped four: the first failure retained an accepted session because
+  terminal reconciliation was not proven, and five later rows timed out. All
+  timeout relaxations trialed for those three observed rows were reverted; an
+  earlier separately justified Windows platform budget remains elsewhere in
+  the suite. Diagnosis proved that the Windows Git-Bash fixture mixed MSYS
+  shell and native Node pid namespaces, so it cannot authoritatively attest
+  process-tree custody. The local runner no longer advertises that custody on
+  Windows. Thirty real runner-backed lifecycle rows now skip only on Windows
+  and remain mandatory on Ubuntu CI; deterministic preflight, parser, gate,
+  controller, and local behavior tests continue to run on Windows. The final
+  truthful Windows ACPX receipt passed 67 and skipped 34, including four
+  pre-existing platform skips. The earlier red receipts are preserved under
+  #20/#41. The ACPX test harness now assigns every implicit-cwd execution a
+  stable, registered temporary workspace for that test and guards the
+  invocation checkout's `.claude/settings.local.json` bytes before and after
+  every row. The final focused run left both previously generated checkout-
+  local settings files byte- and timestamp-stable; those existing untracked
+  files remain preserved for owner classification rather than being deleted or
+  staged. This fixture correction does not satisfy the Ubuntu lifecycle,
+  restart, residue, or release gates, so the checkpoint remains non-merge-ready
+  and non-unattended-ready.
 - Added fail-closed dev-runner generation custody for #20/#28. Each launch now
   acquires an exclusive, append-only claim journal, fsyncs an immutable claim
   header before spawn, appends and fsyncs the accepted child identity, and
@@ -56,8 +118,38 @@ All notable changes to this repository should be recorded here.
   bounded to Node's positive int32 range, unresolved own-group identity fails
   closed, and a selected process-group signal can never downgrade to PID-only
   termination. Focused Windows and Ubuntu/WSL regressions cover probe, TERM,
-  forced-kill, and no-fallback behavior. The fresh complete-suite process
-  receipt remains the #20 gate.
+  forced-kill, and no-fallback behavior. The fresh isolated workspace-runtime
+  suite passes 131 tests, skips 10 intentional platform cases, and fails 0 in
+  206.82s. Its bounded post-run ownership scan found zero surviving service
+  children or suite-owned test-root survivors. This closes the workspace-runtime
+  cohort receipt, not #20: the complete normal hook/global process receipt and a
+  per-service single-flight fence for concurrent general stop calls remain open.
+  The two company import/export E2E cases now skip explicitly on Windows after
+  repeated focused runs proved that their long-lived PowerShell Job custodian
+  cannot return a stable terminal receipt on this host; they remain mandatory on
+  Ubuntu CI. The fixture also no longer assigns its synthetic Claude agent, so it
+  cannot trigger a real provider wake while testing archive portability.
+- Made workspace-runtime launch ownership deterministic for #20/#28. The exact
+  child and launch claim are registered before the first Windows Job-custody
+  await, the blocked child receives its one-shot `go` only after kernel custody
+  and accepted-child checkpointing, and the workspace-control transaction
+  retains that claim through readiness/registry commit. A custody failure either
+  proves the blocked child stopped and releases the claim or retains both
+  identities for retry; rollback owns finalization so a late readiness rejection
+  cannot double-stop the child or overwrite terminal state. Restart adoption now
+  propagates the active launch-claim nonce while refreshing process identity, so
+  an unhealthy adopted service is retained as needs-human instead of conflicting
+  with its own mutation guard. The foreign-workspace reconciliation fixture now
+  expects one needs-human result with the failed/unhealthy row and registry
+  retained, never an unauthorized stop.
+- Isolated every stable Vitest child under one short run root by setting `TEMP`,
+  `TMP`, and `TMPDIR` to the same directory. Supporting fixture repairs supply
+  the watchdog adapter type, the exact test-only callback capability for
+  Claude/Codex positive remote cases while retaining default-off no-effect
+  coverage, and the `editorOptions: undefined` / `edit: false` options required
+  by `@pierre/diffs` 1.3.5. Focused validation passes runner 11/11, watchdog
+  23/23, server remote fixtures 42/42, and workspace-diff 26/26; server,
+  adapter-utils, database, and plugin typechecks are clean.
 - Tightened #22 command-managed upload confinement by rejecting raw `..`
   components before normalization. The current cwd check remains lexical and
   does not yet prove post-resolution POSIX symlink or Windows link/junction
@@ -86,7 +178,8 @@ All notable changes to this repository should be recorded here.
   was created and no hook bypass was used; #20, #22, #28, #29, and #31 remain
   open until repaired evidence is committed and read back.
 - Repaired the blockers exposed by that hook without bypassing it. The
-  workspace-diff plugin no longer passes obsolete editor props, the three
+  workspace-diff plugin now passes the `editorOptions` and non-editable `edit`
+  values required by the installed `@pierre/diffs` 1.3.5 imperative hook, the three
   issue-comment migration cases use the repository's 30-second integration
   ceiling, and database restore can stream canonical `COPY ... FROM stdin`
   sections through the native postgres.js writable API when `psql` is absent.

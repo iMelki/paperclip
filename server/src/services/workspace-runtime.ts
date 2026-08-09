@@ -6,7 +6,12 @@ import { createHash, randomUUID } from "node:crypto";
 import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import type { AdapterRuntimeServiceReport } from "@paperclipai/adapter-utils";
-import type { Db, WindowsTestJobCustody } from "@paperclipai/db";
+import type {
+  Db,
+  ReapWindowsTestProcessTreeResult,
+  WindowsJobObjectTerminationReceipt,
+  WindowsTestJobCustody,
+} from "@paperclipai/db";
 import {
   acquireWindowsTestJobCustody,
   executionWorkspaces,
@@ -198,6 +203,12 @@ interface RuntimeServiceRecord extends RuntimeServiceRef {
   // get a kernel-confirmed stop instead of the CIM-snapshot-only advisory
   // path -- see windows-test-job-warden.ts and reapWindowsTestProcessTree.
   windowsJobCustody?: WindowsTestJobCustody | null;
+  windowsJobCustodyRequired?: boolean;
+  windowsJobCustodyGateState?: "blocked" | "released";
+  // Test-only immutable step checkpoint. Job Object termination consumes the
+  // warden handle, so a later registry/claim finalization failure must reuse
+  // this exact kernel receipt instead of signaling the already-stopped tree.
+  windowsJobTerminationReceipt?: WindowsJobObjectTerminationReceipt | null;
 }
 
 type LocalRuntimeServiceStart = {
@@ -226,6 +237,145 @@ type ProcessOutputAccumulator = {
   finish(): ProcessOutputCapture;
 };
 
+async function terminateBlockedWindowsTestRuntimeChild(
+  child: ChildProcess,
+  timeoutMs = 5_000,
+): Promise<boolean> {
+  if (child.exitCode !== null || child.signalCode !== null) {
+    child.stdin?.end();
+    return true;
+  }
+
+  const terminal = new Promise<boolean>((resolve) => {
+    child.once("exit", () => resolve(true));
+  });
+  child.stdin?.once("error", () => undefined);
+  try {
+    // The child is still blocked before exec. Signal the exact ChildProcess
+    // first; closing stdin first would turn EOF into a competing release path.
+    child.kill("SIGKILL");
+  } catch {
+    // Terminal-state readback below is authoritative for this exact handle.
+  }
+  const exited = await Promise.race([
+    terminal,
+    delay(timeoutMs, false, { ref: false }),
+  ]);
+  const confirmedTerminal =
+    exited === true
+    && (child.exitCode !== null || child.signalCode !== null);
+  if (confirmedTerminal) child.stdin?.end();
+  return confirmedTerminal;
+}
+
+async function terminateRuntimeServiceWithWindowsTestJobCustody(
+  record: RuntimeServiceRecord,
+): Promise<LocalServiceTerminationResult | null> {
+  const custody = record.windowsJobCustody;
+  if (process.platform !== "win32") return null;
+  if (!custody) {
+    if (
+      record.windowsJobCustodyRequired
+      && record.windowsJobCustodyGateState === "blocked"
+      && record.child
+    ) {
+      const confirmedTerminal = await terminateBlockedWindowsTestRuntimeChild(record.child);
+      return {
+        pid: normalizeLocalServicePid(record.child.pid),
+        attempted: true,
+        confirmedStopped: confirmedTerminal,
+        outcome: confirmedTerminal ? "terminated" : "still_running",
+        ...(!confirmedTerminal
+          ? { error: "windows_test_job_custody_unavailable_blocked_child_retained" }
+          : {}),
+      };
+    }
+    return record.windowsJobCustodyRequired
+      ? {
+          pid: normalizeLocalServicePid(record.child?.pid),
+          attempted: false,
+          confirmedStopped: false,
+          outcome: "untrusted_identity",
+          error: "windows_test_job_custody_required_but_unavailable",
+        }
+      : null;
+  }
+
+  const rootPid = normalizeLocalServicePid(record.child?.pid);
+  if (
+    rootPid === null
+    || rootPid === process.pid
+    || custody.serviceId !== record.id
+    || custody.rootPid !== rootPid
+  ) {
+    return {
+      pid: rootPid,
+      attempted: false,
+      confirmedStopped: false,
+      outcome: "untrusted_identity",
+      error: "windows_test_job_custody_identity_mismatch",
+    };
+  }
+
+  const checkpointedReceipt = record.windowsJobTerminationReceipt;
+  if (checkpointedReceipt) {
+    const checkpointMatches =
+      checkpointedReceipt.authority === "job_object_kernel"
+      && checkpointedReceipt.authoritative === true
+      && checkpointedReceipt.serviceId === record.id
+      && checkpointedReceipt.rootPid === rootPid
+      && checkpointedReceipt.activeProcessesAfter === 0;
+    if (!checkpointMatches) {
+      return {
+        pid: rootPid,
+        attempted: false,
+        confirmedStopped: false,
+        outcome: "untrusted_identity",
+        error: "windows_test_job_termination_receipt_identity_mismatch",
+      };
+    }
+    return {
+      pid: rootPid,
+      attempted: false,
+      confirmedStopped: true,
+      outcome: "terminated",
+    };
+  }
+
+  const termination = await reapWindowsTestProcessTree({
+    rootPid,
+    ownerMarkers: [],
+    timeoutMs: 8_000,
+    jobCustody: custody,
+  });
+  const receipt = termination.jobReceipt;
+  const receiptMatches =
+    receipt?.authority === "job_object_kernel"
+    && receipt.authoritative === true
+    && receipt.serviceId === record.id
+    && receipt.rootPid === rootPid
+    && receipt.activeProcessesAfter === 0;
+  if (termination.confirmedStopped && receiptMatches) {
+    record.windowsJobTerminationReceipt = receipt;
+    return {
+      pid: rootPid,
+      attempted: true,
+      confirmedStopped: true,
+      outcome: "terminated",
+    };
+  }
+
+  return {
+    pid: rootPid,
+    attempted: termination.attempted,
+    confirmedStopped: false,
+    outcome: termination.reason === "job_terminate_unconfirmed"
+      ? "still_running"
+      : "untrusted_identity",
+    error: termination.reason,
+  };
+}
+
 export async function resetRuntimeServicesForTests(options?: { preserveProcesses?: boolean }) {
   const records = [...runtimeServicesById.values()];
   for (const record of records) {
@@ -234,46 +384,52 @@ export async function resetRuntimeServicesForTests(options?: { preserveProcesses
   if (!options?.preserveProcesses) {
     for (const record of records) {
       const childPid = normalizeLocalServicePid(record.child?.pid);
-      let childIsLive =
-        childPid !== null
-        && record.child?.exitCode === null
-        && record.child?.signalCode === null;
-      let windowsProcessIdentity =
-        process.platform === "win32" && childIsLive
-          ? await readWindowsTestProcessIdentity(childPid!, 5_000).catch(() => null)
-          : null;
-      if (process.platform === "win32" && childIsLive && !windowsProcessIdentity) {
-        await delay(100);
-        if (record.child?.exitCode !== null || record.child?.signalCode !== null) {
-          childIsLive = false;
-        } else {
-          windowsProcessIdentity = await readWindowsTestProcessIdentity(childPid!, 5_000).catch(() => null);
-          if (
-            !windowsProcessIdentity
-            && !isLocalServicePidAlive(childPid!)
-            && !(await runtimeServiceHasObservedDescendantsForTestCleanup(record))
-          ) {
+      const custodyTermination = await terminateRuntimeServiceWithWindowsTestJobCustody(record);
+      const usedWindowsTestJobCustody = custodyTermination !== null;
+      let termination: LocalServiceTerminationResult | ReapWindowsTestProcessTreeResult | null =
+        custodyTermination;
+      if (!termination) {
+        let childIsLive =
+          childPid !== null
+          && record.child?.exitCode === null
+          && record.child?.signalCode === null;
+        let windowsProcessIdentity =
+          process.platform === "win32" && childIsLive
+            ? await readWindowsTestProcessIdentity(childPid!, 5_000).catch(() => null)
+            : null;
+        if (process.platform === "win32" && childIsLive && !windowsProcessIdentity) {
+          await delay(100);
+          if (record.child?.exitCode !== null || record.child?.signalCode !== null) {
             childIsLive = false;
+          } else {
+            windowsProcessIdentity = await readWindowsTestProcessIdentity(childPid!, 5_000).catch(() => null);
+            if (
+              !windowsProcessIdentity
+              && !isLocalServicePidAlive(childPid!)
+              && !(await runtimeServiceHasObservedDescendantsForTestCleanup(record))
+            ) {
+              childIsLive = false;
+            }
+          }
+          if (childIsLive && !windowsProcessIdentity) {
+            throw new Error(
+              "Test runtime service process termination could not be verified (identity_unavailable); tracking was retained.",
+            );
           }
         }
-        if (childIsLive && !windowsProcessIdentity) {
-          throw new Error(
-            "Test runtime service process termination could not be verified (identity_unavailable); tracking was retained.",
-          );
-        }
+        termination =
+          process.platform === "win32" && childIsLive
+            ? await reapWindowsTestProcessTree({
+                rootPid: childPid!,
+                ownerMarkers: [],
+                expectedRootIdentity: windowsProcessIdentity!,
+                timeoutMs: 8_000,
+              })
+            : await terminateRuntimeServiceProcess(record);
       }
-      let termination =
-        process.platform === "win32" && childIsLive
-          ? await reapWindowsTestProcessTree({
-              rootPid: childPid!,
-              ownerMarkers: [],
-              expectedRootIdentity: windowsProcessIdentity!,
-              timeoutMs: 8_000,
-              jobCustody: record.windowsJobCustody ?? undefined,
-            })
-          : await terminateRuntimeServiceProcess(record);
       if (
-        termination?.confirmedStopped !== true
+        !usedWindowsTestJobCustody
+        && termination?.confirmedStopped !== true
         && record.child
         && (record.child.exitCode !== null || record.child.signalCode !== null)
         && !(await runtimeServiceHasObservedDescendantsForTestCleanup(record))
@@ -289,7 +445,12 @@ export async function resetRuntimeServicesForTests(options?: { preserveProcesses
           `Test runtime service process termination could not be verified (${terminationReason}); tracking was retained.`,
         );
       }
-      await removeLocalServiceRegistryRecord(record.serviceKey);
+      await removeLocalServiceRegistryRecord(
+        record.serviceKey,
+        record.launchClaim
+          ? { launchClaimNonce: record.launchClaim.generationId }
+          : undefined,
+      );
       await releaseRuntimeServiceLaunchClaim(record);
     }
   }
@@ -4194,7 +4355,7 @@ async function spawnLocalRuntimeService(input: StartLocalRuntimeServiceInput): P
   // does not make.
   const useWindowsJobCustodyGate = process.platform === "win32" && process.env.VITEST === "true";
   const spawnedCommand = useWindowsJobCustodyGate
-    ? `read -r __paperclip_job_custody_go; exec ${command}`
+    ? `IFS= read -r __paperclip_job_custody_go && [ "$__paperclip_job_custody_go" = "go" ] && exec ${command}`
     : command;
   let child: ChildProcess;
   try {
@@ -4216,18 +4377,6 @@ async function spawnLocalRuntimeService(input: StartLocalRuntimeServiceInput): P
     }
     throw error;
   }
-  // A failed/unavailable warden degrades to the existing advisory-only path;
-  // it never blocks the spawn itself -- the gate is released either way.
-  const windowsJobCustody = useWindowsJobCustodyGate
-    ? await acquireWindowsTestJobCustody(runtimeServiceId, child)
-    : null;
-  if (useWindowsJobCustodyGate) {
-    child.stdin?.write("go\n");
-    // stdin's only purpose was releasing the gate above; leaving it open
-    // would let the child hold the pipe (an inherited handle) and change its
-    // stdio surface from the non-gated path.
-    child.stdin?.end();
-  }
   const spawnErrorPromise = new Promise<never>((_, reject) => {
     child.once("error", (err) => {
       reject(err);
@@ -4245,24 +4394,12 @@ async function spawnLocalRuntimeService(input: StartLocalRuntimeServiceInput): P
   // as an unhandled rejection; the original promises remain inputs to the race.
   spawnErrorPromise.catch(() => undefined);
   prematureExitPromise.catch(() => undefined);
-  let stderrExcerpt = "";
-  let stdoutExcerpt = "";
-  child.stdout?.on("data", async (chunk) => {
-    const text = String(chunk);
-    stdoutExcerpt = (stdoutExcerpt + text).slice(-4096);
-    if (input.onLog) await input.onLog("stdout", `[service:${serviceName}] ${text}`);
-  });
-  child.stderr?.on("data", async (chunk) => {
-    const text = String(chunk);
-    stderrExcerpt = (stderrExcerpt + text).slice(-4096);
-    if (input.onLog) await input.onLog("stderr", `[service:${serviceName}] ${text}`);
-  });
 
   // A detached POSIX child establishes a process group whose ID is the child
-  // PID. Windows children are not detached and no Job Object custody is
-  // established here, so recording the PID as a process-group identity would
-  // manufacture authority that the launcher does not have.
+  // PID. Windows children are not detached; their required test custody is
+  // represented separately below.
   const spawnedProcessGroupId = process.platform === "win32" ? null : child.pid ?? null;
+  let windowsJobCustody: WindowsTestJobCustody | null = null;
   const record: RuntimeServiceRecord = {
     id: runtimeServiceId,
     companyId: input.agent.companyId,
@@ -4292,6 +4429,7 @@ async function spawnLocalRuntimeService(input: StartLocalRuntimeServiceInput): P
     reused: false,
     db: input.registryDb ?? input.db,
     child,
+    stopRequested: useWindowsJobCustodyGate,
     leaseRunIds: leaseRunId ? new Set([leaseRunId]) : new Set(),
     idleTimer: null,
     envFingerprint,
@@ -4300,33 +4438,115 @@ async function spawnLocalRuntimeService(input: StartLocalRuntimeServiceInput): P
     processGroupId: spawnedProcessGroupId,
     launchClaim,
     windowsJobCustody,
+    windowsJobCustodyRequired: useWindowsJobCustodyGate,
+    windowsJobCustodyGateState: useWindowsJobCustodyGate ? "blocked" : undefined,
   };
+  // Register the exact ChildProcess and claim before custody's first await.
+  // A warden denial or timeout therefore remains reachable by reset/retry.
   registerRuntimeService(input.registryDb ?? input.db, record);
   try {
-    // Publish the in-memory identity to the caller-owned rollback batch before
-    // any await, then fsync the same spawn identity onto the exact claim inode.
-    // If either action fails, the registered record still owns the ChildProcess
-    // and cleanup cannot lose the tree.
     input.onSpawnRegistered?.(record);
     if (!child.pid) {
       throw new Error(`Runtime service "${serviceName}" spawned without a process identity.`);
     }
-    launchClaim?.recordSpawn({
-      pid: child.pid,
-      processGroupId: spawnedProcessGroupId,
-      startedAt: nowIso,
-    });
+    if (!useWindowsJobCustodyGate) {
+      launchClaim?.recordSpawn({
+        pid: child.pid,
+        processGroupId: spawnedProcessGroupId,
+        startedAt: nowIso,
+      });
+    }
   } catch (error) {
     try {
       await stopRuntimeService(record.id, input.db);
     } catch (cleanupError) {
       throw new AggregateError(
         [error, cleanupError],
-        `Runtime service "${serviceName}" failed to record its spawn identity and cleanup was not authoritative.`,
+        `Runtime service "${serviceName}" failed to register its spawn identity and cleanup was not authoritative.`,
       );
     }
     throw error;
   }
+
+  let custodyAcquisitionError: unknown = null;
+  if (useWindowsJobCustodyGate) {
+    try {
+      windowsJobCustody = await acquireWindowsTestJobCustody(runtimeServiceId, child);
+    } catch (error) {
+      custodyAcquisitionError = error;
+    }
+    if (!windowsJobCustody) {
+      const custodyError = custodyAcquisitionError instanceof Error
+        ? custodyAcquisitionError
+        : new Error("Windows test Job Object custody could not be acquired.");
+      record.status = "failed";
+      record.healthStatus = "unhealthy";
+      record.stopRequested = true;
+      record.lastUsedAt = new Date().toISOString();
+      const confirmedTerminal = await terminateBlockedWindowsTestRuntimeChild(child);
+      if (!confirmedTerminal) {
+        record.stoppedAt = null;
+        throw new AggregateError(
+          [custodyError],
+          `Runtime service "${serviceName}" remained blocked without required Windows Job Object custody; its exact ChildProcess and launch claim remain registered for retry.`,
+        );
+      }
+      record.stoppedAt = new Date().toISOString();
+      try {
+        await releaseRuntimeServiceLaunchClaim(record);
+      } catch (cleanupError) {
+        throw new AggregateError(
+          [custodyError, cleanupError],
+          `Runtime service "${serviceName}" was stopped after Job Object custody failed, but its exact ChildProcess and launch claim remain registered because claim release failed.`,
+        );
+      }
+      runtimeServicesById.delete(record.id);
+      if (record.reuseKey && runtimeServicesByReuseKey.get(record.reuseKey) === record.id) {
+        runtimeServicesByReuseKey.delete(record.reuseKey);
+      }
+      throw custodyError;
+    }
+    record.windowsJobCustody = windowsJobCustody;
+    try {
+      launchClaim?.recordSpawn({
+        pid: child.pid!,
+        processGroupId: spawnedProcessGroupId,
+        startedAt: nowIso,
+      });
+    } catch (error) {
+      try {
+        await stopRuntimeService(record.id, input.db);
+      } catch (cleanupError) {
+        throw new AggregateError(
+          [error, cleanupError],
+          `Runtime service "${serviceName}" failed to record its spawn identity and cleanup was not authoritative.`,
+        );
+      }
+      throw error;
+    }
+  }
+  if (useWindowsJobCustodyGate) {
+    record.stopRequested = false;
+    child.stdin?.write("go\n");
+    // stdin's only purpose was releasing the gate above; leaving it open
+    // would let the child hold the pipe (an inherited handle) and change its
+    // stdio surface from the non-gated path.
+    child.stdin?.end();
+    record.windowsJobCustodyGateState = "released";
+  }
+  let stderrExcerpt = "";
+  let stdoutExcerpt = "";
+  child.stdout?.on("data", async (chunk) => {
+    const text = String(chunk);
+    stdoutExcerpt = (stdoutExcerpt + text).slice(-4096);
+    if (input.onLog) await input.onLog("stdout", `[service:${serviceName}] ${text}`);
+  });
+  child.stderr?.on("data", async (chunk) => {
+    const text = String(chunk);
+    stderrExcerpt = (stderrExcerpt + text).slice(-4096);
+    if (input.onLog) await input.onLog("stderr", `[service:${serviceName}] ${text}`);
+  });
+
   try {
     // Persist POSIX process-group identity before any readiness wait. Windows
     // deliberately persists null until launch-time Job Object custody exists.
@@ -4426,14 +4646,24 @@ async function spawnLocalRuntimeService(input: StartLocalRuntimeServiceInput): P
     record.healthStatus = "healthy";
     record.lastUsedAt = new Date().toISOString();
     record.stoppedAt = null;
-    await touchLocalServiceRegistryRecord(record.serviceKey, {
-      runtimeServiceId: record.id,
-      lastSeenAt: record.lastUsedAt,
-    });
+    // Workspace-control transactions deliberately retain their launch claim
+    // through commit. A claim-less touch here would contend with our own guard;
+    // the transaction owner performs it after releasing that exact claim.
+    if (!record.launchClaim) {
+      await touchLocalServiceRegistryRecord(record.serviceKey, {
+        runtimeServiceId: record.id,
+        lastSeenAt: record.lastUsedAt,
+      });
+    }
   }).catch(async (err) => {
     const startFailure = new Error(
       `Failed to start runtime service "${serviceName}": ${err instanceof Error ? err.message : String(err)}${stderrExcerpt ? ` | stderr: ${stderrExcerpt.trim()}` : ""}`,
     );
+    // A transaction rollback or explicit stop can terminate the child while
+    // this deferred readiness race is still pending. That stop already owns
+    // custody and durable finalization; do not start a second termination or
+    // overwrite its terminal row with a late failed/unhealthy projection.
+    if (record.launchClaim || record.stopRequested) throw startFailure;
     record.stopRequested = true;
     const termination = await terminateRuntimeServiceProcess(record);
     record.status = termination?.confirmedStopped === true ? "stopped" : "failed";
@@ -4555,6 +4785,9 @@ async function persistedRuntimeServiceHasLiveOrUnprovenDescendants(
 async function terminateRuntimeServiceProcess(
   record: RuntimeServiceRecord,
 ): Promise<LocalServiceTerminationResult | null> {
+  const custodyTermination = await terminateRuntimeServiceWithWindowsTestJobCustody(record);
+  if (custodyTermination) return custodyTermination;
+
   const childPid = normalizeLocalServicePid(record.child?.pid);
   const childIsLive =
     childPid !== null
@@ -4654,7 +4887,12 @@ async function finalizeConfirmedRuntimeServiceStop(
   // pre-spawn claim. In-memory ownership is removed last so a failed cleanup
   // remains retryable and cannot make a still-live tree look absent.
   await persistRuntimeServiceRecord(db, record);
-  await removeLocalServiceRegistryRecord(record.serviceKey);
+  await removeLocalServiceRegistryRecord(
+    record.serviceKey,
+    record.launchClaim
+      ? { launchClaimNonce: record.launchClaim.generationId }
+      : undefined,
+  );
   await releaseRuntimeServiceLaunchClaim(record);
   runtimeServicesById.delete(record.id);
   if (record.reuseKey && runtimeServicesByReuseKey.get(record.reuseKey) === record.id) {
@@ -5069,10 +5307,10 @@ export async function ensureRuntimeServicesForRun(input: {
           existing.lastUsedAt = new Date().toISOString();
           existing.stoppedAt = null;
           clearIdleTimer(existing);
-          void touchLocalServiceRegistryRecord(existing.serviceKey, {
+          await touchLocalServiceRegistryRecord(existing.serviceKey, {
             runtimeServiceId: existing.id,
             lastSeenAt: existing.lastUsedAt,
-          }).catch(() => undefined);
+          });
           await persistRuntimeServiceRecord(input.db, existing);
           acquiredServiceIds.push(existing.id);
           refs.push(toRuntimeServiceRef(existing, { reused: true }));
@@ -5173,10 +5411,10 @@ async function startRuntimeServicesForWorkspaceControlUnlocked(
         existing.lastUsedAt = new Date().toISOString();
         existing.stoppedAt = null;
         clearIdleTimer(existing);
-        void touchLocalServiceRegistryRecord(existing.serviceKey, {
+        await touchLocalServiceRegistryRecord(existing.serviceKey, {
           runtimeServiceId: existing.id,
           lastSeenAt: existing.lastUsedAt,
-        }).catch(() => undefined);
+        });
         await persistRuntimeServiceRecord(persistenceDb, existing);
         refs.push(toRuntimeServiceRef(existing, { reused: true }));
         continue;
@@ -5316,6 +5554,10 @@ export async function startRuntimeServicesForWorkspaceControl(
     for (const pending of startBatch.pendingReadiness) {
       try {
         await pending.readiness;
+        await touchLocalServiceRegistryRecord(pending.record.serviceKey, {
+          runtimeServiceId: pending.record.id,
+          lastSeenAt: pending.record.lastUsedAt,
+        });
         await persistRuntimeServiceRecord(input.db, pending.record);
       } catch (error) {
         await persistRuntimeServiceRecord(input.db, pending.record).catch(() => undefined);

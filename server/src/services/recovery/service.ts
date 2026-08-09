@@ -163,6 +163,7 @@ type StrandedRecoveryCause =
   | "codex_output_inactivity_monitor"
   | "workspace_validation_failed"
   | "configuration_incomplete"
+  | "execution_configuration_fenced"
   | "execution_review_participant_recovery"
   | typeof SUCCESSFUL_RUN_MISSING_STATE_REASON;
 
@@ -2799,7 +2800,7 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
       ? "missing_disposition" as const
       : cause === "workspace_validation_failed"
         ? "workspace_validation" as const
-      : cause === "configuration_incomplete"
+      : cause === "configuration_incomplete" || cause === "execution_configuration_fenced"
         ? "configuration_validation" as const
       : "stranded_assigned_issue" as const;
   }
@@ -2915,6 +2916,8 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
             : "Repair the source issue workspace link, project workspace cwd, or git checkout before resuming adapter execution."
         : recoveryCause === "configuration_incomplete"
           ? "Bind the missing secret(s) named in the run failure to the agent/project/routine env before resuming adapter execution."
+        : recoveryCause === "execution_configuration_fenced"
+          ? "Resolve the stable callback-disabled or invalid-target configuration fence, then resume explicitly; do not retry automatically."
         : recoveryCause === "execution_review_participant_recovery"
           ? "Repair the failed review participant path, restore the source issue to in_review with a live reviewer, or record an intentional manual resolution."
         : "Restore a live execution path, fix the runtime/adapter failure, or record an intentional manual resolution.",
@@ -2923,7 +2926,7 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
           type: "monitor_only",
           reason: recoveryCause,
         }
-        : recoveryCause === "configuration_incomplete"
+        : recoveryCause === "configuration_incomplete" || recoveryCause === "execution_configuration_fenced"
         ? {
           type: "manual_repair_required",
           reason: recoveryCause,
@@ -2957,6 +2960,7 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
   }) {
     if (input.recoveryCause === "provider_quota" && !input.action.ownerAgentId) return;
     if (input.recoveryCause === "configuration_incomplete") return;
+    if (input.recoveryCause === "execution_configuration_fenced") return;
     if (!input.action.ownerAgentId) return;
     await deps.enqueueWakeup(input.action.ownerAgentId, {
       source: "assignment",
@@ -3334,7 +3338,8 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
     const shouldPostEscalationComment =
       recoveryAction.attemptCount === 1 ||
       input.recoveryCause === "workspace_validation_failed" ||
-      input.recoveryCause === "configuration_incomplete";
+      input.recoveryCause === "configuration_incomplete" ||
+      input.recoveryCause === "execution_configuration_fenced";
     if (shouldPostEscalationComment) {
       const escalationCommentMarker = `Recovery action: \`${recoveryAction.id}\``;
 
@@ -3390,6 +3395,8 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
             ? "recovery.reconcile_workspace_validation_failed"
           : input.recoveryCause === "configuration_incomplete"
             ? "recovery.reconcile_configuration_incomplete"
+          : input.recoveryCause === "execution_configuration_fenced"
+            ? "recovery.reconcile_execution_configuration_fenced"
           : input.recoveryCause === "execution_review_participant_recovery"
             ? "recovery.reconcile_execution_review_participant"
           : "recovery.reconcile_stranded_assigned_issue",

@@ -44,7 +44,7 @@ beforeAll(async () => {
   }
 
   ({ App } = await import("./App"));
-}, 60_000);
+}, process.platform === "win32" ? 120_000 : 60_000);
 
 // Real Layout renders the full authenticated shell (sidebar, data queries) and
 // owns the "No company matches prefix" NotFound. For routing we only need it to

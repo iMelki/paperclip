@@ -1950,6 +1950,7 @@ export async function findLocalServiceRegistryRecordByRuntimeServiceId(input: {
 
 async function refreshLocalServiceRegistryProcessIdentity(
   record: LocalServiceRegistryRecord,
+  launchClaimNonce?: string,
 ) {
   if (process.platform === "win32") {
     const ownerPid = record.port
@@ -1979,7 +1980,11 @@ async function refreshLocalServiceRegistryProcessIdentity(
       lastSeenAt: new Date().toISOString(),
     };
     verifiedWindowsRegistryIdentities.add(candidate);
-    await writeLocalServiceRegistryRecord(candidate, { state: "matches", record });
+    await writeLocalServiceRegistryRecord(candidate, {
+      state: "matches",
+      record,
+      launchClaimNonce,
+    });
     return candidate;
   }
 
@@ -1994,7 +1999,11 @@ async function refreshLocalServiceRegistryProcessIdentity(
     processGroupId: await readLocalServiceProcessGroupId(ownerPid),
     lastSeenAt: new Date().toISOString(),
   };
-  await writeLocalServiceRegistryRecord(candidate, { state: "matches", record });
+  await writeLocalServiceRegistryRecord(candidate, {
+    state: "matches",
+    record,
+    launchClaimNonce,
+  });
   return candidate;
 }
 
@@ -2265,7 +2274,7 @@ export async function findAdoptableLocalService(input: {
   }
   const existing = existingInspection.record;
   const record = existing
-    ? await refreshLocalServiceRegistryProcessIdentity(existing)
+    ? await refreshLocalServiceRegistryProcessIdentity(existing, input.launchClaimNonce)
     : await adoptLocalServiceFromPortOwner(input);
   if (!record) {
     if (

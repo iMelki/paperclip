@@ -70,7 +70,7 @@ export interface PrivateExecutableAssetDirectory {
 export interface CreatePrivateExecutableAssetDirectoryOptions {
   /** A bounded filename prefix; a cryptographically random UUID is appended. */
   prefix: string;
-  /** Existing parent directory. Defaults to the host temporary directory. */
+  /** Existing parent. Defaults to a protected Windows bootstrap or the POSIX temp directory. */
   parentDirectory?: string;
 }
 

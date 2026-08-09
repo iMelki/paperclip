@@ -1,7 +1,10 @@
 import { execFile } from "node:child_process";
 import path from "node:path";
 import { promisify } from "node:util";
-import type { WindowsTestJobCustody } from "./windows-test-job-warden.js";
+import type {
+  WindowsJobObjectTerminationReceipt,
+  WindowsTestJobCustody,
+} from "./windows-test-job-warden.js";
 
 const execFileAsync = promisify(execFile);
 const windowsPowerShellCommand = path.join(
@@ -38,6 +41,7 @@ export type ReapWindowsTestProcessTreeResult = {
   attemptedPids: number[];
   remainingPids: number[];
   snapshots: number;
+  jobReceipt?: WindowsJobObjectTerminationReceipt;
 };
 
 function normalizeMarker(value: string): string {
@@ -291,7 +295,77 @@ export async function reapWindowsTestProcessTree(input: {
     };
   }
 
-  const deadline = Date.now() + Math.max(500, input.timeoutMs ?? 5_000);
+  const timeoutMs = Math.max(500, input.timeoutMs ?? 5_000);
+
+  if (input.jobCustody) {
+    if (
+      rootPid === 0
+      || input.jobCustody.rootPid !== rootPid
+      || typeof input.jobCustody.serviceId !== "string"
+      || input.jobCustody.serviceId.length === 0
+    ) {
+      return {
+        ...base,
+        attempted: false,
+        confirmedStopped: false,
+        reason: "job_containment_incomplete",
+      };
+    }
+
+    // Exact launch-time custody is operationally primary: do not spend any of
+    // its bounded termination budget on CIM/root-liveness diagnostics first.
+    // A dead MSYS wrapper and a reparented native child are still members of
+    // the retained Job Object, while numeric PID/CIM evidence is advisory.
+    const termination = await input.jobCustody.terminate(timeoutMs);
+    if (!termination.ok) {
+      return {
+        rootPid,
+        attempted: true,
+        confirmedStopped: false,
+        reason: "job_terminate_unconfirmed",
+        capturedPids: [],
+        attemptedPids: [],
+        remainingPids: [],
+        snapshots: 0,
+      };
+    }
+
+    const receipt = termination.receipt;
+    if (
+      receipt.authority !== "job_object_kernel"
+      || receipt.authoritative !== true
+      || receipt.serviceId !== input.jobCustody.serviceId
+      || receipt.rootPid !== rootPid
+      || receipt.activeProcessesAfter !== 0
+    ) {
+      return {
+        rootPid,
+        attempted: true,
+        confirmedStopped: false,
+        reason: "job_terminate_unconfirmed",
+        capturedPids: [],
+        attemptedPids: [],
+        remainingPids: [],
+        snapshots: 0,
+      };
+    }
+
+    return {
+      rootPid,
+      attempted: true,
+      confirmedStopped: true,
+      reason: "reaped",
+      // PID-list marshaling is not yet available. Do not mislabel advisory
+      // CIM observations as the exact set acted on by TerminateJobObject.
+      capturedPids: [],
+      attemptedPids: [],
+      remainingPids: [],
+      snapshots: 0,
+      jobReceipt: receipt,
+    };
+  }
+
+  const deadline = Date.now() + timeoutMs;
   let snapshot: WindowsTestProcessIdentity[];
   let snapshots = 0;
   try {
@@ -368,47 +442,6 @@ export async function reapWindowsTestProcessTree(input: {
   const ownedPids = owned
     .map((item) => item.pid)
     .sort((left, right) => left - right);
-
-  if (input.jobCustody) {
-    // A pre-terminate cross-check of owned pids against the job's own pid
-    // list (catching an escapee spawned before custody was assigned) needs
-    // real QueryInformationJobObject(BasicProcessIdList) marshaling in the
-    // warden, deferred out of this first slice -- see windows-test-job-warden.ts.
-    // terminate() itself is still authoritative for everything IN the job: it
-    // is a kernel statement (TerminateJobObject + a post-terminate
-    // ActiveProcesses==0 read) that every process ever assigned to it,
-    // including descendants created after assignment (breakaway is denied),
-    // has exited.
-    const termination = await input.jobCustody.terminate(
-      Math.max(500, deadline - Date.now()),
-    );
-    if (termination.ok) {
-      return {
-        rootPid,
-        attempted: true,
-        confirmedStopped: true,
-        reason: "reaped",
-        capturedPids: ownedPids,
-        // termination.receipt.jobPidsBeforeTerminate is empty until the
-        // warden's own PID-list marshaling lands (see the comment above);
-        // ownedPids is the CIM-observed set that was subject to the
-        // terminate attempt and is meaningful regardless.
-        attemptedPids: ownedPids,
-        remainingPids: [],
-        snapshots,
-      };
-    }
-    return {
-      rootPid,
-      attempted: true,
-      confirmedStopped: false,
-      reason: "job_terminate_unconfirmed",
-      capturedPids: ownedPids,
-      attemptedPids: ownedPids,
-      remainingPids: ownedPids,
-      snapshots,
-    };
-  }
 
   // CIM PID/creation/lineage snapshots are advisory observations. A process can
   // exit and have its PID reused after this snapshot but before a bare-PID kill,

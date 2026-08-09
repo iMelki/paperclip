@@ -2,7 +2,35 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+
+const callbackBridgeTestControl = vi.hoisted(() => ({ enabled: false }));
+
+vi.mock("@paperclipai/adapter-utils/execution-target", async () => {
+  const actual = await vi.importActual<
+    typeof import("@paperclipai/adapter-utils/execution-target")
+  >("@paperclipai/adapter-utils/execution-target");
+  const testCapability = actual.issuePaperclipCallbackBridgeTestCapability();
+
+  return {
+    ...actual,
+    assertPaperclipCallbackBridgeEnabled: (
+      capability?: Parameters<typeof actual.assertPaperclipCallbackBridgeEnabled>[0],
+    ) => actual.assertPaperclipCallbackBridgeEnabled(
+      callbackBridgeTestControl.enabled ? testCapability : capability,
+    ),
+    startAdapterExecutionTargetPaperclipBridge: (
+      input: Parameters<typeof actual.startAdapterExecutionTargetPaperclipBridge>[0],
+    ) => actual.startAdapterExecutionTargetPaperclipBridge({
+      ...input,
+      testOnlyCapability: callbackBridgeTestControl.enabled
+        ? testCapability
+        : input.testOnlyCapability,
+    }),
+  };
+});
+
 import type { AdapterRuntimeMcpServer } from "@paperclipai/adapter-utils";
+import { PAPERCLIP_CALLBACK_BRIDGE_DISABLED } from "@paperclipai/adapter-utils/execution-target";
 import { runChildProcess } from "@paperclipai/adapter-utils/server-utils";
 import { resolveTestShellCommand } from "@paperclipai/adapter-utils/test-shell";
 import {
@@ -12,11 +40,26 @@ import {
   resetClaudeCliCapabilitiesCacheForTests,
 } from "@paperclipai/adapter-claude-local/server";
 
+async function withCallbackBridgeTestCapability<T>(run: () => Promise<T>): Promise<T> {
+  if (callbackBridgeTestControl.enabled) {
+    throw new Error("Callback bridge test capability is already active.");
+  }
+  callbackBridgeTestControl.enabled = true;
+  try {
+    return await run();
+  } finally {
+    callbackBridgeTestControl.enabled = false;
+  }
+}
+
 // Sandbox-managed execution starts a short-lived API bridge plus one or more
 // child CLI processes. Loaded Windows shards can legitimately cross the old
 // 10-second per-test override, while the stable full-suite runner already uses
 // a 30-second test bound. Keep these focused tests on that same finite policy.
 const SANDBOX_EXECUTION_TEST_TIMEOUT_MS = 30_000;
+// This cache-reuse fixture performs two full sandbox executions serially, so
+// keep its finite budget proportional to the single-execution fixtures.
+const SANDBOX_DOUBLE_EXECUTION_TEST_TIMEOUT_MS = SANDBOX_EXECUTION_TEST_TIMEOUT_MS * 2;
 
 async function writeFailingClaudeCommand(
   commandPath: string,
@@ -185,6 +228,7 @@ type CapturePayload = {
 };
 
 afterEach(() => {
+  callbackBridgeTestControl.enabled = false;
   resetClaudeCliCapabilitiesCacheForTests();
 });
 
@@ -817,7 +861,71 @@ describe("claude execute", () => {
     }
   });
 
-  it("injects bridge env into sandbox-managed remote runs", async () => {
+  it("denies sandbox callback execution without the exact test capability and performs no effects", async () => {
+    const sideEffectPath = path.join(
+      os.tmpdir(),
+      `paperclip-claude-disabled-${process.pid}-${Date.now()}`,
+    );
+    const runnerExecute = vi.fn(async () => {
+      throw new Error("sandbox runner must not execute while the callback bridge is disabled");
+    });
+    const onLog = vi.fn(async () => undefined);
+    const onMeta = vi.fn(async () => undefined);
+    const onEvent = vi.fn(async () => undefined);
+    const onSpawn = vi.fn(async () => undefined);
+
+    await expect(execute({
+      runId: "run-sandbox-disabled",
+      agent: {
+        id: "agent-1",
+        companyId: "company-1",
+        name: "Claude Coder",
+        adapterType: "claude_local",
+        adapterConfig: { engine: "cli" },
+      },
+      runtime: {
+        sessionId: null,
+        sessionParams: null,
+        sessionDisplayId: null,
+        taskKey: null,
+      },
+      config: {
+        engine: "cli",
+        command: "claude",
+        cwd: sideEffectPath,
+      },
+      context: {
+        paperclipWorkspace: { cwd: sideEffectPath, source: "project_primary" },
+      },
+      executionTarget: {
+        kind: "remote",
+        transport: "sandbox",
+        providerKey: "fixture",
+        environmentId: "env-1",
+        leaseId: "lease-1",
+        remoteCwd: "/remote/workspace",
+        runner: { execute: runnerExecute },
+      },
+      authToken: "run-jwt-token",
+      onLog,
+      onMeta,
+      onEvent,
+      onSpawn,
+    })).rejects.toMatchObject({
+      code: PAPERCLIP_CALLBACK_BRIDGE_DISABLED,
+      retryable: false,
+      needsHuman: true,
+    });
+
+    expect(runnerExecute).not.toHaveBeenCalled();
+    expect(onLog).not.toHaveBeenCalled();
+    expect(onMeta).not.toHaveBeenCalled();
+    expect(onEvent).not.toHaveBeenCalled();
+    expect(onSpawn).not.toHaveBeenCalled();
+    await expect(fs.access(sideEffectPath)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("injects bridge env into sandbox-managed remote runs with the exact test capability", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-claude-execute-sandbox-"));
     const localWorkspace = path.join(root, "workspace");
     const remoteWorkspace = path.join(root, "sandbox-$HOME");
@@ -845,7 +953,7 @@ describe("claude execute", () => {
     process.env.PAPERCLIP_INSTANCE_ID = "test-instance";
 
     try {
-      const result = await execute({
+      const result = await withCallbackBridgeTestCapability(() => execute({
         runId: "run-sandbox-auth",
         agent: {
           id: "agent-1",
@@ -882,7 +990,8 @@ describe("claude execute", () => {
         },
         authToken: "run-jwt-token",
         onLog: async () => {},
-      });
+        onEvent: async () => {},
+      }));
 
       expect(result.exitCode).toBe(0);
       expect(result.sessionParams).toMatchObject({
@@ -930,7 +1039,7 @@ describe("claude execute", () => {
     await fs.mkdir(remoteWorkspace, { recursive: true });
 
     try {
-      const result = await execute({
+      const result = await withCallbackBridgeTestCapability(() => execute({
         runId: "run-sandbox-effort-fallback",
         agent: {
           id: "agent-1",
@@ -968,7 +1077,8 @@ describe("claude execute", () => {
         },
         authToken: "run-jwt-token",
         onLog: async () => {},
-      });
+        onEvent: async () => {},
+      }));
 
       expect(result.exitCode).toBe(0);
       const capture = JSON.parse(await fs.readFile(capturePath, "utf8")) as CapturePayload;
@@ -1029,18 +1139,22 @@ describe("claude execute", () => {
     };
 
     try {
-      const first = await execute({
-        runId: "run-sandbox-effort-supported-1",
-        ...baseInput,
-      });
-      const second = await execute({
-        runId: "run-sandbox-effort-supported-2",
-        ...baseInput,
-        executionTarget: {
-          ...baseInput.executionTarget,
-          leaseId: "lease-2",
-        },
-      });
+      const [first, second] = await withCallbackBridgeTestCapability(async () => [
+        await execute({
+          runId: "run-sandbox-effort-supported-1",
+          ...baseInput,
+          onEvent: async () => {},
+        }),
+        await execute({
+          runId: "run-sandbox-effort-supported-2",
+          ...baseInput,
+          executionTarget: {
+            ...baseInput.executionTarget,
+            leaseId: "lease-2",
+          },
+          onEvent: async () => {},
+        }),
+      ]);
 
       expect(first.exitCode).toBe(0);
       expect(second.exitCode).toBe(0);
@@ -1052,7 +1166,7 @@ describe("claude execute", () => {
       restore();
       await fs.rm(root, { recursive: true, force: true });
     }
-  }, SANDBOX_EXECUTION_TEST_TIMEOUT_MS);
+  }, SANDBOX_DOUBLE_EXECUTION_TEST_TIMEOUT_MS);
 
   it("degrades to the conservative fallback (returns null) when the sandbox probe throws, and retries on the next lease", async () => {
     let calls = 0;

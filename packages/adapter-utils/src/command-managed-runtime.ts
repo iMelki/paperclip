@@ -297,6 +297,13 @@ export function createCommandManagedRuntimeClient(input: {
       const buffer = toBuffer(bytes);
       const total = buffer.byteLength;
       const encodedLength = base64EncodedLength(total);
+      // remotePath is a native Windows path (backslash-separated) whenever the
+      // sandbox target is the local machine itself (tests, and any adapter
+      // running its "remote" sandbox on Windows). path.posix.dirname sees no
+      // "/" in that string and returns ".", so the real parent directory is
+      // never created -- the staging mkdir silently no-ops and every write
+      // that follows fails with ENOENT. dirnamePortablePath picks win32 vs
+      // posix dirname based on the path's own shape.
       const remoteDir = dirnamePortablePath(remotePath);
       const remoteTempPath = buildUniqueStagingPath({ targetPath: remotePath, suffix: ".paperclip-upload" });
       const canUseSingleStreamProgressPath = input.runner.supportsSingleStreamStdinProgress === true;

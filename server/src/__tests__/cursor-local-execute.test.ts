@@ -1,11 +1,72 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+
+const callbackBridgeTestControl = vi.hoisted(() => ({
+  enabled: false,
+  startCalls: 0,
+  cursorAgentProbeCalls: 0,
+  provisionCalls: 0,
+  networkCalls: 0,
+}));
+
+vi.mock("@paperclipai/adapter-utils/execution-target", async () => {
+  const actual = await vi.importActual<
+    typeof import("@paperclipai/adapter-utils/execution-target")
+  >("@paperclipai/adapter-utils/execution-target");
+  const testCapability = actual.issuePaperclipCallbackBridgeTestCapability();
+
+  return {
+    ...actual,
+    assertPaperclipCallbackBridgeEnabled: (
+      capability?: Parameters<typeof actual.assertPaperclipCallbackBridgeEnabled>[0],
+    ) => actual.assertPaperclipCallbackBridgeEnabled(
+      callbackBridgeTestControl.enabled ? testCapability : capability,
+    ),
+    startAdapterExecutionTargetPaperclipBridge: (
+      input: Parameters<typeof actual.startAdapterExecutionTargetPaperclipBridge>[0],
+    ) => {
+      if (!callbackBridgeTestControl.enabled) {
+        return actual.startAdapterExecutionTargetPaperclipBridge(input);
+      }
+      actual.assertPaperclipCallbackBridgeEnabled(testCapability);
+      callbackBridgeTestControl.startCalls += 1;
+      // These fixtures verify Cursor command selection, not the callback
+      // protocol already covered by the adapter-utils and Claude/Codex suites.
+      return Promise.resolve(null);
+    },
+  };
+});
+
 import { runChildProcess } from "@paperclipai/adapter-utils/server-utils";
 import { toShellPath } from "@paperclipai/adapter-utils/shell-path";
 import { resolveTestShellCommand } from "@paperclipai/adapter-utils/test-shell";
 import { execute } from "@paperclipai/adapter-cursor-local/server";
+
+async function withCallbackBridgeTestCapability<T>(run: () => Promise<T>): Promise<T> {
+  if (callbackBridgeTestControl.enabled) {
+    throw new Error("Callback bridge test capability is already active.");
+  }
+  callbackBridgeTestControl.startCalls = 0;
+  callbackBridgeTestControl.cursorAgentProbeCalls = 0;
+  callbackBridgeTestControl.provisionCalls = 0;
+  callbackBridgeTestControl.networkCalls = 0;
+  callbackBridgeTestControl.enabled = true;
+  try {
+    return await run();
+  } finally {
+    callbackBridgeTestControl.enabled = false;
+  }
+}
+
+afterEach(() => {
+  callbackBridgeTestControl.enabled = false;
+  callbackBridgeTestControl.startCalls = 0;
+  callbackBridgeTestControl.cursorAgentProbeCalls = 0;
+  callbackBridgeTestControl.provisionCalls = 0;
+  callbackBridgeTestControl.networkCalls = 0;
+});
 
 async function writeFakeCursorCommand(commandPath: string): Promise<void> {
   const script = `#!/usr/bin/env node
@@ -76,6 +137,14 @@ console.log(JSON.stringify({
   await fs.chmod(commandPath, 0o755);
 }
 
+function fromShellPath(value: string): string {
+  if (process.platform !== "win32") return value;
+  const driveMatch = /^\/([A-Za-z])\/(.*)$/.exec(value);
+  if (!driveMatch) return value;
+  const [, drive, rest] = driveMatch;
+  return `${drive.toUpperCase()}:\\${rest.replace(/\//g, "\\")}`;
+}
+
 function createLocalSandboxRunner(pathMapping?: { remoteRoot: string; localRoot: string }) {
   let counter = 0;
   const mapValue = (value: string, forShell: boolean) => {
@@ -99,6 +168,60 @@ function createLocalSandboxRunner(pathMapping?: { remoteRoot: string; localRoot:
       counter += 1;
       const commandBasename = path.basename(input.command).toLowerCase();
       const shellCommand = commandBasename === "sh" || commandBasename === "bash";
+      const shellPayload = [input.command, ...(input.args ?? [])].join(" ");
+      if (
+        shellCommand &&
+        shellPayload.includes("__PAPERCLIP_CURSOR_HOME__:") &&
+        shellPayload.includes("__PAPERCLIP_CURSOR_AGENT__:")
+      ) {
+        if (!pathMapping) {
+          throw new Error("Cursor runtime-info fixture requires an exact remote-to-local root mapping.");
+        }
+        await fs.access(path.join(pathMapping.localRoot, "home", ".local", "bin", "cursor-agent"));
+        const remoteHome = path.posix.join(pathMapping.remoteRoot, "home");
+        const remoteCursorAgent = path.posix.join(remoteHome, ".local", "bin", "cursor-agent");
+        callbackBridgeTestControl.cursorAgentProbeCalls += 1;
+        return {
+          exitCode: 0,
+          signal: null,
+          timedOut: false,
+          stdout: [
+            `__PAPERCLIP_CURSOR_HOME__:${remoteHome}`,
+            `__PAPERCLIP_CURSOR_AGENT__:${remoteCursorAgent}`,
+            "",
+          ].join("\n"),
+          stderr: "",
+          pid: null,
+          startedAt: null,
+        };
+      }
+      const isProvisionCommand = /cursor\.com\/install/i.test(shellPayload);
+      const hasNetworkUrl = /\bhttps?:\/\//i.test(shellPayload);
+      if (isProvisionCommand || hasNetworkUrl) {
+        if (isProvisionCommand) callbackBridgeTestControl.provisionCalls += 1;
+        if (hasNetworkUrl) callbackBridgeTestControl.networkCalls += 1;
+        throw new Error("Cursor command-selection fixtures must not invoke installers or network URLs.");
+      }
+      if (
+        shellCommand &&
+        /\bcommand\s+-v\b/.test(shellPayload) &&
+        /cursor-agent/i.test(shellPayload)
+      ) {
+        if (!pathMapping) {
+          throw new Error("Cursor command probe fixture requires an exact remote-to-local root mapping.");
+        }
+        await fs.access(path.join(pathMapping.localRoot, "home", ".local", "bin", "cursor-agent"));
+        callbackBridgeTestControl.cursorAgentProbeCalls += 1;
+        return {
+          exitCode: 0,
+          signal: null,
+          timedOut: false,
+          stdout: "",
+          stderr: "",
+          pid: null,
+          startedAt: null,
+        };
+      }
       const localEnv = Object.fromEntries(
         Object.entries(input.env ?? {}).map(([key, value]) => {
           if (process.platform === "win32" && key.toUpperCase() === "PATH") {
@@ -111,7 +234,7 @@ function createLocalSandboxRunner(pathMapping?: { remoteRoot: string; localRoot:
           return [key, mapValue(value, false)];
         }),
       );
-      return await runChildProcess(`cursor-sandbox-execute-${counter}`, resolveTestShellCommand(mapValue(input.command, false)), (input.args ?? []).map((arg) => mapValue(arg, shellCommand)), {
+      return await runChildProcess(`cursor-sandbox-execute-${counter}`, resolveTestShellCommand(fromShellPath(mapValue(input.command, false))), (input.args ?? []).map((arg) => mapValue(arg, shellCommand)), {
         cwd: mapValue(input.cwd ?? process.cwd(), false),
         env: localEnv,
         stdin: input.stdin,
@@ -362,7 +485,7 @@ describe("cursor execute", () => {
     process.env.HOME = sandboxHome;
 
     try {
-      const result = await execute({
+      const result = await withCallbackBridgeTestCapability(() => execute({
         runId: "run-sandbox-1",
         agent: {
           id: "agent-1",
@@ -395,7 +518,8 @@ describe("cursor execute", () => {
         context: {},
         authToken: "run-jwt-token",
         onLog: async () => {},
-      });
+        onEvent: async () => {},
+      }));
 
       expect(
         result.exitCode,
@@ -404,6 +528,10 @@ describe("cursor execute", () => {
           result,
         }, null, 2),
       ).toBe(0);
+      expect(callbackBridgeTestControl.startCalls).toBe(1);
+      expect(callbackBridgeTestControl.cursorAgentProbeCalls).toBeGreaterThan(0);
+      expect(callbackBridgeTestControl.provisionCalls).toBe(0);
+      expect(callbackBridgeTestControl.networkCalls).toBe(0);
       const capture = JSON.parse(await fs.readFile(capturePath, "utf8")) as {
         command: string;
         argv: string[];
@@ -411,7 +539,10 @@ describe("cursor execute", () => {
         path: string;
       };
       expect(capture.command).toBe(cursorAgentPath);
-      expect(capture.path.split(path.delimiter)).toContain(path.join(homeDir, ".local", "bin"));
+      const normalizePathEntry = (value: string) => value.replace(/\\/g, "/").toLowerCase();
+      expect(capture.path.split(path.delimiter).map(normalizePathEntry)).toContain(
+        normalizePathEntry(path.join(homeDir, ".local", "bin")),
+      );
       expect(capture.prompt).toContain("Follow the paperclip heartbeat.");
     } finally {
       if (previousHome === undefined) delete process.env.HOME;
@@ -440,7 +571,7 @@ describe("cursor execute", () => {
     process.env.HOME = sandboxHome;
 
     try {
-      const result = await execute({
+      const result = await withCallbackBridgeTestCapability(() => execute({
         runId: "run-sandbox-2",
         agent: {
           id: "agent-1",
@@ -473,7 +604,8 @@ describe("cursor execute", () => {
         context: {},
         authToken: "run-jwt-token",
         onLog: async () => {},
-      });
+        onEvent: async () => {},
+      }));
 
       expect(
         result.exitCode,
@@ -482,6 +614,9 @@ describe("cursor execute", () => {
           result,
         }, null, 2),
       ).toBe(0);
+      expect(callbackBridgeTestControl.startCalls).toBe(1);
+      expect(callbackBridgeTestControl.provisionCalls).toBe(0);
+      expect(callbackBridgeTestControl.networkCalls).toBe(0);
       const capture = JSON.parse(await fs.readFile(capturePath, "utf8")) as { command: string };
       expect(capture.command).toBe(customCommandPath);
     } finally {

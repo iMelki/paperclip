@@ -147,6 +147,10 @@ import {
 } from "../services/recovery/index.ts";
 import {
 } from "@paperclipai/adapter-utils/server-utils";
+import {
+  PAPERCLIP_CALLBACK_BRIDGE_DISABLED,
+  PAPERCLIP_EXECUTION_TARGET_INVALID,
+} from "@paperclipai/adapter-utils/execution-target";
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
 
@@ -214,6 +218,7 @@ async function waitForHeartbeatIdle(
   timeoutMs = 3_000,
 ) {
   const deadline = Date.now() + timeoutMs;
+  let consecutiveIdlePolls = 0;
   while (Date.now() < deadline) {
     const runs = await db
       .select({
@@ -221,7 +226,10 @@ async function waitForHeartbeatIdle(
       })
       .from(heartbeatRuns);
     if (!runs.some((run) => run.status === "queued" || run.status === "running")) {
-      return;
+      consecutiveIdlePolls += 1;
+      if (consecutiveIdlePolls >= 3) return;
+    } else {
+      consecutiveIdlePolls = 0;
     }
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
@@ -2508,6 +2516,237 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
 
     const comments = await db.select().from(issueComments).where(eq(issueComments.issueId, issueId));
     expect(comments).toHaveLength(0);
+  });
+
+  it.each([
+    {
+      label: "cross-realm callback bridge disabled",
+      code: PAPERCLIP_CALLBACK_BRIDGE_DISABLED,
+      projectionKey: "paperclipBridgeLaunch",
+      projection: { status: "disabled", retryable: false, needsHuman: true },
+    },
+    {
+      label: "cross-realm invalid execution target",
+      code: PAPERCLIP_EXECUTION_TARGET_INVALID,
+      projectionKey: "executionTarget",
+      projection: { status: "invalid", retryable: false, needsHuman: true },
+    },
+  ])("persists $label adapter throws as terminal configuration fences without retry", async ({
+    code,
+    projectionKey,
+    projection,
+  }) => {
+    mockAdapterExecute.mockRejectedValueOnce(Object.assign(new Error(code), {
+      code,
+      retryable: false,
+      needsHuman: true,
+    }));
+    const { agentId, runId, issueId } = await seedQueuedIssueRunFixture();
+    const heartbeat = heartbeatService(db);
+
+    await heartbeat.resumeQueuedRuns();
+    const settled = await waitForRunToSettle(heartbeat, runId, 5_000);
+    await waitForHeartbeatIdle(db, 5_000);
+
+    expect(settled).toMatchObject({ status: "failed", errorCode: code });
+    expect(settled?.resultJson).toMatchObject({ [projectionKey]: projection });
+    await expect(heartbeat.scheduleBoundedRetry(runId, {
+      retryReason: "test_configuration_fence",
+      wakeReason: "test_configuration_fence",
+    })).resolves.toBeNull();
+    const runs = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.agentId, agentId));
+    expect(runs).toHaveLength(1);
+    expect(runs[0]?.scheduledRetryReason).toBeNull();
+    const retryRuns = await db
+      .select()
+      .from(heartbeatRuns)
+      .where(eq(heartbeatRuns.retryOfRunId, runId));
+    expect(retryRuns).toHaveLength(0);
+    const wakeups = await db
+      .select()
+      .from(agentWakeupRequests)
+      .where(eq(agentWakeupRequests.agentId, agentId));
+    expect(wakeups).toHaveLength(1);
+    const issue = await db
+      .select()
+      .from(issues)
+      .where(eq(issues.id, issueId))
+      .then((rows) => rows[0] ?? null);
+    expect(issue).toMatchObject({ status: "blocked", executionRunId: null });
+    const comments = await db.select().from(issueComments).where(eq(issueComments.issueId, issueId));
+    expect(comments.some((comment) => comment.body.includes("Automatic retry cannot repair this configuration fence")))
+      .toBe(true);
+    const recoveryAction = await db
+      .select()
+      .from(issueRecoveryActions)
+      .where(eq(issueRecoveryActions.sourceIssueId, issueId))
+      .then((rows) => rows[0] ?? null);
+    expect(recoveryAction).toMatchObject({
+      kind: "configuration_validation",
+      cause: "execution_configuration_fenced",
+      wakePolicy: {
+        type: "manual_repair_required",
+        reason: "execution_configuration_fenced",
+      },
+      nextAction: expect.stringContaining("do not retry automatically"),
+    });
+  });
+
+  it("persists an ACPX callback-disabled result as terminal configuration state without retry", async () => {
+    mockAdapterExecute.mockResolvedValueOnce({
+      exitCode: 1,
+      signal: null,
+      timedOut: false,
+      errorMessage: "remote callback execution is disabled",
+      errorCode: PAPERCLIP_CALLBACK_BRIDGE_DISABLED,
+      errorMeta: {
+        category: "configuration",
+        retryable: false,
+        needsHuman: true,
+      },
+      resultJson: {
+        phase: "preflight",
+        paperclipBridgeLaunch: {
+          status: "disabled",
+          retryable: false,
+          needsHuman: true,
+        },
+      },
+    });
+    const { agentId, runId, issueId } = await seedQueuedIssueRunFixture();
+    const heartbeat = heartbeatService(db);
+
+    await heartbeat.resumeQueuedRuns();
+    const settled = await waitForRunToSettle(heartbeat, runId, 5_000);
+    await waitForHeartbeatIdle(db, 5_000);
+
+    expect(settled).toMatchObject({
+      status: "failed",
+      errorCode: PAPERCLIP_CALLBACK_BRIDGE_DISABLED,
+      resultJson: {
+        phase: "preflight",
+        paperclipBridgeLaunch: { status: "disabled", retryable: false, needsHuman: true },
+      },
+    });
+    await expect(heartbeat.scheduleBoundedRetry(runId, {
+      retryReason: "test_configuration_fence",
+      wakeReason: "test_configuration_fence",
+    })).resolves.toBeNull();
+    const runs = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.agentId, agentId));
+    expect(runs).toHaveLength(1);
+    expect(runs[0]?.scheduledRetryReason).toBeNull();
+    const retryRuns = await db
+      .select()
+      .from(heartbeatRuns)
+      .where(eq(heartbeatRuns.retryOfRunId, runId));
+    expect(retryRuns).toHaveLength(0);
+    const wakeups = await db
+      .select()
+      .from(agentWakeupRequests)
+      .where(eq(agentWakeupRequests.agentId, agentId));
+    expect(wakeups).toHaveLength(1);
+    const issue = await db
+      .select()
+      .from(issues)
+      .where(eq(issues.id, issueId))
+      .then((rows) => rows[0] ?? null);
+    expect(issue).toMatchObject({ status: "blocked", executionRunId: null });
+    const comments = await db.select().from(issueComments).where(eq(issueComments.issueId, issueId));
+    expect(comments.some((comment) => comment.body.includes("Automatic retry cannot repair this configuration fence")))
+      .toBe(true);
+    const recoveryAction = await db
+      .select()
+      .from(issueRecoveryActions)
+      .where(eq(issueRecoveryActions.sourceIssueId, issueId))
+      .then((rows) => rows[0] ?? null);
+    expect(recoveryAction).toMatchObject({
+      kind: "configuration_validation",
+      cause: "execution_configuration_fenced",
+      wakePolicy: {
+        type: "manual_repair_required",
+        reason: "execution_configuration_fenced",
+      },
+      nextAction: expect.stringContaining("do not retry automatically"),
+    });
+  });
+
+  it("blocks a reviewer callback configuration fence when the source assignee differs", async () => {
+    mockAdapterExecute.mockRejectedValueOnce(Object.assign(
+      new Error(PAPERCLIP_CALLBACK_BRIDGE_DISABLED),
+      {
+        code: PAPERCLIP_CALLBACK_BRIDGE_DISABLED,
+        retryable: false,
+        needsHuman: true,
+      },
+    ));
+    const { companyId, agentId, runId, issueId } = await seedQueuedIssueRunFixture();
+    const sourceAssigneeAgentId = randomUUID();
+    const stageId = randomUUID();
+    await db.insert(agents).values({
+      id: sourceAssigneeAgentId,
+      companyId,
+      name: "CodexImplementor",
+      role: "engineer",
+      status: "idle",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+    await db.update(issues).set({
+      status: "in_review",
+      assigneeAgentId: sourceAssigneeAgentId,
+      executionState: {
+        status: "pending",
+        currentStageId: stageId,
+        currentStageIndex: 0,
+        currentStageType: "review",
+        currentParticipant: { type: "agent", agentId, userId: null },
+        returnAssignee: { type: "agent", agentId: sourceAssigneeAgentId, userId: null },
+        reviewRequest: null,
+        completedStageIds: [],
+        lastDecisionId: null,
+        lastDecisionOutcome: null,
+      },
+    }).where(eq(issues.id, issueId));
+    const heartbeat = heartbeatService(db);
+
+    await heartbeat.resumeQueuedRuns();
+    const settled = await waitForRunToSettle(heartbeat, runId, 5_000);
+    await waitForHeartbeatIdle(db, 5_000);
+
+    expect(settled).toMatchObject({
+      status: "failed",
+      errorCode: PAPERCLIP_CALLBACK_BRIDGE_DISABLED,
+    });
+    expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.agentId, agentId)))
+      .toHaveLength(1);
+    expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.retryOfRunId, runId)))
+      .toHaveLength(0);
+    expect(await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.agentId, agentId)))
+      .toHaveLength(1);
+    const issue = await db
+      .select()
+      .from(issues)
+      .where(eq(issues.id, issueId))
+      .then((rows) => rows[0] ?? null);
+    expect(issue).toMatchObject({
+      status: "blocked",
+      executionRunId: null,
+      assigneeAgentId: agentId,
+    });
+    const recoveryAction = await db
+      .select()
+      .from(issueRecoveryActions)
+      .where(eq(issueRecoveryActions.sourceIssueId, issueId))
+      .then((rows) => rows[0] ?? null);
+    expect(recoveryAction).toMatchObject({
+      cause: "execution_configuration_fenced",
+      ownerAgentId: agentId,
+      previousOwnerAgentId: sourceAssigneeAgentId,
+      returnOwnerAgentId: sourceAssigneeAgentId,
+      wakePolicy: { type: "manual_repair_required" },
+    });
   });
 
   it("schedules bounded retries for failed accepted interaction continuation wakes", async () => {
