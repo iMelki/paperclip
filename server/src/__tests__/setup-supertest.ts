@@ -28,6 +28,17 @@ if (!process.env.CODEX_HOME) {
   const codexHome = fs.mkdtempSync(path.join(os.tmpdir(), "paperclip-vitest-codex-home-"));
   fs.writeFileSync(path.join(codexHome, "auth.json"), '{"OPENAI_API_KEY":"sk-vitest"}\n', { mode: 0o600 });
   process.env.CODEX_HOME = codexHome;
+  // Best-effort only: vitest terminates pool workers on Windows without firing
+  // exit handlers, so the runner's startup stale-temp sweep (#33) is the
+  // mechanism that actually bounds accumulation. This hook covers direct
+  // single-process vitest invocations.
+  process.on("exit", () => {
+    try {
+      fs.rmSync(codexHome, { recursive: true, force: true, maxRetries: 3, retryDelay: 50 });
+    } catch {
+      // Best-effort: a locked dir is reclaimed by the next run's sweep.
+    }
+  });
 }
 
 if (!SupertestTest.prototype.__paperclipLoopbackPatched) {

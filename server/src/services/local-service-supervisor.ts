@@ -7,6 +7,12 @@ import { promisify } from "node:util";
 import { resolvePaperclipInstanceRoot } from "../home-paths.js";
 
 const execFileAsync = promisify(execFile);
+/**
+ * The POSIX lineage fallback is a safety check, not a best-effort background
+ * probe. Keep its entire ps walk bounded so an unavailable or wedged ps
+ * implementation cannot hold runtime adoption indefinitely.
+ */
+export const UNIX_PROCESS_LINEAGE_TIMEOUT_MS = 2_000;
 const taskkillCommand = path.join(process.env.SystemRoot ?? "C:\\Windows", "System32", "taskkill.exe");
 const windowsPowerShellCommand = path.join(
   process.env.SystemRoot ?? "C:\\Windows",
@@ -545,16 +551,25 @@ function doesCommandLineMatch(
   );
 }
 
-async function doesUnixProcessLineageMatch(ownerPid: number, recordedCommand: string) {
+export async function doesUnixProcessLineageMatch(ownerPid: number, recordedCommand: string) {
   if (process.platform === "win32") return false;
   const visited = new Set<number>();
+  const deadline = Date.now() + UNIX_PROCESS_LINEAGE_TIMEOUT_MS;
   let pid: number | null = normalizeLocalServicePid(ownerPid);
   for (let depth = 0; pid !== null && depth < 16 && !visited.has(pid); depth += 1) {
     visited.add(pid);
+    const remainingMs = deadline - Date.now();
+    if (remainingMs <= 0) return false;
     try {
       const [{ stdout: commandLine }, { stdout: parentPidText }] = await Promise.all([
-        execFileAsync("ps", ["-o", "command=", "-p", String(pid)]),
-        execFileAsync("ps", ["-o", "ppid=", "-p", String(pid)]),
+        execFileAsync("ps", ["-o", "command=", "-p", String(pid)], {
+          timeout: remainingMs,
+          killSignal: "SIGTERM",
+        }),
+        execFileAsync("ps", ["-o", "ppid=", "-p", String(pid)], {
+          timeout: remainingMs,
+          killSignal: "SIGTERM",
+        }),
       ]);
       if (doesCommandLineMatch(recordedCommand, commandLine.trim())) return true;
       const parentPid = normalizeLocalServicePid(parentPidText.trim());
