@@ -6162,16 +6162,25 @@ describeEmbeddedPostgres("workspace runtime startup reconciliation", () => {
         workspaceCwd: workspaceRoot,
       });
       const staleOwnerPid = await readLocalServicePortOwner(stalePort!);
+      // agent-settings#584 / paperclip#49: this fixture's mock server has been
+      // observed leaked past this cleanup on Windows despite the code path
+      // below looking correct. Log the full termination outcome (not just
+      // whether the call threw) so a real CI run pins the actual mechanism
+      // instead of continued speculation.
       if (staleOwnerPid) {
-        await terminateLocalService({
+        const result = await terminateLocalService({
           pid: staleOwnerPid,
           processGroupId: staleOwnerPid,
         }, { trustedPid: true });
+        console.log("[paperclip#49] stale-health cleanup via port owner:", JSON.stringify(result));
       } else if (staleProcess.pid) {
-        await terminateLocalService({
+        const result = await terminateLocalService({
           pid: staleProcess.pid,
           processGroupId: staleProcess.pid,
         }, { trustedPid: true });
+        console.log("[paperclip#49] stale-health cleanup via staleProcess.pid:", JSON.stringify(result));
+      } else {
+        console.log("[paperclip#49] stale-health cleanup: neither staleOwnerPid nor staleProcess.pid was available, no termination attempted");
       }
     }
   }, 20_000);
