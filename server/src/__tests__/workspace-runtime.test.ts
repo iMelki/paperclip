@@ -46,6 +46,7 @@ import {
 } from "../services/workspace-runtime.ts";
 import {
   findAdoptableLocalService,
+  doesUnixProcessLineageMatch,
   findLocalServiceRegistryRecordByRuntimeServiceId,
   isProcessGroupAlive,
   isPidAlive,
@@ -58,6 +59,7 @@ import {
   readLocalServicePortOwner,
   removeLocalServiceRegistryRecord,
   terminateLocalService,
+  UNIX_PROCESS_LINEAGE_TIMEOUT_MS,
   writeLocalServiceRegistryRecord,
 } from "../services/local-service-supervisor.ts";
 import {
@@ -4290,6 +4292,28 @@ describe("readLocalServicePortOwner", () => {
       expect(normalizeLocalServicePid(invalid)).toBeNull();
     }
   });
+
+  it.skipIf(process.platform === "win32")(
+    "bounds the POSIX ps lineage fallback when ps does not return",
+    async () => {
+      const fakeBin = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-runtime-slow-ps-"));
+      const fakePs = path.join(fakeBin, "ps");
+      await fs.writeFile(fakePs, "#!/bin/sh\nexec sleep 30\n", "utf8");
+      await fs.chmod(fakePs, 0o755);
+      const previousPath = process.env.PATH;
+      process.env.PATH = `${fakeBin}${path.delimiter}${previousPath ?? ""}`;
+      const startedAt = Date.now();
+      try {
+        await expect(doesUnixProcessLineageMatch(process.pid, "node paperclip"))
+          .resolves.toBe(false);
+        expect(Date.now() - startedAt).toBeLessThan(UNIX_PROCESS_LINEAGE_TIMEOUT_MS + 1_000);
+      } finally {
+        if (previousPath === undefined) delete process.env.PATH;
+        else process.env.PATH = previousPath;
+        await fs.rm(fakeBin, { recursive: true, force: true });
+      }
+    },
+  );
 
   it("refuses an unverified positive pid without a process-group identity", async () => {
     const child = spawn(process.execPath, [

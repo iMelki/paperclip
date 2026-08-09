@@ -11874,49 +11874,58 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     deferral: WorkspaceBusyDeferral,
   ) {
     const now = new Date();
-    const cancelWrite = await setRunStatusIfRunning(run.id, "cancelled", {
-      error: deferral.message,
-      errorCode: WORKSPACE_BUSY_ERROR_CODE,
-      finishedAt: now,
-      resultJson: {
-        workspaceBusy: {
-          projectWorkspaceId: deferral.projectWorkspaceId,
-          holderRunId: deferral.holder.runId,
-          holderIssueId: deferral.holder.issueId,
-          deferralAttempt: deferral.deferralAttempt,
+    const workspaceBusyResultJson = {
+      workspaceBusy: {
+        projectWorkspaceId: deferral.projectWorkspaceId,
+        holderRunId: deferral.holder.runId,
+        holderIssueId: deferral.holder.issueId,
+        deferralAttempt: deferral.deferralAttempt,
+      },
+    };
+    // Do not publish the terminal cancelled state until the retry row exists.
+    // Observers wake as soon as the status changes, and could otherwise race
+    // this function between the cancellation write and scheduleBoundedRetryForRun,
+    // briefly seeing a cancelled run with no scheduled_retry child. Keep the
+    // source run running while its retry is created; the agent remains occupied
+    // during this short hand-off, and recovery can still repair a process that
+    // dies before the final status write.
+    const preparedRun = await db
+      .update(heartbeatRuns)
+      .set({
+        error: deferral.message,
+        errorCode: WORKSPACE_BUSY_ERROR_CODE,
+        resultJson: workspaceBusyResultJson,
+        // Recorded on the run (and inherited by the scheduled retry's context)
+        // so the retry promotion gate can tell a non-assignee wake — where an
+        // assignee mismatch is the expected state — from a reassignment race.
+        contextSnapshot: {
+          ...parseObject(run.contextSnapshot),
+          workspaceBusyDeferredWhileAssignee: deferral.wasIssueAssignee,
         },
-      },
-      // Recorded on the run (and inherited by the scheduled retry's context)
-      // so the retry promotion gate can tell a non-assignee wake — where an
-      // assignee mismatch is the expected state — from a reassignment race.
-      contextSnapshot: {
-        ...parseObject(run.contextSnapshot),
-        workspaceBusyDeferredWhileAssignee: deferral.wasIssueAssignee,
-      },
-    });
-    if (!cancelWrite.updated) {
+        updatedAt: now,
+      })
+      .where(and(eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.status, "running")))
+      .returning()
+      .then((rows) => rows[0] ?? null);
+    if (!preparedRun) {
+      const currentRun = await getRun(run.id).catch(() => null);
       logger.info(
-        { runId: run.id, currentStatus: cancelWrite.run?.status ?? null },
+        { runId: run.id, currentStatus: currentRun?.status ?? null },
         "skipping workspace-busy deferral finalization because the run already left running state",
       );
       return;
     }
-    await setWakeupStatus(run.wakeupRequestId, "cancelled", {
-      finishedAt: now,
-      error: deferral.message,
-    }).catch(() => undefined);
 
-    const cancelledRun = cancelWrite.run ?? (await getRun(run.id).catch(() => null));
     const agentRow = await getAgent(run.agentId).catch(() => null);
     let scheduleOutcome: string | null = null;
-    if (cancelledRun && agentRow) {
-      const scheduleResult = await scheduleBoundedRetryForRun(cancelledRun, agentRow, {
+    if (agentRow) {
+      const scheduleResult = await scheduleBoundedRetryForRun(preparedRun, agentRow, {
         now,
         retryReason: WORKSPACE_BUSY_RETRY_REASON,
         wakeReason: WORKSPACE_BUSY_RETRY_WAKE_REASON,
         // Always admit the next attempt: workspace-busy deferral is bounded by
         // holder liveness, not by an attempt counter.
-        maxAttempts: (cancelledRun.scheduledRetryAttempt ?? 0) + 1,
+        maxAttempts: (preparedRun.scheduledRetryAttempt ?? 0) + 1,
         delayMs: computeWorkspaceBusyRetryDelayMs(),
       }).catch((scheduleErr) => {
         logger.error(
@@ -11927,6 +11936,22 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       });
       scheduleOutcome = scheduleResult?.outcome ?? null;
     }
+
+    // Publish cancellation only after scheduleBoundedRetryForRun has inserted
+    // and linked the retry, eliminating a transient cancelled-without-retry
+    // state for wakeup consumers.
+    const cancelWrite = await setRunStatusIfRunning(run.id, "cancelled", {
+      error: deferral.message,
+      errorCode: WORKSPACE_BUSY_ERROR_CODE,
+      finishedAt: now,
+      resultJson: workspaceBusyResultJson,
+      contextSnapshot: preparedRun.contextSnapshot,
+    });
+    const cancelledRun = cancelWrite.run ?? (await getRun(run.id).catch(() => null));
+    await setWakeupStatus(run.wakeupRequestId, "cancelled", {
+      finishedAt: now,
+      error: deferral.message,
+    }).catch(() => undefined);
 
     if (cancelledRun) {
       await appendRunEvent(cancelledRun, await nextRunEventSeq(cancelledRun.id), {

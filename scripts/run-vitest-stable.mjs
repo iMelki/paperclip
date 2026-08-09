@@ -9,6 +9,10 @@ import {
   sanitizeGitLocalEnvironment,
 } from "./git-local-env.mjs";
 import { loadShardDurations, selectGeneralServerShard } from "./general-server-shard.mjs";
+import { cleanStaleTestTempDirs } from "./clean-stale-test-temp.mjs";
+
+// Self-heal stale fixture temp dirs from previous killed/aborted runs (#33).
+cleanStaleTestTempDirs({ log: (message) => console.log(`[test:run] ${message}`) });
 
 const repoRoot = process.cwd();
 const gitLocalEnvironmentVariableNames = resolveGitLocalEnvironmentVariableNames({ cwd: repoRoot });
