@@ -4,7 +4,7 @@ import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { createInterface } from "node:readline/promises";
-import { stdin, stdout } from "node:process";
+import { stderr, stdin, stdout } from "node:process";
 import { createCapturedOutputBuffer, parseJsonResponseWithLimit } from "./dev-runner-output.ts";
 import { collectWatchedSnapshot as collectDevServerWatchedSnapshot, diffSnapshots } from "./dev-runner-snapshot.mjs";
 import { createDevServiceIdentity, repoRoot } from "./dev-service-profile.ts";
@@ -346,22 +346,36 @@ async function runPnpm(args: string[], options: {
   cwd?: string;
 } = {}) {
   return await new Promise<{ code: number; signal: NodeJS.Signals | null; stdout: string; stderr: string }>((resolve, reject) => {
+    const isWindows = process.platform === "win32";
+    const requestedStdio = options.stdio ?? ["ignore", "pipe", "pipe"];
+    const actualStdio: "inherit" | ["ignore", "pipe", "pipe"] = isWindows
+      ? ["ignore", "pipe", "pipe"]
+      : requestedStdio;
+    const shouldForwardOutput = requestedStdio === "inherit";
     const spawned = spawn(pnpmBin, args, {
-      stdio: options.stdio ?? ["ignore", "pipe", "pipe"],
+      stdio: actualStdio,
       env: options.env ?? process.env,
       cwd: options.cwd,
-      shell: process.platform === "win32",
+      shell: isWindows,
+      windowsHide: isWindows,
+      detached: false,
     });
 
     const stdoutBuffer = createCapturedOutputBuffer();
     const stderrBuffer = createCapturedOutputBuffer();
 
     if (spawned.stdout) {
+      if (shouldForwardOutput) {
+        spawned.stdout.pipe(stdout, { end: false });
+      }
       spawned.stdout.on("data", (chunk) => {
         stdoutBuffer.append(chunk);
       });
     }
     if (spawned.stderr) {
+      if (shouldForwardOutput) {
+        spawned.stderr.pipe(stderr, { end: false });
+      }
       spawned.stderr.on("data", (chunk) => {
         stderrBuffer.append(chunk);
       });
@@ -556,11 +570,26 @@ async function startServerChild() {
   await buildPluginSdk();
 
   const serverScript = mode === "watch" ? "dev:watch" : "dev";
+  const isWindows = process.platform === "win32";
+  const serverStdio: "inherit" | ["ignore", "pipe", "pipe"] = isWindows
+    ? ["ignore", "pipe", "pipe"]
+    : "inherit";
   child = spawn(
     pnpmBin,
     ["--filter", "@paperclipai/server", serverScript, ...forwardedArgs],
-    { stdio: "inherit", env, shell: process.platform === "win32" },
+    {
+      stdio: serverStdio,
+      env,
+      shell: isWindows,
+      windowsHide: isWindows,
+      detached: false,
+    },
   );
+
+  if (isWindows) {
+    child.stdout?.pipe(stdout, { end: false });
+    child.stderr?.pipe(stderr, { end: false });
+  }
 
   childExitPromise = new Promise((resolve, reject) => {
     child?.on("error", reject);
