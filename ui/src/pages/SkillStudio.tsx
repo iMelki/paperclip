@@ -139,6 +139,7 @@ import { ImageGalleryModal, type GalleryMediaItem } from "@/components/ImageGall
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { IssueOutputSection } from "@/components/issue-output/IssueOutputSection";
 import { buildLineDiff } from "@/lib/line-diff";
+import { useConfirmDialog } from "@/hooks/useConfirmDialog";
 import {
   buildCreateRunRequest,
   buildReRunRequest,
@@ -1271,6 +1272,7 @@ function SkillPane({
   const skillId = skill.id;
   const queryClient = useQueryClient();
   const onError = useMutationErrorToast();
+  const { confirm, confirmDialog } = useConfirmDialog();
   const paths = useMemo(
     () => skill.fileInventory.map((f) => f.path),
     [skill.fileInventory],
@@ -1320,15 +1322,24 @@ function SkillPane({
 
   const selectFile = useCallback((path: string) => {
     if (path === selectedFile) return;
-    if (
-      dirty
-      && typeof window !== "undefined"
-      && !window.confirm("Discard unsaved edits and switch files?")
-    ) {
-      return;
-    }
-    setSelectedFile(path);
-  }, [dirty, selectedFile]);
+    void (async () => {
+      if (dirty) {
+        const confirmed = await confirm({
+          title: "Discard unsaved edits and switch files?",
+          tone: "destructive",
+          confirmLabel: "Discard edits",
+          consequences: {
+            immediateEffect: "Unsaved edits to the current file are discarded.",
+            confirmedEffect: "Nothing is saved; the file keeps its last saved content.",
+            resultLocation: "The editor opens the file you selected.",
+            willNotHappen: "The skill's saved files are not changed or deleted.",
+          },
+        });
+        if (!confirmed) return;
+      }
+      setSelectedFile(path);
+    })();
+  }, [confirm, dirty, selectedFile]);
 
   const saveMutation = useMutation({
     mutationFn: () => companySkillsApi.updateFile(companyId, skillId, selectedFile, draft),
@@ -1589,6 +1600,7 @@ function SkillPane({
         pending={deleteMutation.isPending}
         onSubmit={(path) => deleteMutation.mutate({ path, target: "folder" })}
       />
+      {confirmDialog}
     </PaneScaffold>
   );
 }
@@ -1650,6 +1662,7 @@ function SkillFileActions({
 }) {
   const disabled = readOnly || pending;
   const deleteDisabled = disabled || !canDeleteFile;
+  const { confirm, confirmDialog } = useConfirmDialog();
   return (
     <div className="flex items-center gap-1">
       <Tooltip>
@@ -1680,9 +1693,21 @@ function SkillFileActions({
               size="icon-sm"
               disabled={deleteDisabled}
               onClick={() => {
-                if (typeof window === "undefined" || window.confirm(`Delete ${selectedFile}?`)) {
+                void (async () => {
+                  const confirmed = await confirm({
+                    title: `Delete ${selectedFile}?`,
+                    tone: "destructive",
+                    confirmLabel: "Delete file",
+                    consequences: {
+                      immediateEffect: "The file is removed from this skill.",
+                      confirmedEffect: "The server deletes the file from the skill's folder.",
+                      resultLocation: "The file tree refreshes without the file.",
+                      willNotHappen: "Other files, SKILL.md, and past runs are not affected.",
+                    },
+                  });
+                  if (!confirmed) return;
                   onDeleteFile();
-                }
+                })();
               }}
               aria-label="Delete file"
             >
@@ -1702,6 +1727,7 @@ function SkillFileActions({
         </TooltipTrigger>
         <TooltipContent>Delete folder</TooltipContent>
       </Tooltip>
+      {confirmDialog}
     </div>
   );
 }
@@ -1950,24 +1976,36 @@ function InputPane({
   const selectedName = selectedInput?.name ?? null;
   const dirty = !adHocMode && savedInputDraftDirty(savedInputDraft, selectedInput);
   const canSaveSelectedInput = Boolean(selectedInput && dirty && draft.trim());
+  const { confirm, confirmDialog } = useConfirmDialog();
 
-  const confirmDiscardDirtyInput = useCallback(() => {
+  const confirmDiscardDirtyInput = useCallback(async () => {
     if (!dirty) return true;
-    return (
-      typeof window === "undefined"
-      || window.confirm("Discard unsaved changes to this input?")
-    );
-  }, [dirty]);
+    return confirm({
+      title: "Discard unsaved changes to this input?",
+      tone: "destructive",
+      confirmLabel: "Discard changes",
+      consequences: {
+        immediateEffect: "Unsaved edits to the current test input are discarded.",
+        confirmedEffect: "Nothing is saved; the input keeps its last saved content.",
+        resultLocation: "The input you selected opens in the editor.",
+        willNotHappen: "Saved inputs and past runs are not changed or deleted.",
+      },
+    });
+  }, [confirm, dirty]);
 
   const selectSavedInput = useCallback((id: string) => {
     if (!adHocMode && id === selectedInputId) return;
-    if (!confirmDiscardDirtyInput()) return;
-    onSelectInput(id);
+    void (async () => {
+      if (!(await confirmDiscardDirtyInput())) return;
+      onSelectInput(id);
+    })();
   }, [adHocMode, confirmDiscardDirtyInput, onSelectInput, selectedInputId]);
 
   const selectAdHocInput = useCallback(() => {
-    if (!adHocMode && !confirmDiscardDirtyInput()) return;
-    onSelectAdHoc();
+    void (async () => {
+      if (!adHocMode && !(await confirmDiscardDirtyInput())) return;
+      onSelectAdHoc();
+    })();
   }, [adHocMode, confirmDiscardDirtyInput, onSelectAdHoc]);
 
   const updateMutation = useMutation({
@@ -2180,6 +2218,7 @@ function InputPane({
           onSelectInput(input.id);
         }}
       />
+      {confirmDialog}
     </PaneScaffold>
   );
 }
@@ -2317,6 +2356,7 @@ function RunsPane({
   const queryClient = useQueryClient();
   const onError = useMutationErrorToast();
   const toast = useOptionalToastActions();
+  const { confirm, confirmDialog } = useConfirmDialog();
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [selectedTemplateId, setSelectedTemplateId] = useState<RunTemplateSelection>(
     () => loadRunTemplateSelection(companyId),
@@ -2540,13 +2580,21 @@ function RunsPane({
           onEditTemplate={(template) => setTemplateDialog({ mode: "edit", source: template })}
           onDuplicateTemplate={(template) => setTemplateDialog({ mode: "create", source: template })}
           onDeleteTemplate={(template) => {
-            if (
-              typeof window !== "undefined"
-              && !window.confirm(`Delete run template "${template.name}"?`)
-            ) {
-              return;
-            }
-            deleteTemplateMutation.mutate(template.id);
+            void (async () => {
+              const confirmed = await confirm({
+                title: `Delete run template "${template.name}"?`,
+                tone: "destructive",
+                confirmLabel: "Delete template",
+                consequences: {
+                  immediateEffect: "The run template is removed from this skill.",
+                  confirmedEffect: "The server deletes the template and its saved variables.",
+                  resultLocation: "The template list in the Advanced panel updates.",
+                  willNotHappen: "Past runs and their results are not deleted.",
+                },
+              });
+              if (!confirmed) return;
+              deleteTemplateMutation.mutate(template.id);
+            })();
           }}
           deletingTemplateId={deleteTemplateMutation.variables ?? null}
           actionPending={
@@ -2597,6 +2645,7 @@ function RunsPane({
           }
         }}
       />
+      {confirmDialog}
     </PaneScaffold>
   );
 }
