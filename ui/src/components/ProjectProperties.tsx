@@ -23,6 +23,7 @@ import { DraftInput } from "./agent-config-primitives";
 import { InlineEditor } from "./InlineEditor";
 import { EnvironmentVariablesEditor } from "./environment-variables-editor";
 import { Badge } from "@/components/ui/badge";
+import { useConfirmDialog } from "@/hooks/useConfirmDialog";
 
 const PROJECT_STATUSES = [
   { value: "backlog", label: "Backlog" },
@@ -255,6 +256,7 @@ export function ProjectProperties({ project, onUpdate, onFieldUpdate, getFieldSa
   const [workspaceCwd, setWorkspaceCwd] = useState("");
   const [workspaceRepoUrl, setWorkspaceRepoUrl] = useState("");
   const [workspaceError, setWorkspaceError] = useState<string | null>(null);
+  const { confirm, confirmDialog } = useConfirmDialog();
 
   const commitField = (field: ProjectConfigFieldKey, data: Record<string, unknown>) => {
     if (onFieldUpdate) {
@@ -511,23 +513,44 @@ export function ProjectProperties({ project, onUpdate, onFieldUpdate, getFieldSa
     persistCodebase({ repoUrl });
   };
 
-  const clearLocalWorkspace = () => {
-    const confirmed = window.confirm(
-      codebase.repoUrl
+  const clearLocalWorkspace = async () => {
+    const keepsRepo = Boolean(codebase.repoUrl);
+    const confirmed = await confirm({
+      title: keepsRepo
         ? "Clear local folder from this workspace?"
         : "Delete this workspace local folder?",
-    );
+      tone: "destructive",
+      confirmLabel: "Clear folder",
+      consequences: {
+        immediateEffect: "The local folder link is removed from this project's workspace.",
+        confirmedEffect: keepsRepo
+          ? "The workspace is saved with only its repo; agents stop using the local folder."
+          : "The workspace is saved without a codebase; agents stop using the local folder.",
+        resultLocation: "The Workspace section on this panel updates.",
+        willNotHappen: "No files on disk are deleted; the folder itself is untouched.",
+      },
+    });
     if (!confirmed) return;
     persistCodebase({ cwd: null });
   };
 
-  const clearRepoWorkspace = () => {
+  const clearRepoWorkspace = async () => {
     const hasLocalFolder = Boolean(codebase.localFolder);
-    const confirmed = window.confirm(
-      hasLocalFolder
+    const confirmed = await confirm({
+      title: hasLocalFolder
         ? "Clear repo from this workspace?"
         : "Delete this workspace repo?",
-    );
+      tone: "destructive",
+      confirmLabel: "Clear repo",
+      consequences: {
+        immediateEffect: "The repo link is removed from this project's workspace.",
+        confirmedEffect: hasLocalFolder
+          ? "The workspace is saved with only its local folder; agents stop cloning this repo."
+          : "The workspace is saved without a codebase; agents stop cloning this repo.",
+        resultLocation: "The Workspace section on this panel updates.",
+        willNotHappen: "The GitHub repository itself is not modified or deleted.",
+      },
+    });
     if (!confirmed) return;
     if (primaryCodebaseWorkspace && hasLocalFolder) {
       updateWorkspace.mutate({
@@ -746,7 +769,7 @@ export function ProjectProperties({ project, onUpdate, onFieldUpdate, getFieldSa
                     <Button
                       variant="ghost"
                       size="icon-xs"
-                      onClick={clearRepoWorkspace}
+                      onClick={() => void clearRepoWorkspace()}
                       aria-label="Clear repo"
                     >
                       <Trash2 className="h-3 w-3" />
@@ -800,7 +823,7 @@ export function ProjectProperties({ project, onUpdate, onFieldUpdate, getFieldSa
                     <Button
                       variant="ghost"
                       size="icon-xs"
-                      onClick={clearLocalWorkspace}
+                      onClick={() => void clearLocalWorkspace()}
                       aria-label="Clear local folder"
                     >
                       <Trash2 className="h-3 w-3" />
@@ -1283,6 +1306,7 @@ export function ProjectProperties({ project, onUpdate, onFieldUpdate, getFieldSa
           </div>
         </>
       )}
+      {confirmDialog}
     </div>
   );
 }

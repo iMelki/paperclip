@@ -34,7 +34,6 @@ const devServer = {
 };
 
 beforeEach(() => {
-  vi.spyOn(window, "confirm").mockReturnValue(true);
   vi.spyOn(window, "alert").mockImplementation(() => undefined);
   mockHealthApi.requestDevServerRestart.mockResolvedValue(undefined);
 });
@@ -59,11 +58,27 @@ function render() {
   return container;
 }
 
+function bannerRestartButton(node: HTMLElement) {
+  return [...node.querySelectorAll("button")]
+    .find((entry) => entry.textContent?.includes("Restart now")) as HTMLButtonElement | undefined;
+}
+
+function reviewDialog() {
+  return document.querySelector<HTMLElement>('[data-slot="alert-dialog-content"]');
+}
+
+function dialogConfirmButton() {
+  return document.querySelector<HTMLButtonElement>('[data-slot="alert-dialog-action"]');
+}
+
+function dialogCancelButton() {
+  return document.querySelector<HTMLButtonElement>('[data-slot="alert-dialog-cancel"]');
+}
+
 describe("DevRestartBanner", () => {
-  it("confirms and requests an immediate restart while waiting for live runs", async () => {
+  it("reviews and requests an immediate restart while waiting for live runs", async () => {
     const node = render();
-    const button = [...node.querySelectorAll("button")]
-      .find((entry) => entry.textContent?.includes("Restart now"));
+    const button = bannerRestartButton(node);
 
     expect(node.textContent).toContain("Waiting for 1 live run to finish");
     expect(button).toBeTruthy();
@@ -72,32 +87,48 @@ describe("DevRestartBanner", () => {
       button?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     });
 
-    expect(window.confirm).toHaveBeenCalledWith("Restart Paperclip now? This may interrupt 1 live run.");
+    const dialog = reviewDialog();
+    expect(dialog).toBeTruthy();
+    expect(dialog?.textContent).toContain("Restart Paperclip now?");
+    expect(dialog?.textContent).toContain("This may interrupt 1 live run.");
+    expect(mockHealthApi.requestDevServerRestart).not.toHaveBeenCalled();
+
+    await act(async () => {
+      dialogConfirmButton()?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+
     expect(mockHealthApi.requestDevServerRestart).toHaveBeenCalledTimes(1);
     expect(node.textContent).toContain("Restart requested");
+    expect(reviewDialog()).toBeNull();
   });
 
-  it("does not request restart when confirmation is declined", async () => {
-    vi.mocked(window.confirm).mockReturnValue(false);
+  it("does not request restart when the review is cancelled", async () => {
     const node = render();
-    const button = [...node.querySelectorAll("button")]
-      .find((entry) => entry.textContent?.includes("Restart now"));
+    const button = bannerRestartButton(node);
 
     await act(async () => {
       button?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     });
+    expect(reviewDialog()).toBeTruthy();
+
+    await act(async () => {
+      dialogCancelButton()?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
 
     expect(mockHealthApi.requestDevServerRestart).not.toHaveBeenCalled();
+    expect(reviewDialog()).toBeNull();
   });
 
   it("re-enables the manual restart action when a request does not refresh the page", async () => {
     vi.useFakeTimers();
     const node = render();
-    const button = [...node.querySelectorAll("button")]
-      .find((entry) => entry.textContent?.includes("Restart now")) as HTMLButtonElement | undefined;
+    const button = bannerRestartButton(node);
 
     await act(async () => {
       button?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await act(async () => {
+      dialogConfirmButton()?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     });
 
     expect(button?.disabled).toBe(true);
