@@ -5,8 +5,6 @@ import {
   taskParticipations,
   mutationLeases,
   controlIntents,
-  agentInstances,
-  hostNodes,
 } from "@paperclipai/db";
 
 export interface TaskCoordinationView {
@@ -89,11 +87,11 @@ export interface TaskCoordinationView {
     }>;
   };
   health: {
-    heartbeatAgeSeconds: number;
-    processEvidence?: boolean;
-    outputEvidence?: boolean;
+    heartbeatAgeSeconds: number | null;
+    processEvidence: boolean;
+    outputEvidence: boolean;
     status: "healthy" | "reporting_degraded" | "stale" | "orphaned" | "error" | "offline";
-    freshnessTimestamp: string;
+    freshnessTimestamp: string | null;
     evidenceSource: string;
   };
   controls: {
@@ -107,6 +105,121 @@ export interface TaskCoordinationView {
     confidence: number;
     reconciliationDrift: boolean;
     driftDetails?: string[];
+  };
+}
+
+const FRESH_HEARTBEAT_SECONDS = 5 * 60;
+const ORPHANED_HEARTBEAT_SECONDS = 30 * 60;
+
+type CoordinationHealth = TaskCoordinationView["health"];
+
+interface CoordinationEvidence {
+  health: CoordinationHealth;
+  confidence: number;
+  reconciliationDrift: boolean;
+  driftDetails: string[];
+}
+
+function isValidDate(value: Date): boolean {
+  return Number.isFinite(value.getTime());
+}
+
+/**
+ * Task participations prove that a participant reported, not that its process
+ * is alive or that it produced an output. Keep those stronger claims false
+ * until #28/#29/#30 add their independently persisted evidence sources.
+ */
+function deriveCoordinationEvidence(
+  participations: Array<{ lastSeenAt: Date; endedAt: Date | null }>,
+  now: Date,
+): CoordinationEvidence {
+  const missingIndependentEvidence = [
+    "No independently persisted process-custody evidence is available.",
+    "No independently persisted output-delivery evidence is available.",
+  ];
+  const activeParticipations = participations.filter((participation) => participation.endedAt === null);
+
+  if (activeParticipations.length === 0) {
+    return {
+      health: {
+        heartbeatAgeSeconds: null,
+        processEvidence: false,
+        outputEvidence: false,
+        status: "offline",
+        freshnessTimestamp: null,
+        evidenceSource: "paperclip-db:no-active-participation-record",
+      },
+      confidence: 0,
+      reconciliationDrift: true,
+      driftDetails: ["No active persisted coordination participation is available.", ...missingIndependentEvidence],
+    };
+  }
+
+  if (activeParticipations.some((participation) => !isValidDate(participation.lastSeenAt))) {
+    return {
+      health: {
+        heartbeatAgeSeconds: null,
+        processEvidence: false,
+        outputEvidence: false,
+        status: "error",
+        freshnessTimestamp: null,
+        evidenceSource: "paperclip-db:invalid-participation-heartbeat",
+      },
+      confidence: 0,
+      reconciliationDrift: true,
+      driftDetails: [
+        "An active participation has an invalid persisted heartbeat timestamp.",
+        ...missingIndependentEvidence,
+      ],
+    };
+  }
+
+  const mostRecentSeen = activeParticipations.reduce<Date>((latest, participation) => (
+    participation.lastSeenAt > latest ? participation.lastSeenAt : latest
+  ), activeParticipations[0].lastSeenAt);
+
+  if (mostRecentSeen > now) {
+    return {
+      health: {
+        heartbeatAgeSeconds: null,
+        processEvidence: false,
+        outputEvidence: false,
+        status: "error",
+        freshnessTimestamp: mostRecentSeen.toISOString(),
+        evidenceSource: "paperclip-db:future-participation-heartbeat",
+      },
+      confidence: 0,
+      reconciliationDrift: true,
+      driftDetails: ["The most recent active participation heartbeat is in the future.", ...missingIndependentEvidence],
+    };
+  }
+
+  const heartbeatAgeSeconds = Math.floor((now.getTime() - mostRecentSeen.getTime()) / 1000);
+  const status = heartbeatAgeSeconds > ORPHANED_HEARTBEAT_SECONDS
+    ? "orphaned"
+    : heartbeatAgeSeconds > FRESH_HEARTBEAT_SECONDS
+      ? "stale"
+      : "reporting_degraded";
+
+  return {
+    health: {
+      heartbeatAgeSeconds,
+      processEvidence: false,
+      outputEvidence: false,
+      status,
+      freshnessTimestamp: mostRecentSeen.toISOString(),
+      evidenceSource: "paperclip-db:participation-heartbeat-only",
+    },
+    // A recent report is useful freshness evidence, but there is no persisted
+    // confidence verdict in this read model. Do not invent a numeric score.
+    confidence: 0,
+    reconciliationDrift: true,
+    driftDetails: [
+      status === "reporting_degraded"
+        ? "A fresh participation heartbeat proves reporting only."
+        : "The active participation heartbeat is not fresh enough for reporting confidence.",
+      ...missingIndependentEvidence,
+    ],
   };
 }
 
@@ -198,45 +311,8 @@ export async function getIssueCoordination(
     .from(controlIntents)
     .where(eq(controlIntents.rootIssueId, rootIssue.id));
 
-  // Fetch agent instances and host nodes
-  const agentInstanceIds = [
-    ...new Set(
-      participations
-        .map((p) => p.agentInstanceId)
-        .filter((id): id is string => typeof id === "string"),
-    ),
-  ];
-
-  const instances = agentInstanceIds.length > 0
-    ? await db.select().from(agentInstances).where(inArray(agentInstances.id, agentInstanceIds))
-    : [];
-
-  const hostNodeIds = [
-    ...new Set(
-      instances
-        .map((i) => i.hostNodeId)
-        .filter((id): id is string => typeof id === "string"),
-    ),
-  ];
-
-  const hosts = hostNodeIds.length > 0
-    ? await db.select().from(hostNodes).where(inArray(hostNodes.id, hostNodeIds))
-    : [];
-
   const now = new Date();
-  const mostRecentSeen = participations.reduce<Date>((latest, p) => {
-    const t = new Date(p.lastSeenAt);
-    return t > latest ? t : latest;
-  }, new Date(rootIssue.updatedAt));
-
-  const heartbeatAgeSeconds = Math.max(0, Math.floor((now.getTime() - mostRecentSeen.getTime()) / 1000));
-
-  let healthStatus: "healthy" | "reporting_degraded" | "stale" | "orphaned" | "error" | "offline" = "healthy";
-  if (heartbeatAgeSeconds > 1800) {
-    healthStatus = "orphaned";
-  } else if (heartbeatAgeSeconds > 300) {
-    healthStatus = "stale";
-  }
+  const evidence = deriveCoordinationEvidence(participations, now);
 
   const canonicalKey = rootIssue.identifier
     ? `github:${rootIssue.identifier}`
@@ -289,34 +365,19 @@ export async function getIssueCoordination(
       lastSeenAt: p.lastSeenAt.toISOString(),
       endedAt: p.endedAt ? p.endedAt.toISOString() : null,
     })),
-    placements: hosts.map((h) => ({
-      hostId: h.hostId,
-      hostname: h.hostname,
-      os: h.os,
-      runtime: h.runtime,
-      reachableAddresses: h.reachableAddresses ?? [],
-      environment: h.environment ?? "local",
-      nativePath: "",
-      runtimePath: "",
-      worktreeIdentity: "",
-      repository: "",
-      branch: "dev",
-      dirty: false,
-    })),
+    // Host records do not persist repository, branch, dirty state, or process
+    // custody. Returning no placement is more truthful than fabricating those
+    // operational facts from a host registration.
+    placements: [],
     delivery: {
       commits: [],
       pullRequests: [],
     },
-    health: {
-      heartbeatAgeSeconds,
-      processEvidence: true,
-      outputEvidence: true,
-      status: healthStatus,
-      freshnessTimestamp: mostRecentSeen.toISOString(),
-      evidenceSource: "paperclip-db",
-    },
+    health: evidence.health,
     controls: {
-      permittedIntents: ["pause", "cancel", "retry", "release", "reassign", "takeover"],
+      // #52 owns authorization. The coordination read model must not claim
+      // that an intent is permitted until that decision has a persisted source.
+      permittedIntents: [],
       pendingIntents: intents.filter((i) => i.status === "pending").map((i) => ({
         id: i.id,
         intentType: i.intentType,
@@ -324,19 +385,21 @@ export async function getIssueCoordination(
         requestedBy: i.requestedBy,
         createdAt: i.createdAt.toISOString(),
       })),
-      completedReceipts: intents.filter((i) => i.status === "executed").map((i) => ({
+      completedReceipts: intents
+        .filter((i) => i.status === "executed" && i.receipt && Object.keys(i.receipt).length > 0)
+        .map((i) => ({
         id: i.id,
         intentType: i.intentType,
         receipt: i.receipt,
         executedAt: i.executedAt?.toISOString() ?? null,
-      })),
+        })),
     },
     provenance: {
       sourceAuthority: "paperclip",
       observedAt: now.toISOString(),
-      confidence: 1.0,
-      reconciliationDrift: false,
-      driftDetails: [],
+      confidence: evidence.confidence,
+      reconciliationDrift: evidence.reconciliationDrift,
+      driftDetails: evidence.driftDetails,
     },
   };
 }
