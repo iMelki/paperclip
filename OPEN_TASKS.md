@@ -67,6 +67,10 @@ This file is the durable local index for active `paperclip` issues.
     POSIX prepack/postpack pairs, and missing native-Windows CI coverage; finish
     those canonical resolver/lifecycle consumers before the fresh full matrix,
     typecheck, build, and representative pack readback.
+  - 2026-08-12: normalized discovered package directories to the manifest's
+    POSIX separator form and added a cross-host regression; this removes the
+    deterministic Windows `release-package-map list/check` mismatch. The
+    remaining lifecycle, pack, full-matrix, and process-cleanup gates stay open.
 
 - [#19 - Make headless onboarding and doctor failures automation-safe](https://github.com/iMelki/paperclip/issues/19)
   - Implemented explicit config-only `onboard --yes --no-run` behavior and

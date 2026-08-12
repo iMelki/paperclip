@@ -4,6 +4,10 @@ All notable changes to this repository should be recorded here.
 
 ## Unreleased
 
+- Normalized release-package discovery directories to forward-slash manifest
+  paths, with a Windows-separator regression, so release-map validation does
+  not report every package as missing on native Windows.
+
 - Bounded the POSIX runtime-service adoption fallback for #20: the `ps`
   command/parent-lineage walk now has a two-second total deadline and explicit
   child-process timeouts, with a regression fixture proving a non-returning
