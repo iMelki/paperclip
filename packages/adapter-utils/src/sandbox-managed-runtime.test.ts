@@ -163,7 +163,13 @@ async function git(cwd: string, args: string[]): Promise<string> {
 async function listTarMembers(rootDir: string, name: string, bytes: Buffer): Promise<string[]> {
   const tarPath = path.join(rootDir, name);
   await writeFile(tarPath, bytes);
-  const { stdout } = await execFile("tar", ["-tf", tarPath], { maxBuffer: 32 * 1024 * 1024 });
+  // Pass a RELATIVE archive name with `cwd`: GNU tar reads an absolute Windows
+  // path in `-f` as a remote `host:path` selector ("Cannot connect to C:").
+  // See splitTarArchivePath in sandbox-managed-runtime.ts (issue #47).
+  const { stdout } = await execFile("tar", ["-tf", path.basename(tarPath)], {
+    cwd: path.dirname(tarPath),
+    maxBuffer: 32 * 1024 * 1024,
+  });
   return stdout.split("\n").map((line) => line.trim()).filter(Boolean);
 }
 
@@ -863,7 +869,11 @@ describe("sandbox managed runtime", () => {
     for (const { remotePath, bytes } of uploadedTars) {
       const listPath = path.join(rootDir, `list-${path.basename(remotePath)}`);
       await writeFile(listPath, bytes);
-      const { stdout } = await execFile("tar", ["-tf", listPath], { maxBuffer: 32 * 1024 * 1024 });
+      // Relative archive name + `cwd`: see listTarMembers above (issue #47).
+      const { stdout } = await execFile("tar", ["-tf", path.basename(listPath)], {
+        cwd: path.dirname(listPath),
+        maxBuffer: 32 * 1024 * 1024,
+      });
       const members = stdout.split("\n").map((line) => line.trim()).filter(Boolean);
       // The archive must NOT contain a self-entry for the root directory; that is
       // what makes tar try to mutate the (possibly unowned) extraction target.

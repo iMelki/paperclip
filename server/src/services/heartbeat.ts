@@ -1480,6 +1480,14 @@ export async function resolveWorkspaceAfterLowTrustPreflight<TWorkspace>(input: 
 function deriveRepoNameFromRepoUrl(repoUrl: string | null): string | null {
   const trimmed = repoUrl?.trim() ?? "";
   if (!trimmed) return null;
+  // Local filesystem paths derive no repo name, so they land in the `_default` managed slot.
+  // On POSIX that falls out of `new URL("/srv/repo")` throwing, but a Windows drive-letter path
+  // parses as a URL with scheme "c:" and a backslash-only pathname, so `split("/")` yields the
+  // WHOLE absolute path as the "repo name" and the sanitizer flattens it into one dash-slug
+  // directory segment. That silently orphans pre-existing managed checkouts under `_default`
+  // and breaks the "use a pre-existing directory as-is" guarantee on Windows only. Reject
+  // drive-letter and backslash paths up front so both platforms agree. See issue #47.
+  if (/^[a-zA-Z]:[\\/]/.test(trimmed) || trimmed.includes("\\")) return null;
   try {
     const parsed = new URL(trimmed);
     const cleanedPath = parsed.pathname.replace(/\/+$/, "");

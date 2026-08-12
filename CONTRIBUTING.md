@@ -119,6 +119,29 @@ Every PR must include a **Model Used** section specifying which AI model produce
 
 All tests must pass before a PR can be merged. Run them locally first and verify CI is green after pushing.
 
+#### What the pre-commit hook runs
+
+The pre-commit hook is scoped to your staged change so it stays in the seconds-to-minutes range:
+
+- **Typecheck** runs on the workspace packages your staged files touch, expanded to their
+  dependents (`pnpm --filter ...<pkg> typecheck`). Staging a root build input — the root
+  `package.json`, `pnpm-workspace.yaml`, `pnpm-lock.yaml`, a root `tsconfig*.json`, or
+  `vitest.config.ts` — falls back to the full `pnpm -r typecheck` sweep.
+- **Unit tests** run only the suites whose module graph reaches a staged file
+  (`vitest --related`). A staged file no suite imports runs no tests and passes.
+- **Forbidden tokens, Gitleaks, and React Doctor are unscoped and unchanged** — those gates
+  still see every commit.
+
+The **full** suite is a pre-merge gate, not a pre-commit one: `.github/workflows/pr.yml`
+already runs it on every PR across sharded general, serialized-server, and e2e lanes.
+
+To reproduce the full local sweep before pushing something risky:
+
+```bash
+PAPERCLIP_PRECOMMIT_ALL=1 git commit ...   # full typecheck + full test suite
+pnpm run test:run                          # full suite on its own
+```
+
 ### Telemetry Changes
 
 If your change adds, removes, or modifies emitted telemetry events, update the [Telemetry Data Contract](packages/shared/src/telemetry/README.md) in the same PR. Keep clients emitting raw dimension values and avoid documenting or relying on private delivery details.
