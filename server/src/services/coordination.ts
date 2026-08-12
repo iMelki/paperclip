@@ -124,6 +124,34 @@ function isValidDate(value: Date): boolean {
   return Number.isFinite(value.getTime());
 }
 
+function missingIndependentEvidence(): string[] {
+  return [
+    "No independently persisted process-custody evidence is available.",
+    "No independently persisted output-delivery evidence is available.",
+  ];
+}
+
+function unavailableCoordinationEvidence(
+  status: CoordinationHealth["status"],
+  evidenceSource: string,
+  freshnessTimestamp: string | null,
+  detail: string,
+): CoordinationEvidence {
+  return {
+    health: {
+      heartbeatAgeSeconds: null,
+      processEvidence: false,
+      outputEvidence: false,
+      status,
+      freshnessTimestamp,
+      evidenceSource,
+    },
+    confidence: 0,
+    reconciliationDrift: true,
+    driftDetails: [detail, ...missingIndependentEvidence()],
+  };
+}
+
 /**
  * Task participations prove that a participant reported, not that its process
  * is alive or that it produced an output. Keep those stronger claims false
@@ -133,45 +161,24 @@ function deriveCoordinationEvidence(
   participations: Array<{ lastSeenAt: Date; endedAt: Date | null }>,
   now: Date,
 ): CoordinationEvidence {
-  const missingIndependentEvidence = [
-    "No independently persisted process-custody evidence is available.",
-    "No independently persisted output-delivery evidence is available.",
-  ];
   const activeParticipations = participations.filter((participation) => participation.endedAt === null);
 
   if (activeParticipations.length === 0) {
-    return {
-      health: {
-        heartbeatAgeSeconds: null,
-        processEvidence: false,
-        outputEvidence: false,
-        status: "offline",
-        freshnessTimestamp: null,
-        evidenceSource: "paperclip-db:no-active-participation-record",
-      },
-      confidence: 0,
-      reconciliationDrift: true,
-      driftDetails: ["No active persisted coordination participation is available.", ...missingIndependentEvidence],
-    };
+    return unavailableCoordinationEvidence(
+      "offline",
+      "paperclip-db:no-active-participation-record",
+      null,
+      "No active persisted coordination participation is available.",
+    );
   }
 
   if (activeParticipations.some((participation) => !isValidDate(participation.lastSeenAt))) {
-    return {
-      health: {
-        heartbeatAgeSeconds: null,
-        processEvidence: false,
-        outputEvidence: false,
-        status: "error",
-        freshnessTimestamp: null,
-        evidenceSource: "paperclip-db:invalid-participation-heartbeat",
-      },
-      confidence: 0,
-      reconciliationDrift: true,
-      driftDetails: [
-        "An active participation has an invalid persisted heartbeat timestamp.",
-        ...missingIndependentEvidence,
-      ],
-    };
+    return unavailableCoordinationEvidence(
+      "error",
+      "paperclip-db:invalid-participation-heartbeat",
+      null,
+      "An active participation has an invalid persisted heartbeat timestamp.",
+    );
   }
 
   const mostRecentSeen = activeParticipations.reduce<Date>((latest, participation) => (
@@ -179,19 +186,12 @@ function deriveCoordinationEvidence(
   ), activeParticipations[0].lastSeenAt);
 
   if (mostRecentSeen > now) {
-    return {
-      health: {
-        heartbeatAgeSeconds: null,
-        processEvidence: false,
-        outputEvidence: false,
-        status: "error",
-        freshnessTimestamp: mostRecentSeen.toISOString(),
-        evidenceSource: "paperclip-db:future-participation-heartbeat",
-      },
-      confidence: 0,
-      reconciliationDrift: true,
-      driftDetails: ["The most recent active participation heartbeat is in the future.", ...missingIndependentEvidence],
-    };
+    return unavailableCoordinationEvidence(
+      "error",
+      "paperclip-db:future-participation-heartbeat",
+      mostRecentSeen.toISOString(),
+      "The most recent active participation heartbeat is in the future.",
+    );
   }
 
   const heartbeatAgeSeconds = Math.floor((now.getTime() - mostRecentSeen.getTime()) / 1000);
@@ -218,7 +218,7 @@ function deriveCoordinationEvidence(
       status === "reporting_degraded"
         ? "A fresh participation heartbeat proves reporting only."
         : "The active participation heartbeat is not fresh enough for reporting confidence.",
-      ...missingIndependentEvidence,
+      ...missingIndependentEvidence(),
     ],
   };
 }
