@@ -523,7 +523,12 @@ describe("codex execute", () => {
       expect(result.errorMessage).toBeNull();
 
       const capture = JSON.parse(await fs.readFile(capturePath, "utf8")) as CapturePayload;
-      expect(capture.codexHome).toBe(path.join(remoteWorkspace, ".paperclip-runtime", "codex", "home"));
+      // Paths *inside* the sandbox are POSIX by contract regardless of host platform:
+      // sandbox-managed-runtime.ts builds `runtimeRootDir` and every asset dir with
+      // `path.posix.join`. Asserting with host-native `path.join` only agreed on POSIX hosts and
+      // made this a Windows-only failure. Join the in-sandbox suffix with `path.posix` so the
+      // expectation states the intended contract on every host. See issue #47.
+      expect(capture.codexHome).toBe(path.posix.join(remoteWorkspace, ".paperclip-runtime", "codex", "home"));
       expect(capture.paperclipApiUrl).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/);
       expect(capture.paperclipApiKey).not.toBe("run-jwt-token");
       expect(capture.paperclipApiBridgeMode).toBe("queue_v1");

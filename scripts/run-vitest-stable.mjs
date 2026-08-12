@@ -151,10 +151,23 @@ function parseCliOptions(argv) {
   let shardCount = null;
   let group = null;
   let dryRun = false;
+  let related = false;
+  const relatedFiles = [];
 
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
     if (arg === "--") {
+      continue;
+    }
+
+    if (arg === "--related") {
+      related = true;
+      continue;
+    }
+
+    // Once --related is set, bare arguments are the changed source files to trace.
+    if (related && !arg.startsWith("--")) {
+      relatedFiles.push(arg);
       continue;
     }
 
@@ -208,6 +221,13 @@ function parseCliOptions(argv) {
     }
 
     fail(`Unknown argument "${arg}".`);
+  }
+
+  if (related) {
+    if (mode !== allModeName || group !== null || shardIndex !== null || dryRun) {
+      fail("--related cannot be combined with --mode/--group/--shard-*/--dry-run.");
+    }
+    return { mode, shardIndex: null, shardCount: null, group: null, dryRun: false, related, relatedFiles };
   }
 
   if (!new Set([allModeName, generalModeName, serializedModeName]).has(mode)) {
@@ -264,7 +284,7 @@ function selectSerializedSuites(routeTests, shardIndex, shardCount) {
   return routeTests.filter((_, index) => index % shardCount === shardIndex);
 }
 
-function runVitest(args, label, { serverExcludes = [] } = {}) {
+function runVitest(args, label, { serverExcludes = [], subcommand = "run" } = {}) {
   console.log(`\n[test:run] ${label}`);
   invocationIndex += 1;
   const tempRootParent = process.platform === "win32" ? os.tmpdir() : "/tmp";
@@ -289,7 +309,7 @@ function runVitest(args, label, { serverExcludes = [] } = {}) {
   }
   const result = spawnSync(
     "pnpm",
-    ["exec", "vitest", "run", ...commonVitestArgs, ...args],
+    ["exec", "vitest", subcommand, ...commonVitestArgs, ...args],
     {
       cwd: repoRoot,
       env,
@@ -369,6 +389,48 @@ function runGeneralGroup(routeTests, groupName, shardIndex = null, shardCount = 
   }
 
   fail(`Unknown group "${groupName}".`);
+}
+
+/**
+ * Run only the suites whose module graph reaches one of `files`.
+ *
+ * This backs the pre-commit hook's fast path. It runs across every vitest project (no
+ * `--project` filter) so a changed package pulls in its consumers' suites too, and it reuses
+ * `runVitest` so related runs get the same isolated PAPERCLIP_HOME/TMPDIR sandbox the full
+ * lanes get — running bare `vitest related` would leak the developer's real paperclip home
+ * into the suites.
+ *
+ * `--passWithNoTests` is required: most commits touch files no suite imports, and vitest
+ * otherwise exits non-zero on an empty selection, which would reject every such commit.
+ *
+ * The selection is run under the same isolation the serialized lane hand-rolls
+ * (`runSerializedSuites` spawns one vitest per route/authz suite). A related selection can pull
+ * route/authz suites and general suites into one invocation, and those suites are not safe to
+ * share a process — batching them produced failures that vanished when the same suites ran
+ * apart. `--pool=forks --isolate` gives every selected file its own fresh child process and
+ * `--no-file-parallelism`/`--maxWorkers=1` keeps them sequential, so related mode inherits the
+ * lane contract instead of quietly violating it.
+ */
+function runRelatedSuites(files) {
+  if (files.length === 0) {
+    console.log("\n[test:run] related mode: no candidate source files; nothing to run.");
+    return;
+  }
+
+  // `related` is a vitest subcommand, not a flag on `run`; it defaults to watch mode, so --run
+  // is what makes it terminate.
+  runVitest(
+    [
+      "--run",
+      "--passWithNoTests",
+      "--pool=forks",
+      "--isolate",
+      ...serializedServerVitestArgs,
+      ...files,
+    ],
+    `related to ${files.length} changed file(s)`,
+    { subcommand: "related" },
+  );
 }
 
 function runSerializedSuites(routeTests, shardIndex, shardCount) {
@@ -454,6 +516,11 @@ if (options.dryRun) {
       2,
     ),
   );
+  process.exit(0);
+}
+
+if (options.related) {
+  runRelatedSuites(options.relatedFiles);
   process.exit(0);
 }
 

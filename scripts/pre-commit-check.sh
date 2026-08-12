@@ -57,7 +57,38 @@ fi
 echo
 echo "✓ Running TypeScript check..."
 if [ "$RUN_ALL" = "1" ] || has_staged_match '^(server|ui|cli|packages)/|(^|/)(package\.json|pnpm-workspace\.yaml|tsconfig\.[^/]+|tsconfig\.json)$|\.tsx?$|\.mts$|\.cts$'; then
-  if $PNPM_BIN -r typecheck; then
+  if [ "$RUN_ALL" = "1" ]; then
+    TYPECHECK_STATUS=0
+    $PNPM_BIN -r typecheck || TYPECHECK_STATUS=$?
+  else
+    # Scope the typecheck to the packages the staged files actually touch, expanded to their
+    # dependents via pnpm's "...<pkg>" selector so a changed type surface is still checked
+    # against every consumer. A staged root build input (lockfile, workspace manifest, root
+    # tsconfig) reports fullSweep and falls back to the full -r run.
+    TYPECHECK_STATUS=0
+    AFFECTED_JSON="$(node scripts/affected-workspace-packages.mjs --json)" || TYPECHECK_STATUS=$?
+    if [ "$TYPECHECK_STATUS" != "0" ]; then
+      fail "Could not resolve affected workspace packages."
+    elif printf '%s' "$AFFECTED_JSON" | grep -q '"fullSweep": true'; then
+      info "Full typecheck sweep: staged change touches a root build input."
+      $PNPM_BIN -r typecheck || TYPECHECK_STATUS=$?
+    else
+      AFFECTED_PACKAGES="$(printf '%s' "$AFFECTED_JSON" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const p=JSON.parse(s).packages||[];process.stdout.write(p.join("\n"))})')"
+      if [ -z "$AFFECTED_PACKAGES" ]; then
+        info "Skipping TypeScript check (staged files are outside every workspace package)."
+      else
+        FILTER_ARGS=""
+        for PACKAGE_NAME in $AFFECTED_PACKAGES; do
+          FILTER_ARGS="$FILTER_ARGS --filter ...$PACKAGE_NAME"
+        done
+        info "Typechecking affected packages plus dependents:$FILTER_ARGS"
+        # shellcheck disable=SC2086
+        $PNPM_BIN $FILTER_ARGS typecheck || TYPECHECK_STATUS=$?
+      fi
+    fi
+  fi
+
+  if [ "$TYPECHECK_STATUS" = "0" ]; then
     pass
   else
     fail "TypeScript check failed."
@@ -68,11 +99,37 @@ fi
 
 echo
 echo "✓ Running unit tests..."
-if [ "$RUN_ALL" = "1" ] || has_staged_match '^(server|ui|cli|packages|tests)/|(^|/)(package\.json|pnpm-lock\.yaml|vitest\.[^/]+|vitest\.config\.[^/]+)$|\.test\.[mc]?tsx?$|\.spec\.[mc]?tsx?$'; then
+if [ "$RUN_ALL" = "1" ]; then
   if $PNPM_BIN run test:run; then
     pass
   else
     fail "Unit tests failed."
+  fi
+elif has_staged_match '^(server|ui|cli|packages|tests)/|(^|/)(package\.json|pnpm-lock\.yaml|vitest\.[^/]+|vitest\.config\.[^/]+)$|\.test\.[mc]?tsx?$|\.spec\.[mc]?tsx?$'; then
+  # Run only the suites whose module graph reaches a staged file. The full suite is a
+  # pre-MERGE gate, not a pre-COMMIT one: .github/workflows/pr.yml already runs it on every
+  # PR across sharded general/serialized/e2e lanes, so running all ~3,800 tests here only
+  # duplicated CI at ~75 minutes per commit. Set PAPERCLIP_PRECOMMIT_ALL=1 for a full local
+  # sweep before pushing.
+  RELATED_SEEDS="$(printf '%s\n' "$STAGED_FILES" | grep -E '\.([mc]?[jt]sx?|json)$' || true)"
+  if [ -z "$RELATED_SEEDS" ]; then
+    info "Skipping unit tests (no staged JavaScript/TypeScript sources)."
+  else
+    info "Running suites related to staged source files."
+    # Mirrors the `test:run` script: the workspace-link preflight has to run before vitest,
+    # then the stable runner supplies the isolated PAPERCLIP_HOME/TMPDIR sandbox.
+    RELATED_STATUS=0
+    $PNPM_BIN run preflight:workspace-links || RELATED_STATUS=$?
+    if [ "$RELATED_STATUS" != "0" ]; then
+      fail "Workspace link preflight failed."
+    else
+      # shellcheck disable=SC2086
+      if node scripts/run-vitest-stable.mjs --related $RELATED_SEEDS; then
+        pass
+      else
+        fail "Unit tests failed."
+      fi
+    fi
   fi
 else
   info "Skipping unit tests (no staged test-bearing changes)."
