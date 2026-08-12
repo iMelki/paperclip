@@ -1,6 +1,6 @@
 # Paperclip Open Tasks
 
-Last updated: 2026-08-08
+Last updated: 2026-08-12
 
 This file is the durable local index for active `paperclip` issues.
 
@@ -107,6 +107,15 @@ This file is the durable local index for active `paperclip` issues.
     upstream issues #9366/#9761. It is not causal for the repaired US-1
     catalog-review fixture, but it must be fixed before teardown evidence is
     called clean.
+
+- [#52 - Require authenticated company scope before coordination reads](https://github.com/iMelki/paperclip/issues/52)
+  - The coordination-detail route now authenticates before resolving even the
+    root scope, returns the same 404 for missing and foreign-company roots, and
+    calls the detailed reader only after company authorization. Every detailed
+    query retains the authorized company predicate. Focused route and embedded
+    PostgreSQL isolation tests passed locally; promotion remains blocked until
+    the active shared `dev` lane is clean and the integration owner accepts the
+    isolated commit.
 
 - Historical Gitleaks inventory
   - Refreshed 2026-08-08 at current `dev` head `902118b6` with Gitleaks 8.30.1:

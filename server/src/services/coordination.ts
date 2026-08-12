@@ -160,14 +160,32 @@ function mapIssueStatusToWorkUnitState(
   }
 }
 
+/**
+ * Resolve only the company scope needed to authorize a coordination-detail
+ * read. Route handlers must authorize this result before calling
+ * getIssueCoordination, because the full view includes work descriptions,
+ * participant state, host topology, and control receipts.
+ */
+export async function getIssueCoordinationRootScope(
+  db: Db,
+  rootIssueId: string,
+): Promise<{ companyId: string } | null> {
+  return db
+    .select({ companyId: issues.companyId })
+    .from(issues)
+    .where(eq(issues.id, rootIssueId))
+    .then((rows) => rows[0] ?? null);
+}
+
 export async function getIssueCoordination(
   db: Db,
   rootIssueId: string,
+  companyId: string,
 ): Promise<TaskCoordinationView | null> {
   const rootIssue = await db
     .select()
     .from(issues)
-    .where(eq(issues.id, rootIssueId))
+    .where(and(eq(issues.id, rootIssueId), eq(issues.companyId, companyId)))
     .then((rows) => rows[0] ?? null);
 
   if (!rootIssue) {
@@ -178,7 +196,7 @@ export async function getIssueCoordination(
   const childIssues = await db
     .select()
     .from(issues)
-    .where(eq(issues.parentId, rootIssueId));
+    .where(and(eq(issues.parentId, rootIssueId), eq(issues.companyId, companyId)));
 
   const allIssueIds = [rootIssue.id, ...childIssues.map((c) => c.id)];
 
@@ -186,17 +204,26 @@ export async function getIssueCoordination(
   const participations = await db
     .select()
     .from(taskParticipations)
-    .where(inArray(taskParticipations.issueId, allIssueIds));
+    .where(and(
+      inArray(taskParticipations.issueId, allIssueIds),
+      eq(taskParticipations.companyId, companyId),
+    ));
 
   const leases = await db
     .select()
     .from(mutationLeases)
-    .where(inArray(mutationLeases.issueId, allIssueIds));
+    .where(and(
+      inArray(mutationLeases.issueId, allIssueIds),
+      eq(mutationLeases.companyId, companyId),
+    ));
 
   const intents = await db
     .select()
     .from(controlIntents)
-    .where(eq(controlIntents.rootIssueId, rootIssue.id));
+    .where(and(
+      eq(controlIntents.rootIssueId, rootIssue.id),
+      eq(controlIntents.companyId, companyId),
+    ));
 
   // Fetch agent instances and host nodes
   const agentInstanceIds = [
@@ -208,7 +235,10 @@ export async function getIssueCoordination(
   ];
 
   const instances = agentInstanceIds.length > 0
-    ? await db.select().from(agentInstances).where(inArray(agentInstances.id, agentInstanceIds))
+    ? await db.select().from(agentInstances).where(and(
+      inArray(agentInstances.id, agentInstanceIds),
+      eq(agentInstances.companyId, companyId),
+    ))
     : [];
 
   const hostNodeIds = [
@@ -220,7 +250,10 @@ export async function getIssueCoordination(
   ];
 
   const hosts = hostNodeIds.length > 0
-    ? await db.select().from(hostNodes).where(inArray(hostNodes.id, hostNodeIds))
+    ? await db.select().from(hostNodes).where(and(
+      inArray(hostNodes.id, hostNodeIds),
+      eq(hostNodes.companyId, companyId),
+    ))
     : [];
 
   const now = new Date();
@@ -353,7 +386,7 @@ export async function getCompanyCoordinationTasks(
 
   const results: TaskCoordinationView[] = [];
   for (const root of rootIssues) {
-    const view = await getIssueCoordination(db, root.id);
+    const view = await getIssueCoordination(db, root.id, companyId);
     if (view) {
       results.push(view);
     }
