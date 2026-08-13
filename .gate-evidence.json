@@ -64,6 +64,18 @@
       }
     },
     {
+      "id": "trusted-review-token-selection",
+      "path": ".github/scripts/select-review-token.mjs",
+      "description": "Forks use the trusted workflow token while non-forks retain the commitperclip App token and missing credentials fail closed.",
+      "negativeFixture": ".github/scripts/tests/select-review-token.test.mjs",
+      "observedFailure": {
+        "date": "2026-08-13",
+        "command": "IS_FORK=false GITHUB_TOKEN=github-fixture COMMITPERCLIP_TOKEN='' node .github/scripts/select-review-token.mjs",
+        "reason": "Exited 1 and named the missing COMMITPERCLIP_TOKEN, proving a non-fork cannot silently fall back to the workflow token.",
+        "restoredPass": "IS_FORK=true GITHUB_TOKEN=github-fixture COMMITPERCLIP_TOKEN='' node .github/scripts/select-review-token.mjs exited 0 and selected source=github-token."
+      }
+    },
+    {
       "id": "default-branch-history-secret-allowlist",
       "path": ".gitleaksignore",
       "description": "Pins only exact reviewed historical test-fixture fingerprints while leaving new secret-like values detectable by the complete-history PR scan.",

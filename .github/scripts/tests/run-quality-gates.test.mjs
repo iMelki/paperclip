@@ -41,3 +41,15 @@ test('findExistingComment: returns null when no signed comment exists', async ()
 
   assert.equal(comment, null);
 });
+
+test('findExistingComment: reuses a fork review comment from GitHub Actions', async () => {
+  const comment = await findExistingComment(async () => ([
+    {
+      id: 2,
+      user: { login: 'github-actions[bot]' },
+      body: 'Needs attention.\n\n— commitperclip',
+    },
+  ]), 'token', 'iMelki/paperclip', 51);
+
+  assert.equal(comment.id, 2);
+});

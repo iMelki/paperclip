@@ -18,7 +18,35 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - name: Checkout base branch (never PR code)
+      - name: Checkout trusted workflow revision (never PR code)
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.workflow_sha }}
+
+      - name: Set up Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '20'
+
+      - name: Generate commitperclip token
+        id: app-token
+        if: ${{ !github.event.repository.fork }}
+        run: |
+          TOKEN=$(node .github/scripts/get-bot-token.mjs)
+          echo "::add-mask::$TOKEN"
+          echo "value=$TOKEN" >> $GITHUB_OUTPUT
+        env:
+          COMMITPERCLIP_KEY: ${{ secrets.COMMITPERCLIP_KEY }}
+
+      - name: Select trusted review token
+        id: token
+        run: node .github/scripts/select-review-token.mjs >> "$GITHUB_OUTPUT"
+        env:
+          IS_FORK: ${{ github.event.repository.fork }}
+          GITHUB_TOKEN: ${{ github.token }}
+          COMMITPERCLIP_TOKEN: ${{ steps.app-token.outputs.value }}
+
+      - name: Checkout trusted pull request base (never PR code)
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           ref: ${{ github.event.pull_request.base.sha }}
@@ -30,11 +58,6 @@ jobs:
           base-ref: ${{ github.event.pull_request.base.sha }}
           head-ref: ${{ github.event.pull_request.head.sha }}
 
-      - name: Set up Node
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: '20'
-
       - name: Fork dependency change policy
         if: ${{ github.event.repository.fork }}
         run: node .github/scripts/check-fork-dependency-policy.mjs
@@ -42,15 +65,6 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
-
-      - name: Generate commitperclip token
-        id: token
-        run: |
-          TOKEN=$(node .github/scripts/get-bot-token.mjs)
-          echo "::add-mask::$TOKEN"
-          echo "value=$TOKEN" >> $GITHUB_OUTPUT
-        env:
-          COMMITPERCLIP_KEY: ${{ secrets.COMMITPERCLIP_KEY }}
 
       - name: Run quality gates
         id: quality

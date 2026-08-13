@@ -4,6 +4,14 @@ All notable changes to this repository should be recorded here.
 
 ## Unreleased
 
+- Made trusted pull-request reviews usable on public forks without weakening
+  upstream authentication. Fork workflows use their scoped GitHub token,
+  while non-fork repositories retain the commitperclip App credential and
+  fail closed when its private-key secret is missing. Consolidated review
+  comments are reused for both bot identities instead of accumulating on fork
+  review reruns. Credential selection runs from the immutable workflow
+  revision before the job switches to the pull request's trusted base, so an
+  older base cannot remove the bootstrap helper.
 - Replaced the unsupported fork Dependency Review call in the trusted PR-review
   workflow with a fail-closed fork policy: dependency manifests, lockfiles, and
   package patches now require the maintainer-only `dependency-review-approved`
