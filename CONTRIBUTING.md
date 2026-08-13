@@ -121,6 +121,15 @@ All tests must pass before a PR can be merged. Run them locally first and verify
 
 #### What the pre-commit hook runs
 
+**Budget: p95 ≤ 90 s, hard cap 180 s.** A check that cannot meet that budget **moves to
+pre-push — it is never deleted.** The budget is written down so it can be defended: this
+hook previously reached roughly 88 minutes (13 min `pnpm -r typecheck` plus a ~75 min full
+suite) one "just this once" check at a time.
+
+**This repo does not meet its own budget yet** — see the measurements below and
+[#71](https://github.com/iMelki/paperclip/issues/71). The number stays as the target;
+the gap is tracked rather than papered over by raising it.
+
 The pre-commit hook is scoped to your staged change so it stays in the seconds-to-minutes range:
 
 - **Typecheck** runs on the workspace packages your staged files touch, expanded to their
@@ -136,10 +145,18 @@ The pre-commit hook is scoped to your staged change so it stays in the seconds-t
 
 The **full** suite is a **pre-push** gate — not a pre-commit one, and not a CI one.
 
-`.husky/pre-push` runs `scripts/pre-push-check.ps1` (or the `.sh` mirror): full
-`pnpm -r typecheck`, the full vitest suite with no cap and no `--related`, a deep
-Gitleaks history scan, and the forbidden-token check. It runs once per push rather
-than once per commit, and it costs no GitHub Actions minutes.
+`.husky/pre-push` runs `scripts/pre-push-check.ps1` (or the `.sh` mirror): the workspace
+link preflight, the forbidden-token check, full `pnpm -r typecheck`, and the full vitest
+suite with no cap and no `--related`. It runs once per push rather than once per commit,
+and it costs no GitHub Actions minutes.
+
+It deliberately does **not** run the deep Gitleaks *history* scan. That scan exits 2 on 24
+pre-existing findings across 7837 commits (all test fixtures and mock data), which would
+make the gate unpassable for reasons no individual push introduced — and an unpassable gate
+just trains everyone into `--no-verify`, which disables the typecheck and suite above it.
+New content is already scanned at pre-commit by `verify-gitleaks.mjs --staged`. Restoring a
+`--range base..head` scan is tracked in
+[#68](https://github.com/iMelki/paperclip/issues/68).
 
 It is deliberately not CI's job. `.github/workflows/pr.yml` is scoped to
 `pull_request: branches: [master]`, while all development happens on `dev` — so no CI
@@ -160,6 +177,31 @@ pnpm run test:run                          # full suite on its own
 PAPERCLIP_PRECOMMIT_ALL=1 git commit ...   # full typecheck + full test suite at commit time
 PAPERCLIP_PRECOMMIT_RELATED_CAP=0 ...      # uncapped related run (can exceed the full suite)
 ```
+
+#### Measured cost (2026-08-13, contended host: ~120 node processes, ~58% CPU)
+
+| Stage | Leaf change (`ui/src/lib/activity-format.ts`) | Hub change (`server/src/services/heartbeat.ts`) |
+| :--- | ---: | ---: |
+| `--related` suites selected | 9 of 1130 | **159**, capped to 12 |
+| `--related` run (wall) | 93.6 s | 304.8 s |
+| Scoped typecheck, cold | 137.6 s | 168.5 s |
+| Scoped typecheck, warm (incremental) | 68.6 s | — |
+
+Reference points: full `pnpm -r typecheck` is **184.3 s** warm across all 32 workspace
+packages, and the full suite is ~75 min.
+
+Two things follow, and they are why the cap exists and why it is not enough:
+
+- **Cost is import, not execution.** The capped 12-suite hub run spent **227.8 s of 262.7 s
+  (87%) importing modules** and only 29.6 s executing tests — about 22-25 s per suite,
+  scaling linearly with suite *count*. So an *uncapped* `--related` on a hub module (159
+  suites) would cost more than the full suite it replaced, which amortizes imports across
+  shards. Uncapped `--related` is not a cheaper full suite; it is a slower one with less
+  coverage.
+- **Scoping the typecheck buys less than it looks.** `pnpm -r` already runs packages in
+  parallel, so the full sweep costs roughly the slowest package: 184.3 s for 32 packages
+  versus 137.6 s for the single `ui` package. The saving comes from tsc's incremental
+  cache (`ui/tsconfig.tsbuildinfo`), not from narrowing the package set.
 
 ### Telemetry Changes
 
