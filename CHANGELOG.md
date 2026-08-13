@@ -9,7 +9,9 @@ All notable changes to this repository should be recorded here.
   package patches now require the maintainer-only `dependency-review-approved`
   label. Non-fork repositories retain GitHub's native Dependency Review action,
   and every review executes the trusted PR base commit rather than hard-coded
-  `master` content.
+  `master` content. The same default-branch compatibility repair pins two exact
+  reviewed synthetic-fixture fingerprints so the complete-history secret scan
+  no longer blocks every `master` pull request on its existing tip.
 - Bounded the POSIX runtime-service adoption fallback for #20: the `ps`
   command/parent-lineage walk now has a two-second total deadline and explicit
   child-process timeouts, with a regression fixture proving a non-returning

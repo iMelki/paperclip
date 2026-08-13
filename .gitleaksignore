@@ -104,3 +104,9 @@ server/src/__tests__/server-startup-feedback-export.test.ts:generic-api-key:356
 server/src/__tests__/server-startup-feedback-export.test.ts:generic-api-key:588
 server/src/__tests__/server-startup-feedback-export.test.ts:generic-api-key:635
 server/src/__tests__/decisions-service.test.ts:generic-api-key:50
+
+# Historical review 2026-08-13: master commit b2955e0 moved one existing
+# synthetic decision secret and added one synthetic JWT fixture. Pin the exact
+# commit/file/rule/line fingerprints so unrelated future values remain visible.
+b2955e09997d535c8123558d0e773b59a7ec8221:server/src/__tests__/decisions-service.test.ts:generic-api-key:54
+b2955e09997d535c8123558d0e773b59a7ec8221:server/src/__tests__/remote-mcp-headers.test.ts:jwt:202
