@@ -6,6 +6,22 @@ This file is the durable local index for active `paperclip` issues.
 
 ## Active Issues
 
+- [#67 - CI never validates dev: pr.yml is scoped to PRs into master](https://github.com/iMelki/paperclip/issues/67)
+  - `.github/workflows/pr.yml` fires only on `pull_request: branches: [master]`, while
+    `origin/dev` was 1212 commits ahead of `origin/master` (3 PRs ever opened into
+    `dev`). No CI run has validated that work. `92f464f99` closed the local half by
+    adding `.husky/pre-push` with the full suite, but a Windows pre-push cannot catch
+    POSIX-only defects, so the Linux gap is real. Extending the trigger to `dev`
+    **increases** Actions spend (~+60-120 min/2 d); do NOT add `push: dev`. Operator
+    decision — see the issue for the costed options.
+
+- [#68 - Deep gitleaks history scan fails; no pushed-range mode](https://github.com/iMelki/paperclip/issues/68)
+  - `verify-gitleaks.mjs --history` exits 2 with 24 pre-existing findings across 7837
+    commits, all in test fixtures and mock data. The pre-push gate therefore does not
+    call it: an unpassable gate trains everyone into `--no-verify`, which would also
+    disable the full typecheck and suite. Triage the 24 findings, add a
+    `--range <base>..<head>` mode, then re-add the scan to `pre-push-check.{ps1,sh}`.
+
 - [Day-0 branch/worktree consolidation plan](doc/plans/2026-08-02-day0-branch-consolidation.md)
   - Preserve concurrent dirty branches and locked worktrees. Consolidate only
     after receipt, independent review, exact-path release, and remote-SHA
