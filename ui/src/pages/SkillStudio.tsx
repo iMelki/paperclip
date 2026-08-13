@@ -1975,23 +1975,41 @@ function InputPane({
   );
   const selectedName = selectedInput?.name ?? null;
   const dirty = !adHocMode && savedInputDraftDirty(savedInputDraft, selectedInput);
+  // `dirty` is false by construction whenever adHocMode is true, so it cannot
+  // speak for unsaved ad-hoc text. Tracked separately, or selecting a saved
+  // input silently destroys whatever the operator typed. (#51)
+  const adHocDirty = adHocMode && adHocContent.trim().length > 0;
   const canSaveSelectedInput = Boolean(selectedInput && dirty && draft.trim());
   const { confirm, confirmDialog } = useConfirmDialog();
 
   const confirmDiscardDirtyInput = useCallback(async () => {
-    if (!dirty) return true;
-    return confirm({
-      title: "Discard unsaved changes to this input?",
-      tone: "destructive",
-      confirmLabel: "Discard changes",
-      consequences: {
-        immediateEffect: "Unsaved edits to the current test input are discarded.",
-        confirmedEffect: "Nothing is saved; the input keeps its last saved content.",
-        resultLocation: "The input you selected opens in the editor.",
-        willNotHappen: "Saved inputs and past runs are not changed or deleted.",
-      },
-    });
-  }, [confirm, dirty]);
+    if (!dirty && !adHocDirty) return true;
+    return confirm(
+      adHocDirty
+        ? {
+            title: "Discard this unsaved test input?",
+            tone: "destructive",
+            confirmLabel: "Discard input",
+            consequences: {
+              immediateEffect: "The ad-hoc test input you typed is discarded.",
+              confirmedEffect: "It is never saved; no test input record is created.",
+              resultLocation: "The input you selected opens in the editor.",
+              willNotHappen: "Saved inputs and past runs are not changed or deleted.",
+            },
+          }
+        : {
+            title: "Discard unsaved changes to this input?",
+            tone: "destructive",
+            confirmLabel: "Discard changes",
+            consequences: {
+              immediateEffect: "Unsaved edits to the current test input are discarded.",
+              confirmedEffect: "Nothing is saved; the input keeps its last saved content.",
+              resultLocation: "The input you selected opens in the editor.",
+              willNotHappen: "Saved inputs and past runs are not changed or deleted.",
+            },
+          },
+    );
+  }, [adHocDirty, confirm, dirty]);
 
   const selectSavedInput = useCallback((id: string) => {
     if (!adHocMode && id === selectedInputId) return;
