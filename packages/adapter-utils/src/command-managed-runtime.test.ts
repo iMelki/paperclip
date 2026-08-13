@@ -12,6 +12,8 @@ import {
 } from "./command-managed-runtime.js";
 import type { SandboxSyncOperation } from "./sandbox-managed-runtime.js";
 import type { RunProcessResult } from "./server-utils.js";
+import { resolveTestShellCommand } from "./test-shell.js";
+import { toShellPath } from "./shell-path.js";
 
 const execFile = promisify(execFileCallback);
 
@@ -39,8 +41,10 @@ function makeSpawnRunner(options: {
           stdin: input.stdin,
         });
         const startedAt = new Date().toISOString();
-        const command =
-          input.command === "sh" ? "/bin/sh" : input.command === "bash" ? "/bin/bash" : input.command;
+        // Resolve `sh`/`bash` through the shared helper instead of hardcoding
+        // `/bin/sh`: on Windows that POSIX path does not exist, `spawn` emits
+        // ENOENT, and every script in this suite reports a bogus exit code 127.
+        const command = resolveTestShellCommand(input.command);
         const child = spawn(command, input.args ?? [], {
           cwd: input.cwd,
           env: { ...process.env, ...input.env },
@@ -168,8 +172,7 @@ describe("command managed runtime", () => {
           ...process.env,
           ...input.env,
         };
-        const command =
-          input.command === "sh" ? "/bin/sh" : input.command === "bash" ? "/bin/bash" : input.command;
+        const command = resolveTestShellCommand(input.command);
         const args = [...(input.args ?? [])];
         if (
           input.stdin != null &&
@@ -286,7 +289,12 @@ describe("command managed runtime", () => {
     });
 
     expect(prepared.workspaceRemoteDir).toBe(remoteWorkspaceDir);
-    expect(prepared.assetDirs.home).toBe(path.join(remoteWorkspaceDir, ".paperclip-runtime", "codex", "home"));
+    // Remote asset dirs are POSIX by contract (see the `path.posix.join` fallback in
+    // execution-target.ts), so assert with posix join — `path.join` would demand
+    // backslashes on a Windows host and never matches what the runtime returns.
+    expect(prepared.assetDirs.home).toBe(
+      path.posix.join(remoteWorkspaceDir, ".paperclip-runtime", "codex", "home"),
+    );
     await expect(readFile(path.join(remoteWorkspaceDir, "README.md"), "utf8")).resolves.toBe(
       "authoritative workspace\n",
     );
@@ -464,7 +472,9 @@ describe("command managed runtime", () => {
     // Characterization guardrail: the legacy single-file transport must keep its
     // stage-then-atomic-rename shape (temp .paperclip-upload + `mv -f`).
     const script = (calls[0].args ?? []).join(" ");
-    expect(script).toContain(`${remotePath}.paperclip-upload`);
+    // The transport addresses the host path through the remote shell, so the script
+    // carries `toShellPath` form (`/c/...`), not the Windows-native spelling.
+    expect(script).toContain(`${toShellPath(remotePath)}.paperclip-upload`);
     expect(script).toContain(`trap cleanup EXIT`);
     expect(script).toContain(`mv -f`);
     expect(script.indexOf(".paperclip-upload")).toBeLessThan(script.indexOf("mv -f"));
@@ -520,7 +530,7 @@ describe("command managed runtime", () => {
     await client.writeFile(remotePath, toArrayBuffer(payload));
 
     const scripts = calls.map((call) => (call.args ?? []).join(" "));
-    expect(scripts.some((script) => script.includes(`${remotePath}.paperclip-upload`))).toBe(true);
+    expect(scripts.some((script) => script.includes(`${toShellPath(remotePath)}.paperclip-upload`))).toBe(true);
     expect(scripts.some((script) => script.includes(`mv -f`))).toBe(true);
     expect((await readFile(remotePath)).equals(payload)).toBe(true);
   });
@@ -627,7 +637,7 @@ describe("command managed runtime", () => {
     // single stdin-backed call; the untar and the two commands follow it in order.
     const scripts = calls.map((call) => (call.args ?? []).join("\n"));
     const uploadIdx = scripts.findIndex((s) => s.includes(".paperclip-syncin.tar") && s.includes("base64 -d"));
-    const untarIdx = scripts.findIndex((s) => s.includes("tar -xf") && s.includes(targetDir));
+    const untarIdx = scripts.findIndex((s) => s.includes("tar -xf") && s.includes(toShellPath(targetDir)));
     const cmd1Idx = scripts.findIndex((s) => s.includes("1-first"));
     const cmd2Idx = scripts.findIndex((s) => s.includes("2-second"));
     expect(uploadIdx).toBeGreaterThanOrEqual(0);
@@ -688,18 +698,19 @@ describe("command managed runtime", () => {
 
     expect(await readFile(targetFile, "utf8")).toBe("payload\n");
     const scripts = calls.map((call) => (call.args ?? []).join(" "));
+    const remoteTargetFile = toShellPath(targetFile);
     expect(scripts).toHaveLength(5);
-    expect(scripts[0]).toContain(targetFile + ".paperclip-syncin.");
+    expect(scripts[0]).toContain(remoteTargetFile + ".paperclip-syncin.");
     expect(scripts[0]).toContain(".paperclip-upload.");
     expect(scripts[1]).toContain("rm -rf");
     expect(scripts[1]).toContain(".paperclip-upload.");
     expect(scripts[2]).toContain("chmod 640");
-    expect(scripts[2]).toContain(targetFile + ".paperclip-syncin.");
+    expect(scripts[2]).toContain(remoteTargetFile + ".paperclip-syncin.");
     expect(scripts[3]).toContain("mv -f");
-    expect(scripts[3]).toContain(targetFile + ".paperclip-syncin.");
-    expect(scripts[3]).toContain(targetFile);
+    expect(scripts[3]).toContain(remoteTargetFile + ".paperclip-syncin.");
+    expect(scripts[3]).toContain(remoteTargetFile);
     expect(scripts[4]).toContain("rm -rf");
-    expect(scripts[4]).toContain(targetFile + ".paperclip-syncin.");
+    expect(scripts[4]).toContain(remoteTargetFile + ".paperclip-syncin.");
   });
 
   it("fallback syncIn cleans up a staged file when chmod fails before rename", async () => {

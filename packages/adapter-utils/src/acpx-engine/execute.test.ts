@@ -35,6 +35,7 @@ import {
   type AcpxEngineExecutorOptions,
 } from "./execute.js";
 import { runChildProcess } from "../server-utils.js";
+import { resolveTestShellCommand } from "../test-shell.js";
 import {
   getActiveStepContext,
   runWithRuntimeParent,
@@ -109,7 +110,11 @@ function createLocalSandboxRunner(
     }) => {
       counter += 1;
       onExecute?.(input);
-      const command = input.command === "bash" ? "/bin/bash" : input.command;
+      // Same hazard as command-managed-runtime.test.ts: `/bin/bash` does not exist on
+      // Windows, and a bare `sh` is resolved by runChildProcess through the
+      // `Git\usr\bin` entry it appends to PATH — the variant that cannot see mkdir,
+      // rm, or base64. resolveTestShellCommand prefers `Git\bin\sh.exe`, which can.
+      const command = resolveTestShellCommand(input.command);
       return await runChildProcess(`acpx-sandbox-run-${counter}`, command, input.args ?? [], {
         cwd: input.cwd ?? process.cwd(),
         env: input.env ?? {},

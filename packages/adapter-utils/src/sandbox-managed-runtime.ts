@@ -455,8 +455,33 @@ async function withTempDir<T>(prefix: string, fn: (dir: string) => Promise<T>): 
   }
 }
 
-async function execTar(args: string[]): Promise<void> {
+/**
+ * Split a host archive path into the `cwd` + bare filename that `execTar` needs.
+ *
+ * GNU tar parses the `-f` ARCHIVE operand as `[user@]host:path` (its rsh/rmt
+ * remote-archive syntax). A Windows absolute path therefore reads as host `C`
+ * plus path `\tmp\x`, and tar aborts with "Cannot connect to C: resolve failed"
+ * before touching the filesystem. Only the `-f` operand is parsed this way —
+ * `-C` and member names are always literal, so they need no normalisation here
+ * (they are passed as argv by `execFile`, never through a shell).
+ *
+ * GNU's own escape hatch, `--force-local`, is NOT portable: bsdtar/libarchive
+ * (the `tar` shipped in Windows System32, and the default on macOS) rejects it
+ * with "Option --force-local is not supported", so adding the flag would trade a
+ * Git-Bash failure for a System32/macOS failure. Passing a RELATIVE `-f` and
+ * chdir'ing the child to the archive's directory removes the colon from the
+ * operand entirely, which is accepted by GNU tar, bsdtar and busybox tar alike.
+ *
+ * See issue #47.
+ */
+export function splitTarArchivePath(archivePath: string): { cwd: string; file: string } {
+  const absolute = path.resolve(archivePath);
+  return { cwd: path.dirname(absolute), file: path.basename(absolute) };
+}
+
+async function execTar(args: string[], cwd: string): Promise<void> {
   await execFile("tar", args, {
+    cwd,
     env: {
       ...process.env,
       COPYFILE_DISABLE: "1",
@@ -488,6 +513,7 @@ export async function createTarballFromDirectory(input: {
     await fs.writeFile(input.archivePath, Buffer.alloc(1024));
     return;
   }
+  const archive = splitTarArchivePath(input.archivePath);
   await execTar([
     "-c",
     // Prevent macOS bsdtar from embedding LIBARCHIVE.xattr.* PAX extended
@@ -499,21 +525,24 @@ export async function createTarballFromDirectory(input: {
     "--no-xattrs",
     ...(input.followSymlinks ? ["-h"] : []),
     "-f",
-    input.archivePath,
+    // Relative archive name + `cwd` below: see splitTarArchivePath (issue #47).
+    archive.file,
     "-C",
     input.localDir,
     ...excludeArgs,
     "--",
     ...entries,
-  ]);
+  ], archive.cwd);
 }
 
-async function extractTarballToDirectory(input: {
+export async function extractTarballToDirectory(input: {
   archivePath: string;
   localDir: string;
 }): Promise<void> {
   await fs.mkdir(input.localDir, { recursive: true });
-  await execTar(["-xf", input.archivePath, "-C", input.localDir]);
+  const archive = splitTarArchivePath(input.archivePath);
+  // Relative archive name + `cwd`: see splitTarArchivePath (issue #47).
+  await execTar(["-xf", archive.file, "-C", input.localDir], archive.cwd);
 }
 
 async function walkDirectory(root: string, relative = ""): Promise<string[]> {

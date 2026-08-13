@@ -1,4 +1,4 @@
-import { promises as fsPromises } from "node:fs";
+import { existsSync, promises as fsPromises } from "node:fs";
 import { lstat, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -11,8 +11,11 @@ import { resolveTestShellCommand } from "./test-shell.js";
 
 import {
   assertSyncOperationsConfined,
+  createTarballFromDirectory,
+  extractTarballToDirectory,
   mirrorDirectory,
   prepareSandboxManagedRuntime,
+  splitTarArchivePath,
   type SandboxManagedRuntimeClient,
   type SandboxSyncOperation,
   type SandboxSyncResult,
@@ -163,7 +166,13 @@ async function git(cwd: string, args: string[]): Promise<string> {
 async function listTarMembers(rootDir: string, name: string, bytes: Buffer): Promise<string[]> {
   const tarPath = path.join(rootDir, name);
   await writeFile(tarPath, bytes);
-  const { stdout } = await execFile("tar", ["-tf", tarPath], { maxBuffer: 32 * 1024 * 1024 });
+  // Pass a RELATIVE archive name with `cwd`: GNU tar reads an absolute Windows
+  // path in `-f` as a remote `host:path` selector ("Cannot connect to C:").
+  // See splitTarArchivePath in sandbox-managed-runtime.ts (issue #47).
+  const { stdout } = await execFile("tar", ["-tf", path.basename(tarPath)], {
+    cwd: path.dirname(tarPath),
+    maxBuffer: 32 * 1024 * 1024,
+  });
   return stdout.split("\n").map((line) => line.trim()).filter(Boolean);
 }
 
@@ -863,7 +872,11 @@ describe("sandbox managed runtime", () => {
     for (const { remotePath, bytes } of uploadedTars) {
       const listPath = path.join(rootDir, `list-${path.basename(remotePath)}`);
       await writeFile(listPath, bytes);
-      const { stdout } = await execFile("tar", ["-tf", listPath], { maxBuffer: 32 * 1024 * 1024 });
+      // Relative archive name + `cwd`: see listTarMembers above (issue #47).
+      const { stdout } = await execFile("tar", ["-tf", path.basename(listPath)], {
+        cwd: path.dirname(listPath),
+        maxBuffer: 32 * 1024 * 1024,
+      });
       const members = stdout.split("\n").map((line) => line.trim()).filter(Boolean);
       // The archive must NOT contain a self-entry for the root directory; that is
       // what makes tar try to mutate the (possibly unowned) extraction target.
@@ -2127,4 +2140,79 @@ describe("sandbox managed runtime", () => {
     // under the step in a real trace.
     expect(packSpan!.parentName).toBe("stage.sync");
   });
+});
+
+/**
+ * Regression coverage for issue #47 — host-side tar on Windows.
+ *
+ * GNU tar parses the `-f` ARCHIVE operand as an rsh/rmt `[user@]host:path`
+ * selector, so an absolute Windows path reads as host `C` and tar aborts with
+ * "Cannot connect to C: resolve failed" before touching the filesystem.
+ *
+ * Whether that reproduces depends on which `tar` wins the PATH race, which is
+ * NOT controllable: PowerShell/cmd resolve System32 bsdtar (tolerant), Git Bash
+ * resolves GNU tar (strict). A suite that only ever sees bsdtar reports green on
+ * a broken tree — so this runs the REAL production pack/extract pair once per
+ * tar binary present on the host, pinning each to the front of PATH in turn.
+ */
+function discoverTarDirs(): Array<{ label: string; dir: string | null }> {
+  if (process.platform !== "win32") {
+    // POSIX paths carry neither a drive-letter colon nor backslashes; the
+    // inherited system tar is the only meaningful case.
+    return [{ label: "system tar", dir: null }];
+  }
+  const candidates = [
+    { label: "bsdtar (System32)", exe: path.join(process.env.SystemRoot ?? "C:\\Windows", "System32", "tar.exe") },
+    { label: "GNU tar (Git for Windows)", exe: "C:\\Program Files\\Git\\usr\\bin\\tar.exe" },
+  ];
+  const found = candidates.filter((candidate) => existsSync(candidate.exe));
+  // Never silently degrade to "nothing to test": fall back to inherited PATH.
+  return found.length > 0
+    ? found.map((candidate) => ({ label: candidate.label, dir: path.dirname(candidate.exe) }))
+    : [{ label: "system tar", dir: null }];
+}
+
+describe("host tar operand portability (issue #47)", () => {
+  it("reduces the `-f` operand to a colon-free basename plus an absolute cwd", () => {
+    const archive = splitTarArchivePath(path.join(os.tmpdir(), "pc47", "workspace.tar"));
+    // A bare basename can never be parsed as `[user@]host:path`.
+    expect(archive.file).toBe("workspace.tar");
+    expect(archive.file).not.toContain(":");
+    expect(archive.file).not.toContain(path.sep);
+    // The child must be chdir'd to the archive's directory for that to resolve.
+    expect(path.isAbsolute(archive.cwd)).toBe(true);
+    expect(archive.cwd).toBe(path.join(os.tmpdir(), "pc47"));
+  });
+
+  for (const { label, dir } of discoverTarDirs()) {
+    it(`round-trips a workspace through pack + extract using ${label}`, async () => {
+      const root = await mkdtemp(path.join(os.tmpdir(), "paperclip-pc47-"));
+      const localDir = path.join(root, "src");
+      const restoreDir = path.join(root, "dst");
+      // The archive deliberately lives OUTSIDE both the packed and the extracted
+      // tree, so `-f`'s cwd and `-C`'s target are genuinely different dirs.
+      const archivePath = path.join(root, "archive", "workspace.tar");
+      await mkdir(path.join(localDir, "nested"), { recursive: true });
+      await mkdir(path.dirname(archivePath), { recursive: true });
+      await writeFile(path.join(localDir, "a.txt"), "top-level");
+      await writeFile(path.join(localDir, "nested", "b.txt"), "nested");
+
+      const savedPath = process.env.PATH;
+      if (dir) {
+        // Prepend (not replace): the binary still needs its sibling runtime DLLs
+        // and the rest of the system path to load.
+        process.env.PATH = `${dir}${path.delimiter}${savedPath ?? ""}`;
+      }
+      try {
+        await createTarballFromDirectory({ localDir, archivePath });
+        await extractTarballToDirectory({ archivePath, localDir: restoreDir });
+      } finally {
+        process.env.PATH = savedPath;
+      }
+
+      expect(await readFile(path.join(restoreDir, "a.txt"), "utf8")).toBe("top-level");
+      expect(await readFile(path.join(restoreDir, "nested", "b.txt"), "utf8")).toBe("nested");
+      await rm(root, { recursive: true, force: true });
+    });
+  }
 });

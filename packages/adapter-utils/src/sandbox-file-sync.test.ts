@@ -11,6 +11,7 @@ import {
   type SandboxManagedRuntimeClient,
   type SandboxSyncOperation,
 } from "./sandbox-managed-runtime.js";
+import { resolveTestShellCommand } from "./test-shell.js";
 
 const execFile = promisify(execFileCallback);
 
@@ -57,7 +58,11 @@ function makeNativeClient(): RecordingClient {
       }
       // Honor the operation's ordered post-upload commands (PR-2), fail-fast.
       for (const command of operation.postUploadCommands ?? []) {
-        await execFile("sh", ["-c", command.command], { maxBuffer: 32 * 1024 * 1024 });
+        // `sh` is not on PATH on Windows, so a bare spawn raises ENOENT before the
+        // command ever runs. resolveTestShellCommand finds the Git shell that can.
+        await execFile(resolveTestShellCommand("sh"), ["-c", command.command], {
+          maxBuffer: 32 * 1024 * 1024,
+        });
       }
       return { operationId: operation.operationId, filesTransferred, bytesTransferred: 0 };
     })),
