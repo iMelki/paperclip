@@ -12,6 +12,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { queryKeys } from "../lib/queryKeys";
 import { formatDateTime, relativeTime } from "../lib/utils";
+import { useConfirmDialog } from "@/hooks/useConfirmDialog";
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
@@ -30,6 +31,7 @@ export function InstanceSettings() {
   const { setBreadcrumbs } = useBreadcrumbs();
   const queryClient = useQueryClient();
   const [actionError, setActionError] = useState<string | null>(null);
+  const { confirm, confirmDialog } = useConfirmDialog();
 
   useEffect(() => {
     setBreadcrumbs([
@@ -188,10 +190,21 @@ export function InstanceSettings() {
             disabled={disableAllMutation.isPending}
             onClick={() => {
               const noun = enabledCount === 1 ? "agent" : "agents";
-              if (!window.confirm(`Disable timer heartbeats for all ${enabledCount} enabled ${noun}?`)) {
-                return;
-              }
-              disableAllMutation.mutate(agents);
+              void (async () => {
+                const confirmed = await confirm({
+                  title: `Disable timer heartbeats for all ${enabledCount} enabled ${noun}?`,
+                  tone: "destructive",
+                  confirmLabel: "Disable all",
+                  consequences: {
+                    immediateEffect: `Timer heartbeats are turned off for ${enabledCount} ${noun} across all companies.`,
+                    confirmedEffect: "Each agent's heartbeat setting is saved as disabled on the server.",
+                    resultLocation: "The counts and list on this page update as each agent is saved.",
+                    willNotHappen: "Agents are not paused or deleted; you can re-enable any heartbeat individually.",
+                  },
+                });
+                if (!confirmed) return;
+                disableAllMutation.mutate(agents);
+              })();
             }}
           >
             {disableAllMutation.isPending ? "Disabling..." : "Disable All"}
@@ -279,6 +292,7 @@ export function InstanceSettings() {
           ))}
         </div>
       )}
+      {confirmDialog}
     </div>
   );
 }

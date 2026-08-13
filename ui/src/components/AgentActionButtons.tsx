@@ -36,6 +36,7 @@ import { agentRouteRef } from "../lib/utils";
 import { copyTextToClipboard } from "../lib/clipboard";
 import { useDialogActions } from "../context/DialogContext";
 import { useToastActions } from "../context/ToastContext";
+import { useConfirmDialog } from "@/hooks/useConfirmDialog";
 import {
   buildDuplicateAgentPayload,
   duplicateAgentName,
@@ -207,6 +208,7 @@ export function AgentActionButtons({
   const { pushToast } = useToastActions();
   const [moreOpen, setMoreOpen] = useState(false);
   const [pauseConfirmOpen, setPauseConfirmOpen] = useState(false);
+  const { confirm, confirmDialog } = useConfirmDialog();
 
   const resolvedCompanyId = companyId ?? agent.companyId;
   const canonicalAgentRef = agentRouteRef(agent);
@@ -294,14 +296,23 @@ export function AgentActionButtons({
     },
   });
 
-  const handleDuplicateAgent = useCallback(() => {
+  const handleDuplicateAgent = useCallback(async () => {
     if (duplicateAgent.isPending) return;
     const nextName = duplicateAgentName(agent.name);
-    const confirmed = window.confirm(`Duplicate ${agent.name} as ${nextName}?`);
     setMoreOpen(false);
+    const confirmed = await confirm({
+      title: `Duplicate ${agent.name}?`,
+      confirmLabel: "Duplicate",
+      consequences: {
+        immediateEffect: `A new agent named ${nextName} is created from this agent's configuration.`,
+        confirmedEffect: "The copy is saved on the server, ready to review before it does any work.",
+        resultLocation: "You are taken to the new agent's dashboard; a toast confirms the copy.",
+        willNotHappen: `${agent.name} is not modified, and its run history is not copied.`,
+      },
+    });
     if (!confirmed) return;
     duplicateAgent.mutate();
-  }, [agent.name, duplicateAgent]);
+  }, [agent.name, confirm, duplicateAgent]);
 
   const resetTaskSession = useMutation({
     mutationFn: () => agentsApi.resetSession(agent.id, null, resolvedCompanyId ?? undefined),
@@ -372,6 +383,7 @@ export function AgentActionButtons({
           </AlertDialogContent>
         </AlertDialog>
       )}
+      {confirmDialog}
       {showStatus && (
         <span className="hidden sm:inline">
           <AgentStatusBadge status={agent.status} />
@@ -388,7 +400,7 @@ export function AgentActionButtons({
           <button
             className="flex items-center gap-2 w-full px-2 py-1.5 text-xs rounded hover:bg-accent/50"
             disabled={duplicateAgent.isPending}
-            onClick={handleDuplicateAgent}
+            onClick={() => void handleDuplicateAgent()}
           >
             {duplicateAgent.isPending ? (
               <Loader2 className="h-3 w-3 animate-spin" />
