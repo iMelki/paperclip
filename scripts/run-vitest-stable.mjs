@@ -151,10 +151,23 @@ function parseCliOptions(argv) {
   let shardCount = null;
   let group = null;
   let dryRun = false;
+  let related = false;
+  const relatedFiles = [];
 
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
     if (arg === "--") {
+      continue;
+    }
+
+    if (arg === "--related") {
+      related = true;
+      continue;
+    }
+
+    // Once --related is set, bare arguments are the changed source files to trace.
+    if (related && !arg.startsWith("--")) {
+      relatedFiles.push(arg);
       continue;
     }
 
@@ -208,6 +221,13 @@ function parseCliOptions(argv) {
     }
 
     fail(`Unknown argument "${arg}".`);
+  }
+
+  if (related) {
+    if (mode !== allModeName || group !== null || shardIndex !== null || dryRun) {
+      fail("--related cannot be combined with --mode/--group/--shard-*/--dry-run.");
+    }
+    return { mode, shardIndex: null, shardCount: null, group: null, dryRun: false, related, relatedFiles };
   }
 
   if (!new Set([allModeName, generalModeName, serializedModeName]).has(mode)) {
@@ -264,7 +284,7 @@ function selectSerializedSuites(routeTests, shardIndex, shardCount) {
   return routeTests.filter((_, index) => index % shardCount === shardIndex);
 }
 
-function runVitest(args, label, { serverExcludes = [] } = {}) {
+function runVitest(args, label, { serverExcludes = [], subcommand = "run" } = {}) {
   console.log(`\n[test:run] ${label}`);
   invocationIndex += 1;
   const tempRootParent = process.platform === "win32" ? os.tmpdir() : "/tmp";
@@ -289,7 +309,7 @@ function runVitest(args, label, { serverExcludes = [] } = {}) {
   }
   const result = spawnSync(
     "pnpm",
-    ["exec", "vitest", "run", ...commonVitestArgs, ...args],
+    ["exec", "vitest", subcommand, ...commonVitestArgs, ...args],
     {
       cwd: repoRoot,
       env,
@@ -369,6 +389,205 @@ function runGeneralGroup(routeTests, groupName, shardIndex = null, shardCount = 
   }
 
   fail(`Unknown group "${groupName}".`);
+}
+
+/**
+ * Run only the suites whose module graph reaches one of `files`.
+ *
+ * This backs the pre-commit hook's fast path. It runs across every vitest project (no
+ * `--project` filter) so a changed package pulls in its consumers' suites too, and it reuses
+ * `runVitest` so related runs get the same isolated PAPERCLIP_HOME/TMPDIR sandbox the full
+ * lanes get — running bare `vitest related` would leak the developer's real paperclip home
+ * into the suites.
+ *
+ * `--passWithNoTests` is required: most commits touch files no suite imports, and vitest
+ * otherwise exits non-zero on an empty selection, which would reject every such commit.
+ *
+ * The selection is run under the same isolation the serialized lane hand-rolls
+ * (`runSerializedSuites` spawns one vitest per route/authz suite). A related selection can pull
+ * route/authz suites and general suites into one invocation, and those suites are not safe to
+ * share a process — batching them produced failures that vanished when the same suites ran
+ * apart. `--pool=forks --isolate` gives every selected file its own fresh child process and
+ * `--no-file-parallelism`/`--maxWorkers=1` keeps them sequential, so related mode inherits the
+ * lane contract instead of quietly violating it.
+ */
+/**
+ * Default ceiling on how many suites a single pre-commit related run may execute.
+ *
+ * Rationale: `vitest related` is honest about the import graph, and that is exactly the
+ * problem. Server suites import the app, and the app imports ~everything, so almost any
+ * `server/src` change is a "hub" change. Measured on this repo (2026-08-12):
+ *
+ *   server/src/services/heartbeat.ts                    159 of 1130 specs
+ *   server/src/services/execution-allowlist.ts          160 of 1130 specs
+ *   packages/adapter-utils/src/sandbox-managed-runtime.ts  288 of 1130 specs
+ *   ui/src/lib/activity-format.ts                         9 of 1130 specs  (a genuine leaf)
+ *
+ * A capped run of 25 server suites measured 673.9s wall, of which 618.5s was module IMPORT
+ * and only 28.0s was test execution — i.e. cost is ~27s per suite and scales linearly with
+ * the count, so 159 suites extrapolates to ~70 minutes. Uncapped, the hook silently degrades
+ * into the full sweep it was introduced to avoid.
+ *
+ * 12 keeps a hub-module commit near a ~5 minute test budget while leaving genuine leaf changes
+ * (the common case) completely untouched — they select fewer suites than the cap and still run
+ * their full related set.
+ *
+ * This inverts the usual test-impact-analysis convention (Azure DevOps / Datadog / Google all
+ * fall back to running MORE tests when selection is untrustworthy). That is deliberate: those
+ * systems' selection guards a MERGE. This one guards a local commit, and it is not the
+ * authoritative gate — exhaustiveness lands at PRE-PUSH (.husky/pre-push runs the full suite,
+ * uncapped and without --related). Correctness gates (forbidden tokens, gitleaks, react-doctor,
+ * typecheck) are untouched by this cap.
+ *
+ * HARD PRECONDITION: this cap is only safe in a checkout where the pre-push hook is installed
+ * AND actually dispatches. A missing .husky/pre-push is indistinguishable from a passing one —
+ * the husky shim exits 0 when the hook file is absent — so "no output" is not proof of a gate.
+ * Verify with: git config --get core.hooksPath, then confirm <that dir>/../pre-push exists.
+ *
+ * Override with PAPERCLIP_PRECOMMIT_RELATED_CAP (0 disables the cap and restores the
+ * uncapped related run).
+ */
+const defaultRelatedSuiteCap = 12;
+
+function resolveRelatedSuiteCap() {
+  const raw = process.env.PAPERCLIP_PRECOMMIT_RELATED_CAP;
+  if (raw === undefined || raw === "") return defaultRelatedSuiteCap;
+  const parsed = Number(raw);
+  if (!Number.isInteger(parsed) || parsed < 0) {
+    fail(`PAPERCLIP_PRECOMMIT_RELATED_CAP must be a non-negative integer; got "${raw}".`);
+  }
+  return parsed;
+}
+
+/**
+ * Resolve the suites vitest's `related` selection would run, WITHOUT running them.
+ *
+ * Uses vitest's Node API so the cap can be applied before any test process is spawned. This
+ * builds the module graph once (~70s on this repo); the selected files are then handed to a
+ * normal `vitest run`, so the graph is not rebuilt by a second `vitest related` invocation.
+ *
+ * Resolution only globs and traces imports — it never executes a suite, so it does not need
+ * the isolated PAPERCLIP_HOME/TMPDIR sandbox that `runVitest` sets up for execution.
+ */
+async function resolveRelatedSpecFiles(files) {
+  const { createVitest } = await import("vitest/node");
+  const vitest = await createVitest("test", {
+    watch: false,
+    run: true,
+    related: files,
+    passWithNoTests: true,
+  });
+  try {
+    const specs = await vitest.getRelevantTestSpecifications();
+    const unique = new Set();
+    for (const spec of specs) {
+      if (spec.moduleId) unique.add(toRepoPath(spec.moduleId));
+    }
+    return [...unique].sort();
+  } finally {
+    await vitest.close();
+  }
+}
+
+/**
+ * Rank selected suites by proximity to the changed files, then keep the first `cap`.
+ *
+ * Proximity beats arbitrary truncation: a change's own co-located suite is the one most likely
+ * to catch the regression, and it keeps the subset deterministic (stable ordering => the same
+ * commit always runs the same suites, so a green hook is reproducible).
+ *
+ * Tier 0: the changed file IS a suite (always run — never drop a directly staged test).
+ * Tier 1: suite lives in the same directory as a changed file.
+ * Tier 2: suite shares the changed file's workspace package (first two path segments).
+ * Tier 3: everything else, alphabetically.
+ */
+function selectRepresentativeSuites(specFiles, changedFiles, cap) {
+  const changed = new Set(changedFiles.map((file) => toRepoPath(path.resolve(repoRoot, file))));
+  const changedDirs = new Set([...changed].map((file) => path.posix.dirname(file)));
+  const packageOf = (file) => file.split("/").slice(0, 2).join("/");
+  const changedPackages = new Set([...changed].map(packageOf));
+
+  const tierOf = (file) => {
+    if (changed.has(file)) return 0;
+    if (changedDirs.has(path.posix.dirname(file))) return 1;
+    if (changedPackages.has(packageOf(file))) return 2;
+    return 3;
+  };
+
+  return [...specFiles]
+    .sort((left, right) => tierOf(left) - tierOf(right) || left.localeCompare(right))
+    .slice(0, cap);
+}
+
+async function runRelatedSuites(files) {
+  if (files.length === 0) {
+    console.log("\n[test:run] related mode: no candidate source files; nothing to run.");
+    return;
+  }
+
+  const cap = resolveRelatedSuiteCap();
+  if (cap === 0) {
+    // Escape hatch: uncapped behaviour. `related` is a vitest subcommand, not a flag on `run`;
+    // it defaults to watch mode, so --run is what makes it terminate.
+    runVitest(
+      [
+        "--run",
+        "--passWithNoTests",
+        "--pool=forks",
+        "--isolate",
+        ...serializedServerVitestArgs,
+        ...files,
+      ],
+      `related to ${files.length} changed file(s) (uncapped)`,
+      { subcommand: "related" },
+    );
+    return;
+  }
+
+  console.log(`\n[test:run] resolving suites related to ${files.length} changed file(s)...`);
+  const selected = await resolveRelatedSpecFiles(files);
+  if (selected.length === 0) {
+    console.log("[test:run] related mode: no suite imports the changed files; nothing to run.");
+    return;
+  }
+
+  if (selected.length <= cap) {
+    runVitest(
+      [
+        "--passWithNoTests",
+        "--pool=forks",
+        "--isolate",
+        ...serializedServerVitestArgs,
+        ...selected,
+      ],
+      `related to ${files.length} changed file(s): ${selected.length} suite(s)`,
+    );
+    return;
+  }
+
+  const subset = selectRepresentativeSuites(selected, files, cap);
+  console.log(
+    `\n[test:run] ${selected.length} suites import the staged files (cap ${cap}). ` +
+      `The staged change reaches a hub module, so the related set has degenerated toward the ` +
+      `full suite.\n` +
+      `[test:run] Running the ${subset.length} suites closest to the change locally. ` +
+      `The full suite runs at PRE-PUSH (.husky/pre-push), uncapped and without --related, ` +
+      `before anything leaves this machine — that is the authoritative gate, not CI. ` +
+      `.github/workflows/pr.yml is scoped to 'pull_request: branches: [master]', so nothing ` +
+      `in CI runs the suite on pushes to dev or on PRs into dev.\n` +
+      `[test:run] For a full local sweep before pushing: PAPERCLIP_PRECOMMIT_ALL=1 git commit ...` +
+      ` (or PAPERCLIP_PRECOMMIT_RELATED_CAP=0 to run all ${selected.length}).`,
+  );
+  runVitest(
+    [
+      "--passWithNoTests",
+      "--pool=forks",
+      "--isolate",
+      ...serializedServerVitestArgs,
+      ...subset,
+    ],
+    `related subset: ${subset.length} of ${selected.length} suite(s)`,
+  );
 }
 
 function runSerializedSuites(routeTests, shardIndex, shardCount) {
@@ -454,6 +673,12 @@ if (options.dryRun) {
       2,
     ),
   );
+  process.exit(0);
+}
+
+if (options.related) {
+  // Top-level await: resolving the related set needs vitest's async Node API.
+  await runRelatedSuites(options.relatedFiles);
   process.exit(0);
 }
 
