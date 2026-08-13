@@ -1,17 +1,23 @@
 # Paperclip Open Tasks
 
-Last updated: 2026-08-08
+Last updated: 2026-08-13
 
 This file is the durable local index for active `paperclip` issues.
 
 ## Active Issues
 
+- [#73 - Push lockout: the exhaustive pre-push gate rejects every push](https://github.com/iMelki/paperclip/issues/73)
+  - The old pre-push hook required the whole suite to be green even when a change only
+    repaired an existing failure. It now runs full typecheck and uncapped tests related
+    to the outgoing source changes, so unrelated baseline failures cannot block their
+    own repair. #67 remains the required follow-up for exhaustive validation on `dev`.
+
 - [#67 - CI never validates dev: pr.yml is scoped to PRs into master](https://github.com/iMelki/paperclip/issues/67)
   - `.github/workflows/pr.yml` fires only on `pull_request: branches: [master]`, while
     `origin/dev` was 1212 commits ahead of `origin/master` (3 PRs ever opened into
-    `dev`). No CI run has validated that work. `92f464f99` closed the local half by
-    adding `.husky/pre-push` with the full suite, but a Windows pre-push cannot catch
-    POSIX-only defects, so the Linux gap is real. Extending the trigger to `dev`
+    `dev`). No CI run has validated that work. #73 replaced the all-or-nothing local
+    full-suite hook with changed-workspace regression checks, but a Windows pre-push
+    cannot catch POSIX-only defects or provide exhaustive validation. Extending the trigger to `dev`
     **increases** Actions spend (~+60-120 min/2 d); do NOT add `push: dev`. Operator
     decision — see the issue for the costed options.
 

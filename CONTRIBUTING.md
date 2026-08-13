@@ -121,8 +121,8 @@ All tests must pass before a PR can be merged. Run them locally first and verify
 
 #### What the pre-commit hook runs
 
-**Budget: p95 ≤ 90 s, hard cap 180 s.** A check that cannot meet that budget **moves to
-pre-push — it is never deleted.** The budget is written down so it can be defended: this
+**Budget: p95 ≤ 90 s, hard cap 180 s.** A check that cannot meet that budget **moves to a
+separately scheduled or CI exhaustive tier — it is never deleted.** The budget is written down so it can be defended: this
 hook previously reached roughly 88 minutes (13 min `pnpm -r typecheck` plus a ~75 min full
 suite) one "just this once" check at a time.
 
@@ -141,14 +141,16 @@ The pre-commit hook is scoped to your staged change so it stays in the seconds-t
 - **Forbidden tokens, Gitleaks, and React Doctor are unscoped and unchanged** — those gates
   still see every commit.
 
-#### Where exhaustive verification actually happens
-
-The **full** suite is a **pre-push** gate — not a pre-commit one, and not a CI one.
+#### Where push verification happens
 
 `.husky/pre-push` runs `scripts/pre-push-check.ps1` (or the `.sh` mirror): the workspace
-link preflight, the forbidden-token check, full `pnpm -r typecheck`, and the full vitest
-suite with no cap and no `--related`. It runs once per push rather than once per commit,
-and it costs no GitHub Actions minutes.
+link preflight, the forbidden-token check, full `pnpm -r typecheck`, and every uncapped
+Vitest suite related to the outgoing source changes. It rejects regressions in the push
+without re-failing unrelated existing test failures. This is intentional: the former
+full-suite pre-push hook made the repository unpushable while its baseline was red (#73).
+
+The exhaustive suite needs to move to CI on `dev` (#67). Until then, a clean full-suite
+receipt is useful evidence but is not a condition for pushing a fix to an existing failure.
 
 It deliberately does **not** run the deep Gitleaks *history* scan. That scan exits 2 on 24
 pre-existing findings across 7837 commits (all test fixtures and mock data), which would
@@ -165,9 +167,9 @@ can do: Linux/POSIX behaviour (every dev host here is Windows), clean-environmen
 installs from a frozen lockfile, and verification a reviewer can trust because it did
 not come from a developer's machine.
 
-That split is what makes the pre-commit cap safe. **If you disable or bypass the
-pre-push hook, the pre-commit cap is no longer sound** — a hub-module change only runs
-12 of up to 288 relevant suites. Note that a missing `.husky/pre-push` looks exactly
+The push hook removes the pre-commit representative cap, but it still runs only the
+outgoing change's related suite set. **If you disable or bypass the pre-push hook, you
+lose this uncapped regression check**. Note that a missing `.husky/pre-push` looks exactly
 like a passing one, because the husky shim exits 0 when the hook file is absent.
 
 To reproduce the full sweep on demand:

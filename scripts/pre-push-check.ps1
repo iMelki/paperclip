@@ -1,10 +1,11 @@
 <#
 .SYNOPSIS
-  Paperclip pre-push gate: the exhaustive tier.
+  Paperclip pre-push gate: changed-workspace verification.
 
 .DESCRIPTION
-  This hook -- not pre-commit, and not CI -- is where exhaustive verification lands
-  for this repo. That placement is deliberate:
+  This hook verifies the changed workspace without re-failing unrelated, known-red
+  suites. It supplements the smaller pre-commit check; it is not a replacement for
+  exhaustive CI on dev (tracked in #67).
 
     * pre-commit is scoped and capped (affected typecheck + `vitest --related` with a
       hard suite cap). It guards a local commit. It is explicitly NOT authoritative,
@@ -19,21 +20,25 @@
       reserved for what only CI can do -- Linux/POSIX behaviour, clean-environment
       installs, and reviewer-independent verification -- not for exhaustiveness.
 
-  So the full suite runs here: once per push, free of Actions minutes, and off the
-  per-commit critical path.
+  The prior version ran the full suite here. That made every push reject while the
+  baseline suite was red, including fixes to the failing suites (#73). The hook now
+  runs the full TypeScript check plus uncapped tests related to the outgoing source
+  changes. A failure still rejects the push; unrelated existing failures do not.
 
   FAIL-CLOSED CONTRACT
-  This script has no skip flag and no fast path. Every step's exit code is captured
-  explicitly and a single non-zero result fails the push. `git push --no-verify` is
-  the only escape and it is visible in the operator's own command line -- that is
-  intentional, so a bypass is never silent. Adding an env-var bypass here would make
-  this gate indistinguishable from the absent hook it replaced.
+  This script has no skip flag. Every selected step's exit code is captured explicitly
+  and a non-zero result rejects the push. `git push --no-verify` remains Git's visible
+  bypass; no environment-variable bypass is provided here.
 
   Steps are ordered cheapest-first so a cheap failure never pays for the expensive one.
 #>
 
 [CmdletBinding()]
-param()
+param(
+  [string[]]$ChangedFiles,
+  [switch]$DryRun,
+  [string]$LogPath
+)
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
@@ -53,14 +58,44 @@ if (-not $pnpmCommand) {
 }
 $pnpm = $pnpmCommand.Source
 
+function Get-OutgoingChangedFiles {
+  if ($ChangedFiles) {
+    return @($ChangedFiles | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+  }
+
+  $upstream = & git rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' 2>$null
+  if ($LASTEXITCODE -eq 0 -and -not [string]::IsNullOrWhiteSpace($upstream)) {
+    $mergeBase = & git merge-base HEAD $upstream
+    if ($LASTEXITCODE -eq 0 -and -not [string]::IsNullOrWhiteSpace($mergeBase)) {
+      $files = @(& git diff --name-only "$mergeBase..HEAD")
+      if ($LASTEXITCODE -eq 0) {
+        return @($files | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+      }
+    }
+  }
+
+  $files = @(& git diff-tree --no-commit-id --name-only -r HEAD)
+  if ($LASTEXITCODE -ne 0) {
+    throw 'Could not resolve outgoing source files for the pre-push test selection.'
+  }
+  return @($files | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+}
+
+function Test-TestBearingPath {
+  param([string]$Path)
+  return $Path -match '^(server|ui|cli|packages|tests)/' -or
+    $Path -match '(^|/)(package\.json|pnpm-lock\.yaml|vitest\.[^/]+|vitest\.config\.[^/]+)$' -or
+    $Path -match '\.(test|spec)\.[mc]?[jt]sx?$'
+}
+
 function Write-Fail {
   param([string]$Message)
-  Write-Host "FAIL: $Message" -ForegroundColor Red
+  Write-GateLine -Message "FAIL: $Message" -Color Red
   $script:failed = $true
 }
 
 function Write-Pass {
-  Write-Host "PASS" -ForegroundColor Green
+  Write-GateLine -Message "PASS" -Color Green
 }
 
 # Deliberately returns nothing. An earlier draft returned the exit code and callers
@@ -73,30 +108,70 @@ function Invoke-Step {
     [scriptblock]$Action,
     [string]$FailureMessage
   )
-  Write-Host ""
-  Write-Host "Running $Name..."
+  Write-GateLine -Message ''
+  Write-GateLine -Message "Running $Name..."
   $stepStart = Get-Date
-  & $Action
+  # Transcript misses stdout produced by some native children. Capture the child stream
+  # explicitly, then write it to both the terminal and the durable gate log.
+  $stepOutput = @(& $Action 2>&1)
   $stepExit = $LASTEXITCODE
+  foreach ($line in $stepOutput) {
+    $rendered = [string]$line
+    Add-Content -LiteralPath $LogPath -Value $rendered
+    Write-Host $rendered
+  }
   $elapsed = [math]::Round(((Get-Date) - $stepStart).TotalSeconds, 1)
   if ($stepExit -eq 0) {
-    Write-Host "  ($Name took ${elapsed}s)" -ForegroundColor DarkGray
+    Write-GateLine -Message "  ($Name took ${elapsed}s)" -Color DarkGray
     Write-Pass
   } else {
-    Write-Host "  ($Name took ${elapsed}s, exit $stepExit)" -ForegroundColor DarkGray
+    Write-GateLine -Message "  ($Name took ${elapsed}s, exit $stepExit)" -Color DarkGray
     Write-Fail $FailureMessage
   }
 }
 
+$outgoingFiles = @(Get-OutgoingChangedFiles)
+$testFiles = @($outgoingFiles | Where-Object { Test-TestBearingPath $_ })
+
+if ($DryRun) {
+  [ordered]@{
+    mode = 'changed-workspace'
+    outgoingFiles = $outgoingFiles
+    testFiles = $testFiles
+    runsFullTypecheck = $true
+    runsUncappedRelatedTests = $testFiles.Count -gt 0
+  } | ConvertTo-Json -Depth 4
+  exit 0
+}
+
+if ([string]::IsNullOrWhiteSpace($LogPath)) {
+  $logDirectory = Join-Path $repoRoot '.local-logs/pre-push'
+  New-Item -ItemType Directory -Force -Path $logDirectory | Out-Null
+  $LogPath = Join-Path $logDirectory ("{0:yyyyMMddTHHmmssZ}-{1}.log" -f [DateTime]::UtcNow, $PID)
+}
+
+[IO.File]::AppendAllText(
+  $LogPath,
+  ("Paperclip pre-push check started {0:O}{1}" -f [DateTimeOffset]::UtcNow, [Environment]::NewLine),
+  [Text.UTF8Encoding]::new($false)
+)
+function Write-GateLine {
+  param(
+    [string]$Message,
+    [ConsoleColor]$Color = [ConsoleColor]::Gray
+  )
+  Add-Content -LiteralPath $LogPath -Value $Message
+  Write-Host $Message -ForegroundColor $Color
+}
+
+Write-GateLine -Message "Full gate output: $LogPath" -Color DarkGray
+
 $start = Get-Date
-Write-Host "Paperclip - Pre-Push Check (exhaustive tier)"
-Write-Host "================================================"
-# R5 (quota-aware turn budgeting): a long gate can strand work if a usage window
-# closes mid-push, and unpushed work is invisible. State the cost up front so the
-# operator can decide not to start a push they cannot finish.
-Write-Host "Started $($start.ToString('HH:mm:ss')). Expect roughly 60-90 minutes on this repo"
-Write-Host "(full -r typecheck plus the full vitest suite over ~1211 tracked test files)."
-Write-Host "This is the exhaustive gate; pre-commit deliberately ran only a capped subset."
+Write-GateLine -Message 'Paperclip - Pre-Push Check (changed-workspace tier)'
+Write-GateLine -Message '================================================'
+Write-GateLine -Message "Started $($start.ToString('HH:mm:ss'))."
+Write-GateLine -Message "Outgoing files: $($outgoingFiles.Count); test-bearing files: $($testFiles.Count)."
+Write-GateLine -Message 'Runs full typecheck and uncapped tests related to this push; #67 owns exhaustive dev CI.'
 
 # 1. Workspace link preflight -- seconds. Every later step depends on it, and it is
 #    the cheapest way to catch a broken workspace before paying for a typecheck.
@@ -140,22 +215,34 @@ if (-not $failed) {
     -FailureMessage "TypeScript check failed."
 }
 
-# 5. The full suite. No --related, no cap. This is the whole point of the tier:
-#    pre-commit's cap is only safe because this runs.
-if (-not $failed) {
-  Invoke-Step -Name "full unit/integration suite (pnpm run test:run)" `
-    -Action { & $pnpm @("run", "test:run") } `
-    -FailureMessage "Unit tests failed."
+# 5. Test every suite related to this push, without pre-commit's representative cap.
+#    This preserves a real regression gate without making a red unrelated suite block
+#    the commit that repairs it (#73).
+if (-not $failed -and $testFiles.Count -gt 0) {
+  Invoke-Step -Name "uncapped unit/integration suites related to this push" `
+    -Action {
+      $env:PAPERCLIP_PRECOMMIT_RELATED_CAP = '0'
+      try {
+        & node scripts/run-vitest-stable.mjs --related @testFiles
+      } finally {
+        Remove-Item Env:PAPERCLIP_PRECOMMIT_RELATED_CAP -ErrorAction SilentlyContinue
+      }
+    } `
+    -FailureMessage "A test related to this push failed."
+} elseif (-not $failed) {
+  Write-GateLine -Message 'Skipping unit tests: this push has no test-bearing source files.' -Color DarkGray
 }
 
 $totalMinutes = [math]::Round(((Get-Date) - $start).TotalMinutes, 1)
-Write-Host ""
-Write-Host "================================================"
+Write-GateLine -Message ''
+Write-GateLine -Message '================================================'
 if ($failed) {
-  Write-Host "PRE-PUSH CHECK FAILED after ${totalMinutes} min" -ForegroundColor Red
-  Write-Host "The push was rejected. Fix the failure above, or push a branch that does not carry it."
-  exit 1
+  Write-GateLine -Message "PRE-PUSH CHECK FAILED after ${totalMinutes} min" -Color Red
+  Write-GateLine -Message 'The push was rejected. Fix the failure in this push before retrying.'
+  $exitCode = 1
+} else {
+  Write-GateLine -Message "PRE-PUSH CHECK PASSED in ${totalMinutes} min" -Color Green
+  $exitCode = 0
 }
 
-Write-Host "PRE-PUSH CHECK PASSED in ${totalMinutes} min" -ForegroundColor Green
-exit 0
+exit $exitCode
