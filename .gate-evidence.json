@@ -62,6 +62,18 @@
         "reason": "Exited 1 for the deliberately unapproved package.json change and named the missing trusted label as the cause.",
         "restoredPass": "With only README.md modified, the script exited 0 and emitted passed=true."
       }
+    },
+    {
+      "id": "default-branch-history-secret-allowlist",
+      "path": ".gitleaksignore",
+      "description": "Pins only exact reviewed historical test-fixture fingerprints while leaving new secret-like values detectable by the complete-history PR scan.",
+      "negativeFixture": "scripts/verify-gitleaks.test.mjs",
+      "observedFailure": {
+        "date": "2026-08-13",
+        "command": "PAPERCLIP_GITLEAKS_BIN=gitleaks-8.30.1 node scripts/verify-gitleaks.mjs --history in an isolated single-ref clone with a committed generic-api-key fixture",
+        "reason": "Exited 2, named gate-negative-fixture.txt and generic-api-key, redacted the value, and reported that commit or CI execution was blocked.",
+        "restoredPass": "A fresh single-ref clone at 12a207b2631921b33b3849ce78f44fa38ca87c2c scanned 2,031 commits, found no leaks, and exited 0. Durable logs: .runtime/gate-proof/paperclip-pr74-negative-v2.log and paperclip-pr74-restored.log in the Assistants workspace."
+      }
     }
   ]
 }
