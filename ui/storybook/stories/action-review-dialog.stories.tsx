@@ -64,7 +64,8 @@ export const DestructiveReview: Story = {
       consequences={{
         immediateEffect: "The company is hidden from the sidebar and company switcher.",
         confirmedEffect: "Its status is set to archived in the database.",
-        resultLocation: "You are switched to your next active company.",
+        resultLocation:
+          "You switch to the next active company when one remains; otherwise no company is selected.",
         willNotHappen: "No agents, issues, or data are deleted; everything stays in the database.",
       }}
       onConfirm={() => {}}

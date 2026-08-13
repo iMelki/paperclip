@@ -522,10 +522,12 @@ export function ProjectProperties({ project, onUpdate, onFieldUpdate, getFieldSa
       tone: "destructive",
       confirmLabel: "Clear folder",
       consequences: {
-        immediateEffect: "The local folder link is removed from this project's workspace.",
+        immediateEffect: keepsRepo
+          ? "The local folder link is removed from this project's workspace."
+          : "This project's workspace record is removed.",
         confirmedEffect: keepsRepo
           ? "The workspace is saved with only its repo; agents stop using the local folder."
-          : "The workspace is saved without a codebase; agents stop using the local folder.",
+          : "Agents stop using the local folder because the workspace is removed.",
         resultLocation: "The Workspace section on this panel updates.",
         willNotHappen: "No files on disk are deleted; the folder itself is untouched.",
       },
@@ -543,10 +545,12 @@ export function ProjectProperties({ project, onUpdate, onFieldUpdate, getFieldSa
       tone: "destructive",
       confirmLabel: "Clear repo",
       consequences: {
-        immediateEffect: "The repo link is removed from this project's workspace.",
+        immediateEffect: hasLocalFolder
+          ? "The repo link is removed from this project's workspace."
+          : "This project's workspace record is removed.",
         confirmedEffect: hasLocalFolder
           ? "The workspace is saved with only its local folder; agents stop cloning this repo."
-          : "The workspace is saved without a codebase; agents stop cloning this repo.",
+          : "Agents stop cloning this repo because the workspace is removed.",
         resultLocation: "The Workspace section on this panel updates.",
         willNotHappen: "The GitHub repository itself is not modified or deleted.",
       },

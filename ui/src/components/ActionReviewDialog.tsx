@@ -158,7 +158,7 @@ export function ActionReviewDialog({
             {ACTION_REVIEW_CONSEQUENCE_KEYS.map((key) => (
               <div
                 key={key}
-                className="grid grid-cols-[minmax(0,8rem)_1fr] gap-x-3 gap-y-0.5"
+                className="grid grid-cols-(--gtc-action-review) gap-x-3 gap-y-0.5"
               >
                 <dt className="text-xs text-muted-foreground pt-0.5">
                   {ACTION_REVIEW_CONSEQUENCE_LABELS[key]}
