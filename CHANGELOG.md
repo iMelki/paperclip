@@ -4,6 +4,17 @@ All notable changes to this repository should be recorded here.
 
 ## Unreleased
 
+- Replaced the unsupported fork Dependency Review call in the trusted PR-review
+  workflow with a fail-closed fork policy: dependency manifests, lockfiles, and
+  package patches now require the maintainer-only `dependency-review-approved`
+  label. Non-fork repositories retain GitHub's native Dependency Review action,
+  and every review executes the trusted PR base commit rather than hard-coded
+  `master` content.
+
+- Replaced the all-or-nothing pre-push suite with full typecheck plus uncapped tests
+  related to the outgoing source changes. Existing unrelated test failures can no
+  longer prevent their own repair from being pushed; exhaustive dev CI remains #67.
+
 - Normalized release-package discovery directories to forward-slash manifest
   paths, with a Windows-separator regression, so release-map validation does
   not report every package as missing on native Windows.
