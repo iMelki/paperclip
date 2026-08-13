@@ -4,6 +4,13 @@ All notable changes to this repository should be recorded here.
 
 ## Unreleased
 
+- Fixed native-Windows adapter-utils execution by moving the process-session
+  payload out of the Git-for-Windows `sh -c` argument, using Node-native file
+  copying, resolving script wrappers through Node, and making shell discovery
+  support PATH-derived, per-user, and Scoop Git installs with a clear failure
+  when no complete Git shell is available. The environment transport remains
+  bounded; #64 tracks reducing or replacing the oversized ambient-env payload.
+
 - Replaced the all-or-nothing pre-push suite with full typecheck plus uncapped tests
   related to the outgoing source changes. Existing unrelated test failures can no
   longer prevent their own repair from being pushed; exhaustive dev CI remains #67.

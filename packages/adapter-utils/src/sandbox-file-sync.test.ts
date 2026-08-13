@@ -28,6 +28,15 @@ function buildTestExtractCommand(assetTarPath: string, assetDir: string): string
   return `rm -rf ${dir} && mkdir -p ${dir} && tar -xf ${tarPath} -C ${dir} && rm -f ${tarPath}`;
 }
 
+function withNativeWindowsTar(command: string): string {
+  if (process.platform !== "win32") return command;
+  const tarCommand = path.join(process.env.SystemRoot ?? "C:\\Windows", "System32", "tar.exe");
+  // Git's shell prepends /usr/bin, whose GNU tar cannot recreate native Windows
+  // symlinks from the PAX metadata emitted by System32 bsdtar. Override only tar
+  // so find/rm/mkdir still resolve to Git's coreutils.
+  return `tar() { ${shellQuotePath(tarCommand)} "$@"; }; ${command}`;
+}
+
 interface RecordingClient {
   client: SandboxManagedRuntimeClient;
   syncInOps: SandboxSyncOperation[][];
@@ -84,7 +93,7 @@ function makeNativeClient(): RecordingClient {
       for (const command of operation.postUploadCommands ?? []) {
         // `sh` is not on PATH on Windows, so a bare spawn raises ENOENT before the
         // command ever runs. resolveTestShellCommand finds the Git shell that can.
-        await execFile(resolveTestShellCommand("sh"), ["-c", command.command], {
+        await execFile(resolveTestShellCommand("sh"), ["-c", withNativeWindowsTar(command.command)], {
           maxBuffer: 32 * 1024 * 1024,
         });
       }
@@ -106,7 +115,9 @@ function makeNativeClient(): RecordingClient {
     remove: async (remotePath) => { await rm(remotePath, { recursive: true, force: true }); },
     // Same `sh`-is-not-on-PATH hazard as the postUploadCommands loop above.
     run: async (command) => {
-      await execFile(resolveTestShellCommand("sh"), ["-c", command], { maxBuffer: 32 * 1024 * 1024 });
+      await execFile(resolveTestShellCommand("sh"), ["-c", withNativeWindowsTar(command)], {
+        maxBuffer: 32 * 1024 * 1024,
+      });
     },
     syncIn: async (operations) => { syncInOps.push(operations); return applyOperations(operations); },
     syncOut: async (operations) => { syncOutOps.push(operations); return applyOperations(operations); },

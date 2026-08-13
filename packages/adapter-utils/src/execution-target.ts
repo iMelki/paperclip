@@ -1505,7 +1505,10 @@ export async function startAdapterExecutionTargetProcessSessionBridge(input: {
         // Windows -> MSYS (`sh.exe`) spawn boundary is truncated at 8 KiB,
         // which severs the closing quote and fails the launch with
         // "unexpected EOF while looking for matching `'". The streamed path
-        // below already passes these two through `env`; this matches it. (#59)
+        // below already passes these two through `env`; this matches it. This
+        // removes the 8 KiB argv boundary, but an environment variable is still
+        // bounded on Windows. #64 owns narrowing or replacing that transport;
+        // do not describe this payload as unbounded. (#59)
         PAPERCLIP_PROCESS_SESSION_DIR: sessionDir,
         PAPERCLIP_PROCESS_SESSION_COMMAND_B64: commandPayload,
         PAPERCLIP_SANDBOX_EXEC_CHANNEL: "bridge",

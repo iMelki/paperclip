@@ -1134,7 +1134,10 @@ describe("sandbox adapter execution targets", () => {
         await waitForCondition(
           () => stdout.includes("delta:ping\n") && stderr.includes("trace:ping\n"),
           "Timed out waiting for live streamed process session output.",
-          3000,
+          // Native Windows bridge startup can cross the three-second edge while
+          // Git-for-Windows initializes; the proxy still retains its own bounded
+          // five-second exit timer after the stream becomes live.
+          15000,
         );
         expect(exited).toBe(false);
 
@@ -1157,7 +1160,7 @@ describe("sandbox adapter execution targets", () => {
         }
         await bridge?.stop();
       }
-    });
+    }, 30_000);
 
     it("keeps the agent command on the persistent session and forces bridge control execs off it", async () => {
       // Regression guard for the streamed-mode startup deadlock. The persistent
