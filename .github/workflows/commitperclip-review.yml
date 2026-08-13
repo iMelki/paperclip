@@ -18,30 +18,15 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - name: Checkout base branch (never PR code)
+      - name: Checkout trusted workflow revision (never PR code)
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
-          ref: ${{ github.event.pull_request.base.sha }}
-
-      - name: Dependency Review
-        if: ${{ !github.event.repository.fork }}
-        uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
-        with:
-          base-ref: ${{ github.event.pull_request.base.sha }}
-          head-ref: ${{ github.event.pull_request.head.sha }}
+          ref: ${{ github.workflow_sha }}
 
       - name: Set up Node
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: '20'
-
-      - name: Fork dependency change policy
-        if: ${{ github.event.repository.fork }}
-        run: node .github/scripts/check-fork-dependency-policy.mjs
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
 
       - name: Generate commitperclip token
         id: app-token
@@ -60,6 +45,26 @@ jobs:
           IS_FORK: ${{ github.event.repository.fork }}
           GITHUB_TOKEN: ${{ github.token }}
           COMMITPERCLIP_TOKEN: ${{ steps.app-token.outputs.value }}
+
+      - name: Checkout trusted pull request base (never PR code)
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+
+      - name: Dependency Review
+        if: ${{ !github.event.repository.fork }}
+        uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
+        with:
+          base-ref: ${{ github.event.pull_request.base.sha }}
+          head-ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: Fork dependency change policy
+        if: ${{ github.event.repository.fork }}
+        run: node .github/scripts/check-fork-dependency-policy.mjs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
 
       - name: Run quality gates
         id: quality
