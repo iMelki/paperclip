@@ -62,6 +62,30 @@
         "reason": "Exited 1 for the deliberately unapproved package.json change and named the missing trusted label as the cause.",
         "restoredPass": "With only README.md modified, the script exited 0 and emitted passed=true."
       }
+    },
+    {
+      "id": "paperclip-react-doctor-local-resolver",
+      "path": "scripts/run-react-doctor.js",
+      "description": "Runs only an exact local React Doctor package and emits a normalized receipt.",
+      "negativeFixture": "scripts/run-react-doctor.test.mjs",
+      "observedFailure": {
+        "date": "2026-08-13",
+        "command": "node C:\\Users\\Milky\\AppData\\Local\\Temp\\paperclip-negative-7cd8d702402842bdba7ae1334417debc\\scripts\\run-react-doctor.js",
+        "reason": "The temporary checkout had no node_modules/react-doctor. The runner returned exit 2 and JSON error pinned-package-missing with outcome=incomplete; no npx or package-manager fallback was available.",
+        "restoredPass": "The test creates a temporary exact 0.7.8 package whose local analyzer returns JSON; the runner exits 0 with outcome=passed and 64-character package/output hashes."
+      }
+    },
+    {
+      "id": "paperclip-react-doctor-exit-propagation",
+      "path": ".husky/pre-commit",
+      "description": "Stops on pre-commit checker failure and preserves real analyzer failures while allowing only the explicit unconfigured state.",
+      "negativeFixture": "scripts/run-react-doctor.test.mjs",
+      "observedFailure": {
+        "date": "2026-08-13",
+        "command": "node --test scripts/run-react-doctor.test.mjs --test-name-pattern=\"preserves a real analyzer failure exit code\"",
+        "reason": "The temporary exact 0.7.8 analyzer emits valid JSON and exits 23; the runner receipt is outcome=failed, error=analyzer-reported-failure, exitCode=23. The hook allows only exit 2 for missing configuration and exits for any other nonzero status.",
+        "restoredPass": "The paired local-analyzer test exits 0 with outcome=passed, while the missing-package case remains the explicit disabled receipt path rather than a false quality pass."
+      }
     }
   ]
 }
