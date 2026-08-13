@@ -119,6 +119,92 @@ Every PR must include a **Model Used** section specifying which AI model produce
 
 All tests must pass before a PR can be merged. Run them locally first and verify CI is green after pushing.
 
+#### What the pre-commit hook runs
+
+**Budget: p95 ≤ 90 s, hard cap 180 s.** A check that cannot meet that budget **moves to a
+separately scheduled or CI exhaustive tier — it is never deleted.** The budget is written down so it can be defended: this
+hook previously reached roughly 88 minutes (13 min `pnpm -r typecheck` plus a ~75 min full
+suite) one "just this once" check at a time.
+
+**This repo does not meet its own budget yet** — see the measurements below and
+[#71](https://github.com/iMelki/paperclip/issues/71). The number stays as the target;
+the gap is tracked rather than papered over by raising it.
+
+The pre-commit hook is scoped to your staged change so it stays in the seconds-to-minutes range:
+
+- **Typecheck** runs on the workspace packages your staged files touch, expanded to their
+  dependents (`pnpm --filter ...<pkg> typecheck`). Staging a root build input — the root
+  `package.json`, `pnpm-workspace.yaml`, `pnpm-lock.yaml`, a root `tsconfig*.json`, or
+  `vitest.config.ts` — falls back to the full `pnpm -r typecheck` sweep.
+- **Unit tests** run only the suites whose module graph reaches a staged file
+  (`vitest --related`). A staged file no suite imports runs no tests and passes.
+- **Forbidden tokens, Gitleaks, and React Doctor are unscoped and unchanged** — those gates
+  still see every commit.
+
+#### Where push verification happens
+
+`.husky/pre-push` runs `scripts/pre-push-check.ps1` (or the `.sh` mirror): the workspace
+link preflight, the forbidden-token check, full `pnpm -r typecheck`, and every uncapped
+Vitest suite related to the outgoing source changes. It rejects regressions in the push
+without re-failing unrelated existing test failures. This is intentional: the former
+full-suite pre-push hook made the repository unpushable while its baseline was red (#73).
+
+The exhaustive suite needs to move to CI on `dev` (#67). Until then, a clean full-suite
+receipt is useful evidence but is not a condition for pushing a fix to an existing failure.
+
+It deliberately does **not** run the deep Gitleaks *history* scan. That scan exits 2 on 24
+pre-existing findings across 7837 commits (all test fixtures and mock data), which would
+make the gate unpassable for reasons no individual push introduced — and an unpassable gate
+just trains everyone into `--no-verify`, which disables the typecheck and suite above it.
+New content is already scanned at pre-commit by `verify-gitleaks.mjs --staged`. Restoring a
+`--range base..head` scan is tracked in
+[#68](https://github.com/iMelki/paperclip/issues/68).
+
+It is deliberately not CI's job. `.github/workflows/pr.yml` is scoped to
+`pull_request: branches: [master]`, while all development happens on `dev` — so no CI
+run validates a commit until the promotion PR. CI is reserved for the things only CI
+can do: Linux/POSIX behaviour (every dev host here is Windows), clean-environment
+installs from a frozen lockfile, and verification a reviewer can trust because it did
+not come from a developer's machine.
+
+The push hook removes the pre-commit representative cap, but it still runs only the
+outgoing change's related suite set. **If you disable or bypass the pre-push hook, you
+lose this uncapped regression check**. Note that a missing `.husky/pre-push` looks exactly
+like a passing one, because the husky shim exits 0 when the hook file is absent.
+
+To reproduce the full sweep on demand:
+
+```bash
+pnpm run test:run                          # full suite on its own
+PAPERCLIP_PRECOMMIT_ALL=1 git commit ...   # full typecheck + full test suite at commit time
+PAPERCLIP_PRECOMMIT_RELATED_CAP=0 ...      # uncapped related run (can exceed the full suite)
+```
+
+#### Measured cost (2026-08-13, contended host: ~120 node processes, ~58% CPU)
+
+| Stage | Leaf change (`ui/src/lib/activity-format.ts`) | Hub change (`server/src/services/heartbeat.ts`) |
+| :--- | ---: | ---: |
+| `--related` suites selected | 9 of 1130 | **159**, capped to 12 |
+| `--related` run (wall) | 93.6 s | 304.8 s |
+| Scoped typecheck, cold | 137.6 s | 168.5 s |
+| Scoped typecheck, warm (incremental) | 68.6 s | — |
+
+Reference points: full `pnpm -r typecheck` is **184.3 s** warm across all 32 workspace
+packages, and the full suite is ~75 min.
+
+Two things follow, and they are why the cap exists and why it is not enough:
+
+- **Cost is import, not execution.** The capped 12-suite hub run spent **227.8 s of 262.7 s
+  (87%) importing modules** and only 29.6 s executing tests — about 22-25 s per suite,
+  scaling linearly with suite *count*. So an *uncapped* `--related` on a hub module (159
+  suites) would cost more than the full suite it replaced, which amortizes imports across
+  shards. Uncapped `--related` is not a cheaper full suite; it is a slower one with less
+  coverage.
+- **Scoping the typecheck buys less than it looks.** `pnpm -r` already runs packages in
+  parallel, so the full sweep costs roughly the slowest package: 184.3 s for 32 packages
+  versus 137.6 s for the single `ui` package. The saving comes from tsc's incremental
+  cache (`ui/tsconfig.tsbuildinfo`), not from narrowing the package set.
+
 ### Telemetry Changes
 
 If your change adds, removes, or modifies emitted telemetry events, update the [Telemetry Data Contract](packages/shared/src/telemetry/README.md) in the same PR. Keep clients emitting raw dimension values and avoid documenting or relying on private delivery details.
