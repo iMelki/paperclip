@@ -19,6 +19,11 @@ export interface ConfirmDialogRequest {
 }
 
 interface ActiveConfirmRequest {
+  /**
+   * Monotonic per-request id, used as the dialog's React `key`. See the
+   * remount note in `confirm` below — this is a correctness gate, not cosmetics.
+   */
+  id: number;
   request: ConfirmDialogRequest;
   resolve: (confirmed: boolean) => void;
 }
@@ -46,6 +51,7 @@ export function useConfirmDialog(): {
 } {
   const [active, setActive] = useState<ActiveConfirmRequest | null>(null);
   const activeRef = useRef<ActiveConfirmRequest | null>(null);
+  const requestIdRef = useRef(0);
   activeRef.current = active;
 
   useEffect(() => {
@@ -58,7 +64,15 @@ export function useConfirmDialog(): {
   const confirm = useCallback((request: ConfirmDialogRequest) => {
     return new Promise<boolean>((resolve) => {
       activeRef.current?.resolve(false);
-      const next: ActiveConfirmRequest = { request, resolve };
+      // A replacement request keeps ActionReviewDialog mounted with open={true}.
+      // The dialog clears its internal `typedValue` only on an open->closed
+      // transition, which never happens here, so without a fresh identity the
+      // second request would inherit the first request's typed text — and an
+      // irreversible action could be confirmed with no typed confirmation of
+      // its own. The incrementing id is used as the dialog's `key` so React
+      // remounts it and the typed gate re-arms. (#51)
+      requestIdRef.current += 1;
+      const next: ActiveConfirmRequest = { id: requestIdRef.current, request, resolve };
       activeRef.current = next;
       setActive(next);
     });
@@ -74,6 +88,7 @@ export function useConfirmDialog(): {
 
   const confirmDialog = active ? (
     <ActionReviewDialog
+      key={active.id}
       open
       onOpenChange={(open) => {
         if (!open) settle(false);
