@@ -119,6 +119,48 @@ Every PR must include a **Model Used** section specifying which AI model produce
 
 All tests must pass before a PR can be merged. Run them locally first and verify CI is green after pushing.
 
+#### What the pre-commit hook runs
+
+The pre-commit hook is scoped to your staged change so it stays in the seconds-to-minutes range:
+
+- **Typecheck** runs on the workspace packages your staged files touch, expanded to their
+  dependents (`pnpm --filter ...<pkg> typecheck`). Staging a root build input — the root
+  `package.json`, `pnpm-workspace.yaml`, `pnpm-lock.yaml`, a root `tsconfig*.json`, or
+  `vitest.config.ts` — falls back to the full `pnpm -r typecheck` sweep.
+- **Unit tests** run only the suites whose module graph reaches a staged file
+  (`vitest --related`). A staged file no suite imports runs no tests and passes.
+- **Forbidden tokens, Gitleaks, and React Doctor are unscoped and unchanged** — those gates
+  still see every commit.
+
+#### Where exhaustive verification actually happens
+
+The **full** suite is a **pre-push** gate — not a pre-commit one, and not a CI one.
+
+`.husky/pre-push` runs `scripts/pre-push-check.ps1` (or the `.sh` mirror): full
+`pnpm -r typecheck`, the full vitest suite with no cap and no `--related`, a deep
+Gitleaks history scan, and the forbidden-token check. It runs once per push rather
+than once per commit, and it costs no GitHub Actions minutes.
+
+It is deliberately not CI's job. `.github/workflows/pr.yml` is scoped to
+`pull_request: branches: [master]`, while all development happens on `dev` — so no CI
+run validates a commit until the promotion PR. CI is reserved for the things only CI
+can do: Linux/POSIX behaviour (every dev host here is Windows), clean-environment
+installs from a frozen lockfile, and verification a reviewer can trust because it did
+not come from a developer's machine.
+
+That split is what makes the pre-commit cap safe. **If you disable or bypass the
+pre-push hook, the pre-commit cap is no longer sound** — a hub-module change only runs
+12 of up to 288 relevant suites. Note that a missing `.husky/pre-push` looks exactly
+like a passing one, because the husky shim exits 0 when the hook file is absent.
+
+To reproduce the full sweep on demand:
+
+```bash
+pnpm run test:run                          # full suite on its own
+PAPERCLIP_PRECOMMIT_ALL=1 git commit ...   # full typecheck + full test suite at commit time
+PAPERCLIP_PRECOMMIT_RELATED_CAP=0 ...      # uncapped related run (can exceed the full suite)
+```
+
 ### Telemetry Changes
 
 If your change adds, removes, or modifies emitted telemetry events, update the [Telemetry Data Contract](packages/shared/src/telemetry/README.md) in the same PR. Keep clients emitting raw dimension values and avoid documenting or relying on private delivery details.
