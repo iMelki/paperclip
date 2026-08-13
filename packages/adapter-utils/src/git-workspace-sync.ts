@@ -4,6 +4,8 @@ import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+import { shellQuotePath } from "./shell-path.js";
+
 export interface GitCommandResult {
   stdout: string;
   stderr: string;
@@ -19,9 +21,14 @@ export interface GitWorkspaceSnapshot {
 
 export const GIT_ARCHIVE_EXCLUDES = [".git", ".git/*"] as const;
 
-function shellQuote(value: string) {
-  return `'${value.replace(/'/g, `'\"'\"'`)}'`;
-}
+// The scripts built here run in a POSIX shell even when the host is Windows, so
+// a drive-letter path must become `/c/...` before it is quoted: otherwise `C:`
+// parses as a separate word, and `tar` reads it as its rsh `host:path` selector
+// ("tar: Cannot connect to C:"). `toShellPath` only rewrites strings matching
+// `^[A-Za-z]:[\\/]`, so it is a no-op for the POSIX paths a real sandbox
+// supplies. This matches command-managed-runtime.ts and
+// sandbox-managed-runtime.ts, which both alias the same helper. (#63)
+const shellQuote = shellQuotePath;
 
 export async function runLocalGit(
   localDir: string,

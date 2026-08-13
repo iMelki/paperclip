@@ -17,6 +17,7 @@ import {
   sanitizeGitRemoteUrl,
   withShallowGitWorkspaceClone,
 } from "./git-workspace-sync.js";
+import { resolveTestShellCommand } from "./test-shell.js";
 
 const execFile = promisify(execFileCallback);
 
@@ -182,7 +183,7 @@ describe("git workspace sync", () => {
       snapshot: snapshot!,
     }, async (remoteDir) => {
       const emptyBundle = path.join(rootDir, "empty.bundle");
-      await execFile("sh", ["-c", buildRemoteGitDeltaBundleScript({
+      await execFile(resolveTestShellCommand("sh"), ["-c", buildRemoteGitDeltaBundleScript({
         remoteDir,
         baseSha: baseHead,
         exportRef: createRemoteGitExportRef("test"),
@@ -200,7 +201,7 @@ describe("git workspace sync", () => {
       const importedRef = createImportedGitRef("test");
       const exportRef = createRemoteGitExportRef("test");
       try {
-        await execFile("sh", ["-c", buildRemoteGitDeltaBundleScript({
+        await execFile(resolveTestShellCommand("sh"), ["-c", buildRemoteGitDeltaBundleScript({
           remoteDir,
           baseSha: baseHead,
           exportRef,
@@ -221,7 +222,11 @@ describe("git workspace sync", () => {
         await deleteLocalGitRef({ localDir: repo, ref: importedRef });
       }
     });
-  });
+    // Real clone/bundle/fetch I/O against the filesystem. Measured 4.4 s on
+    // Windows, i.e. straddling vitest's 5 s default — it passed or flaked
+    // depending on machine load. Give it headroom instead of leaving a coin
+    // flip in the suite. (#63; see #20 for the wider timeout-flake sweep.)
+  }, 30_000);
 
   it("imports a diverged sandbox HEAD even when the host no longer holds baseSha", async () => {
     const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-git-diverge-"));
@@ -256,7 +261,7 @@ describe("git workspace sync", () => {
     const exportRef = createRemoteGitExportRef("test");
     const importedRef = createImportedGitRef("test");
     try {
-      await execFile("sh", ["-c", buildRemoteGitDeltaBundleScript({
+      await execFile(resolveTestShellCommand("sh"), ["-c", buildRemoteGitDeltaBundleScript({
         remoteDir: sandbox,
         baseSha,
         exportRef,
@@ -318,7 +323,7 @@ describe("git workspace sync", () => {
     // The delta bundle (relative to the merge-base = fork point) names a
     // prerequisite the host lacks, so its import fails and is detected.
     const deltaBundle = path.join(rootDir, "delta.bundle");
-    await execFile("sh", ["-c", buildRemoteGitDeltaBundleScript({
+    await execFile(resolveTestShellCommand("sh"), ["-c", buildRemoteGitDeltaBundleScript({
       remoteDir: sandbox,
       baseSha,
       exportRef,
@@ -336,7 +341,7 @@ describe("git workspace sync", () => {
     // The forced full bundle is self-contained and imports into the same host.
     const fullBundle = path.join(rootDir, "full.bundle");
     try {
-      await execFile("sh", ["-c", buildRemoteGitDeltaBundleScript({
+      await execFile(resolveTestShellCommand("sh"), ["-c", buildRemoteGitDeltaBundleScript({
         remoteDir: sandbox,
         baseSha,
         exportRef,
@@ -354,7 +359,9 @@ describe("git workspace sync", () => {
     } finally {
       await deleteLocalGitRef({ localDir: host, ref: importedRef });
     }
-  });
+    // Same real-git I/O cost as the thin-bundle test above; measured 5.2 s on
+    // Windows, just over vitest's 5 s default. (#63)
+  }, 30_000);
 
   it("falls back to a full self-contained bundle when the sandbox lacks baseSha", async () => {
     const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-git-full-"));
@@ -374,7 +381,7 @@ describe("git workspace sync", () => {
     const exportRef = createRemoteGitExportRef("test");
     const importedRef = createImportedGitRef("test");
     try {
-      await execFile("sh", ["-c", buildRemoteGitDeltaBundleScript({
+      await execFile(resolveTestShellCommand("sh"), ["-c", buildRemoteGitDeltaBundleScript({
         remoteDir: sandbox,
         // A base the sandbox does not have forces the full-bundle fallback.
         baseSha: "0000000000000000000000000000000000000000",
