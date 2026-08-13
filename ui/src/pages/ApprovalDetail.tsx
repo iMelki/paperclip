@@ -315,6 +315,12 @@ export function ApprovalDetail() {
               className="text-destructive border-destructive/40"
               onClick={() => {
                 const agentName = agentNameById.get(linkedAgentId);
+                if (!agentName) {
+                  setError(
+                    "Agent details are still loading. Wait for the agent name before deleting."
+                  );
+                  return;
+                }
                 void (async () => {
                   const confirmed = await confirm({
                     title: "Delete this disapproved agent?",
@@ -323,7 +329,7 @@ export function ApprovalDetail() {
                     confirmLabel: "Delete agent",
                     typedConfirmation: agentName,
                     consequences: {
-                      immediateEffect: `${agentName ?? "The agent"} is permanently deleted.`,
+                      immediateEffect: `${agentName} is permanently deleted.`,
                       confirmedEffect: "The server removes the agent record and its configuration.",
                       resultLocation: "You return to the Approvals list; this approval stays as history.",
                       willNotHappen: "Other agents, issues, and this approval's comments are not affected.",

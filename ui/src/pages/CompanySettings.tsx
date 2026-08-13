@@ -603,6 +603,12 @@ export function CompanySettings() {
               onClick={() => {
                 if (!selectedCompanyId) return;
                 void (async () => {
+                  const nextCompanyId =
+                    companies.find(
+                      (company) =>
+                        company.id !== selectedCompanyId &&
+                        company.status !== "archived"
+                    )?.id ?? null;
                   const confirmed = await confirm({
                     title: `Archive company "${selectedCompany.name}"?`,
                     tone: "destructive",
@@ -610,17 +616,13 @@ export function CompanySettings() {
                     consequences: {
                       immediateEffect: "The company is hidden from the sidebar and company switcher.",
                       confirmedEffect: "Its status is set to archived in the database.",
-                      resultLocation: "You are switched to your next active company.",
+                      resultLocation: nextCompanyId
+                        ? "You are switched to your next active company."
+                        : "This is your last active company, so no other company is selected.",
                       willNotHappen: "No agents, issues, or data are deleted; everything stays in the database.",
                     },
                   });
                   if (!confirmed) return;
-                  const nextCompanyId =
-                    companies.find(
-                      (company) =>
-                        company.id !== selectedCompanyId &&
-                        company.status !== "archived"
-                    )?.id ?? null;
                   archiveMutation.mutate({
                     companyId: selectedCompanyId,
                     nextCompanyId

@@ -61,7 +61,8 @@ export function DevRestartBanner({ devServer }: { devServer?: DevServerHealthSta
       consequences: {
         immediateEffect: "A restart request is sent right away.",
         confirmedEffect: "The dev server restarts and picks up the changed backend files.",
-        resultLocation: "This banner shows Restart requested, then clears once the server is back.",
+        resultLocation:
+          "The button shows Restart requested for up to 30 seconds; this banner clears when refreshed server health no longer reports a restart.",
         willNotHappen: hasLiveRuns
           ? "No data is deleted, but interrupted runs are not resumed automatically."
           : "No data is deleted and no runs are interrupted.",
