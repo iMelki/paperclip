@@ -4,6 +4,13 @@ All notable changes to this repository should be recorded here.
 
 ## Unreleased
 
+- Fixed native-Windows adapter-utils execution by moving the process-session
+  payload out of the Git-for-Windows `sh -c` argument, using Node-native file
+  copying, resolving script wrappers through Node, and making shell discovery
+  support PATH-derived, per-user, and Scoop Git installs with a clear failure
+  when no complete Git shell is available. The environment transport remains
+  bounded; #64 tracks reducing or replacing the oversized ambient-env payload.
+
 - Replaced the unsupported fork Dependency Review call in the trusted PR-review
   workflow with a fail-closed fork policy: dependency manifests, lockfiles, and
   package patches now require the maintainer-only `dependency-review-approved`

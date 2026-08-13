@@ -1,4 +1,4 @@
-import { lstat, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
+import { cp, lstat, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { execFile as execFileCallback } from "node:child_process";
@@ -11,8 +11,31 @@ import {
   type SandboxManagedRuntimeClient,
   type SandboxSyncOperation,
 } from "./sandbox-managed-runtime.js";
+import { shellQuotePath } from "./shell-path.js";
+import { resolveTestShellCommand } from "./test-shell.js";
 
 const execFile = promisify(execFileCallback);
+
+// A bespoke `provision.postUploadCommand` runs in a POSIX shell, so it must
+// quote and convert its paths exactly like the production default builder
+// (`buildDefaultExtractRuntimeAssetCommand`) does. Interpolating raw values
+// broke on Windows two ways: `C:` parsed as a separate word, and `tar` read the
+// drive letter as its rsh `host:path` selector ("tar: Cannot connect to C:").
+// shellQuotePath is a no-op for the POSIX paths a real sandbox supplies.
+function buildTestExtractCommand(assetTarPath: string, assetDir: string): string {
+  const dir = shellQuotePath(assetDir);
+  const tarPath = shellQuotePath(assetTarPath);
+  return `rm -rf ${dir} && mkdir -p ${dir} && tar -xf ${tarPath} -C ${dir} && rm -f ${tarPath}`;
+}
+
+function withNativeWindowsTar(command: string): string {
+  if (process.platform !== "win32") return command;
+  const tarCommand = path.join(process.env.SystemRoot ?? "C:\\Windows", "System32", "tar.exe");
+  // Git's shell prepends /usr/bin, whose GNU tar cannot recreate native Windows
+  // symlinks from the PAX metadata emitted by System32 bsdtar. Override only tar
+  // so find/rm/mkdir still resolve to Git's coreutils.
+  return `tar() { ${shellQuotePath(tarCommand)} "$@"; }; ${command}`;
+}
 
 interface RecordingClient {
   client: SandboxManagedRuntimeClient;
@@ -37,8 +60,19 @@ function makeNativeClient(): RecordingClient {
     await rm(targetPath, { recursive: true, force: true });
     await mkdir(targetPath, { recursive: true });
     // followSymlinks true dereferences to bytes (like tar -h); falsy preserves links.
-    const copyArgs = followSymlinks ? ["-RL"] : ["-a"];
-    await execFile("cp", [...copyArgs, `${sourcePath}/.`, targetPath]);
+    // `cp` is a POSIX coreutil that is not on PATH on Windows, so a bare spawn
+    // raised ENOENT before any copy happened. fs.cp is the Node-native
+    // equivalent and needs no external binary: `dereference` reproduces
+    // `cp -RL`, while `verbatimSymlinks` + `preserveTimestamps` reproduce
+    // `cp -a`. The two options are mutually exclusive — passing both throws
+    // ERR_INCOMPATIBLE_OPTION_PAIR — hence the branch rather than one object.
+    await cp(sourcePath, targetPath, {
+      recursive: true,
+      force: true,
+      ...(followSymlinks
+        ? { dereference: true }
+        : { verbatimSymlinks: true, preserveTimestamps: true }),
+    });
     const entries = await readdir(targetPath, { withFileTypes: true }).catch(() => []);
     return entries.length;
   };
@@ -57,7 +91,11 @@ function makeNativeClient(): RecordingClient {
       }
       // Honor the operation's ordered post-upload commands (PR-2), fail-fast.
       for (const command of operation.postUploadCommands ?? []) {
-        await execFile("sh", ["-c", command.command], { maxBuffer: 32 * 1024 * 1024 });
+        // `sh` is not on PATH on Windows, so a bare spawn raises ENOENT before the
+        // command ever runs. resolveTestShellCommand finds the Git shell that can.
+        await execFile(resolveTestShellCommand("sh"), ["-c", withNativeWindowsTar(command.command)], {
+          maxBuffer: 32 * 1024 * 1024,
+        });
       }
       return { operationId: operation.operationId, filesTransferred, bytesTransferred: 0 };
     })),
@@ -75,7 +113,12 @@ function makeNativeClient(): RecordingClient {
       return entries.filter((e) => e.isFile()).map((e) => e.name).sort();
     },
     remove: async (remotePath) => { await rm(remotePath, { recursive: true, force: true }); },
-    run: async (command) => { await execFile("sh", ["-c", command], { maxBuffer: 32 * 1024 * 1024 }); },
+    // Same `sh`-is-not-on-PATH hazard as the postUploadCommands loop above.
+    run: async (command) => {
+      await execFile(resolveTestShellCommand("sh"), ["-c", withNativeWindowsTar(command)], {
+        maxBuffer: 32 * 1024 * 1024,
+      });
+    },
     syncIn: async (operations) => { syncInOps.push(operations); return applyOperations(operations); },
     syncOut: async (operations) => { syncOutOps.push(operations); return applyOperations(operations); },
   };
@@ -178,7 +221,7 @@ describe("sandbox native file sync", () => {
           key: "creds",
           localDir: customAssetDir,
           provision: { postUploadCommand: ({ assetTarPath, assetDir }) =>
-            `rm -rf ${assetDir} && mkdir -p ${assetDir} && tar -xf ${assetTarPath} -C ${assetDir} && rm -f ${assetTarPath}` },
+            buildTestExtractCommand(assetTarPath, assetDir) },
         },
       ],
     });
@@ -215,7 +258,7 @@ describe("sandbox native file sync", () => {
         // A bespoke post-upload command (e.g. a credential merge) rides syncIn as
         // the operation's ordered post-upload command — no native-diversion gate.
         provision: { postUploadCommand: ({ assetTarPath, assetDir }) =>
-          `rm -rf ${assetDir} && mkdir -p ${assetDir} && tar -xf ${assetTarPath} -C ${assetDir} && rm -f ${assetTarPath}` },
+          buildTestExtractCommand(assetTarPath, assetDir) },
       }],
     });
 
