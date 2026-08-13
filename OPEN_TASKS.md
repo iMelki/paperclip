@@ -22,6 +22,16 @@ This file is the durable local index for active `paperclip` issues.
     disable the full typecheck and suite. Triage the 24 findings, add a
     `--range <base>..<head>` mode, then re-add the scan to `pre-push-check.{ps1,sh}`.
 
+- [#71 - Pre-commit exceeds its declared budget; 87% of the cost is vitest module import](https://github.com/iMelki/paperclip/issues/71)
+  - `CONTRIBUTING.md` now declares the budget (p95 <= 90 s, hard cap 180 s) and this repo
+    does not meet it: measured 2026-08-13, a capped 12-suite hub run spent 227.8 s of
+    262.7 s importing modules and only 29.6 s executing tests. Because cost scales with
+    suite *count*, no cap value closes the gap — hitting 90 s needs a cap of ~3-4 of 159
+    relevant suites. Fix per-suite import cost, not the selection strategy. Related: the
+    affected-package typecheck buys less than assumed (`pnpm -r` already parallelizes, so
+    the 32-package sweep costs ~the slowest package), and the previously cited "~13 min
+    `pnpm -r typecheck`" baseline did not reproduce (184.3 s warm).
+
 - [Day-0 branch/worktree consolidation plan](doc/plans/2026-08-02-day0-branch-consolidation.md)
   - Preserve concurrent dirty branches and locked worktrees. Consolidate only
     after receipt, independent review, exact-path release, and remote-SHA
