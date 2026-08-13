@@ -46,9 +46,9 @@
       "negativeFixture": ".github/scripts/tests/check-fork-dependency-policy.test.mjs",
       "observedFailure": {
         "date": "2026-08-13",
-        "command": "PR_FILES_JSON=[{package.json modified}] PR_LABELS_JSON=[] node .github/scripts/check-fork-dependency-policy.mjs",
+        "command": "PR_FILES_JSON='[{\"filename\":\"package.json\",\"status\":\"modified\"}]' PR_LABELS_JSON='[]' node .github/scripts/check-fork-dependency-policy.mjs",
         "reason": "Exited 1 and reported that dependency-bearing files changed without the trusted dependency-review-approved label.",
-        "restoredPass": "With only README.md modified, the same gate exited 0 and emitted passed=true."
+        "restoredPass": "PR_FILES_JSON='[{\"filename\":\"README.md\",\"status\":\"modified\"}]' PR_LABELS_JSON='[]' node .github/scripts/check-fork-dependency-policy.mjs exited 0 and emitted passed=true."
       }
     },
     {
@@ -58,9 +58,9 @@
       "negativeFixture": ".github/scripts/tests/check-fork-dependency-policy.test.mjs",
       "observedFailure": {
         "date": "2026-08-13",
-        "command": "PR_FILES_JSON=[{package.json modified}] PR_LABELS_JSON=[] node .github/scripts/check-fork-dependency-policy.mjs",
+        "command": "PR_FILES_JSON='[{\"filename\":\"package.json\",\"status\":\"modified\"}]' PR_LABELS_JSON='[]' node .github/scripts/check-fork-dependency-policy.mjs",
         "reason": "Exited 1 for the deliberately unapproved package.json change and named the missing trusted label as the cause.",
-        "restoredPass": "With only README.md modified, the script exited 0 and emitted passed=true."
+        "restoredPass": "PR_FILES_JSON='[{\"filename\":\"README.md\",\"status\":\"modified\"}]' PR_LABELS_JSON='[]' node .github/scripts/check-fork-dependency-policy.mjs exited 0 and emitted passed=true."
       }
     },
     {
