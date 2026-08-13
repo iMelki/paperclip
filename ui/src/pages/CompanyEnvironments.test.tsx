@@ -692,7 +692,6 @@ describe("CompanyEnvironments — test provider button", () => {
   it("confirms before cancelling the edit page with unsaved environment variable drafts", async () => {
     root = createRoot(container);
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(false);
 
     await act(async () => {
       root!.render(renderCompanyEnvironments(queryClient));
@@ -720,11 +719,20 @@ describe("CompanyEnvironments — test provider button", () => {
     await act(async () => click(findButton(document.body, "Cancel")));
     await flushReact();
 
-    expect(confirmSpy).toHaveBeenCalledWith("Discard unsaved environment changes?");
+    // The action-review dialog replaces window.confirm (#48). Keep editing.
+    const reviewDialog = document.body.querySelector('[data-slot="alert-dialog-content"]');
+    expect(reviewDialog?.textContent).toContain("Discard unsaved environment changes?");
+    await act(async () =>
+      click(document.body.querySelector<HTMLButtonElement>('[data-slot="alert-dialog-cancel"]')),
+    );
+    await flushReact();
     expect(getEnvironmentFormPage()).not.toBeNull();
 
-    confirmSpy.mockReturnValue(true);
     await act(async () => click(findButton(document.body, "Cancel")));
+    await flushReact();
+    await act(async () =>
+      click(document.body.querySelector<HTMLButtonElement>('[data-slot="alert-dialog-action"]')),
+    );
     await flushReact();
 
     expect(getEnvironmentFormPage()).toBeNull();
@@ -733,7 +741,6 @@ describe("CompanyEnvironments — test provider button", () => {
   it("keeps unload and in-app link warnings after env var changes are staged into the form", async () => {
     root = createRoot(container);
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(false);
 
     await act(async () => {
       root!.render(renderCompanyEnvironments(queryClient));
@@ -770,10 +777,19 @@ describe("CompanyEnvironments — test provider button", () => {
     link.href = "/agents/dashboard";
     document.body.appendChild(link);
     const clickEvent = new MouseEvent("click", { bubbles: true, cancelable: true, button: 0 });
-    link.dispatchEvent(clickEvent);
+    await act(async () => {
+      link.dispatchEvent(clickEvent);
+    });
+    await flushReact();
 
-    expect(confirmSpy).toHaveBeenCalledWith("Discard unsaved environment changes?");
+    // Navigation is blocked immediately; the action-review dialog asks about the draft (#48).
     expect(clickEvent.defaultPrevented).toBe(true);
+    const reviewDialog = document.body.querySelector('[data-slot="alert-dialog-content"]');
+    expect(reviewDialog?.textContent).toContain("Discard unsaved environment changes?");
+    await act(async () =>
+      click(document.body.querySelector<HTMLButtonElement>('[data-slot="alert-dialog-cancel"]')),
+    );
+    await flushReact();
     expect(getEnvironmentFormPage()).not.toBeNull();
     link.remove();
   });

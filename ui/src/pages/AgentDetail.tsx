@@ -123,6 +123,7 @@ import {
   useResourceMemberships,
 } from "../hooks/useResourceMemberships";
 import { Badge } from "@/components/ui/badge";
+import { useConfirmDialog } from "@/hooks/useConfirmDialog";
 
 const runStatusIcons: Record<string, { icon: typeof CheckCircle2; color: string }> = {
   succeeded: { icon: CheckCircle2, color: "text-green-600 dark:text-green-400" },
@@ -2151,6 +2152,7 @@ export function PromptsTab({
   const queryClient = useQueryClient();
   const { selectedCompanyId } = useCompany();
   const { isMobile } = useSidebar();
+  const { confirm, confirmDialog } = useConfirmDialog();
   const [selectedFile, setSelectedFile] = useState<string>("AGENTS.md");
   const [showFilePanel, setShowFilePanel] = useState(false);
   const [draft, setDraft] = useState<string | null>(null);
@@ -2833,14 +2835,26 @@ export function PromptsTab({
                   size="sm"
                   variant="outline"
                   onClick={() => {
-                    if (confirm(`Delete ${selectedOrEntryFile}?`)) {
+                    void (async () => {
+                      const confirmed = await confirm({
+                        title: `Delete ${selectedOrEntryFile}?`,
+                        tone: "destructive",
+                        confirmLabel: "Delete file",
+                        consequences: {
+                          immediateEffect: "The file is removed from this agent's instructions.",
+                          confirmedEffect: "The server deletes the file from the agent's configuration.",
+                          resultLocation: "The file list refreshes and the entry file is selected.",
+                          willNotHappen: "Other instruction files and the agent's settings are not changed.",
+                        },
+                      });
+                      if (!confirmed) return;
                       deleteFile.mutate(selectedOrEntryFile, {
                         onSuccess: () => {
                           setSelectedFile(currentEntryFile);
                           setDraft(null);
                         },
                       });
-                    }
+                    })();
                   }}
                   disabled={deleteFile.isPending}
                 >
@@ -2876,7 +2890,7 @@ export function PromptsTab({
           )}
         </div>
       </div>
-
+      {confirmDialog}
     </div>
   );
 }
@@ -3075,6 +3089,7 @@ function RunsTab({
 function RunDetail({ run: initialRun, agentRouteId, adapterType, adapterConfig }: { run: HeartbeatRun; agentRouteId: string; adapterType: string; adapterConfig: Record<string, unknown> }) {
   const queryClient = useQueryClient();
   const navigate = useNavigate();
+  const { confirm, confirmDialog } = useConfirmDialog();
   const { data: hydratedRun } = useQuery({
     queryKey: queryKeys.runDetail(initialRun.id),
     queryFn: () => heartbeatsApi.get(initialRun.id),
@@ -3492,11 +3507,22 @@ function RunDetail({ run: initialRun, agentRouteId, adapterType, adapterConfig }
                       disabled={clearSessionsForTouchedIssues.isPending}
                       onClick={() => {
                         const issueCount = touchedIssueIds.length;
-                        const confirmed = window.confirm(
-                          `Clear session for ${issueCount} issue${issueCount === 1 ? "" : "s"} touched by this run?`,
-                        );
-                        if (!confirmed) return;
-                        clearSessionsForTouchedIssues.mutate();
+                        const issueNoun = issueCount === 1 ? "issue" : "issues";
+                        void (async () => {
+                          const confirmed = await confirm({
+                            title: `Clear session for ${issueCount} ${issueNoun} touched by this run?`,
+                            tone: "destructive",
+                            confirmLabel: "Clear sessions",
+                            consequences: {
+                              immediateEffect: `Stored session continuity is cleared for ${issueCount} ${issueNoun}.`,
+                              confirmedEffect: "The server resets the saved agent session for each touched issue.",
+                              resultLocation: `The next run on ${issueCount === 1 ? "that issue" : "those issues"} starts from a fresh session.`,
+                              willNotHappen: "No runs are stopped, and no issues, comments, or run history are deleted.",
+                            },
+                          });
+                          if (!confirmed) return;
+                          clearSessionsForTouchedIssues.mutate();
+                        })();
                       }}
                     >
                       {clearSessionsForTouchedIssues.isPending
@@ -3566,6 +3592,7 @@ function RunDetail({ run: initialRun, agentRouteId, adapterType, adapterConfig }
       {/* Log viewer */}
       <LogViewer run={run} adapterType={adapterType} />
       <ScrollToBottom />
+      {confirmDialog}
     </div>
   );
 }
