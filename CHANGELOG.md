@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- Replaced the floating React Doctor `npx` hook invocation with a local-only
+  resolver, minimized child environment, and normalized fail-closed receipt.
+  The current branch intentionally remains incomplete until a separately
+  reviewed dependency pin and lock update is approved. Until then the hook
+  reports an explicit disabled state (exit 2); analyzer failures still block
+  commits. No fallback or network bootstrap is permitted.
+
 All notable changes to this repository should be recorded here.
 
 ## Unreleased
