@@ -1,0 +1,79 @@
+{
+  "version": 1,
+  "_doc": "Negative-proof ledger introduced for the fork dependency gate. Exact historical gate paths are excluded until their own controls are changed and proved; future undisclosed gates remain discoverable.",
+  "exclude": [
+    ".agents/skills/pr-gardening/scripts/check-readiness.mjs",
+    ".github/scripts/check-pr-dedup-search.mjs",
+    ".github/scripts/check-pr-dependencies.mjs",
+    ".github/scripts/check-pr-linked-issue.mjs",
+    ".github/scripts/check-pr-lockfile.mjs",
+    ".github/scripts/check-pr-security.mjs",
+    ".github/scripts/check-pr-template.mjs",
+    ".github/scripts/check-pr-test-coverage.mjs",
+    ".github/workflows/agent-runtime-images.yml",
+    ".github/workflows/docker.yml",
+    ".github/workflows/e2e.yml",
+    ".github/workflows/pr.yml",
+    ".github/workflows/refresh-lockfile.yml",
+    ".github/workflows/release-smoke.yml",
+    ".github/workflows/release-verify.yml",
+    ".github/workflows/release.yml",
+    ".github/workflows/storybook-visual.yml",
+    ".github/workflows/sync-upstream.yml",
+    "packages/db/src/check-migration-numbering.ts",
+    "packages/db/src/check-migration-safety.test.ts",
+    "packages/db/src/check-migration-safety.ts",
+    "scripts/check-docker-deps-stage.mjs",
+    "scripts/check-forbidden-tokens-core.cjs",
+    "scripts/check-forbidden-tokens.mjs",
+    "scripts/check-no-git-push.mjs",
+    "scripts/check-no-git-push.test.mjs",
+    "scripts/check-release-package-bootstrap.mjs",
+    "scripts/check-release-package-bootstrap.test.mjs",
+    "scripts/check-task-chat-motion.mjs",
+    "scripts/check-token-gates.mjs",
+    "scripts/verify-gitleaks.mjs",
+    "scripts/verify-gitleaks.test.mjs",
+    "scripts/verify-release-registry-state.mjs",
+    "scripts/verify-release-registry-state.test.mjs",
+    "server/src/services/change-consent-gate.ts"
+  ],
+  "gates": [
+    {
+      "id": "fork-dependency-review-workflow",
+      "path": ".github/workflows/commitperclip-review.yml",
+      "description": "Fork PR dependency-bearing changes fail unless a trusted maintainer applies the dependency-review-approved label.",
+      "negativeFixture": ".github/scripts/tests/check-fork-dependency-policy.test.mjs",
+      "observedFailure": {
+        "date": "2026-08-13",
+        "command": "PR_FILES_JSON='[{\"filename\":\"package.json\",\"status\":\"modified\"}]' PR_LABELS_JSON='[]' node .github/scripts/check-fork-dependency-policy.mjs",
+        "reason": "Exited 1 and reported that dependency-bearing files changed without the trusted dependency-review-approved label.",
+        "restoredPass": "PR_FILES_JSON='[{\"filename\":\"README.md\",\"status\":\"modified\"}]' PR_LABELS_JSON='[]' node .github/scripts/check-fork-dependency-policy.mjs exited 0 and emitted passed=true."
+      }
+    },
+    {
+      "id": "fork-dependency-change-policy",
+      "path": ".github/scripts/check-fork-dependency-policy.mjs",
+      "description": "Classifies dependency-bearing PR files and enforces explicit trusted-label approval on fork repositories.",
+      "negativeFixture": ".github/scripts/tests/check-fork-dependency-policy.test.mjs",
+      "observedFailure": {
+        "date": "2026-08-13",
+        "command": "PR_FILES_JSON='[{\"filename\":\"package.json\",\"status\":\"modified\"}]' PR_LABELS_JSON='[]' node .github/scripts/check-fork-dependency-policy.mjs",
+        "reason": "Exited 1 for the deliberately unapproved package.json change and named the missing trusted label as the cause.",
+        "restoredPass": "PR_FILES_JSON='[{\"filename\":\"README.md\",\"status\":\"modified\"}]' PR_LABELS_JSON='[]' node .github/scripts/check-fork-dependency-policy.mjs exited 0 and emitted passed=true."
+      }
+    },
+    {
+      "id": "default-branch-history-secret-allowlist",
+      "path": ".gitleaksignore",
+      "description": "Pins only exact reviewed historical test-fixture fingerprints while leaving new secret-like values detectable by the complete-history PR scan.",
+      "negativeFixture": "scripts/verify-gitleaks.test.mjs",
+      "observedFailure": {
+        "date": "2026-08-13",
+        "command": "PAPERCLIP_GITLEAKS_BIN=gitleaks-8.30.1 node scripts/verify-gitleaks.mjs --history in an isolated single-ref clone with a committed generic-api-key fixture",
+        "reason": "Exited 2, named gate-negative-fixture.txt and generic-api-key, redacted the value, and reported that commit or CI execution was blocked.",
+        "restoredPass": "A fresh single-ref clone at 12a207b2631921b33b3849ce78f44fa38ca87c2c scanned 2,031 commits, found no leaks, and exited 0. Durable logs: .runtime/gate-proof/paperclip-pr74-negative-v2.log and paperclip-pr74-restored.log in the Assistants workspace."
+      }
+    }
+  ]
+}
