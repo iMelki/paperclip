@@ -6,6 +6,14 @@ This file is the durable local index for active `paperclip` issues.
 
 ## Active Issues
 
+- [#46 - Make React Doctor hook execution reproducible and fail closed](https://github.com/iMelki/paperclip/issues/46)
+  - Commit `124a48cc` removed the floating `npx react-doctor@latest` path and
+    added bounded local resolution, minimized child environment, normalized
+    receipts, timeout/termination handling, and negative-proof evidence. The
+    quality gate remains explicitly disabled until React Doctor is declared in
+    the manifest/lockfile and receives license, dependency-closure,
+    offline/Windows/Linux, and authenticated-consumer qualification evidence.
+
 - [#73 - Push lockout: the exhaustive pre-push gate rejects every push](https://github.com/iMelki/paperclip/issues/73)
   - The old pre-push hook required the whole suite to be green even when a change only
     repaired an existing failure. It now runs full typecheck and uncapped tests related
