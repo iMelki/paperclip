@@ -1492,14 +1492,22 @@ export async function startAdapterExecutionTargetProcessSessionBridge(input: {
       args: shellCommandArgs(
         [
           `mkdir -p ${shellQuote(stdinDir)} ${shellQuote(eventsDir)}`,
-          `PAPERCLIP_PROCESS_SESSION_DIR=${shellQuote(sessionDir)} ` +
-            `PAPERCLIP_PROCESS_SESSION_COMMAND_B64=${shellQuote(commandPayload)} ` +
-            `nohup node ${shellQuote(remoteScriptPath)} >/dev/null 2>&1 < /dev/null &`,
+          `nohup node ${shellQuote(remoteScriptPath)} >/dev/null 2>&1 < /dev/null &`,
           "printf '%s\\n' \"$!\"",
         ].join("\n"),
       ),
       cwd: target.remoteCwd,
       env: {
+        // Carry the session env through the runner rather than inlining
+        // `VAR=value` prefixes into the script text. `commandPayload` is the
+        // base64 of the whole resolved adapter env, so inlining made this one
+        // argument grow with the environment. A single argument crossing the
+        // Windows -> MSYS (`sh.exe`) spawn boundary is truncated at 8 KiB,
+        // which severs the closing quote and fails the launch with
+        // "unexpected EOF while looking for matching `'". The streamed path
+        // below already passes these two through `env`; this matches it. (#59)
+        PAPERCLIP_PROCESS_SESSION_DIR: sessionDir,
+        PAPERCLIP_PROCESS_SESSION_COMMAND_B64: commandPayload,
         PAPERCLIP_SANDBOX_EXEC_CHANNEL: "bridge",
       },
       timeoutMs,

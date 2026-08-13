@@ -1097,7 +1097,11 @@ describe("sandbox adapter execution targets", () => {
       });
       expect(bridge).not.toBeNull();
 
-      const child = spawn(bridge!.agentCommand, [], { stdio: ["pipe", "pipe", "pipe"] });
+      // A .mjs/.js wrapper path is not directly executable on Windows; the
+      // helper re-spawns it through process.execPath. Matches the two sibling
+      // call sites in this file.
+      const targetCommand = resolveTestScriptSpawn(bridge!.agentCommand);
+      const child = spawn(targetCommand.command, targetCommand.args, { stdio: ["pipe", "pipe", "pipe"] });
       let stdout = "";
       let stderr = "";
       let exited = false;
