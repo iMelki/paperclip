@@ -44,13 +44,22 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
 
       - name: Generate commitperclip token
-        id: token
+        id: app-token
+        if: ${{ !github.event.repository.fork }}
         run: |
           TOKEN=$(node .github/scripts/get-bot-token.mjs)
           echo "::add-mask::$TOKEN"
           echo "value=$TOKEN" >> $GITHUB_OUTPUT
         env:
           COMMITPERCLIP_KEY: ${{ secrets.COMMITPERCLIP_KEY }}
+
+      - name: Select trusted review token
+        id: token
+        run: node .github/scripts/select-review-token.mjs >> "$GITHUB_OUTPUT"
+        env:
+          IS_FORK: ${{ github.event.repository.fork }}
+          GITHUB_TOKEN: ${{ github.token }}
+          COMMITPERCLIP_TOKEN: ${{ steps.app-token.outputs.value }}
 
       - name: Run quality gates
         id: quality
