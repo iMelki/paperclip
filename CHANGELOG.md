@@ -17,7 +17,9 @@ All notable changes to this repository should be recorded here.
   payload out of the Git-for-Windows `sh -c` argument, using Node-native file
   copying, resolving script wrappers through Node, and making shell discovery
   support PATH-derived, per-user, and Scoop Git installs with a clear failure
-  when no complete Git shell is available. The environment transport remains
+  when no complete Git shell is available. Process-session stdin and EOF writes
+  are now ordered, and cleanup waits for proven wrapper termination before
+  removing the remote session or workspace. The environment transport remains
   bounded; #64 tracks reducing or replacing the oversized ambient-env payload.
 
 - Replaced the unsupported fork Dependency Review call in the trusted PR-review

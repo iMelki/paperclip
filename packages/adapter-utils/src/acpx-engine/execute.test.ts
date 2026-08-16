@@ -125,6 +125,17 @@ function createLocalSandboxRunner(
   };
 }
 
+function decodeProcessSessionLaunchPayload(input: {
+  env?: Record<string, string>;
+}, previous: Record<string, unknown> | null = null): Record<string, unknown> | null {
+  const encodedPayload = input.env?.PAPERCLIP_PROCESS_SESSION_COMMAND_B64;
+  if (!encodedPayload) return previous;
+  return JSON.parse(Buffer.from(encodedPayload, "base64").toString("utf8")) as Record<
+    string,
+    unknown
+  >;
+}
+
 function buildRuntime(
   onSetConfigOption?: (input: { key: string; value: string }) => void,
   onEnsureSession?: (input: Record<string, unknown>) => void,
@@ -1292,11 +1303,7 @@ describe("shared ACPX engine runtime behavior", () => {
     const runner = createLocalSandboxRunner(
       (input: { args?: string[]; env?: Record<string, string> }) => {
         if (input.env?.PAPERCLIP_SANDBOX_EXEC_CHANNEL === "bridge") {
-          const script = input.args?.[1] ?? "";
-          const match = script.match(/PAPERCLIP_PROCESS_SESSION_COMMAND_B64='([^']+)'/);
-          if (match) {
-            sessionPayload = JSON.parse(Buffer.from(match[1]!, "base64").toString("utf8")) as Record<string, unknown>;
-          }
+          sessionPayload = decodeProcessSessionLaunchPayload(input, sessionPayload);
         }
       },
     );
@@ -2209,19 +2216,12 @@ describe("ACPX engine remote sandbox staging seam (PR 1: workspace + cwd)", () =
 
   it("hands the merged paperclip env to the process-session launch when the setups overlap", async () => {
     const { stateDir, localCwd, remoteCwd, executionTarget } = await setupRemoteSandbox();
-    // Decode the process-session LAUNCH payload (the base64 command blob) — the
-    // in-sandbox process env is carried there, NOT in the exec's own `env`.
+    // Decode the process-session LAUNCH payload (the base64 command blob) from
+    // the exec env. The in-sandbox process env is nested inside that payload.
     let launchPayload: Record<string, unknown> | null = null;
     (executionTarget as { runner: unknown }).runner = createLocalSandboxRunner((input) => {
       if (input.env?.PAPERCLIP_SANDBOX_EXEC_CHANNEL === "bridge") {
-        const script = input.args?.[1] ?? "";
-        const match = script.match(/PAPERCLIP_PROCESS_SESSION_COMMAND_B64='([^']+)'/);
-        if (match) {
-          launchPayload = JSON.parse(Buffer.from(match[1]!, "base64").toString("utf8")) as Record<
-            string,
-            unknown
-          >;
-        }
+        launchPayload = decodeProcessSessionLaunchPayload(input, launchPayload);
       }
     });
 
@@ -2258,18 +2258,12 @@ describe("ACPX engine remote sandbox staging seam (PR 1: workspace + cwd)", () =
     await fs.mkdir(referencedProjectDir, { recursive: true });
     await fs.writeFile(path.join(referencedProjectDir, "note.txt"), "referenced", "utf8");
 
-    // Decode the process-session LAUNCH payload — the in-sandbox process env is carried there.
+    // Decode the process-session LAUNCH payload from the exec env; the
+    // in-sandbox process env is carried inside the payload.
     let launchPayload: Record<string, unknown> | null = null;
     (executionTarget as { runner: unknown }).runner = createLocalSandboxRunner((input) => {
       if (input.env?.PAPERCLIP_SANDBOX_EXEC_CHANNEL === "bridge") {
-        const script = input.args?.[1] ?? "";
-        const match = script.match(/PAPERCLIP_PROCESS_SESSION_COMMAND_B64='([^']+)'/);
-        if (match) {
-          launchPayload = JSON.parse(Buffer.from(match[1]!, "base64").toString("utf8")) as Record<
-            string,
-            unknown
-          >;
-        }
+        launchPayload = decodeProcessSessionLaunchPayload(input, launchPayload);
       }
     });
 
