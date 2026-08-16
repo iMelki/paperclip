@@ -46,7 +46,8 @@ export function parsePushUpdates(input) {
     if (!remoteRef.startsWith("refs/")) {
       throw new PrePushIntegrityError(`pre-push update line ${index + 1} contains an invalid remote ref`);
     }
-    if (deletion ? localRef !== "(delete)" : !localRef.startsWith("refs/")) {
+    const validLocalRef = localRef === "HEAD" || localRef.startsWith("refs/");
+    if (deletion ? localRef !== "(delete)" : !validLocalRef) {
       throw new PrePushIntegrityError(`pre-push update line ${index + 1} contains an invalid local ref`);
     }
     updates.push({

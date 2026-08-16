@@ -45,9 +45,11 @@ This file is the durable local index for active `paperclip` issues.
     live production, malformed Git updates, and child failures reject; non-runnable
     deletions and other hosted-only changes must travel through a topic PR. The plan is bound to one
     pristine checked-out HEAD with repository-wide normal index state and the
-    exact configured push destination. Both real
-    platform callers passed their broken/restored proofs; post-merge-base and hosted
-    validation remain pending.
+    exact configured push destination. Both real platform callers passed their
+    broken/restored proofs. The first real `HEAD:topic` push exposed and then
+    proved the valid literal-`HEAD` protocol form without weakening object
+    binding; post-merge-base validation is green and hosted validation remains
+    pending.
 
 - [#67 - CI never validates dev: pr.yml is scoped to PRs into master](https://github.com/iMelki/paperclip/issues/67)
   - Bootstrap prepared: PR CI covers `master` and `dev`, never `push: dev`, and a

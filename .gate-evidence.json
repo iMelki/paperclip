@@ -73,13 +73,13 @@
     {
       "id": "pre-push-git-update-planner",
       "path": "scripts/run-pre-push-tests.mjs",
-      "description": "Parses Git's four-field pre-push protocol, binds tested bytes to one pristine HEAD with repository-wide normal index state, covers every outgoing commit on a new branch, rejects zero/unresolved ranges, and runs the runner-aware exact plan.",
+      "description": "Parses Git's four-field pre-push protocol, including the literal HEAD local-ref emitted for HEAD:topic refspecs; binds tested bytes to one pristine HEAD with repository-wide normal index state, covers every outgoing commit on a new branch, rejects zero/unresolved ranges, and runs the runner-aware exact plan.",
       "negativeFixture": "scripts/run-pre-push-tests.test.mjs",
       "observedFailure": {
         "date": "2026-08-16",
         "command": "node --test scripts/run-pre-push-tests.test.mjs",
-        "reason": "Malformed/empty protocol, dirty/non-HEAD/multi-ref state, unsafe destination identity, and a selected child exit 19 were each rejected for their asserted reason. A real status-clean repository then substituted a tracked Node test behind skip-worktree outside the scanner roots; the real planner exited 2 and named that exact hidden/non-normal path before executing it.",
-        "restoredPass": "Clearing the index flag and restoring the exact HEAD bytes let the real planner execute the named Node test and exit 0. One clean checked-out update bound to the authoritative advertised dev object and restored child exit 0 passed; 8/8 planner proofs passed."
+        "reason": "Malformed/empty protocol, dirty/non-HEAD/multi-ref state, unsafe destination identity, and a selected child exit 19 were each rejected for their asserted reason. A real status-clean repository then substituted a tracked Node test behind skip-worktree outside the scanner roots; the real planner exited 2 and named that exact hidden/non-normal path before executing it. The first real HEAD:topic push was also rejected before scanning because Git emitted the valid literal local ref HEAD, exposing an over-narrow refs/-only parser.",
+        "restoredPass": "Clearing the index flag and restoring the exact HEAD bytes let the real planner execute the named Node test and exit 0. One clean checked-out update bound to the authoritative advertised dev object and restored child exit 0 passed; 8/8 planner proofs passed. The parser fixture now accepts literal HEAD while preserving the same object binding, and the exact secret-range caller consumed the saved real update, scanned one outgoing commit with pinned Gitleaks 8.30.1, and exited 0 with no leaks."
       }
     },
     {

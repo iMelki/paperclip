@@ -26,6 +26,17 @@ test("parses the real four-field pre-push protocol and rejects empty or malforme
       creation: true,
     }],
   );
+  assert.deepEqual(
+    parsePushUpdates(`HEAD ${A} refs/heads/topic ${ZERO}\n`),
+    [{
+      localRef: "HEAD",
+      localOid: A,
+      remoteRef: "refs/heads/topic",
+      remoteOid: ZERO,
+      deletion: false,
+      creation: true,
+    }],
+  );
   assert.throws(() => parsePushUpdates(""), /no pre-push ref updates/);
   assert.throws(
     () => parsePushUpdates(`refs/heads/topic ${A} refs/heads/topic\n`),

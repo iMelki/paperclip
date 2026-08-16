@@ -67,8 +67,10 @@ All notable changes to this repository should be recorded here.
   siblings run under Node or Vitest; missing coverage fails closed; hosted-only
   changes require a topic PR. A push must be one pristine checked-out HEAD, new
   branches resolve the actual destination's advertised `dev`, and outgoing
-  secrets use its exact base-to-head range. PR CI now covers `dev` without adding
-  `push: dev` and scans only the PR range rather than known-red full history.
+  secrets use its exact base-to-head range. Git's literal `HEAD` local-ref form
+  from an explicit `HEAD:topic` refspec is accepted without weakening the OID or
+  pristine-worktree binding. PR CI now covers `dev` without adding `push: dev`
+  and scans only the PR range rather than known-red full history.
 
 - Normalized release-package discovery directories to forward-slash manifest
   paths, with a Windows-separator regression, so release-map validation does
