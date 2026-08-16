@@ -19,6 +19,9 @@ export function isMainModule(importMetaUrl, argvPath = process.argv[1], realpath
     const modulePath = realpath(fileURLToPath(importMetaUrl));
     return normalizeComparablePath(entryPath) === normalizeComparablePath(modulePath);
   } catch (error) {
-    throw new Error(`cannot resolve ESM entry point for gate dispatch: ${error?.code ?? error?.message}`);
+    throw new Error(
+      `cannot resolve ESM entry point for gate dispatch: ${error?.code ?? error?.message}`,
+      { cause: error },
+    );
   }
 }

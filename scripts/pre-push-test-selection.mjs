@@ -1,10 +1,8 @@
 #!/usr/bin/env node
 
-import { lstatSync, readdirSync, readFileSync, realpathSync } from "node:fs";
+import { lstatSync, readdirSync, realpathSync } from "node:fs";
 import path from "node:path";
 import process from "node:process";
-
-import { isMainModule } from "./is-main-module.mjs";
 
 const TEST_FILE_PATTERN = /\.(?:test|spec)\.[mc]?[jt]sx?$/i;
 const SOURCE_FILE_PATTERN = /\.[mc]?[jt]sx?$/i;
@@ -224,6 +222,9 @@ function isHostedCiPath(file) {
 }
 
 export function selectPrePushTests({ repoRoot, changedFiles, trackedFiles }) {
+  if (!Array.isArray(changedFiles)) {
+    throw new TestSelectionIntegrityError("changed files must be supplied as an array");
+  }
   if (!(trackedFiles instanceof Set)) {
     throw new TestSelectionIntegrityError(
       "tracked files from the pushed HEAD are required for deterministic test selection",
@@ -307,46 +308,4 @@ export function selectPrePushTests({ repoRoot, changedFiles, trackedFiles }) {
     uncoveredProductionFiles,
     selectionErrors,
   };
-}
-
-export function parseCli(argv) {
-  let repoRoot = process.cwd();
-  let stdin = false;
-  const files = [];
-  for (let index = 0; index < argv.length; index += 1) {
-    const arg = argv[index];
-    if (arg === "--") continue;
-    if (arg === "--stdin") {
-      stdin = true;
-      continue;
-    }
-    if (arg === "--repo-root") {
-      const value = argv[index + 1];
-      if (!value || value.startsWith("--")) {
-        throw new TestSelectionIntegrityError("--repo-root requires a value");
-      }
-      repoRoot = value;
-      index += 1;
-      continue;
-    }
-    files.push(arg);
-  }
-  if (stdin) files.push(...readFileSync(0, "utf8").split(/\r?\n/).filter(Boolean));
-  return { repoRoot: path.resolve(repoRoot), changedFiles: files };
-}
-
-if (isMainModule(import.meta.url)) {
-  try {
-    const result = selectPrePushTests(parseCli(process.argv.slice(2)));
-    process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
-    if (result.selectionErrors.length > 0) {
-      process.stderr.write(
-        `ERROR: Pre-push test selection failed closed:\n${result.selectionErrors.map((item) => `  ${item}`).join("\n")}\n`,
-      );
-      process.exit(2);
-    }
-  } catch (error) {
-    process.stderr.write(`ERROR: Pre-push test selection failed: ${error.message}\n`);
-    process.exit(2);
-  }
 }

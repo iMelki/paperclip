@@ -39,6 +39,19 @@ test("real comments are ignored and quotes inside them cannot hide later code", 
   );
 });
 
+test("astral characters do not shift comment ranges or later offense lines", () => {
+  const source = [
+    `// ${ALLOW_MARKER}: one reviewed mirror`,
+    "// 🚀 comment after the marker",
+    'exec("git push origin main");',
+    "",
+  ].join("\n");
+  assert.deepEqual(
+    findGitPushOffenses(source).map(({ lineNumber }) => lineNumber),
+    [3],
+  );
+});
+
 test("only a standalone preceding marker with a reason grants one exemption", () => {
   const trailing = `exec("git push origin master"); // ${ALLOW_MARKER}: mirror\n`;
   assert.equal(findGitPushOffenses(trailing).length, 1);

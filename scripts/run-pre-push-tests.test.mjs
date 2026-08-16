@@ -9,6 +9,7 @@ import { fileURLToPath } from "node:url";
 
 import {
   PrePushIntegrityError,
+  assertAdvertisedDevAncestor,
   assertPushMatchesWorkingTree,
   executeTestPlan,
   parsePushUpdates,
@@ -165,6 +166,30 @@ test("a new branch uses the authoritative remote dev object as its exact base", 
   ]);
 });
 
+test("new-branch ancestry distinguishes divergence from Git execution failure", () => {
+  assert.throws(
+    () => assertAdvertisedDevAncestor({
+      repoRoot: "C:/repo",
+      remoteDevOid: A,
+      localOid: C,
+      remoteRef: "refs/heads/new",
+      git: () => { throw new PrePushIntegrityError("git merge-base failed with exit 1", { exitCode: 1 }); },
+    }),
+    /new branch refs\/heads\/new must contain advertised refs\/heads\/dev object/,
+  );
+  const original = new PrePushIntegrityError("git merge-base failed with exit 128", { exitCode: 128 });
+  assert.throws(
+    () => assertAdvertisedDevAncestor({
+      repoRoot: "C:/repo",
+      remoteDevOid: A,
+      localOid: C,
+      remoteRef: "refs/heads/new",
+      git: () => { throw original; },
+    }),
+    (error) => error === original,
+  );
+});
+
 test("Git subprocesses fail closed within finite timeout and buffer bounds", () => {
   let observed;
   const output = runGit("C:/repo", ["ls-remote", "origin"], {
@@ -212,6 +237,17 @@ test("explicit dry-run paths can bind selection to the current HEAD tree", () =>
     ["rev-parse", "--verify", "HEAD"],
     ["ls-tree", "-r", "-z", "--name-only", B],
   ]);
+});
+
+test("planner CLI rejects an option-shaped required value before reading Git state", () => {
+  const result = spawnSync(process.execPath, [runnerScript, "--repo-root", "--dry-run"], {
+    cwd: repoRoot,
+    encoding: "utf8",
+    windowsHide: true,
+    shell: false,
+  });
+  assert.equal(result.status, 2);
+  assert.match(result.stderr, /--repo-root requires a value/);
 });
 
 test("the changed-file dry-run CLI reads current HEAD tracking data", () => {

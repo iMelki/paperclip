@@ -50,3 +50,8 @@ export function runVitestDirect(
     shell: false,
   });
 }
+
+/** Invokes each exact suite independently so one collected file cannot mask an unmatched file. */
+export function forEachExactVitestFile(files, runFile) {
+  for (const file of files) runFile(file);
+}

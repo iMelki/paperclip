@@ -8,7 +8,7 @@ import {
   sanitizeGitLocalEnvironment,
 } from "./git-local-env.mjs";
 import { loadShardDurations, selectGeneralServerShard } from "./general-server-shard.mjs";
-import { runVitestDirect } from "./run-vitest-direct.mjs";
+import { forEachExactVitestFile, runVitestDirect } from "./run-vitest-direct.mjs";
 
 const repoRoot = process.cwd();
 const gitLocalEnvironmentVariableNames = resolveGitLocalEnvironmentVariableNames({ cwd: repoRoot });
@@ -632,10 +632,15 @@ function runExactSuites(files) {
   if (invalid.length > 0) {
     fail(`--files accepts only exact test paths; received: ${invalid.join(", ")}`);
   }
-  runVitest(
-    ["--pool=forks", "--isolate", ...serializedServerVitestArgs, ...files],
-    `exact pre-push selection: ${files.length} suite(s)`,
-  );
+  // Run each exact file separately. Some workspace projects deliberately include
+  // only *.test.ts while others include *.spec.ts; one accepted file must never
+  // let an excluded file disappear behind an otherwise successful invocation.
+  forEachExactVitestFile(files, (file) => {
+    runVitest(
+      ["--pool=forks", "--isolate", ...serializedServerVitestArgs, file],
+      `exact pre-push selection: ${file}`,
+    );
+  });
 }
 
 function runSerializedSuites(routeTests, shardIndex, shardCount) {

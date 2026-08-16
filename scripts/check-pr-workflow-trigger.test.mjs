@@ -13,6 +13,19 @@ test("the real PR workflow covers master and dev without a push event", () => {
   assert.deepEqual(validatePrWorkflowTrigger(realWorkflow), []);
 });
 
+test("the policy job must run the stable Vitest runner regression suite", () => {
+  const broken = realWorkflow.replace(
+    "./scripts/__tests__/run-vitest-stable-shard.test.mjs",
+    "./scripts/__tests__/removed-stable-shard.test.mjs",
+  );
+  assert.notEqual(broken, realWorkflow, "negative fixture must remove the shard regression suite");
+  assert.ok(
+    validatePrWorkflowTrigger(broken).includes(
+      "workflow policy tests are missing ./scripts/__tests__/run-vitest-stable-shard.test.mjs",
+    ),
+  );
+});
+
 test("removing dev fails for the exact missing-branch reason", () => {
   const broken = realWorkflow.replace(/^\s{6}- dev\s*$/m, "");
   assert.notEqual(broken, realWorkflow, "negative fixture must remove dev");

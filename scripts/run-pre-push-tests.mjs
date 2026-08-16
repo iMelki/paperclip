@@ -20,9 +20,10 @@ const SAFE_REMOTE_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const PROTECTED_REFS = new Set(["refs/heads/dev", "refs/heads/master"]);
 
 export class PrePushIntegrityError extends Error {
-  constructor(message) {
-    super(message);
+  constructor(message, { cause, exitCode } = {}) {
+    super(message, { cause });
     this.name = "PrePushIntegrityError";
+    this.exitCode = exitCode;
   }
 }
 
@@ -87,12 +88,16 @@ export function runGit(
     timeout,
   });
   if (result.error) {
-    throw new PrePushIntegrityError(`could not start git ${args[0]}: ${result.error.message}`);
+    throw new PrePushIntegrityError(
+      `could not start git ${args[0]}: ${result.error.message}`,
+      { cause: result.error },
+    );
   }
   if (result.status !== 0) {
     const detail = `${result.stderr ?? ""}`.trim();
     throw new PrePushIntegrityError(
       `git ${args[0]} failed with exit ${result.status ?? "unknown"}${detail ? `: ${detail}` : ""}`,
+      { exitCode: result.status },
     );
   }
   return result.stdout;
@@ -159,6 +164,26 @@ export function assertRemoteLocationMatchesConfig({
     throw new PrePushIntegrityError(
       `Git remote location does not match a configured push URL for ${remoteName}`,
     );
+  }
+}
+
+export function assertAdvertisedDevAncestor({
+  repoRoot,
+  remoteDevOid,
+  localOid,
+  remoteRef,
+  git = runGit,
+}) {
+  try {
+    git(repoRoot, ["merge-base", "--is-ancestor", remoteDevOid, localOid]);
+  } catch (error) {
+    if (error instanceof PrePushIntegrityError && error.exitCode === 1) {
+      throw new PrePushIntegrityError(
+        `new branch ${remoteRef} must contain advertised refs/heads/dev object ${remoteDevOid}`,
+        { cause: error, exitCode: 1 },
+      );
+    }
+    throw error;
   }
 }
 
@@ -260,7 +285,13 @@ export function resolveOutgoingChangedFiles({
       remoteLocation,
       git,
     });
-    git(repoRoot, ["merge-base", "--is-ancestor", remoteDevOid, update.localOid]);
+    assertAdvertisedDevAncestor({
+      repoRoot,
+      remoteDevOid,
+      localOid: update.localOid,
+      remoteRef: update.remoteRef,
+      git,
+    });
     const output = git(
       repoRoot,
       [
@@ -378,7 +409,9 @@ function parseCli(argv) {
     const key = valueOptions.get(arg);
     if (!key) throw new PrePushIntegrityError(`unknown argument: ${arg}`);
     const value = argv[index + 1];
-    if (!value) throw new PrePushIntegrityError(`${arg} requires a value`);
+    if (!value || value.startsWith("--")) {
+      throw new PrePushIntegrityError(`${arg} requires a value`);
+    }
     if (Array.isArray(options[key])) options[key].push(value);
     else options[key] = value;
     index += 1;

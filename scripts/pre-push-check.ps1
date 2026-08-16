@@ -27,6 +27,9 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+if (Get-Variable -Name PSNativeCommandUseErrorActionPreference -ErrorAction SilentlyContinue) {
+  $PSNativeCommandUseErrorActionPreference = $false
+}
 
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repoRoot = Resolve-Path (Join-Path $scriptDir '..') | Select-Object -ExpandProperty Path
@@ -36,8 +39,16 @@ $nodeCommand = Get-Command node -ErrorAction SilentlyContinue
 if (-not $nodeCommand) { throw 'node was not found on PATH.' }
 $node = $nodeCommand.Source
 
-$gitLogPath = & git rev-parse --git-path 'paperclip-gate-logs/pre-push'
-if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($gitLogPath)) {
+$previousErrorActionPreference = $ErrorActionPreference
+try {
+  $ErrorActionPreference = 'Continue'
+  $gitLogOutput = @(& git rev-parse --git-path 'paperclip-gate-logs/pre-push' 2>&1)
+  $gitLogExit = $LASTEXITCODE
+} finally {
+  $ErrorActionPreference = $previousErrorActionPreference
+}
+$gitLogPath = if ($gitLogOutput.Count -eq 1) { [string]$gitLogOutput[0] } else { '' }
+if ($gitLogExit -ne 0 -or [string]::IsNullOrWhiteSpace($gitLogPath)) {
   throw 'Could not resolve the Git-private pre-push log directory.'
 }
 if ([IO.Path]::IsPathRooted($gitLogPath)) {
@@ -131,12 +142,18 @@ function Invoke-Step {
   Write-GateLine -Message ''
   Write-GateLine -Message "Running $Name..."
   $stepStart = Get-Date
-  & $Action 2>&1 | ForEach-Object {
-    $rendered = [string]$_
-    Add-Content -LiteralPath $LogPath -Value $rendered
-    Write-Host $rendered
+  $previousErrorActionPreference = $ErrorActionPreference
+  try {
+    $ErrorActionPreference = 'Continue'
+    & $Action 2>&1 | ForEach-Object {
+      $rendered = [string]$_
+      Add-Content -LiteralPath $LogPath -Value $rendered -ErrorAction Stop
+      Write-Host $rendered
+    }
+    $stepExit = $LASTEXITCODE
+  } finally {
+    $ErrorActionPreference = $previousErrorActionPreference
   }
-  $stepExit = $LASTEXITCODE
   $elapsed = [math]::Round(((Get-Date) - $stepStart).TotalSeconds, 1)
   if ($stepExit -eq 0) {
     Write-GateLine -Message "  ($Name took ${elapsed}s)" -Color DarkGray

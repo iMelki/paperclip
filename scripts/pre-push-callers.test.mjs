@@ -16,6 +16,13 @@ function commandAvailable(command) {
   return !result.error && result.status === 0;
 }
 
+const shCommand = [
+  "sh",
+  process.platform === "win32"
+    ? path.join(process.env.ProgramFiles ?? "C:\\Program Files", "Git", "bin", "sh.exe")
+    : null,
+].filter(Boolean).find(commandAvailable);
+
 function assertNoTemporaryGateArtifacts(root, logName) {
   assert.match(readFileSync(path.join(root, logName), "utf8"), /Paperclip/);
   const temporaryArtifacts = readdirSync(root).filter(
@@ -34,6 +41,8 @@ function withFakeTools(body) {
       [
         "#!/usr/bin/env sh",
         'if [ -n "${PAPERCLIP_FAKE_ARGS_LOG:-}" ]; then printf "%s\\n" "$*" >> "$PAPERCLIP_FAKE_ARGS_LOG"; fi',
+        'if [ -n "${PAPERCLIP_FAKE_NATIVE_STDERR:-}" ]; then echo "sentinel native stderr" >&2; fi',
+        'if [ "${PAPERCLIP_FAKE_SIGNAL_PARENT:-}" = "TERM" ]; then kill -TERM "$PPID"; exit 0; fi',
         'case "$*" in',
         '  *check-no-git-push.mjs*) exit "${PAPERCLIP_FAKE_NO_PUSH_EXIT:-0}";;',
         '  *scan-pre-push-secrets.mjs*) exit "${PAPERCLIP_FAKE_SECRET_EXIT:-0}";;',
@@ -52,6 +61,7 @@ function withFakeTools(body) {
       [
         "@echo off",
         "if not \"%PAPERCLIP_FAKE_ARGS_LOG%\"==\"\" echo %*>>\"%PAPERCLIP_FAKE_ARGS_LOG%\"",
+        "if not \"%PAPERCLIP_FAKE_NATIVE_STDERR%\"==\"\" echo sentinel native stderr 1>&2",
         "echo %* | %SystemRoot%\\System32\\findstr.exe /C:\"check-no-git-push.mjs\" >nul",
         "if %errorlevel%==0 exit /b %PAPERCLIP_FAKE_NO_PUSH_EXIT%",
         "echo %* | %SystemRoot%\\System32\\findstr.exe /C:\"scan-pre-push-secrets.mjs\" >nul",
@@ -71,7 +81,15 @@ function withFakeTools(body) {
 
 function fakeEnvironment(
   fakeBin,
-  { planExit = 0, noPushExit = 0, secretExit = 0, argsLog = "", logPath = "" } = {},
+  {
+    planExit = 0,
+    noPushExit = 0,
+    secretExit = 0,
+    argsLog = "",
+    logPath = "",
+    nativeStderr = false,
+    signalParent = "",
+  } = {},
 ) {
   return {
     ...process.env,
@@ -81,6 +99,8 @@ function fakeEnvironment(
     PAPERCLIP_FAKE_SECRET_EXIT: `${secretExit}`,
     PAPERCLIP_FAKE_ARGS_LOG: argsLog,
     PAPERCLIP_PRE_PUSH_LOG_PATH: logPath,
+    PAPERCLIP_FAKE_NATIVE_STDERR: nativeStderr ? "1" : "",
+    PAPERCLIP_FAKE_SIGNAL_PARENT: signalParent,
   };
 }
 
@@ -99,6 +119,10 @@ test("both callers use the same security, workflow, and exact-plan gates", () =>
   }
   assert.match(hook, /-RemoteName "\$1" -RemoteLocation "\$2"/);
   assert.match(hook, /pre-push-check\.sh "\$@"/);
+  assert.match(ps, /PSNativeCommandUseErrorActionPreference\s*=\s*\$false/);
+  for (const signal of ["HUP", "INT", "TERM"]) {
+    assert.match(sh, new RegExp(`trap 'exit \\d+' ${signal}`));
+  }
 });
 
 test("PowerShell caller invokes the no-push gate, propagates failures, and passes after restore", {
@@ -108,19 +132,35 @@ test("PowerShell caller invokes the no-push gate, propagates failures, and passe
     const update = `refs/heads/topic ${"a".repeat(40)} refs/heads/topic ${"0".repeat(40)}\n`;
     const invoke = (fakeExits, label) => {
       const logName = `${label}.log`;
+      let commandArgs = [
+        "-NoProfile",
+        "-File",
+        psCaller,
+        "-RemoteName",
+        "origin",
+        "-RemoteLocation",
+        "trusted-location",
+        "-LogPath",
+        path.join(fakeBin, logName),
+      ];
+      if (fakeExits.nativePreference) {
+        const quote = (value) => value.replaceAll("'", "''");
+        const wrapper = path.join(fakeBin, `${label}-wrapper.ps1`);
+        writeFileSync(
+          wrapper,
+          [
+            "$PSNativeCommandUseErrorActionPreference = $true",
+            `& '${quote(psCaller)}' -RemoteName 'origin' -RemoteLocation 'trusted-location' ` +
+              `-LogPath '${quote(path.join(fakeBin, logName))}'`,
+            "exit $LASTEXITCODE",
+            "",
+          ].join("\n"),
+        );
+        commandArgs = ["-NoProfile", "-File", wrapper];
+      }
       const result = spawnSync(
         "pwsh",
-        [
-          "-NoProfile",
-          "-File",
-          psCaller,
-          "-RemoteName",
-          "origin",
-          "-RemoteLocation",
-          "trusted-location",
-          "-LogPath",
-          path.join(fakeBin, logName),
-        ],
+        commandArgs,
         {
           cwd: repoRoot,
           encoding: "utf8",
@@ -133,9 +173,13 @@ test("PowerShell caller invokes the no-push gate, propagates failures, and passe
       assertNoTemporaryGateArtifacts(fakeBin, logName);
       return result;
     };
-    const noPushFailure = invoke({ noPushExit: 17 }, "ps-no-push-fail");
+    const noPushFailure = invoke(
+      { noPushExit: 17, nativeStderr: true, nativePreference: true },
+      "ps-no-push-fail",
+    );
     assert.equal(noPushFailure.status, 1);
     assert.match(`${noPushFailure.stdout}\n${noPushFailure.stderr}`, /exit 17/);
+    assert.match(`${noPushFailure.stdout}\n${noPushFailure.stderr}`, /sentinel native stderr/);
     const secretFailure = invoke({ secretExit: 23 }, "ps-secret-fail");
     assert.equal(secretFailure.status, 1);
     assert.match(`${secretFailure.stdout}\n${secretFailure.stderr}`, /exit 23/);
@@ -170,14 +214,14 @@ test("PowerShell caller invokes the no-push gate, propagates failures, and passe
 });
 
 test("POSIX caller invokes the no-push gate, propagates failures, and passes after restore", {
-  skip: !commandAvailable("sh"),
+  skip: !shCommand,
 }, () => {
   withFakeTools((fakeBin) => {
     const update = `refs/heads/topic ${"a".repeat(40)} refs/heads/topic ${"0".repeat(40)}\n`;
     const invoke = (fakeExits, label) => {
       const logName = `${label}.log`;
       const logPath = path.join(fakeBin, logName);
-      const result = spawnSync("sh", [shCaller, "origin", "trusted-location"], {
+      const result = spawnSync(shCommand, [shCaller, "origin", "trusted-location"], {
         cwd: repoRoot,
         encoding: "utf8",
         env: fakeEnvironment(fakeBin, { ...fakeExits, logPath }),
@@ -197,6 +241,8 @@ test("POSIX caller invokes the no-push gate, propagates failures, and passes aft
     const planFailure = invoke({ planExit: 19 }, "sh-plan-fail");
     assert.equal(planFailure.status, 1);
     assert.match(`${planFailure.stdout}\n${planFailure.stderr}`, /exit 19/);
+    const signalFailure = invoke({ signalParent: "TERM" }, "sh-term-fail");
+    assert.equal(signalFailure.status, 143);
     const argsLog = path.join(fakeBin, "sh-args.log");
     const passing = invoke({ argsLog }, "sh-pass");
     assert.equal(passing.status, 0, passing.stderr);
@@ -207,7 +253,7 @@ test("POSIX caller invokes the no-push gate, propagates failures, and passes aft
       assert.match(line ?? "", /--remote-location trusted-location/);
     }
 
-    const missingLocation = spawnSync("sh", [shCaller, "origin"], {
+    const missingLocation = spawnSync(shCommand, [shCaller, "origin"], {
       cwd: repoRoot,
       encoding: "utf8",
       env: fakeEnvironment(fakeBin),

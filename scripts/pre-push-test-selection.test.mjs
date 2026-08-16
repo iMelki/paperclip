@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
 import {
   mkdirSync,
   mkdtempSync,
@@ -12,18 +11,14 @@ import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 import test from "node:test";
-import { fileURLToPath } from "node:url";
 
 import {
   TestSelectionIntegrityError,
   classifyTestRunner,
   isTestBearingProductionFile,
   normalizeRepoPath,
-  parseCli,
   selectPrePushTests,
 } from "./pre-push-test-selection.mjs";
-
-const selectorScript = fileURLToPath(new URL("./pre-push-test-selection.mjs", import.meta.url));
 
 function withFixture(run) {
   const temporaryRoot = mkdtempSync(path.join(os.tmpdir(), "paperclip-pre-push-selector-"));
@@ -239,22 +234,22 @@ test("rejects empty, absolute, parent-relative, and symlink inputs", () => {
   });
 });
 
-test("rejects missing pushed-HEAD tracking data and an option-shaped repo root", () => {
+test("rejects missing pushed-HEAD tracking data and non-array changed paths", () => {
   withFixture(({ repoRoot, write }) => {
     write("ui/src/lib/format.test.ts", "test('format', () => {});\n");
     assert.throws(
       () => selectPrePushTests({ repoRoot, changedFiles: ["ui/src/lib/format.test.ts"] }),
       /tracked files from the pushed HEAD are required/,
     );
-    const cli = spawnSync(
-      process.execPath,
-      [selectorScript, "--repo-root", repoRoot, "ui/src/lib/format.test.ts"],
-      { cwd: repoRoot, encoding: "utf8", windowsHide: true, shell: false },
-    );
-    assert.equal(cli.status, 2);
-    assert.match(cli.stderr, /tracked files from the pushed HEAD are required/);
+    for (const changedFiles of [null, {}, "ui/src/lib/format.test.ts", new Set()]) {
+      assert.throws(
+        () => selectPrePushTests({ repoRoot, changedFiles, trackedFiles: new Set() }),
+        (error) =>
+          error instanceof TestSelectionIntegrityError &&
+          error.message === "changed files must be supplied as an array",
+      );
+    }
   });
-  assert.throws(() => parseCli(["--repo-root", "--stdin"]), /--repo-root requires a value/);
 });
 
 test("does not treat generated declarations or docs as test-bearing production", () => {

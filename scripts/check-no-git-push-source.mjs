@@ -192,7 +192,10 @@ function advanceQuotedState(text, index, quote, syntax) {
 /** Removes only comments valid for the current source language. */
 function lexSource(text, relativePath) {
   const syntax = sourceSyntax(relativePath);
-  const output = [...text];
+  // Every cursor and range in this lexer uses JavaScript string offsets (UTF-16
+  // code units). split("") preserves that indexing; the string iterator would
+  // collapse astral characters into one element and shift every later range.
+  const output = text.split("");
   const allowMarkerLines = new Set();
   let lineStart = 0;
   let quote = null;

@@ -135,7 +135,7 @@ function shouldScanFile(relativePath) {
   const extension = path.extname(relativePath).toLowerCase();
   if (SCANNABLE_EXTENSIONS.has(extension)) return true;
   if (
-    DECLARED_NON_RUNTIME_EXTENSIONS.has(extension.toLowerCase()) ||
+    DECLARED_NON_RUNTIME_EXTENSIONS.has(extension) ||
     DECLARED_NON_RUNTIME_FILENAMES.has(path.basename(relativePath))
   ) {
     return false;

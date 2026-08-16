@@ -30,6 +30,13 @@ test("entry-point comparison resolves junction and symlink aliases", () => {
       () => isMainModule(pathToFileURL(modulePath), path.join(realDirectory, "missing.mjs")),
       /cannot resolve ESM entry point/,
     );
+    const sentinel = Object.assign(new Error("sentinel realpath failure"), { code: "ESENTINEL" });
+    assert.throws(
+      () => isMainModule(pathToFileURL(modulePath), modulePath, () => { throw sentinel; }),
+      (error) =>
+        /cannot resolve ESM entry point.*ESENTINEL/.test(error.message) &&
+        error.cause === sentinel,
+    );
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

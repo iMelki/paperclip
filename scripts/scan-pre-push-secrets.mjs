@@ -7,6 +7,7 @@ import process from "node:process";
 
 import { isMainModule } from "./is-main-module.mjs";
 import {
+  assertAdvertisedDevAncestor,
   assertRemoteLocationMatchesConfig,
   parsePushUpdates,
   resolveAuthoritativeRemoteDevOid,
@@ -48,7 +49,13 @@ export function buildPrePushSecretScans({
         remoteLocation,
         git,
       });
-      git(repoRoot, ["merge-base", "--is-ancestor", remoteDevOid, update.localOid]);
+      assertAdvertisedDevAncestor({
+        repoRoot,
+        remoteDevOid,
+        localOid: update.localOid,
+        remoteRef: update.remoteRef,
+        git,
+      });
     }
     return {
       localRef: update.localRef,
@@ -81,7 +88,10 @@ export function executePrePushSecretScans(
       return 2;
     }
     if (result.status !== 0) {
-      error(`ERROR: outgoing secret scan failed with exit ${result.status ?? "unknown"}.`);
+      const outcome = result.signal
+        ? `terminated by signal ${result.signal}`
+        : `failed with exit ${result.status ?? "unknown"}`;
+      error(`ERROR: outgoing secret scan ${outcome}.`);
       return result.status ?? 2;
     }
   }
@@ -106,7 +116,9 @@ function parseCli(argv) {
     ]).get(arg);
     if (!key) throw new PrePushSecretScanError(`unknown argument: ${arg}`);
     const value = argv[index + 1];
-    if (!value) throw new PrePushSecretScanError(`${arg} requires a value`);
+    if (!value || value.startsWith("--")) {
+      throw new PrePushSecretScanError(`${arg} requires a value`);
+    }
     options[key] = value;
     index += 1;
   }

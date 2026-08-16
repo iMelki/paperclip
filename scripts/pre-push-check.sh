@@ -47,7 +47,7 @@ UPDATES_FILE="${LOG_FILE}.updates"
 
 cleanup() {
   CLEANUP_STATUS=$?
-  trap - 0
+  trap - 0 HUP INT TERM
   rm -f "$UPDATES_FILE" || :
   if [ -n "${STEP_LOG-}" ]; then
     rm -f "$STEP_LOG" || :
@@ -55,6 +55,9 @@ cleanup() {
   exit "$CLEANUP_STATUS"
 }
 trap cleanup 0
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 cat > "$UPDATES_FILE" || exit 2
 if [ ! -s "$UPDATES_FILE" ]; then
