@@ -6,17 +6,20 @@ This file is the durable local index for active `paperclip` issues.
 
 ## Active Issues
 
-- [#76 - Security gate fails open: incomplete tree coverage in check-no-git-push.mjs](https://github.com/iMelki/paperclip/issues/76) — **issue closed after first repair; adversarial follow-up prepared**
-  - The first repair closed unreadable-file/directory and zero-file failures, and
-    the GitHub issue is currently closed, but adversarial follow-up review showed it
-    still tolerated one missing required root, skipped directory symlinks, omitted
-    `.mts`/`.cts`/`.jsx`, and had no `dev` pre-push invoker. The current repair
-    declares all four Paperclip roots required, rejects symlinks, junctions,
-    generated/cache directories, unknown entries and file types, uses
-    language-aware command detection including PowerShell here-strings and shell
-    heredocs, reconciles every tracked in-scope path
-    against the visible tree, rejects skip-worktree/assume-unchanged index
-    states before scanning substitute bytes, and invokes the gate locally on every push.
+- [#76 - Security gate fails open: incomplete tree coverage in check-no-git-push.mjs](https://github.com/iMelki/paperclip/issues/76) — **closed after the reopened fix; stronger adversarial hardening prepared**
+  - The first repair closed unreadable-file/directory and zero-file failures.
+    Reopened proof in `bf81b90e` then reproduced three live bypasses: renaming
+    one required root still passed, a committed directory symlink dropped its
+    whole target subtree, and `.mts`/`.cts`/`.jsx` files were unscanned. That
+    upstream repair (`bf81b90e`, documented by `5a09494a`) declared roots,
+    traversed links cycle-safely, added the extensions, improved tree telemetry,
+    and wired the gate into pre-push.
+  - The current hardening supersedes traversal with fail-closed rejection for
+    symlinks, junctions, tracked generated/cache directories, unknown entries,
+    encodings, and undeclared file types. It reconciles every tracked in-scope
+    path against the visible tree, rejects skip-worktree/assume-unchanged index
+    states before scanning substitute bytes, and uses language-aware detection
+    for PowerShell here-strings, shell heredocs, and remote-mutating Git forms.
     Focused broken/restored receipts are complete; hosted readback and an exact
     issue-state update remain required.
 

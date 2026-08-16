@@ -10,11 +10,14 @@
   Renaming the four scan roots was enough to clear an offending file that was
   still on disk. Unreadable paths now exit 2 naming the path and errno, a scan
   of zero files is an error in its own right, and the success line carries a
-  non-zero denominator. Follow-up review found that the first repair still
-  missed one renamed required root, a symlinked generated directory, and tracked
-  paths hidden from the visible working tree. Required roots now fail when
-  absent or empty; every tracked in-scope path must be physically observed or
-  deliberately classified with normal index state; skip-worktree and
+  non-zero denominator. Reopened evidence in `bf81b90e` then proved three
+  working bypasses: one renamed required root still passed, and a committed
+  mode-120000 directory symlink silently dropped its entire target subtree
+  because its directory entry described the link rather than the target,
+  and `.mts`/`.cts`/`.jsx` files were never scanned. Follow-up review also found
+  tracked paths hidden from the visible working tree. Required roots now fail
+  when absent or empty; every tracked in-scope path must be physically observed
+  or deliberately classified with normal index state; skip-worktree and
   assume-unchanged byte-substitution attempts reject before content scanning;
   and symlinks, junctions, tracked generated/cache
   directories, unknown entry kinds, encodings, and undeclared file types fail

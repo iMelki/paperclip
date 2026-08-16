@@ -50,7 +50,12 @@
         "status": "proved-2026-08-16",
         "command": "node --test scripts/check-no-git-push-source.test.mjs scripts/git-push-scan-integrity.test.mjs scripts/check-no-git-push.test.mjs",
         "failureReason": "A scratch real-caller run moved an asserted unsupported file into packages/adapters and exited 2 naming 'undeclared file type inside scan root: packages/adapters/hostile.unknown'. A separate real repository committed a forbidden git push, marked that path skip-worktree, substituted clean bytes in place, and remained status-clean; the real scanner still exited 2 naming the exact hidden/non-normal index path. Clearing the flag and committing the clean bytes restored exit 0. Multiline real callers exited 1 and named the exact lines for PowerShell expandable here-string and unquoted shell-heredoc substitutions, an indented fake PowerShell closer, fragmented ordinary/ANSI-quoted delimiters followed by real commands, and a line-continued expanding delimiter. Bash-syntax-validated arithmetic fixtures exited 1 on the real push instead of misclassifying << as a hiding heredoc, including nested command substitutions whose comments or quoted arguments contained misleading closing parentheses, Bash's legacy square-bracket arithmetic expansion, both double- and single-quoted indexed-array subscripts, and a false indexed-array delimiter whose exact text was the later executable push line; each proof passed after safe restoration. The scanner keeps every quoted or unquoted LF/CRLF heredoc body and terminator line scan-visible, and the 44/44 matrix also covers YAML/Python/batch marker spoofing, generated-name symlinks, and Windows case folding.",
-        "preFixAuthority": "Run the new fixtures against 79dcf8e1d to demonstrate the partial-root and directory-symlink cases exit 0 before this repair."
+        "preFixAuthority": "Run the new fixtures against 79dcf8e1d to demonstrate the partial-root and directory-symlink cases exit 0 before this repair.",
+        "upstreamReopenedEvidence": {
+          "commit": "bf81b90e9acd8a5a6acde731d151f55f301c63b2",
+          "preFixFacts": "One renamed required root passed, a committed mode-120000 directory symlink dropped its target subtree because its directory entry described the link rather than the target, and .mts/.cts/.jsx files were unscanned; each was reproduced against 79dcf8e1d with a live control.",
+          "finalDisposition": "The integrated hardening keeps required-root and extension coverage, but deliberately rejects every symlink or junction instead of traversing it; tracked-tree and normal-index reconciliation cover hidden or substituted pushed bytes."
+        }
       }
     },
     {
