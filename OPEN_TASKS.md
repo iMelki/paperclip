@@ -1,10 +1,23 @@
 # Paperclip Open Tasks
 
-Last updated: 2026-08-13
+Last updated: 2026-08-16
 
 This file is the durable local index for active `paperclip` issues.
 
 ## Active Issues
+
+- [#76 - Security gate fails open: three swallowed fs errors in check-no-git-push.mjs](https://github.com/iMelki/paperclip/issues/76) — **resolved**
+  - All three swallows now fail closed and name the unreadable path and errno, a
+    scan of zero files is an error in its own right, and the success line carries
+    the scanned-file denominator. Swallow #2 (`readdirSync`), previously inferred
+    from code shape, was reproduced under a real EPERM before and after the fix.
+    An absent optional scan root is still tolerated and reported so a different
+    repo layout does not fail the check. Cross-check of the sibling `check:`/
+    `verify:` gates found no other member of this fail-open family; the only
+    remaining bare swallow in that neighbourhood is
+    `.github/scripts/check-pr-dependencies.mjs:67`, which is advisory-only
+    (always returns `passed: true`) and under-reports new dependencies rather
+    than clearing a violation.
 
 - [#46 - Make React Doctor hook execution reproducible and fail closed](https://github.com/iMelki/paperclip/issues/46)
   - Commit `124a48cc` removed the floating `npx react-doctor@latest` path and

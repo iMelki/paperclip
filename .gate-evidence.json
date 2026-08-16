@@ -26,8 +26,6 @@
     "scripts/check-docker-deps-stage.mjs",
     "scripts/check-forbidden-tokens-core.cjs",
     "scripts/check-forbidden-tokens.mjs",
-    "scripts/check-no-git-push.mjs",
-    "scripts/check-no-git-push.test.mjs",
     "scripts/check-release-package-bootstrap.mjs",
     "scripts/check-release-package-bootstrap.test.mjs",
     "scripts/check-task-chat-motion.mjs",
@@ -39,6 +37,19 @@
     "server/src/services/change-consent-gate.ts"
   ],
   "gates": [
+    {
+      "id": "adapter-runtime-no-git-push",
+      "path": "scripts/check-no-git-push.mjs",
+      "description": "Rejects `git push` in adapter/runtime source, and rejects its own run when it could not read what it was supposed to scan (renamed/unreadable scan root, unreadable directory, unreadable file, or zero files scanned).",
+      "negativeFixture": "scripts/check-no-git-push.test.mjs",
+      "observedFailure": {
+        "date": "2026-08-16",
+        "command": "node scripts/check-no-git-push.mjs (run in a scratch fixture whose four scan roots were renamed, with the offending file still on disk)",
+        "reason": "Exited 2 with 'scanned 0 files and therefore cannot report a pass' and named all four absent roots. Under real EPERM the same run exits 2 with 'cannot list directory packages/adapters/deep: EPERM' and 'cannot read packages/adapters/evil.ts: EPERM'. The pre-fix script exited 0 printing the success line in all three cases, having read nothing.",
+        "restoredPass": "With the roots restored and readable, the same fixture exits 0 and prints the denominator '4 file(s) scanned across 4 of 4 scan root(s)'; a seeded offender still exits 1 and names the file and line. Against the real checkout the gate reports 1273 files scanned across 4 of 4 roots.",
+        "preFixTestRun": "Run against a scratch copy of the pre-fix module (94a4a440c), the suite is 14 pass / 8 fail; against the fixed module it is 22 pass / 0 fail. The 8 are the seven new #76 fixtures plus the happy-path assertion that the pass line carries a non-zero scanned-file count."
+      }
+    },
     {
       "id": "fork-dependency-review-workflow",
       "path": ".github/workflows/commitperclip-review.yml",
@@ -70,7 +81,7 @@
       "negativeFixture": "scripts/run-react-doctor.test.mjs",
       "observedFailure": {
         "date": "2026-08-13",
-        "command": "node C:\\Users\\Milky\\AppData\\Local\\Temp\\paperclip-negative-7cd8d702402842bdba7ae1334417debc\\scripts\\run-react-doctor.js",
+        "command": "node <temp-negative-checkout>/scripts/run-react-doctor.js",
         "reason": "The temporary checkout had no node_modules/react-doctor. The runner returned exit 2 and JSON error pinned-package-missing with outcome=incomplete; no npx or package-manager fallback was available.",
         "restoredPass": "The test creates a temporary exact 0.7.8 package whose local analyzer returns JSON; the runner exits 0 with outcome=passed and 64-character package/output hashes."
       }

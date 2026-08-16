@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- Made the adapter/runtime `git push` gate fail closed (#76).
+  `scripts/check-no-git-push.mjs` swallowed three filesystem errors
+  (`statSync` on a scan root, `readdirSync` mid-walk, `readFileSync` on a
+  file), so an unreadable or renamed tree produced exit 0 and the message
+  "No unapproved `git push` invocations found" having scanned zero files.
+  Renaming the four scan roots was enough to clear an offending file that was
+  still on disk. Unreadable paths now exit 2 naming the path and errno, a scan
+  of zero files is an error in its own right, and the success line carries the
+  denominator (`N file(s) scanned across M of K scan root(s)`). A scan root
+  that is legitimately absent (ENOENT) is still tolerated and reported, so a
+  different repo layout does not fail the check.
+
 - Replaced the floating React Doctor `npx` hook invocation with a local-only
   resolver, minimized child environment, and normalized fail-closed receipt.
   The current branch intentionally remains incomplete until a separately
