@@ -55,7 +55,7 @@ test("markers inside strings, commands, templates, or without reasons do not exe
     `// ${ALLOW_MARKER}:\nexec("git push origin main");\n`,
     `const command = \`\n// ${ALLOW_MARKER}: fake\ngit push origin main\n\`;\n`,
   ];
-  for (const source of fixtures) assert.ok(findGitPushOffenses(source).length >= 1);
+  for (const source of fixtures) assert.ok(findGitPushOffenses(source).length >= 1, source);
 });
 
 test("spawn and execFile arrays work across lines and nested long values", () => {
@@ -81,7 +81,10 @@ test("shell forms cover options, git.exe, relative paths, and platform continuat
     { path: "adapter.ps1", source: "git `\n push origin main\n" },
   ];
   for (const fixture of fixtures) {
-    assert.ok(findGitPushOffenses(fixture.source, { relativePath: fixture.path }).length > 0);
+    assert.ok(
+      findGitPushOffenses(fixture.source, { relativePath: fixture.path }).length > 0,
+      `${fixture.path}: ${fixture.source}`,
+    );
   }
 });
 
@@ -286,14 +289,17 @@ test("multiline data cannot spoof an exemption in YAML, Python, or batch", () =>
 });
 
 test("quoted push and send-pack subcommands are rejected", () => {
-  for (const source of [
-    'git "push" origin main\n',
-    "git 'push' origin main\n",
-    'git send-pack origin refs/heads/main\n',
-    'git-send-pack origin refs/heads/main\n',
-    'spawn("git", ["send-pack", "origin", "refs/heads/main"]);\n',
+  for (const { relativePath, source } of [
+    { relativePath: "adapter.sh", source: 'git "push" origin main\n' },
+    { relativePath: "adapter.sh", source: "git 'push' origin main\n" },
+    { relativePath: "adapter.sh", source: "git send-pack origin refs/heads/main\n" },
+    { relativePath: "adapter.sh", source: "git-send-pack origin refs/heads/main\n" },
+    {
+      relativePath: "adapter.ts",
+      source: 'spawn("git", ["send-pack", "origin", "refs/heads/main"]);\n',
+    },
   ]) {
-    assert.equal(findGitPushOffenses(source, { relativePath: "adapter.sh" }).length, 1, source);
+    assert.equal(findGitPushOffenses(source, { relativePath }).length, 1, source);
   }
 });
 

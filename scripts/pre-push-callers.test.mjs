@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
@@ -11,8 +11,17 @@ const psCaller = path.join(repoRoot, "scripts/pre-push-check.ps1");
 const shCaller = path.join(repoRoot, "scripts/pre-push-check.sh");
 
 function commandAvailable(command) {
-  const result = spawnSync(command, ["--version"], { windowsHide: true, shell: false });
+  const args = command === "sh" ? ["-c", "exit 0"] : ["--version"];
+  const result = spawnSync(command, args, { windowsHide: true, shell: false });
   return !result.error && result.status === 0;
+}
+
+function assertNoTemporaryGateArtifacts(root, logName) {
+  assert.match(readFileSync(path.join(root, logName), "utf8"), /Paperclip/);
+  const temporaryArtifacts = readdirSync(root).filter(
+    (entry) => entry === `${logName}.updates` || entry.startsWith(`${logName}.step-`),
+  );
+  assert.deepEqual(temporaryArtifacts, []);
 }
 
 function withFakeTools(body) {
@@ -62,7 +71,7 @@ function withFakeTools(body) {
 
 function fakeEnvironment(
   fakeBin,
-  { planExit = 0, noPushExit = 0, secretExit = 0, argsLog = "" } = {},
+  { planExit = 0, noPushExit = 0, secretExit = 0, argsLog = "", logPath = "" } = {},
 ) {
   return {
     ...process.env,
@@ -71,6 +80,7 @@ function fakeEnvironment(
     PAPERCLIP_FAKE_NO_PUSH_EXIT: `${noPushExit}`,
     PAPERCLIP_FAKE_SECRET_EXIT: `${secretExit}`,
     PAPERCLIP_FAKE_ARGS_LOG: argsLog,
+    PAPERCLIP_PRE_PUSH_LOG_PATH: logPath,
   };
 }
 
@@ -96,28 +106,33 @@ test("PowerShell caller invokes the no-push gate, propagates failures, and passe
 }, () => {
   withFakeTools((fakeBin) => {
     const update = `refs/heads/topic ${"a".repeat(40)} refs/heads/topic ${"0".repeat(40)}\n`;
-    const invoke = (fakeExits, label) => spawnSync(
-      "pwsh",
-      [
-        "-NoProfile",
-        "-File",
-        psCaller,
-        "-RemoteName",
-        "origin",
-        "-RemoteLocation",
-        "trusted-location",
-        "-LogPath",
-        path.join(fakeBin, `${label}.log`),
-      ],
-      {
-        cwd: repoRoot,
-        encoding: "utf8",
-        env: fakeEnvironment(fakeBin, fakeExits),
-        input: update,
-        windowsHide: true,
-        shell: false,
-      },
-    );
+    const invoke = (fakeExits, label) => {
+      const logName = `${label}.log`;
+      const result = spawnSync(
+        "pwsh",
+        [
+          "-NoProfile",
+          "-File",
+          psCaller,
+          "-RemoteName",
+          "origin",
+          "-RemoteLocation",
+          "trusted-location",
+          "-LogPath",
+          path.join(fakeBin, logName),
+        ],
+        {
+          cwd: repoRoot,
+          encoding: "utf8",
+          env: fakeEnvironment(fakeBin, fakeExits),
+          input: update,
+          windowsHide: true,
+          shell: false,
+        },
+      );
+      assertNoTemporaryGateArtifacts(fakeBin, logName);
+      return result;
+    };
     const noPushFailure = invoke({ noPushExit: 17 }, "ps-no-push-fail");
     assert.equal(noPushFailure.status, 1);
     assert.match(`${noPushFailure.stdout}\n${noPushFailure.stderr}`, /exit 17/);
@@ -159,25 +174,31 @@ test("POSIX caller invokes the no-push gate, propagates failures, and passes aft
 }, () => {
   withFakeTools((fakeBin) => {
     const update = `refs/heads/topic ${"a".repeat(40)} refs/heads/topic ${"0".repeat(40)}\n`;
-    const invoke = (fakeExits) => spawnSync("sh", [shCaller, "origin", "trusted-location"], {
-      cwd: repoRoot,
-      encoding: "utf8",
-      env: fakeEnvironment(fakeBin, fakeExits),
-      input: update,
-      windowsHide: true,
-      shell: false,
-    });
-    const noPushFailure = invoke({ noPushExit: 17 });
+    const invoke = (fakeExits, label) => {
+      const logName = `${label}.log`;
+      const logPath = path.join(fakeBin, logName);
+      const result = spawnSync("sh", [shCaller, "origin", "trusted-location"], {
+        cwd: repoRoot,
+        encoding: "utf8",
+        env: fakeEnvironment(fakeBin, { ...fakeExits, logPath }),
+        input: update,
+        windowsHide: true,
+        shell: false,
+      });
+      assertNoTemporaryGateArtifacts(fakeBin, logName);
+      return result;
+    };
+    const noPushFailure = invoke({ noPushExit: 17 }, "sh-no-push-fail");
     assert.equal(noPushFailure.status, 1);
     assert.match(`${noPushFailure.stdout}\n${noPushFailure.stderr}`, /exit 17/);
-    const secretFailure = invoke({ secretExit: 23 });
+    const secretFailure = invoke({ secretExit: 23 }, "sh-secret-fail");
     assert.equal(secretFailure.status, 1);
     assert.match(`${secretFailure.stdout}\n${secretFailure.stderr}`, /exit 23/);
-    const planFailure = invoke({ planExit: 19 });
+    const planFailure = invoke({ planExit: 19 }, "sh-plan-fail");
     assert.equal(planFailure.status, 1);
     assert.match(`${planFailure.stdout}\n${planFailure.stderr}`, /exit 19/);
     const argsLog = path.join(fakeBin, "sh-args.log");
-    const passing = invoke({ argsLog });
+    const passing = invoke({ argsLog }, "sh-pass");
     assert.equal(passing.status, 0, passing.stderr);
     const observed = readFileSync(argsLog, "utf8");
     for (const script of ["scan-pre-push-secrets.mjs", "run-pre-push-tests.mjs"]) {

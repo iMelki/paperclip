@@ -11,9 +11,8 @@ import {
   parsePushUpdates,
   resolveAuthoritativeRemoteDevOid,
   runGit,
+  validateRemoteInputs,
 } from "./run-pre-push-tests.mjs";
-
-const SAFE_REMOTE_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 
 export class PrePushSecretScanError extends Error {
   constructor(message) {
@@ -29,11 +28,10 @@ export function buildPrePushSecretScans({
   updates,
   git = runGit,
 }) {
-  if (!SAFE_REMOTE_PATTERN.test(remoteName)) {
-    throw new PrePushSecretScanError(`unsafe or missing remote name: ${remoteName || "(empty)"}`);
-  }
-  if (typeof remoteLocation !== "string" || remoteLocation.trim() === "" || remoteLocation.includes("\0")) {
-    throw new PrePushSecretScanError("Git supplied an unsafe or missing remote location");
+  try {
+    validateRemoteInputs(remoteName, remoteLocation);
+  } catch (cause) {
+    throw new PrePushSecretScanError(cause.message);
   }
   if (
     updates.some((update) => !update.deletion) &&

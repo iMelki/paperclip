@@ -14,12 +14,15 @@ const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), ".."
 const script = path.join(repoRoot, "scripts", "run-vitest-stable.mjs");
 const durationsManifest = path.join(repoRoot, "scripts", "general-server-shard-durations.json");
 
-function dryRun(args) {
-  const result = spawnSync(process.execPath, [script, ...args, "--dry-run"], {
+function runScript(args) {
+  return spawnSync(process.execPath, [script, ...args], {
     cwd: repoRoot,
     encoding: "utf8",
   });
-  return result;
+}
+
+function dryRun(args) {
+  return runScript([...args, "--dry-run"]);
 }
 
 function dryRunJson(args) {
@@ -100,6 +103,17 @@ test("the unsharded general-server lane transports exclusions outside Windows ar
 test("shard flags are rejected for the parallel workspace groups", () => {
   const result = dryRun(["--mode", "general", "--group", "general-workspaces-a", "--shard-index", "0", "--shard-count", "3"]);
   assert.notEqual(result.status, 0, "workspace groups must not accept shard flags");
+});
+
+test("shard count alone is rejected for related and exact-file modes", () => {
+  for (const args of [
+    ["--related", "server/src/probe.ts", "--shard-count", "3"],
+    ["--files", "server/src/probe.test.ts", "--shard-count", "3"],
+  ]) {
+    const result = runScript(args);
+    assert.notEqual(result.status, 0, `expected failure for ${args.join(" ")}`);
+    assert.match(result.stderr, /cannot be combined with --mode\/--group\/--shard-\*\/--dry-run/);
+  }
 });
 
 test("duration-aware partition balances skewed weights better than round-robin", () => {

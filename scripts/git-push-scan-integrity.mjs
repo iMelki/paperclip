@@ -1,6 +1,9 @@
 import { spawnSync } from "node:child_process";
 import process from "node:process";
 
+export const GIT_CHILD_MAX_BUFFER = 64 * 1024 * 1024;
+export const GIT_CHILD_TIMEOUT_MS = 120_000;
+
 export class ScanIntegrityError extends Error {
   constructor(message, { path: failedPath, code } = {}) {
     super(message);
@@ -15,41 +18,54 @@ export function normalizeRepoPathKey(file) {
   return process.platform === "win32" ? normalized.toLowerCase() : normalized;
 }
 
-export function containsTrackedPath(relativeDirectory, trackedFiles) {
-  if (!trackedFiles) return true;
-  const directory = normalizeRepoPathKey(relativeDirectory);
-  const prefix = `${directory}/`;
-  return [...trackedFiles].some((file) => {
-    const candidate = normalizeRepoPathKey(file);
-    return candidate === directory || candidate.startsWith(prefix);
-  });
+export function normalizeTrackedPathSet(trackedFiles) {
+  if (!trackedFiles) return trackedFiles;
+  return new Set([...trackedFiles].map(normalizeRepoPathKey));
 }
 
-export function findUnobservedTrackedPaths({ trackedFiles, scanRoots, observedPaths }) {
-  if (!trackedFiles) return [];
+export function containsTrackedPath(relativeDirectory, normalizedTrackedFiles) {
+  if (!normalizedTrackedFiles) return true;
+  const directory = normalizeRepoPathKey(relativeDirectory);
+  const prefix = `${directory}/`;
+  return [...normalizedTrackedFiles].some(
+    (candidate) => candidate === directory || candidate.startsWith(prefix),
+  );
+}
+
+export function findUnobservedTrackedPaths({
+  trackedFiles: normalizedTrackedFiles,
+  scanRoots,
+  observedPaths,
+}) {
+  if (!normalizedTrackedFiles) return [];
   const roots = scanRoots.map((root) => normalizeRepoPathKey(root));
   const observed = new Set([...observedPaths].map(normalizeRepoPathKey));
-  return [...trackedFiles]
-    .filter((file) => {
-      const candidate = normalizeRepoPathKey(file);
+  return [...normalizedTrackedFiles]
+    .filter((candidate) => {
       const inScope = roots.some((root) => candidate === root || candidate.startsWith(`${root}/`));
       return inScope && !observed.has(candidate);
     })
     .sort();
 }
 
-export function findPathsUnderRoots(paths, scanRoots) {
+export function findPathsUnderRoots(normalizedPaths, scanRoots) {
   const roots = scanRoots.map((root) => normalizeRepoPathKey(root));
-  return [...paths].filter((file) => {
-    const candidate = normalizeRepoPathKey(file);
+  return [...normalizedPaths].filter((candidate) => {
     return roots.some((root) => candidate === root || candidate.startsWith(`${root}/`));
   }).sort();
 }
 
 export function assertNormalIndexState(nonStandardIndexPaths, scanRoots = null) {
+  if (nonStandardIndexPaths == null) {
+    throw new ScanIntegrityError(
+      "index state was not supplied; a tracked manifest must provide both tracked files and index state",
+      { code: "EINDEXUNKNOWN" },
+    );
+  }
+  const normalizedIndexPaths = normalizeTrackedPathSet(nonStandardIndexPaths);
   const hiddenIndexPaths = scanRoots
-    ? findPathsUnderRoots(nonStandardIndexPaths, scanRoots)
-    : [...nonStandardIndexPaths].sort();
+    ? findPathsUnderRoots(normalizedIndexPaths, scanRoots)
+    : [...normalizedIndexPaths].sort();
   if (hiddenIndexPaths.length > 0) {
     const scope = scanRoots ? " under scan roots" : "";
     throw new ScanIntegrityError(
@@ -81,6 +97,9 @@ export function parseTrackedManifest(output, repoRoot = ".") {
 export function readTrackedManifest(repoRoot, spawn = spawnSync) {
   const result = spawn("git", ["-C", repoRoot, "ls-files", "-v", "-z"], {
     encoding: null,
+    killSignal: "SIGKILL",
+    maxBuffer: GIT_CHILD_MAX_BUFFER,
+    timeout: GIT_CHILD_TIMEOUT_MS,
     windowsHide: true,
     shell: false,
   });

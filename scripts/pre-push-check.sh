@@ -40,9 +40,22 @@ case "$GIT_LOG_PATH" in
   /* | [A-Za-z]:/*) LOG_DIR="$GIT_LOG_PATH" ;;
   *) LOG_DIR="$REPO_ROOT/$GIT_LOG_PATH" ;;
 esac
-mkdir -p "$LOG_DIR" || exit 1
-LOG_FILE="$LOG_DIR/$(date -u +%Y%m%dT%H%M%SZ)-$$.log"
+DEFAULT_LOG_FILE="$LOG_DIR/$(date -u +%Y%m%dT%H%M%SZ)-$$.log"
+LOG_FILE=${PAPERCLIP_PRE_PUSH_LOG_PATH:-$DEFAULT_LOG_FILE}
+mkdir -p "$(dirname -- "$LOG_FILE")" || exit 1
 UPDATES_FILE="${LOG_FILE}.updates"
+
+cleanup() {
+  CLEANUP_STATUS=$?
+  trap - 0
+  rm -f "$UPDATES_FILE" || :
+  if [ -n "${STEP_LOG-}" ]; then
+    rm -f "$STEP_LOG" || :
+  fi
+  exit "$CLEANUP_STATUS"
+}
+trap cleanup 0
+
 cat > "$UPDATES_FILE" || exit 2
 if [ ! -s "$UPDATES_FILE" ]; then
   echo "FAIL: Git supplied no pre-push ref updates on stdin." >&2
@@ -76,6 +89,8 @@ run_step() {
   STEP_STATUS=$?
   cat "$STEP_LOG"
   cat "$STEP_LOG" >> "$LOG_FILE"
+  rm -f "$STEP_LOG" || :
+  STEP_LOG=
   STEP_ELAPSED=$(( $(date +%s) - STEP_START ))
   if [ "$STEP_STATUS" -eq 0 ]; then
     echo "  ($NAME took ${STEP_ELAPSED}s)"

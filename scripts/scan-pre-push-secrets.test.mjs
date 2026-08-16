@@ -51,6 +51,17 @@ test("builds one exact scan per update and uses authoritative dev for a new bran
 
 test("rejects an unsafe remote before constructing any scan", () => {
   const updates = parsePushUpdates(`refs/heads/topic ${B} refs/heads/topic ${A}\n`);
+  for (const remoteName of [undefined, null, {}, ""]) {
+    assert.throws(
+      () => buildPrePushSecretScans({
+        repoRoot: "C:/repo",
+        remoteName,
+        remoteLocation: "git@example.test:paperclip.git",
+        updates,
+      }),
+      /unsafe or missing remote name/,
+    );
+  }
   assert.throws(
     () => buildPrePushSecretScans({
       repoRoot: "C:/repo",
@@ -68,6 +79,17 @@ test("rejects an unsafe remote before constructing any scan", () => {
       updates,
     }),
     /unsafe or missing remote name/,
+  );
+  assert.throws(
+    () => buildPrePushSecretScans({
+      repoRoot: "C:/repo",
+      remoteName: "origin",
+      remoteLocation: "\0unsafe",
+      updates,
+    }),
+    (error) =>
+      error instanceof PrePushSecretScanError &&
+      /unsafe or missing remote location/.test(error.message),
   );
 });
 

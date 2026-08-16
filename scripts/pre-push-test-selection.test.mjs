@@ -1,36 +1,56 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import {
+  mkdirSync,
+  mkdtempSync,
+  realpathSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import process from "node:process";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 
 import {
   TestSelectionIntegrityError,
   classifyTestRunner,
   isTestBearingProductionFile,
   normalizeRepoPath,
+  parseCli,
   selectPrePushTests,
 } from "./pre-push-test-selection.mjs";
 
+const selectorScript = fileURLToPath(new URL("./pre-push-test-selection.mjs", import.meta.url));
+
 function withFixture(run) {
-  const repoRoot = mkdtempSync(path.join(os.tmpdir(), "paperclip-pre-push-selector-"));
+  const temporaryRoot = mkdtempSync(path.join(os.tmpdir(), "paperclip-pre-push-selector-"));
+  const repoRoot = realpathSync(temporaryRoot);
+  const trackedFiles = new Set();
   const write = (relativePath, contents = "") => {
     const absolutePath = path.join(repoRoot, relativePath);
     mkdirSync(path.dirname(absolutePath), { recursive: true });
     writeFileSync(absolutePath, contents);
+    trackedFiles.add(relativePath.replaceAll("\\", "/"));
   };
   try {
-    return run({ repoRoot, write });
+    return run({ repoRoot, trackedFiles, write });
   } finally {
-    rmSync(repoRoot, { recursive: true, force: true });
+    rmSync(temporaryRoot, { recursive: true, force: true });
   }
 }
 
 test("selects an exact changed Vitest suite without tracing its import graph", () => {
-  withFixture(({ repoRoot, write }) => {
+  withFixture(({ repoRoot, trackedFiles, write }) => {
     write("ui/src/lib/format.test.ts", "test('format', () => {});\n");
     write("ui/src/lib/unrelated.test.ts", "test('unrelated', () => {});\n");
-    const result = selectPrePushTests({ repoRoot, changedFiles: ["ui/src/lib/format.test.ts"] });
+    const result = selectPrePushTests({
+      repoRoot,
+      changedFiles: ["ui/src/lib/format.test.ts"],
+      trackedFiles,
+    });
     assert.deepEqual(result.vitestFiles, ["ui/src/lib/format.test.ts"]);
     assert.deepEqual(result.nodeTestFiles, []);
     assert.deepEqual(result.selectionErrors, []);
@@ -38,12 +58,16 @@ test("selects an exact changed Vitest suite without tracing its import graph", (
 });
 
 test("selects deterministic co-located and parent __tests__ siblings", () => {
-  withFixture(({ repoRoot, write }) => {
+  withFixture(({ repoRoot, trackedFiles, write }) => {
     write("server/src/services/heartbeat.ts", "export const heartbeat = true;\n");
     write("server/src/services/heartbeat.test.ts", "test('direct', () => {});\n");
     write("server/src/__tests__/heartbeat-recovery.test.ts", "test('recovery', () => {});\n");
     write("server/src/__tests__/unrelated.test.ts", "test('other', () => {});\n");
-    const result = selectPrePushTests({ repoRoot, changedFiles: ["server/src/services/heartbeat.ts"] });
+    const result = selectPrePushTests({
+      repoRoot,
+      changedFiles: ["server/src/services/heartbeat.ts"],
+      trackedFiles,
+    });
     assert.deepEqual(result.vitestFiles, [
       "server/src/__tests__/heartbeat-recovery.test.ts",
       "server/src/services/heartbeat.test.ts",
@@ -63,11 +87,12 @@ test("routes each test family to its real runner", () => {
 });
 
 test("fails closed in its result when production code has no sibling test", () => {
-  withFixture(({ repoRoot, write }) => {
+  withFixture(({ repoRoot, trackedFiles, write }) => {
     write("packages/adapter-utils/src/uncovered.ts", "export const uncovered = true;\n");
     const result = selectPrePushTests({
       repoRoot,
       changedFiles: ["packages/adapter-utils/src/uncovered.ts"],
+      trackedFiles,
     });
     assert.deepEqual(result.vitestFiles, []);
     assert.deepEqual(result.uncoveredProductionFiles, ["packages/adapter-utils/src/uncovered.ts"]);
@@ -89,8 +114,12 @@ test("a discovered sibling must be tracked in the pushed HEAD", () => {
 });
 
 test("removed tests require hosted CI instead of making topic-branch deletion impossible", () => {
-  withFixture(({ repoRoot }) => {
-    const result = selectPrePushTests({ repoRoot, changedFiles: ["ui/src/removed.test.ts"] });
+  withFixture(({ repoRoot, trackedFiles }) => {
+    const result = selectPrePushTests({
+      repoRoot,
+      changedFiles: ["ui/src/removed.test.ts"],
+      trackedFiles,
+    });
     assert.deepEqual(result.removedTestFiles, ["ui/src/removed.test.ts"]);
     assert.deepEqual(result.hostedCiFiles, ["ui/src/removed.test.ts"]);
     assert.deepEqual(result.selectionErrors, []);
@@ -98,11 +127,12 @@ test("removed tests require hosted CI instead of making topic-branch deletion im
 });
 
 test("a removed production file runs a surviving sibling or requires hosted CI", () => {
-  withFixture(({ repoRoot, write }) => {
+  withFixture(({ repoRoot, trackedFiles, write }) => {
     write("server/src/removed-with-test.test.ts", "test('remaining contract', () => {});\n");
     const withSibling = selectPrePushTests({
       repoRoot,
       changedFiles: ["server/src/removed-with-test.ts"],
+      trackedFiles,
     });
     assert.deepEqual(withSibling.removedProductionFiles, ["server/src/removed-with-test.ts"]);
     assert.deepEqual(withSibling.vitestFiles, ["server/src/removed-with-test.test.ts"]);
@@ -112,6 +142,7 @@ test("a removed production file runs a surviving sibling or requires hosted CI",
     const withoutSibling = selectPrePushTests({
       repoRoot,
       changedFiles: ["server/src/removed-without-test.ts"],
+      trackedFiles,
     });
     assert.deepEqual(withoutSibling.removedProductionFiles, ["server/src/removed-without-test.ts"]);
     assert.deepEqual(withoutSibling.hostedCiFiles, ["server/src/removed-without-test.ts"]);
@@ -120,7 +151,7 @@ test("a removed production file runs a surviving sibling or requires hosted CI",
 });
 
 test("workflow, hook, manifest, and config changes require hosted CI", () => {
-  withFixture(({ repoRoot, write }) => {
+  withFixture(({ repoRoot, trackedFiles, write }) => {
     const files = [
       ".github/workflows/pr.yml",
       ".husky/pre-push",
@@ -128,13 +159,13 @@ test("workflow, hook, manifest, and config changes require hosted CI", () => {
       "vitest.config.ts",
     ];
     files.forEach((file) => write(file, "x\n"));
-    const result = selectPrePushTests({ repoRoot, changedFiles: files });
+    const result = selectPrePushTests({ repoRoot, changedFiles: files, trackedFiles });
     assert.deepEqual(result.hostedCiFiles, [...files].sort());
   });
 });
 
 test("non-JavaScript runtime changes are explicitly assigned to hosted CI", () => {
-  withFixture(({ repoRoot, write }) => {
+  withFixture(({ repoRoot, trackedFiles, write }) => {
     const files = [
       "server/src/db/migration.sql",
       "packages/adapters/codex-local/src/server/bootstrap.sh",
@@ -142,34 +173,34 @@ test("non-JavaScript runtime changes are explicitly assigned to hosted CI", () =
       ".github/scripts/check.py",
     ];
     files.forEach((file) => write(file, "runtime change\n"));
-    const result = selectPrePushTests({ repoRoot, changedFiles: files });
+    const result = selectPrePushTests({ repoRoot, changedFiles: files, trackedFiles });
     assert.deepEqual(result.hostedCiFiles, [...files].sort());
     assert.deepEqual(result.selectionErrors, []);
   });
 });
 
 test("root enforcement and build configuration changes cannot fall through unclassified", () => {
-  withFixture(({ repoRoot, write }) => {
+  withFixture(({ repoRoot, trackedFiles, write }) => {
     const files = ["Dockerfile", ".gitleaks.toml", "tsconfig.json", ".github/dependabot.yml"];
     files.forEach((file) => write(file, "configuration\n"));
-    const result = selectPrePushTests({ repoRoot, changedFiles: files });
+    const result = selectPrePushTests({ repoRoot, changedFiles: files, trackedFiles });
     assert.deepEqual(result.hostedCiFiles, [...files].sort());
     assert.deepEqual(result.nonProductionFiles, []);
   });
 });
 
 test("runtime Markdown and media assets require hosted CI", () => {
-  withFixture(({ repoRoot, write }) => {
+  withFixture(({ repoRoot, trackedFiles, write }) => {
     const files = ["ui/src/assets/logo.svg", "server/src/template.md"];
     files.forEach((file) => write(file, "runtime asset\n"));
-    const result = selectPrePushTests({ repoRoot, changedFiles: files });
+    const result = selectPrePushTests({ repoRoot, changedFiles: files, trackedFiles });
     assert.deepEqual(result.hostedCiFiles, [...files].sort());
     assert.deepEqual(result.nonProductionFiles, []);
   });
 });
 
 test("documentation is explicitly classified as non-production", () => {
-  withFixture(({ repoRoot, write }) => {
+  withFixture(({ repoRoot, trackedFiles, write }) => {
     const files = [
       "CHANGELOG.md",
       "doc/DEVELOPING.md",
@@ -177,16 +208,16 @@ test("documentation is explicitly classified as non-production", () => {
       "packages/adapters/README.md",
     ];
     files.forEach((file) => write(file, "documentation\n"));
-    const result = selectPrePushTests({ repoRoot, changedFiles: files });
+    const result = selectPrePushTests({ repoRoot, changedFiles: files, trackedFiles });
     assert.deepEqual(result.hostedCiFiles, []);
     assert.deepEqual(result.nonProductionFiles, [...files].sort());
   });
 });
 
 test("rejects empty, absolute, parent-relative, and symlink inputs", () => {
-  withFixture(({ repoRoot, write }) => {
+  withFixture(({ repoRoot, trackedFiles, write }) => {
     assert.throws(
-      () => selectPrePushTests({ repoRoot, changedFiles: [] }),
+      () => selectPrePushTests({ repoRoot, changedFiles: [], trackedFiles }),
       /no resolvable changed paths/,
     );
     for (const badPath of ["../outside.ts", "C:/outside.ts", "/outside.ts", " scripts/clean.mjs"]) {
@@ -202,10 +233,28 @@ test("rejects empty, absolute, parent-relative, and symlink inputs", () => {
       process.platform === "win32" ? "junction" : "dir",
     );
     assert.throws(
-      () => selectPrePushTests({ repoRoot, changedFiles: ["ui/src/link.test.ts"] }),
+      () => selectPrePushTests({ repoRoot, changedFiles: ["ui/src/link.test.ts"], trackedFiles }),
       /symbolic-link traversal is not valid/,
     );
   });
+});
+
+test("rejects missing pushed-HEAD tracking data and an option-shaped repo root", () => {
+  withFixture(({ repoRoot, write }) => {
+    write("ui/src/lib/format.test.ts", "test('format', () => {});\n");
+    assert.throws(
+      () => selectPrePushTests({ repoRoot, changedFiles: ["ui/src/lib/format.test.ts"] }),
+      /tracked files from the pushed HEAD are required/,
+    );
+    const cli = spawnSync(
+      process.execPath,
+      [selectorScript, "--repo-root", repoRoot, "ui/src/lib/format.test.ts"],
+      { cwd: repoRoot, encoding: "utf8", windowsHide: true, shell: false },
+    );
+    assert.equal(cli.status, 2);
+    assert.match(cli.stderr, /tracked files from the pushed HEAD are required/);
+  });
+  assert.throws(() => parseCli(["--repo-root", "--stdin"]), /--repo-root requires a value/);
 });
 
 test("does not treat generated declarations or docs as test-bearing production", () => {

@@ -6,6 +6,8 @@ import path from "node:path";
 import process from "node:process";
 
 import {
+  GIT_CHILD_MAX_BUFFER,
+  GIT_CHILD_TIMEOUT_MS,
   assertNormalIndexState,
   parseTrackedManifest,
 } from "./git-push-scan-integrity.mjs";
@@ -65,12 +67,24 @@ export function parsePushUpdates(input) {
   return updates;
 }
 
-export function runGit(repoRoot, args, { encoding = null } = {}) {
-  const result = spawnSync("git", args, {
+export function runGit(
+  repoRoot,
+  args,
+  {
+    encoding = null,
+    maxBuffer = GIT_CHILD_MAX_BUFFER,
+    timeout = GIT_CHILD_TIMEOUT_MS,
+    spawn = spawnSync,
+  } = {},
+) {
+  const result = spawn("git", args, {
     cwd: repoRoot,
     encoding,
+    killSignal: "SIGKILL",
+    maxBuffer,
     windowsHide: true,
     shell: false,
+    timeout,
   });
   if (result.error) {
     throw new PrePushIntegrityError(`could not start git ${args[0]}: ${result.error.message}`);
@@ -93,9 +107,10 @@ function normalizeNativePath(file) {
   return process.platform === "win32" ? resolved.toLowerCase() : resolved;
 }
 
-function validateRemoteInputs(remoteName, remoteLocation) {
-  if (!SAFE_REMOTE_PATTERN.test(remoteName)) {
-    throw new PrePushIntegrityError(`unsafe or missing remote name: ${remoteName || "(empty)"}`);
+export function validateRemoteInputs(remoteName, remoteLocation) {
+  if (typeof remoteName !== "string" || !SAFE_REMOTE_PATTERN.test(remoteName)) {
+    const renderedName = typeof remoteName === "string" && remoteName !== "" ? remoteName : "(empty or non-string)";
+    throw new PrePushIntegrityError(`unsafe or missing remote name: ${renderedName}`);
   }
   if (typeof remoteLocation !== "string" || remoteLocation.trim() === "" || remoteLocation.includes("\0")) {
     throw new PrePushIntegrityError("Git supplied an unsafe or missing remote location");
@@ -194,6 +209,16 @@ function parseNullDelimited(output) {
   return buffer.toString("utf8").split("\0").filter(Boolean);
 }
 
+export function readHeadTrackedFiles({ repoRoot, git = runGit }) {
+  const headOid = readGitText(git(repoRoot, ["rev-parse", "--verify", "HEAD"], {
+    encoding: "utf8",
+  }));
+  validateOid(headOid, "current HEAD oid");
+  return new Set(parseNullDelimited(
+    git(repoRoot, ["ls-tree", "-r", "-z", "--name-only", headOid]),
+  ));
+}
+
 export function resolveOutgoingChangedFiles({
   repoRoot,
   remoteName,
@@ -214,7 +239,16 @@ export function resolveOutgoingChangedFiles({
     if (!update.creation) {
       const output = git(
         repoRoot,
-        ["diff", "--name-only", "-z", "--diff-filter=ACDMRTUXB", update.remoteOid, update.localOid, "--"],
+        [
+          "diff",
+          "--name-only",
+          "-z",
+          "--no-renames",
+          "--diff-filter=ACDMRTUXB",
+          update.remoteOid,
+          update.localOid,
+          "--",
+        ],
       );
       parseNullDelimited(output).forEach((file) => changedFiles.add(file));
       continue;
@@ -229,7 +263,16 @@ export function resolveOutgoingChangedFiles({
     git(repoRoot, ["merge-base", "--is-ancestor", remoteDevOid, update.localOid]);
     const output = git(
       repoRoot,
-      ["diff", "--name-only", "-z", "--diff-filter=ACDMRTUXB", remoteDevOid, update.localOid, "--"],
+      [
+        "diff",
+        "--name-only",
+        "-z",
+        "--no-renames",
+        "--diff-filter=ACDMRTUXB",
+        remoteDevOid,
+        update.localOid,
+        "--",
+      ],
     );
     parseNullDelimited(output).forEach((file) => changedFiles.add(file));
   }
@@ -368,6 +411,8 @@ if (isMainModule(import.meta.url)) {
         updates,
       });
       targetRefs = updates.map((update) => update.remoteRef);
+    } else {
+      trackedFiles = readHeadTrackedFiles({ repoRoot: options.repoRoot });
     }
     if (targetRefs.length === 0) targetRefs = ["refs/heads/topic"];
     if (changedFiles.length === 0) {

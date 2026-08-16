@@ -11,22 +11,23 @@ const REQUIRED_POLICY_VALIDATION_COMMANDS = [
   "node ./scripts/check-pr-workflow-trigger.mjs",
 ];
 
-const REQUIRED_POLICY_TEST_GROUPS = [
-  [
-    "./scripts/check-no-git-push-source.test.mjs",
-    "./scripts/git-push-scan-integrity.test.mjs",
-    "./scripts/check-no-git-push.test.mjs",
-  ],
-  ["./scripts/check-pr-workflow-trigger.test.mjs"],
-  [
-    "./scripts/is-main-module.test.mjs",
-    "./scripts/pre-push-callers.test.mjs",
-    "./scripts/pre-push-test-selection.test.mjs",
-    "./scripts/run-vitest-direct.test.mjs",
-    "./scripts/scan-pre-push-secrets.test.mjs",
-    "./scripts/run-pre-push-tests.test.mjs",
-    "./scripts/verify-gitleaks.test.mjs",
-  ],
+const REQUIRED_JOB_KEYS = {
+  "secret-scan": new Set(["name", "runs-on", "timeout-minutes", "permissions", "steps"]),
+  policy: new Set(["name", "needs", "runs-on", "timeout-minutes", "outputs", "permissions", "steps"]),
+};
+
+const REQUIRED_POLICY_TEST_PATHS = [
+  "./scripts/check-no-git-push-source.test.mjs",
+  "./scripts/git-push-scan-integrity.test.mjs",
+  "./scripts/check-no-git-push.test.mjs",
+  "./scripts/check-pr-workflow-trigger.test.mjs",
+  "./scripts/is-main-module.test.mjs",
+  "./scripts/pre-push-callers.test.mjs",
+  "./scripts/pre-push-test-selection.test.mjs",
+  "./scripts/run-vitest-direct.test.mjs",
+  "./scripts/scan-pre-push-secrets.test.mjs",
+  "./scripts/run-pre-push-tests.test.mjs",
+  "./scripts/verify-gitleaks.test.mjs",
 ];
 
 function extractTopLevelBlock(workflow, key) {
@@ -37,6 +38,8 @@ function extractTopLevelBlock(workflow, key) {
   const block = [];
   for (let index = start + 1; index < lines.length; index += 1) {
     const line = lines[index];
+    // YAML comments do not close a mapping, even at column zero. Keep them in
+    // the block so later indented entries are still validated; readers skip comments.
     if (line !== "" && !/^\s/.test(line) && !/^\s*#/.test(line)) break;
     block.push(line);
   }
@@ -140,7 +143,6 @@ function extractStepRuns(jobBlock) {
     else stepKeys.push(openerKey);
     for (const line of stepLines.slice(1)) {
       if (line.trim() === "" || line.trimStart().startsWith("#") || !/^ {8}\S/.test(line)) continue;
-      if (/^ {9}/.test(line)) continue;
       const key = line.match(/^        ([A-Za-z0-9_-]+)\s*:/)?.[1];
       if (!key) ambiguousMapping = true;
       else stepKeys.push(key);
@@ -154,7 +156,7 @@ function extractStepRuns(jobBlock) {
       command: readRunScalar(stepLines, runIndexes[0]),
       masksFailure:
         ambiguousMapping ||
-        stepKeys.some((key) => ["if", "continue-on-error", "shell"].includes(key)),
+        stepKeys.some((key) => !["name", "run"].includes(key)),
     });
   }
   return steps;
@@ -168,6 +170,25 @@ function hasExactUnmaskedStep(steps, command) {
   return steps.some(
     (step) => step.command === command && !step.masksFailure && !containsShellControl(step.command),
   );
+}
+
+function collectActiveNodeTestPaths(steps) {
+  const testPaths = new Set();
+  for (const step of steps) {
+    if (step.masksFailure || containsShellControl(step.command)) continue;
+    const tokens = step.command?.trim().split(/\s+/) ?? [];
+    const paths = tokens.slice(2);
+    if (
+      tokens[0] !== "node" ||
+      tokens[1] !== "--test" ||
+      paths.length === 0 ||
+      paths.some((testPath) => !/^\.\/scripts\/\S+\.test\.mjs$/.test(testPath))
+    ) {
+      continue;
+    }
+    paths.forEach((testPath) => testPaths.add(testPath));
+  }
+  return testPaths;
 }
 
 function validateTopLevelMapping(workflow) {
@@ -192,6 +213,11 @@ function validateTopLevelMapping(workflow) {
   }
   if (keys.filter((key) => key === "on").length !== 1) {
     failures.push("workflow must define exactly one plain top-level on block");
+  }
+  for (const forbidden of ["env", "defaults"]) {
+    if (keys.includes(forbidden)) {
+      failures.push(`workflow must not define top-level ${forbidden} execution context`);
+    }
   }
   return failures;
 }
@@ -270,11 +296,24 @@ function readRequiredJob(jobsBlock, jobName, failures) {
     { allowInlineValues: true },
   );
   failures.push(...jobKeys.failures);
+  const duplicateKeys = [...new Set(
+    jobKeys.keys.filter((key, index) => jobKeys.keys.indexOf(key) !== index),
+  )];
+  if (duplicateKeys.length > 0) {
+    failures.push(`${jobName} job must not define duplicate keys: ${duplicateKeys.join(", ")}`);
+  }
   if (jobKeys.keys.filter((key) => key === "steps").length !== 1) {
     failures.push(`${jobName} job must define exactly one plain steps block`);
   }
   if (jobKeys.keys.some((key) => ["if", "continue-on-error", "defaults"].includes(key))) {
     failures.push(`${jobName} job must run unconditionally without custom defaults`);
+  }
+  const unsupportedKeys = jobKeys.keys.filter((key) => !REQUIRED_JOB_KEYS[jobName].has(key));
+  if (unsupportedKeys.length > 0) {
+    failures.push(`${jobName} job contains unsupported execution keys: ${unsupportedKeys.join(", ")}`);
+  }
+  if ((job.match(/^    runs-on: ubuntu-latest$/gm) ?? []).length !== 1) {
+    failures.push(`${jobName} job must run exactly once on ubuntu-latest`);
   }
   return { job, steps: extractStepRuns(job) };
 }
@@ -295,18 +334,19 @@ function validateSecretJob(jobsBlock, failures) {
 }
 
 function validatePolicyJob(jobsBlock, failures) {
-  const { steps } = readRequiredJob(jobsBlock, "policy", failures);
+  const { job, steps } = readRequiredJob(jobsBlock, "policy", failures);
+  if ((job.match(/^    needs: \[secret-scan\]$/gm) ?? []).length !== 1) {
+    failures.push("policy job must depend exactly on secret-scan");
+  }
   for (const command of REQUIRED_POLICY_VALIDATION_COMMANDS) {
     if (!hasExactUnmaskedStep(steps, command)) {
       failures.push(`workflow policy validation is missing active command: ${command}`);
     }
   }
-  for (const paths of REQUIRED_POLICY_TEST_GROUPS) {
-    const command = `node --test ${paths.join(" ")}`;
-    if (!hasExactUnmaskedStep(steps, command)) {
-      for (const testPath of paths) {
-        failures.push(`workflow policy tests are missing ${testPath}`);
-      }
+  const activeTestPaths = collectActiveNodeTestPaths(steps);
+  for (const testPath of REQUIRED_POLICY_TEST_PATHS) {
+    if (!activeTestPaths.has(testPath)) {
+      failures.push(`workflow policy tests are missing ${testPath}`);
     }
   }
 }

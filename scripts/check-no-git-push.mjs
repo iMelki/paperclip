@@ -14,8 +14,8 @@
  * Opt-in mechanism: an immediately preceding, standalone line comment in the
  * exact form `// paperclip:allow-git-push: <reason>` (or `# ...` in POSIX
  * shell) suppresses one match. Languages with ambiguous multiline strings do
- * not accept markers. Markers inside strings, commands, or trailing comments
- * do not.
+ * not accept markers. A marker inside a string, command, or trailing comment
+ * does not suppress a match.
  *
  * FAIL-CLOSED CONTRACT (#76)
  * A static scanner that cannot read its subject has not cleared it. Every
@@ -53,6 +53,7 @@ import {
   assertNormalIndexState,
   containsTrackedPath,
   findUnobservedTrackedPaths,
+  normalizeTrackedPathSet,
   readTrackedManifest,
   readTrackedFiles,
 } from "./git-push-scan-integrity.mjs";
@@ -182,11 +183,11 @@ function normalizeNativePath(file) {
   return process.platform === "win32" ? resolved.toLowerCase() : resolved;
 }
 
-function assertCanonicalScanPath(absolutePath, repoRoot, fs) {
-  let realRepoRoot;
+function assertCanonicalScanPath(absolutePath, repoRoot, fs, realRepoRootHint) {
+  let realRepoRoot = realRepoRootHint;
   let realPath;
   try {
-    realRepoRoot = fs.realpathSync(repoRoot);
+    realRepoRoot ??= fs.realpathSync(repoRoot);
     realPath = fs.realpathSync(absolutePath);
   } catch (cause) {
     throw new ScanIntegrityError(
@@ -207,6 +208,7 @@ function assertCanonicalScanPath(absolutePath, repoRoot, fs) {
       { path: toRepoRelative(repoRoot, absolutePath), code: "ESYMLINK" },
     );
   }
+  return realRepoRoot;
 }
 
 /**
@@ -261,12 +263,12 @@ export function collectScannableFiles(
       { path: toRepoRelative(repoRoot, absoluteRoot), code: "ENOTDIR" },
     );
   }
-  assertCanonicalScanPath(absoluteRoot, repoRoot, fs);
+  const realRepoRoot = assertCanonicalScanPath(absoluteRoot, repoRoot, fs);
 
   const stack = [absoluteRoot];
   while (stack.length > 0) {
     const current = stack.pop();
-    assertCanonicalScanPath(current, repoRoot, fs);
+    assertCanonicalScanPath(current, repoRoot, fs, realRepoRoot);
     if (coverage) coverage.directoriesVisited += 1;
     let entries;
     try {
@@ -306,17 +308,12 @@ export function collectScannableFiles(
       }
       if (!entry.isFile()) {
         throw new ScanIntegrityError(
-          `unsupported filesystem entry inside scan root: ${toRepoRelative(repoRoot, path.join(current, entry.name))}`,
-          {
-            path: toRepoRelative(repoRoot, path.join(current, entry.name)),
-            code: "EUNSUPPORTED",
-          },
+          `unsupported filesystem entry inside scan root: ${relativeEntry}`,
+          { path: relativeEntry, code: "EUNSUPPORTED" },
         );
       }
-      const absolute = path.join(current, entry.name);
-      const relative = path.relative(repoRoot, absolute).split(path.sep).join("/");
-      observedPaths?.add(relative);
-      if (shouldScanFile(relative)) results.push({ absolute, relative });
+      observedPaths?.add(relativeEntry);
+      if (shouldScanFile(relativeEntry)) results.push({ absolute: entryPath, relative: relativeEntry });
       else if (coverage) coverage.filesSkippedByExtension += 1;
     }
   }
@@ -350,17 +347,20 @@ export function runCheck({
 
   try {
     rootDeclarations = scanRoots.map(normalizeScanRoot);
-    assertNormalIndexState(
-      nonStandardIndexPaths ?? [],
-      rootDeclarations.map((declaration) => declaration.path),
-    );
+    if ((trackedFiles === null) !== (nonStandardIndexPaths === null)) {
+      throw new ScanIntegrityError("tracked files and index state must be supplied together", { code: "EINDEXUNKNOWN" });
+    }
+    const normalizedTrackedFiles = trackedFiles === null ? null : normalizeTrackedPathSet(trackedFiles);
+    if (nonStandardIndexPaths !== null) {
+      assertNormalIndexState(nonStandardIndexPaths, rootDeclarations.map((entry) => entry.path));
+    }
     for (const declaration of rootDeclarations) {
       const scanRoot = declaration.path;
       const absoluteRoot = resolveScanRoot(repoRoot, scanRoot);
       const files = collectScannableFiles(absoluteRoot, repoRoot, {
         fs,
         coverage,
-        trackedFiles,
+        trackedFiles: normalizedTrackedFiles,
         observedPaths,
         onMissingRoot: () => {
           missingRoots.push(scanRoot);
@@ -396,7 +396,7 @@ export function runCheck({
       }
     }
     const unobservedTracked = findUnobservedTrackedPaths({
-      trackedFiles,
+      trackedFiles: normalizedTrackedFiles,
       scanRoots: rootDeclarations.map((declaration) => declaration.path),
       observedPaths,
     });

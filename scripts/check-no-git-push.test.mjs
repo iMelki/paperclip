@@ -23,6 +23,7 @@ import {
   collectScannableFiles,
   runCheck,
 } from "./check-no-git-push.mjs";
+import { normalizeTrackedPathSet } from "./git-push-scan-integrity.mjs";
 
 /**
  * Real node:fs, except that one path fails with a chosen errno.
@@ -573,8 +574,7 @@ test("#76: collectScannableFiles throws ScanIntegrityError rather than returning
 });
 
 test("collectScannableFiles excludes docs and only untracked declared generated directories", () => {
-  const tmpRoot = mkdtempSync(path.join(os.tmpdir(), "no-git-push-collect-"));
-  try {
+  withTempRepo("no-git-push-collect-", (tmpRoot) => {
     const adaptersRoot = path.join(tmpRoot, "packages/adapters/sample");
     mkdirSync(path.join(adaptersRoot, "src"), { recursive: true });
     writeFileSync(path.join(adaptersRoot, "src/index.ts"), "");
@@ -602,9 +602,20 @@ test("collectScannableFiles excludes docs and only untracked declared generated 
     assert.deepEqual(untrackedFiles.map((entry) => entry.relative), [
       "packages/adapters/sample/src/index.ts",
     ]);
-  } finally {
-    rmSync(tmpRoot, { recursive: true, force: true });
-  }
+  });
+});
+
+test("runCheck rejects a tracked manifest without its index state", () => {
+  const errors = [];
+  const code = runCheck({
+    repoRoot: ".",
+    scanRoots: ["packages/adapters"],
+    trackedFiles: new Set(["packages/adapters/example.ts"]),
+    log: () => {},
+    error: (message) => errors.push(message),
+  });
+  assert.equal(code, SCAN_INTEGRITY_EXIT_CODE);
+  assert.match(errors.join("\n"), /tracked files and index state must be supplied together/);
 });
 
 test("#76: undeclared extensions and extensionless scripts fail closed", () => {
@@ -638,6 +649,7 @@ test("tracked paths under scan roots must be physically observed or classified",
         "packages/adapters/visible.ts",
         "packages/adapters/hidden.ts",
       ]),
+      nonStandardIndexPaths: new Set(),
       log: () => {},
       error: (message) => errors.push(message),
     });
@@ -680,7 +692,7 @@ test("Windows tracked generated-directory matching is case-insensitive", {
     writeFileSync(path.join(scanRoot, "dist/index.js"), "export {};\n");
     assert.throws(
       () => collectScannableFiles(scanRoot, tmpRoot, {
-        trackedFiles: new Set(["packages/adapters/Dist/index.js"]),
+        trackedFiles: normalizeTrackedPathSet(new Set(["packages/adapters/Dist/index.js"])),
       }),
       /tracked generated\/cache directory inside scan root requires explicit review/,
     );

@@ -24,6 +24,8 @@ test("entry-point comparison resolves junction and symlink aliases", () => {
       true,
     );
     assert.equal(isMainModule(pathToFileURL(modulePath), otherPath), false);
+    assert.equal(isMainModule(pathToFileURL(modulePath), ""), false);
+    assert.equal(isMainModule(pathToFileURL(modulePath), null), false);
     assert.throws(
       () => isMainModule(pathToFileURL(modulePath), path.join(realDirectory, "missing.mjs")),
       /cannot resolve ESM entry point/,

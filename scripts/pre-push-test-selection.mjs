@@ -45,7 +45,6 @@ const HOSTED_CI_PATH_PATTERNS = [
   /^scripts\/(?:run-vitest-stable|run-pre-push-tests|pre-push-test-selection)\.mjs$/,
 ];
 
-const RUNTIME_ROOT_PATTERN = /^(?:server|ui|cli|packages|scripts|tests|\.github\/scripts)(?:\/|$)/;
 const NON_PRODUCTION_PATH_PATTERNS = [
   /(?:^|\/)(?:README|CHANGELOG|OPEN_TASKS|LICENSE|AUTHORING)(?:\.[^/]*)?$/i,
   /^[^/]+\.md$/i,
@@ -221,13 +220,15 @@ function discoverSiblingTests(repoRoot, sourceFile) {
 function isHostedCiPath(file) {
   if (NON_PRODUCTION_PATH_PATTERNS.some((pattern) => pattern.test(file))) return false;
   if (HOSTED_CI_PATH_PATTERNS.some((pattern) => pattern.test(file))) return true;
-  if (RUNTIME_ROOT_PATTERN.test(file) && !isTestFile(file) && !isTestBearingProductionFile(file)) {
-    return true;
-  }
   return !isTestFile(file) && !isTestBearingProductionFile(file);
 }
 
 export function selectPrePushTests({ repoRoot, changedFiles, trackedFiles }) {
+  if (!(trackedFiles instanceof Set)) {
+    throw new TestSelectionIntegrityError(
+      "tracked files from the pushed HEAD are required for deterministic test selection",
+    );
+  }
   const normalizedChanges = [...new Set(changedFiles.map(normalizeRepoPath))].sort();
   if (normalizedChanges.length === 0) {
     throw new TestSelectionIntegrityError("the push contains no resolvable changed paths");
@@ -285,7 +286,7 @@ export function selectPrePushTests({ repoRoot, changedFiles, trackedFiles }) {
       (file) => `test-bearing production file lacks a deterministic sibling test: ${file}`,
     ),
     ...[...selected]
-      .filter((file) => trackedFiles && !trackedFiles.has(file))
+      .filter((file) => !trackedFiles.has(file))
       .map((file) => `selected test is not tracked in the pushed HEAD: ${file}`),
   ];
 
@@ -308,7 +309,7 @@ export function selectPrePushTests({ repoRoot, changedFiles, trackedFiles }) {
   };
 }
 
-function parseCli(argv) {
+export function parseCli(argv) {
   let repoRoot = process.cwd();
   let stdin = false;
   const files = [];
@@ -320,8 +321,11 @@ function parseCli(argv) {
       continue;
     }
     if (arg === "--repo-root") {
-      repoRoot = argv[index + 1];
-      if (!repoRoot) throw new TestSelectionIntegrityError("--repo-root requires a value");
+      const value = argv[index + 1];
+      if (!value || value.startsWith("--")) {
+        throw new TestSelectionIntegrityError("--repo-root requires a value");
+      }
+      repoRoot = value;
       index += 1;
       continue;
     }

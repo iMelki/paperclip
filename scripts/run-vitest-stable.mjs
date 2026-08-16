@@ -240,7 +240,7 @@ function parseCliOptions(argv) {
   }
 
   if (related) {
-    if (mode !== allModeName || group !== null || shardIndex !== null || dryRun) {
+    if (mode !== allModeName || group !== null || shardIndex !== null || shardCount !== null || dryRun) {
       fail("--related cannot be combined with --mode/--group/--shard-*/--dry-run.");
     }
     return {
@@ -257,7 +257,7 @@ function parseCliOptions(argv) {
   }
 
   if (exact) {
-    if (mode !== allModeName || group !== null || shardIndex !== null || dryRun) {
+    if (mode !== allModeName || group !== null || shardIndex !== null || shardCount !== null || dryRun) {
       fail("--files cannot be combined with --mode/--group/--shard-*/--dry-run.");
     }
     if (exactFiles.length === 0) fail("--files requires at least one exact test path.");

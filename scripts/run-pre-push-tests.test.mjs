@@ -1,18 +1,39 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import process from "node:process";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 
 import {
   PrePushIntegrityError,
   assertPushMatchesWorkingTree,
   executeTestPlan,
   parsePushUpdates,
+  readHeadTrackedFiles,
   resolveOutgoingChangedFiles,
+  runGit,
 } from "./run-pre-push-tests.mjs";
 
 const A = "a".repeat(40);
 const B = "b".repeat(40);
 const C = "c".repeat(40);
 const ZERO = "0".repeat(40);
+const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const runnerScript = path.join(repoRoot, "scripts", "run-pre-push-tests.mjs");
+
+function runScratchGit(scratchRoot, args) {
+  const result = spawnSync("git", args, {
+    cwd: scratchRoot,
+    encoding: "utf8",
+    windowsHide: true,
+    shell: false,
+  });
+  assert.equal(result.status, 0, `${args.join(" ")}: ${result.stderr}`);
+  return result.stdout.trim();
+}
 
 test("parses the real four-field pre-push protocol and rejects empty or malformed input", () => {
   assert.deepEqual(
@@ -76,8 +97,43 @@ test("uses the exact remote-to-local range for an existing remote ref", () => {
   assert.deepEqual(changed, ["server/src/a.test.ts", "server/src/a.ts"]);
   assert.deepEqual(calls, [
     ["remote", "get-url", "--push", "--all", "origin"],
-    ["diff", "--name-only", "-z", "--diff-filter=ACDMRTUXB", A, B, "--"],
+    ["diff", "--name-only", "-z", "--no-renames", "--diff-filter=ACDMRTUXB", A, B, "--"],
   ]);
+});
+
+test("a real Git rename reports both deleted and added paths", () => {
+  const createdRoot = mkdtempSync(path.join(os.tmpdir(), "paperclip-pre-push-rename-"));
+  const scratchRoot = realpathSync(createdRoot);
+  try {
+    runScratchGit(scratchRoot, ["init"]);
+    runScratchGit(scratchRoot, ["config", "user.name", "iMelki"]);
+    runScratchGit(scratchRoot, ["config", "user.email", "iMelki@users.noreply.github.com"]);
+    mkdirSync(path.join(scratchRoot, "server", "src"), { recursive: true });
+    writeFileSync(path.join(scratchRoot, "server", "src", "old.ts"), "export const value = 1;\n");
+    runScratchGit(scratchRoot, ["add", "server/src/old.ts"]);
+    runScratchGit(scratchRoot, ["commit", "-m", "test: add old path"]);
+    const baseOid = runScratchGit(scratchRoot, ["rev-parse", "HEAD"]);
+    renameSync(
+      path.join(scratchRoot, "server", "src", "old.ts"),
+      path.join(scratchRoot, "server", "src", "new.ts"),
+    );
+    runScratchGit(scratchRoot, ["add", "server/src/old.ts", "server/src/new.ts"]);
+    runScratchGit(scratchRoot, ["commit", "-m", "test: rename source path"]);
+    const headOid = runScratchGit(scratchRoot, ["rev-parse", "HEAD"]);
+    runScratchGit(scratchRoot, ["remote", "add", "origin", "https://example.test/paperclip.git"]);
+
+    const changed = resolveOutgoingChangedFiles({
+      repoRoot: scratchRoot,
+      remoteName: "origin",
+      remoteLocation: "https://example.test/paperclip.git",
+      updates: parsePushUpdates(
+        `refs/heads/topic ${headOid} refs/heads/topic ${baseOid}\n`,
+      ),
+    });
+    assert.deepEqual(changed, ["server/src/new.ts", "server/src/old.ts"]);
+  } finally {
+    rmSync(createdRoot, { recursive: true, force: true });
+  }
 });
 
 test("a new branch uses the authoritative remote dev object as its exact base", () => {
@@ -105,12 +161,91 @@ test("a new branch uses the authoritative remote dev object as its exact base", 
   ]);
   assert.deepEqual(calls[2], ["merge-base", "--is-ancestor", A, C]);
   assert.deepEqual(calls[3], [
-    "diff", "--name-only", "-z", "--diff-filter=ACDMRTUXB", A, C, "--",
+    "diff", "--name-only", "-z", "--no-renames", "--diff-filter=ACDMRTUXB", A, C, "--",
   ]);
+});
+
+test("Git subprocesses fail closed within finite timeout and buffer bounds", () => {
+  let observed;
+  const output = runGit("C:/repo", ["ls-remote", "origin"], {
+    spawn: (command, args, options) => {
+      observed = { command, args, options };
+      return { status: 0, stdout: "ok\n" };
+    },
+  });
+  assert.equal(output, "ok\n");
+  assert.equal(observed.command, "git");
+  assert.deepEqual(observed.args, ["ls-remote", "origin"]);
+  assert.equal(observed.options.timeout, 120_000);
+  assert.equal(observed.options.killSignal, "SIGKILL");
+  assert.equal(observed.options.maxBuffer, 64 * 1024 * 1024);
+  assert.throws(
+    () => runGit("C:/repo", ["status", "--porcelain"], {
+      spawn: () => ({
+        error: Object.assign(new Error("operation timed out"), { code: "ETIMEDOUT" }),
+      }),
+    }),
+    /could not start git status: operation timed out/,
+  );
+  assert.throws(
+    () => runGit("C:/repo", ["ls-tree", "-r", "HEAD"], {
+      spawn: () => ({
+        error: Object.assign(new Error("stdout maxBuffer length exceeded"), { code: "ENOBUFS" }),
+      }),
+    }),
+    /could not start git ls-tree: stdout maxBuffer length exceeded/,
+  );
+});
+
+test("explicit dry-run paths can bind selection to the current HEAD tree", () => {
+  const calls = [];
+  const trackedFiles = readHeadTrackedFiles({
+    repoRoot: "C:/repo",
+    git: (_repoRoot, args) => {
+      calls.push(args);
+      if (args[0] === "rev-parse") return `${B}\n`;
+      return Buffer.from("CHANGELOG.md\0server/src/probe.test.ts\0");
+    },
+  });
+  assert.deepEqual([...trackedFiles], ["CHANGELOG.md", "server/src/probe.test.ts"]);
+  assert.deepEqual(calls, [
+    ["rev-parse", "--verify", "HEAD"],
+    ["ls-tree", "-r", "-z", "--name-only", B],
+  ]);
+});
+
+test("the changed-file dry-run CLI reads current HEAD tracking data", () => {
+  const result = spawnSync(
+    process.execPath,
+    [
+      runnerScript,
+      "--dry-run",
+      "--repo-root",
+      repoRoot,
+      "--changed-file",
+      "scripts/run-pre-push-tests.test.mjs",
+    ],
+    { cwd: repoRoot, encoding: "utf8", windowsHide: true, shell: false },
+  );
+  assert.equal(result.status, 0, result.stderr);
+  const plan = JSON.parse(result.stdout);
+  assert.deepEqual(plan.selection.nodeTestFiles, ["scripts/run-pre-push-tests.test.mjs"]);
+  assert.deepEqual(plan.selection.selectionErrors, []);
 });
 
 test("rejects unsafe remote identity and permits an update with no tree changes", () => {
   const updates = parsePushUpdates(`refs/heads/topic ${B} refs/heads/topic ${A}\n`);
+  for (const remoteName of [undefined, null, {}, ""]) {
+    assert.throws(
+      () => resolveOutgoingChangedFiles({
+        repoRoot: "C:/repo",
+        remoteName,
+        remoteLocation: "git@example.test:paperclip.git",
+        updates,
+      }),
+      /unsafe or missing remote name/,
+    );
+  }
   assert.throws(
     () => resolveOutgoingChangedFiles({
       repoRoot: "C:/repo",
@@ -260,4 +395,34 @@ test("an exact test child exit 19 is propagated and restored exit 0 passes", () 
     error: () => {},
   });
   assert.equal(passing, 0);
+});
+
+test("Node suites run before exact Vitest suites with literal argv", () => {
+  const calls = [];
+  const status = executeTestPlan(
+    {
+      selection: baseSelection({
+        nodeTestFiles: ["scripts/probe.test.mjs"],
+        vitestFiles: ["server/src/probe.test.ts"],
+      }),
+      targetRefs: ["refs/heads/topic"],
+    },
+    {
+      repoRoot: "C:/repo",
+      spawn: (command, args, options) => {
+        calls.push({ command, args, options });
+        return { status: 0 };
+      },
+      log: () => {},
+      error: () => {},
+    },
+  );
+
+  assert.equal(status, 0);
+  assert.deepEqual(calls.map(({ args }) => args), [
+    ["--test", "scripts/probe.test.mjs"],
+    [path.join("C:/repo", "scripts/run-vitest-stable.mjs"), "--files", "server/src/probe.test.ts"],
+  ]);
+  assert.ok(calls.every(({ command }) => command === process.execPath));
+  assert.ok(calls.every(({ options }) => options.shell === false));
 });

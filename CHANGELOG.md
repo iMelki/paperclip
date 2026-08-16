@@ -70,7 +70,11 @@ All notable changes to this repository should be recorded here.
   secrets use its exact base-to-head range. Git's literal `HEAD` local-ref form
   from an explicit `HEAD:topic` refspec is accepted without weakening the OID or
   pristine-worktree binding. PR CI now covers `dev` without adding `push: dev`
-  and scans only the PR range rather than known-red full history.
+  and scans only the PR range rather than known-red full history. Both platform
+  callers remove their temporary update artifacts after every outcome while
+  retaining the consolidated log; the POSIX caller also removes per-step files,
+  supports isolated caller-test logging, and the PowerShell caller streams long
+  step output as it arrives.
 
 - Normalized release-package discovery directories to forward-slash manifest
   paths, with a Windows-separator regression, so release-map validation does

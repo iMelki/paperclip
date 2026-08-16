@@ -56,6 +56,7 @@ $planArgs = @(
 )
 $updatesPath = $null
 
+try {
 if ($ChangedFiles -and $ChangedFiles.Count -gt 0) {
   if (-not $DryRun) {
     throw 'ChangedFiles is available only with DryRun; a real gate requires Git update objects for secret scanning.'
@@ -130,13 +131,12 @@ function Invoke-Step {
   Write-GateLine -Message ''
   Write-GateLine -Message "Running $Name..."
   $stepStart = Get-Date
-  $stepOutput = @(& $Action 2>&1)
-  $stepExit = $LASTEXITCODE
-  foreach ($line in $stepOutput) {
-    $rendered = [string]$line
+  & $Action 2>&1 | ForEach-Object {
+    $rendered = [string]$_
     Add-Content -LiteralPath $LogPath -Value $rendered
     Write-Host $rendered
   }
+  $stepExit = $LASTEXITCODE
   $elapsed = [math]::Round(((Get-Date) - $stepStart).TotalSeconds, 1)
   if ($stepExit -eq 0) {
     Write-GateLine -Message "  ($Name took ${elapsed}s)" -Color DarkGray
@@ -211,3 +211,8 @@ if ($failed) {
 
 Write-GateLine -Message "PRE-PUSH CHECK PASSED in ${totalMinutes} min" -Color Green
 exit 0
+} finally {
+  if ($updatesPath -and (Test-Path -LiteralPath $updatesPath)) {
+    Remove-Item -LiteralPath $updatesPath -Force -ErrorAction SilentlyContinue
+  }
+}

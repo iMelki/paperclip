@@ -3,10 +3,12 @@ import process from "node:process";
 import test from "node:test";
 
 import {
+  ScanIntegrityError,
   assertNormalIndexState,
   containsTrackedPath,
   findUnobservedTrackedPaths,
   normalizeRepoPathKey,
+  normalizeTrackedPathSet,
   parseTrackedManifest,
   readTrackedFiles,
   readTrackedManifest,
@@ -14,13 +16,48 @@ import {
 
 test("tracked-file enumeration fails closed and returns exact Git paths", () => {
   const output = Buffer.from("H packages/adapters/a.ts\0H server/src/b.ts\0");
+  let spawnOptions;
   assert.deepEqual(
-    [...readTrackedFiles("C:/repo", () => ({ status: 0, stdout: output }))],
+    [...readTrackedFiles("C:/repo", (_command, _args, options) => {
+      spawnOptions = options;
+      return { status: 0, stdout: output };
+    })],
     ["packages/adapters/a.ts", "server/src/b.ts"],
   );
+  assert.equal(spawnOptions.maxBuffer, 64 * 1024 * 1024);
+  assert.equal(spawnOptions.timeout, 120_000);
+  assert.equal(spawnOptions.killSignal, "SIGKILL");
   assert.throws(
     () => readTrackedFiles("C:/repo", () => ({ status: 9, stderr: "failed" })),
     /cannot enumerate tracked files/,
+  );
+  assert.throws(
+    () => readTrackedFiles("C:/repo", () => ({
+      error: Object.assign(new Error("spawn ENOENT"), { code: "ENOENT" }),
+    })),
+    (error) => error instanceof ScanIntegrityError && error.code === "ENOENT",
+  );
+  assert.throws(
+    () => readTrackedFiles("C:/repo", () => ({
+      error: Object.assign(new Error("stdout maxBuffer length exceeded"), { code: "ENOBUFS" }),
+    })),
+    (error) =>
+      error instanceof ScanIntegrityError &&
+      error.code === "ENOBUFS" &&
+      /maxBuffer/.test(error.message),
+  );
+  assert.throws(
+    () => readTrackedFiles("C:/repo", () => ({
+      error: Object.assign(new Error("operation timed out"), { code: "ETIMEDOUT" }),
+    })),
+    (error) =>
+      error instanceof ScanIntegrityError &&
+      error.code === "ETIMEDOUT" &&
+      /timed out/.test(error.message),
+  );
+  assert.throws(
+    () => parseTrackedManifest(Buffer.from("malformed-record-without-tag\0")),
+    (error) => error instanceof ScanIntegrityError && error.code === "EGIT",
   );
 
   const hiddenOutput = Buffer.from(
@@ -39,10 +76,14 @@ test("tracked-file enumeration fails closed and returns exact Git paths", () => 
     () => assertNormalIndexState(parseTrackedManifest(hiddenOutput).nonStandardIndexPaths),
     /hidden or non-normal index state: packages\/adapters\/assumed\.ts/,
   );
+  assert.throws(
+    () => assertNormalIndexState(null, ["packages/adapters"]),
+    (error) => error instanceof ScanIntegrityError && error.code === "EINDEXUNKNOWN",
+  );
 });
 
 test("tracked-directory matching follows host path case semantics", () => {
-  const tracked = new Set(["packages/adapters/Dist/index.js"]);
+  const tracked = normalizeTrackedPathSet(new Set(["packages/adapters/Dist/index.js"]));
   assert.equal(
     containsTrackedPath("packages/adapters/dist", tracked),
     process.platform === "win32",
@@ -53,11 +94,11 @@ test("tracked-directory matching follows host path case semantics", () => {
 test("manifest reconciliation names only missing tracked paths under scan roots", () => {
   assert.deepEqual(
     findUnobservedTrackedPaths({
-      trackedFiles: new Set([
+      trackedFiles: normalizeTrackedPathSet(new Set([
         "packages/adapters/visible.ts",
         "packages/adapters/hidden.ts",
         "doc/out-of-scope.md",
-      ]),
+      ])),
       scanRoots: ["packages/adapters"],
       observedPaths: new Set(["packages/adapters/visible.ts"]),
     }),

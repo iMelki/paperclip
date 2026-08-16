@@ -29,6 +29,19 @@ test("adding a push event fails even when pull-request coverage remains", () => 
   );
 });
 
+test("a column-zero comment cannot hide a later event in the on block", () => {
+  const broken = realWorkflow.replace(
+    /^concurrency:\s*$/m,
+    "# This comment does not close the on mapping.\n  push:\n    branches:\n      - dev\nconcurrency:",
+  );
+  assert.notEqual(broken, realWorkflow, "negative fixture must add a push after a comment");
+  assert.ok(
+    validatePrWorkflowTrigger(broken).includes(
+      "workflow must not define a push event; dev validation is pull-request-only",
+    ),
+  );
+});
+
 test("quoted or whitespace-padded push keys cannot bypass the no-push policy", () => {
   for (const pushKey of ['"push":', "'push':", "push :"]) {
     const broken = realWorkflow.replace(/^on:\s*$/m, `on:\n  ${pushKey}\n    branches:\n      - dev`);
@@ -104,6 +117,23 @@ test("the exact secret range and gate regression list cannot be removed", () => 
       "workflow policy tests are missing ./scripts/run-pre-push-tests.test.mjs",
     ),
   );
+});
+
+test("required policy tests may be reordered and split across unmasked node steps", () => {
+  const reordered = realWorkflow
+    .replace("./scripts/check-no-git-push-source.test.mjs", "__SOURCE_TEST__")
+    .replace("./scripts/check-no-git-push.test.mjs", "./scripts/check-no-git-push-source.test.mjs")
+    .replace("__SOURCE_TEST__", "./scripts/check-no-git-push.test.mjs");
+  const regrouped = reordered
+    .replace(/^\s{10}\.\/scripts\/git-push-scan-integrity\.test\.mjs\r?$/m, "")
+    .replace(
+      /^      - name: Validate PR workflow trigger policy\r?$/m,
+      "      - name: Test scan integrity independently\n" +
+        "        run: node --test ./scripts/git-push-scan-integrity.test.mjs\n\n" +
+        "      - name: Validate PR workflow trigger policy",
+    );
+  assert.notEqual(regrouped, realWorkflow, "fixture must reorder and regroup policy tests");
+  assert.deepEqual(validatePrWorkflowTrigger(regrouped), []);
 });
 
 test("comments, conditional steps, and masked test commands cannot impersonate active gates", () => {
@@ -193,6 +223,23 @@ test("job defaults, continue-on-error, custom shells, and missing validations fa
     ),
   );
 
+  for (const hostileStepConfig of [
+    "        working-directory: ./shadow-policy",
+    "        env:\n          NODE_OPTIONS: --require=./shadow-policy.cjs",
+  ]) {
+    const broken = realWorkflow.replace(
+      "        run: node ./scripts/check-no-git-push.mjs",
+      `${hostileStepConfig}\n        run: node ./scripts/check-no-git-push.mjs`,
+    );
+    assert.notEqual(broken, realWorkflow, "negative fixture must add hostile step execution context");
+    assert.ok(
+      validatePrWorkflowTrigger(broken).includes(
+        "workflow policy validation is missing active command: node ./scripts/check-no-git-push.mjs",
+      ),
+      hostileStepConfig,
+    );
+  }
+
   for (const opener of ["if: false", "continue-on-error: true", "shell: bash"]) {
     const broken = realWorkflow.replace(
       "      - name: Validate PR workflow trigger policy",
@@ -214,6 +261,72 @@ test("job defaults, continue-on-error, custom shells, and missing validations fa
   assert.ok(
     validatePrWorkflowTrigger(missingValidation).includes(
       "workflow policy validation is missing active command: node ./scripts/check-no-git-push.mjs",
+    ),
+  );
+});
+
+test("global and required-job execution context cannot replace the validated tools", () => {
+  for (const topLevelConfig of [
+    "env:\n  NODE_OPTIONS: --require=./shadow-policy.cjs\n",
+    "defaults:\n  run:\n    working-directory: ./shadow-policy\n",
+  ]) {
+    const broken = realWorkflow.replace(/^jobs:\s*$/m, `${topLevelConfig}\njobs:`);
+    assert.notEqual(broken, realWorkflow, "negative fixture must inject top-level execution context");
+    assert.ok(
+      validatePrWorkflowTrigger(broken).some((failure) =>
+        failure.startsWith("workflow must not define top-level")),
+      topLevelConfig,
+    );
+  }
+
+  for (const { job, hostileConfig } of [
+    { job: "secret-scan", hostileConfig: "    env:\n      NODE_OPTIONS: --require=./shadow-secret.cjs" },
+    { job: "policy", hostileConfig: "    container: attacker.invalid/policy:latest" },
+    { job: "policy", hostileConfig: "    services:\n      node:\n        image: attacker.invalid/node:latest" },
+  ]) {
+    const broken = realWorkflow.replace(new RegExp(`^  ${job}:\\s*$`, "m"), `  ${job}:\n${hostileConfig}`);
+    assert.notEqual(broken, realWorkflow, `negative fixture must inject ${job} execution context`);
+    assert.ok(
+      validatePrWorkflowTrigger(broken).some((failure) =>
+        failure.startsWith(`${job} job contains unsupported execution keys:`)),
+      hostileConfig,
+    );
+  }
+
+  const selfHosted = realWorkflow.replace(
+    /^(  secret-scan:[\s\S]*?)^    runs-on: ubuntu-latest$/m,
+    "$1    runs-on: self-hosted",
+  );
+  assert.notEqual(selfHosted, realWorkflow, "negative fixture must replace the secret-scan runner");
+  assert.ok(
+    validatePrWorkflowTrigger(selfHosted).includes(
+      "secret-scan job must run exactly once on ubuntu-latest",
+    ),
+  );
+
+  const duplicateRunner = realWorkflow.replace(
+    /^(  secret-scan:[\s\S]*?^    runs-on: ubuntu-latest)$/m,
+    "$1\n    runs-on: self-hosted",
+  );
+  assert.notEqual(duplicateRunner, realWorkflow, "negative fixture must duplicate a job key");
+  assert.ok(
+    validatePrWorkflowTrigger(duplicateRunner).includes(
+      "secret-scan job must not define duplicate keys: runs-on",
+    ),
+  );
+
+  const missingSecretDependency = realWorkflow.replace(
+    "    needs: [secret-scan]",
+    "    needs: [build]",
+  );
+  assert.notEqual(
+    missingSecretDependency,
+    realWorkflow,
+    "negative fixture must replace the policy dependency",
+  );
+  assert.ok(
+    validatePrWorkflowTrigger(missingSecretDependency).includes(
+      "policy job must depend exactly on secret-scan",
     ),
   );
 });
