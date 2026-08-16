@@ -3,15 +3,30 @@
 import { spawnSync } from "node:child_process";
 
 const expectedVersion = "8.30.1";
-const args = new Set(process.argv.slice(2));
-const staged = args.has("--staged");
-const history = args.has("--history");
+const argv = process.argv.slice(2);
+const staged = argv.includes("--staged");
+const history = argv.includes("--history");
+const rangeIndex = argv.indexOf("--range");
+const range = rangeIndex >= 0 ? argv[rangeIndex + 1] : null;
 
-if (staged === history) {
-  console.error("Specify exactly one scan mode: --staged or --history.");
+if ([staged, history, rangeIndex >= 0].filter(Boolean).length !== 1) {
+  console.error(
+    "Specify exactly one scan mode: --staged, --history, or --range <base>..<head>.",
+  );
   process.exit(3);
 }
-
+if ((staged || history) && argv.length !== 1) {
+  console.error("The staged and history scan modes do not accept additional arguments.");
+  process.exit(3);
+}
+if (rangeIndex >= 0 && (rangeIndex !== 0 || argv.length !== 2)) {
+  console.error("Use range mode as exactly: --range <base>..<head>.");
+  process.exit(3);
+}
+if (rangeIndex >= 0 && !/^(?:[0-9a-f]{40}|[0-9a-f]{64})\.\.(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(range ?? "")) {
+  console.error("--range requires full hexadecimal base and head object ids separated by '..'.");
+  process.exit(3);
+}
 const binary =
   process.env.PAPERCLIP_GITLEAKS_BIN?.trim() ||
   (process.platform === "win32" ? "gitleaks.exe" : "gitleaks");
@@ -63,8 +78,10 @@ if (!new RegExp(`(^|\\s)${expectedVersion.replaceAll(".", "\\.")}($|\\s)`).test(
 const scanArgs = ["git", "--redact", "--verbose", "--exit-code", "2"];
 if (staged) {
   scanArgs.push("--pre-commit", "--staged");
-} else {
+} else if (history) {
   scanArgs.push("--log-opts=--all");
+} else {
+  scanArgs.push(`--log-opts=${range}`);
 }
 scanArgs.push(".");
 
@@ -74,7 +91,8 @@ if (scanResult.error) {
   process.exit(3);
 }
 if (scanResult.status === 0) {
-  console.log(`Gitleaks ${expectedVersion} ${staged ? "staged" : "history"} scan passed.`);
+  const mode = staged ? "staged" : history ? "history" : "range";
+  console.log(`Gitleaks ${expectedVersion} ${mode} scan passed.`);
   process.exit(0);
 }
 if (scanResult.status === 2) {
