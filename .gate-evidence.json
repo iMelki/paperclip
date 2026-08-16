@@ -35,11 +35,13 @@
   ],
   "finalRepairedSnapshot": {
     "date": "2026-08-17",
-    "baseHead": "5cf55ae1cb2b7bcbfa9acd902a5fc109a831cfc7",
-    "implementationFileCount": 21,
-    "implementationManifestSha256": "877ea6967bc6920f4f0158a8ab0b2ade411bf45d469e655b2a759668670e1c92",
-    "receipt": "C:/Dev/paperclip-gate-repair-logs/coderabbit-round1-final-20260817T000325/final-repaired-snapshot-receipt.json",
-    "focusedTests": "113/113 passed with no skip"
+    "recordedAtUtc": "2026-08-16T22:02:24.9919430Z",
+    "baseHead": "b6e8ae0794bd8ca2f1e2625daadfd095f461955c",
+    "codeCommit": "a3dba3f74681fcfa9a3c49ce613e78def67507d2",
+    "implementationFileCount": 19,
+    "implementationManifestSha256": "632ffec7b88c70cd22bfcf0b59d46f4e0a31b0e01ac46b10688521294524cfd6",
+    "receipt": "doc/evidence/gate-bootstrap/2026-08-17/second-review-repair-receipt.json",
+    "focusedTests": "121/121 passed with no skip"
   },
   "gates": [
     {
@@ -57,7 +59,7 @@
       "followupProofDefinition": {
         "status": "proved-2026-08-16",
         "command": "node --test scripts/check-no-git-push-source.test.mjs scripts/git-push-scan-integrity.test.mjs scripts/check-no-git-push.test.mjs",
-        "failureReason": "A scratch real-caller run moved an asserted unsupported file into packages/adapters and exited 2 naming 'undeclared file type inside scan root: packages/adapters/hostile.unknown'. A separate real repository committed a forbidden git push, marked that path skip-worktree, substituted clean bytes in place, and remained status-clean; the real scanner still exited 2 naming the exact hidden/non-normal index path. Clearing the flag and committing the clean bytes restored exit 0. A tracked manifest without its paired index state now exits for EINDEXUNKNOWN, while injected ENOBUFS/timeout child results name the bounded Git-enumeration failure before any scan is trusted. Multiline real callers exited 1 and named the exact lines for PowerShell expandable here-string and unquoted shell-heredoc substitutions, an indented fake PowerShell closer, fragmented ordinary/ANSI-quoted delimiters followed by real commands, and a line-continued expanding delimiter. Bash-syntax-validated arithmetic fixtures exited 1 on the real push instead of misclassifying << as a hiding heredoc, including nested command substitutions whose comments or quoted arguments contained misleading closing parentheses, Bash's legacy square-bracket arithmetic expansion, both double- and single-quoted indexed-array subscripts, and a false indexed-array delimiter whose exact text was the later executable push line; each proof passed after safe restoration. The scanner keeps every quoted or unquoted LF/CRLF heredoc body and terminator line scan-visible, and the 45/45 matrix also covers YAML/Python/batch marker spoofing, generated-name symlinks, and Windows case folding.",
+        "failureReason": "A scratch real-caller run moved an asserted unsupported file into packages/adapters and exited 2 naming 'undeclared file type inside scan root: packages/adapters/hostile.unknown'. A separate real repository committed a forbidden git push, marked that path skip-worktree, substituted clean bytes in place, and remained status-clean; the real scanner still exited 2 naming the exact hidden/non-normal index path. Clearing the flag and committing the clean bytes restored exit 0. A tracked manifest without its paired index state now exits for EINDEXUNKNOWN, while injected ENOBUFS/timeout child results name the bounded Git-enumeration failure before any scan is trusted. Multiline real callers exited 1 and named the exact lines for PowerShell expandable here-string and unquoted shell-heredoc substitutions, an indented fake PowerShell closer, fragmented ordinary/ANSI-quoted delimiters followed by real commands, and a line-continued expanding delimiter. Bash-syntax-validated arithmetic fixtures exited 1 on the real push instead of misclassifying << as a hiding heredoc, including nested command substitutions whose comments or quoted arguments contained misleading closing parentheses, Bash's legacy square-bracket arithmetic expansion, both double- and single-quoted indexed-array subscripts, and a false indexed-array delimiter whose exact text was the later executable push line; each proof passed after safe restoration. A UTF-16-indexed fixture with an astral character between an allow marker and a live push exited 1 and named line 3. The scanner keeps every quoted or unquoted LF/CRLF heredoc body and terminator line scan-visible, and the 46/46 matrix also covers YAML/Python/batch marker spoofing, generated-name symlinks, and Windows case folding.",
         "preFixAuthority": "Run the new fixtures against 79dcf8e1d to demonstrate the partial-root and directory-symlink cases exit 0 before this repair.",
         "upstreamReopenedEvidence": {
           "commit": "bf81b90e9acd8a5a6acde731d151f55f301c63b2",
@@ -75,7 +77,7 @@
         "date": "2026-08-17",
         "command": "node --test scripts/check-no-git-push-source.test.mjs",
         "reason": "Deliberately seeded direct, array, shell, send-pack, executable here-string/heredoc, marker-spoof, and Bash arithmetic/heredoc-confusion forms were each attributed to their exact source line instead of disappearing behind comment, quote, delimiter, or arithmetic state.",
-        "restoredPass": "Safe comments, literal data, documentation markers, and grammar-valid multiline controls remained accepted; the owning suite passed 15/15 inside the final repaired-snapshot bundle."
+        "restoredPass": "Safe comments, literal data, documentation markers, and grammar-valid multiline controls remained accepted; the owning suite passed 16/16 inside the final repaired-snapshot bundle."
       }
     },
     {
@@ -87,7 +89,7 @@
         "date": "2026-08-17",
         "command": "node --test scripts/check-no-git-push-source.test.mjs",
         "reason": "Every hostile fixture asserts the exact detected line and form; removing the detector behavior makes the corresponding assertion fail rather than producing a green policy job.",
-        "restoredPass": "The complete source-policy fixture passed 15/15 and is an active, unmasked member of the required PR policy command."
+        "restoredPass": "The complete source-policy fixture passed 16/16 and is an active, unmasked member of the required PR policy command."
       }
     },
     {
@@ -99,7 +101,7 @@
         "date": "2026-08-17",
         "command": "node --test scripts/git-push-scan-integrity.test.mjs",
         "reason": "Malformed records, missing paired index state, non-normal index tags, child ENOENT, injected ENOBUFS, injected ETIMEDOUT, and non-zero Git status each raised ScanIntegrityError with the attributable code/reason instead of returning an empty trusted manifest.",
-        "restoredPass": "A valid NUL-delimited H manifest returned exact tracked paths; the child received shell=false, SIGKILL, a 120-second timeout, and a 64 MiB maxBuffer. The owning suite passed 3/3 inside the final 2026-08-17 repaired-snapshot bundle (113/113)."
+        "restoredPass": "A valid NUL-delimited H manifest returned exact tracked paths; the child received shell=false, SIGKILL, a 120-second timeout, and a 64 MiB maxBuffer. The owning suite passed 3/3 inside the final repaired-snapshot bundle (121/121)."
       }
     },
     {
@@ -111,19 +113,19 @@
         "date": "2026-08-16",
         "command": "node --test scripts/run-vitest-direct.test.mjs",
         "reason": "Missing or escaping manifest bin declarations were rejected before launch; a hostile Git-derived filename remained one literal argv element and produced no shell side effect.",
-        "restoredPass": "The installed Vitest manifest resolved to its in-package vitest.mjs entry, and the shell-free launcher suite passed 2/2."
+        "restoredPass": "The installed Vitest manifest resolved to its in-package vitest.mjs entry; exact files remained separate invocations, and the shell-free launcher suite passed 3/3."
       }
     },
     {
       "id": "stable-vitest-exact-mode",
       "path": "scripts/run-vitest-stable.mjs",
-      "description": "Runs exact selected Vitest files without silently accepting incompatible grouping, sharding, related, or dry-run options.",
+      "description": "Runs each exact selected Vitest file independently so an included test cannot mask an unmatched project file, while rejecting incompatible grouping, sharding, related, or dry-run options.",
       "negativeFixture": "scripts/__tests__/run-vitest-stable-shard.test.mjs",
       "observedFailure": {
         "date": "2026-08-16",
         "command": "node --test scripts/__tests__/run-vitest-stable-shard.test.mjs",
-        "reason": "Supplying shard-count alone with --files or --related now raises the declared --shard-* incompatibility instead of discarding the value and returning a false plan.",
-        "restoredPass": "Valid exact, related, and duration-balanced shard configurations remained deterministic; the owning suite passed 12/12."
+        "reason": "Supplying shard-count alone with --files or --related raises the declared --shard-* incompatibility. A real exact invocation then ran one valid shared test before rejecting an existing .spec.ts file excluded by that project's include glob, proving the valid file could not mask it.",
+        "restoredPass": "Renaming the fixture to the supported .test.ts form made both exact per-file invocations pass (10 tests total); valid related and duration-balanced shard configurations remained deterministic, and the shard suite passed 12/12."
       }
     },
     {
@@ -134,7 +136,7 @@
       "observedFailure": {
         "date": "2026-08-16",
         "command": "node --test scripts/pre-push-test-selection.test.mjs",
-        "reason": "The committed fixture supplied uncovered live production, an untracked sibling, and empty/escaping/symlink paths; each result named its exact coverage or integrity error instead of returning an empty passing plan.",
+        "reason": "The committed fixture supplied uncovered live production, an untracked sibling, non-array changed-path inputs, and empty/escaping/symlink paths; each result named its exact coverage or integrity error instead of returning an empty passing plan. The unused standalone selector CLI was removed so pushed-HEAD membership cannot be caller-supplied.",
         "restoredPass": "Restored tracked Node/Vitest sibling fixtures selected only their named suites; direct changed-file dry runs loaded the exact HEAD tree, and 15/15 selector proofs passed with no skips."
       }
     },
@@ -146,8 +148,8 @@
       "observedFailure": {
         "date": "2026-08-16",
         "command": "node --test scripts/run-pre-push-tests.test.mjs",
-        "reason": "Malformed/empty protocol, dirty/non-HEAD/multi-ref state, non-string or unsafe destination identity, bounded Git timeout/maxBuffer errors, and a selected child exit 19 were each rejected for their asserted reason. A real status-clean repository then substituted a tracked Node test behind skip-worktree outside the scanner roots; the real planner exited 2 and named that exact hidden/non-normal path before executing it. A real scratch Git rename proved the old and new paths are both returned through --no-renames. The first real HEAD:topic push was also rejected before scanning because Git emitted the valid literal local ref HEAD, exposing an over-narrow refs/-only parser.",
-        "restoredPass": "Clearing the index flag and restoring the exact HEAD bytes let the real planner execute the named Node test and exit 0. One clean checked-out update bound to the authoritative advertised dev object and restored child exit 0 passed; 13/13 planner proofs passed. The parser fixture accepts literal HEAD while preserving the same object binding, exact Git children carry a 120-second timeout and 64 MiB buffer, and the exact secret-range caller consumed the saved real update, scanned one outgoing commit with pinned Gitleaks 8.30.1, and exited 0 with no leaks."
+        "reason": "Malformed/empty protocol, dirty/non-HEAD/multi-ref state, non-string or unsafe destination identity, option-shaped missing CLI values, bounded Git timeout/maxBuffer errors, and a selected child exit 19 were each rejected for their asserted reason. A real status-clean repository then substituted a tracked Node test behind skip-worktree outside the scanner roots; the real planner exited 2 and named that exact hidden/non-normal path before executing it. A real scratch Git rename proved the old and new paths are both returned through --no-renames. Git merge-base exit 1 now names the exact advertised-dev ancestry requirement while exit 128 remains an infrastructure failure. The first real HEAD:topic push was also rejected before scanning because Git emitted the valid literal local ref HEAD, exposing an over-narrow refs/-only parser.",
+        "restoredPass": "Clearing the index flag and restoring the exact HEAD bytes let the real planner execute the named Node test and exit 0. One clean checked-out update bound to the authoritative advertised dev object and restored child exit 0 passed; 15/15 planner proofs passed. The parser fixture accepts literal HEAD while preserving the same object binding, exact Git children carry a 120-second timeout and 64 MiB buffer, and the exact secret-range caller consumed the saved real update, scanned one outgoing commit with pinned Gitleaks 8.30.1, and exited 0 with no leaks."
       }
     },
     {
@@ -157,9 +159,9 @@
       "negativeFixture": "scripts/pre-push-callers.test.mjs",
       "observedFailure": {
         "date": "2026-08-16",
-        "command": "PATH='C:/Program Files/Git/bin:<existing PATH>' node --test scripts/pre-push-callers.test.mjs",
-        "reason": "The real PowerShell and POSIX callers received fake scanner exit 17, secret-range exit 23, and planner exit 19; every invocation rejected and its log named the exact child exit. The first Git-for-Windows cleanup proof also caught a surviving .step-1 artifact after a failed POSIX child, providing an attributable failing cleanup fixture before the exact-path repair.",
-        "restoredPass": "With all three children restored to exit 0, both callers passed the same Git update and forwarded the exact remote name/location; failure and success paths removed their update/step artifacts while retaining the consolidated log, and the dedicated platform run passed 3/3 with no skip. Evidence: C:/Dev/paperclip-gate-repair-logs/coderabbit-round1-20260816T2345/platform-callers-restored-receipt.json."
+        "command": "node --test scripts/pre-push-callers.test.mjs",
+        "reason": "The real PowerShell and POSIX callers received fake scanner exit 17, secret-range exit 23, and planner exit 19; every invocation rejected and its log named the exact child exit. The PowerShell proof enabled PSNativeCommandUseErrorActionPreference and emitted native stderr before exit 17; the caller retained the output and exact status. The POSIX proof delivered TERM during an active child and returned 143. The first cleanup proof had caught a surviving .step-1 artifact before the exact-path repair.",
+        "restoredPass": "With all children restored to exit 0, both callers passed the same Git update and forwarded the exact remote name/location; native-error, interrupt, failure, and success paths removed their update/step artifacts while retaining the consolidated log. The platform run passed 3/3 with no skip; portable summary: doc/evidence/gate-bootstrap/2026-08-17/second-review-repair-receipt.json."
       }
     },
     {
@@ -169,9 +171,9 @@
       "negativeFixture": "scripts/pre-push-callers.test.mjs",
       "observedFailure": {
         "date": "2026-08-16",
-        "command": "PATH='C:/Program Files/Git/bin:<existing PATH>' node --test scripts/pre-push-callers.test.mjs",
-        "reason": "Git-for-Windows sh ran the real POSIX caller; fake scanner exit 17, secret-range exit 23, and planner exit 19 each rejected with the exact exit in output. The initial cleanup fixture failed because a platform-sensitive wildcard left .step-1 behind.",
-        "restoredPass": "Exact active-step cleanup removed update and step artifacts on every failure and on success, restored children exited 0, and the POSIX caller forwarded both remote arguments; the dedicated caller run passed 3/3 with zero skips."
+        "command": "node --test scripts/pre-push-callers.test.mjs",
+        "reason": "The automatically discovered POSIX shell ran the real caller; fake scanner exit 17, secret-range exit 23, and planner exit 19 each rejected with the exact exit in output. TERM during an active child returned 143. The initial cleanup fixture had failed because a platform-sensitive wildcard left .step-1 behind.",
+        "restoredPass": "Portable symbolic signal traps and exact active-step cleanup removed update and step artifacts on interrupt, every failure, and success. Restored children exited 0, both remote arguments were forwarded, and the dedicated caller run passed 3/3 with zero skips."
       }
     },
     {
@@ -195,7 +197,7 @@
         "date": "2026-08-16",
         "command": "node scripts/check-pr-workflow-trigger.mjs (from a preserved scratch copy with exactly one dev branch entry removed)",
         "reason": "One real scratch CLI exited 1 and named 'pull_request.branches is missing dev'. A second changed a required step opener to '- if: false'; the real CLI exited 1 naming the missing active validation. The broader fixture also rejected push keys and every nested conditional, custom-shell, continue-on-error, compact-operator, or removed-command masking form.",
-        "restoredPass": "Both workflow files were restored to their exact baseline SHA-256 and the real CLI exited 0; the repaired policy matrix passed 11/11, and the live checkout reports master+dev with no push event. PR #78 head 5cf55ae1 launched the complete PR run 31969559521: policy, secret scan, typecheck/registry, build, five general-server shards, two workspace shards, five serialized-suite shards, three e2e shards plus aggregate, canary, and verify all succeeded. Repaired-head hosted proof remains required after the next push."
+        "restoredPass": "The workflow was restored and the real CLI exited 0; the repaired policy matrix passed 12/12. PR #78 heads 5cf55ae1 and b6e8ae07 each launched the complete PR matrix: policy, secret scan, typecheck/registry, build, five general-server shards, two workspace shards, five serialized-suite shards, three e2e shards plus aggregate, canary, and verify all succeeded. The next repaired head still requires exact hosted readback."
       }
     },
     {
@@ -206,8 +208,8 @@
       "observedFailure": {
         "date": "2026-08-17",
         "command": "node --test scripts/check-pr-workflow-trigger.test.mjs; node scripts/check-pr-workflow-trigger.mjs",
-        "reason": "The missing-dev, plain/quoted/escaped/duplicate event key, duplicate required-job key, altered policy dependency, removed-validator, commented-command, sequence-opener if/continue-on-error/shell, conditional-step, job/global env or defaults, job container/services, self-hosted runner, custom-shell/working-directory, and compact-operator fixtures each asserted a distinct policy failure; a real scratch CLI run exited 1 specifically for missing dev.",
-        "restoredPass": "The restored workflow passed the real CLI and the policy matrix passed 11/11 with no skips inside the final 2026-08-17 repaired-snapshot bundle (113/113); earlier caller-exact missing-dev evidence remains unchanged."
+        "reason": "The missing-dev, missing stable-runner regression, plain/quoted/escaped/duplicate event key, duplicate required-job key, altered policy dependency, removed-validator, commented-command, sequence-opener if/continue-on-error/shell, conditional-step, job/global env or defaults, job container/services, self-hosted runner, custom-shell/working-directory, and compact-operator fixtures each asserted a distinct policy failure. The real CLI exited 1 specifically when the stable-runner path was replaced.",
+        "restoredPass": "The restored workflow passed the real CLI and the policy matrix passed 12/12 with no skips inside the final repaired-snapshot bundle (121/121); earlier caller-exact missing-dev evidence remains unchanged."
       }
     },
     {
@@ -218,8 +220,8 @@
       "observedFailure": {
         "date": "2026-08-17",
         "command": "node --test scripts/check-pr-workflow-trigger.test.mjs",
-        "reason": "Missing dev coverage, push events, encoded or duplicate keys, a duplicate required-job key, altered policy dependency, hostile execution context, self-hosted runners, masked steps, and removed exact commands each asserted its attributable policy failure.",
-        "restoredPass": "The real workflow and restored fixtures passed 11/11 with no skips, and the real checker exited 0."
+        "reason": "Missing dev coverage, a removed stable-runner regression, push events, encoded or duplicate keys, a duplicate required-job key, altered policy dependency, hostile execution context, self-hosted runners, masked steps, and removed exact commands each asserted its attributable policy failure.",
+        "restoredPass": "The real workflow and restored fixtures passed 12/12 with no skips, and the real checker exited 0."
       }
     },
     {
@@ -242,8 +244,8 @@
       "observedFailure": {
         "date": "2026-08-16",
         "command": "node --test scripts/scan-pre-push-secrets.test.mjs",
-        "reason": "Non-string, unsafe, or mismatched remote identity was rejected before any scan, and a fake verifier exit 27 was propagated instead of being flattened to success.",
-        "restoredPass": "The exact existing base..head and authoritative dev..head ranges passed after the fake verifier returned 0; 4/4 proofs passed."
+        "reason": "Non-string, unsafe, or mismatched remote identity and option-shaped missing CLI values were rejected before any scan. Verifier spawn errors, signal termination, and non-zero status were attributed instead of flattened to success; new-branch divergence was distinguished from Git infrastructure failure.",
+        "restoredPass": "The exact existing base..head and authoritative dev..head ranges passed after the fake verifier returned 0; 7/7 proofs passed."
       }
     },
     {
@@ -255,7 +257,7 @@
         "date": "2026-08-16",
         "command": "node --test scripts/check-no-git-push-source.test.mjs scripts/git-push-scan-integrity.test.mjs scripts/check-no-git-push.test.mjs",
         "reason": "The fixture asserted exit 2 with the exact path/reason for integrity breaks and exit 1 with file/line for forbidden commands; direct scratch callers independently rejected an undeclared runtime type, a status-clean in-place byte substitution hidden by skip-worktree, executable substitutions inside a PowerShell here-string plus a shell heredoc, two Bash-valid nested arithmetic substitutions with misleading comment or quote parentheses, Bash's legacy square-bracket arithmetic expansion, double- and single-quoted indexed-array arithmetic forms whose false heredoc classifications previously hid a real push, and a false delimiter whose exact text was the executable push line. The restored scanner keeps every heredoc body and terminator line scan-visible regardless of delimiter quoting.",
-        "restoredPass": "Every fixture restored a readable declared tree, paired tracked/index manifest, normal index state, or safe source and observed exit 0; 45/45 scanner proofs passed with no skips."
+        "restoredPass": "Every fixture restored a readable declared tree, paired tracked/index manifest, normal index state, or safe source and observed exit 0; 46/46 scanner proofs passed with no skips."
       }
     },
     {

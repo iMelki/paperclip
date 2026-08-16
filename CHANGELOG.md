@@ -42,7 +42,10 @@
   platform pre-push callers and in PR CI for `dev` and `master`.
   The deterministic pre-push planner applies the same normal-index proof to
   the whole repository, so substituted UI, script, package, or test bytes
-  cannot be executed in place of the pushed HEAD.
+  cannot be executed in place of the pushed HEAD. Final review hardening aligns
+  lexical blanking with JavaScript's UTF-16 offsets, requires the stable-runner
+  regression in PR policy, retains native PowerShell stderr/status, and cleans
+  POSIX temporary artifacts on HUP, INT, and TERM.
 
 - Replaced the floating React Doctor `npx` hook invocation with a local-only
   resolver, minimized child environment, and normalized fail-closed receipt.
@@ -74,7 +77,11 @@ All notable changes to this repository should be recorded here.
   callers remove their temporary update artifacts after every outcome while
   retaining the consolidated log; the POSIX caller also removes per-step files,
   supports isolated caller-test logging, and the PowerShell caller streams long
-  step output as it arrives.
+  step output as it arrives. Exact Vitest paths now run independently so an
+  included suite cannot mask a second path excluded by its project config;
+  option-shaped missing values and non-array selector inputs reject before work,
+  and only a real non-ancestor Git result is translated into the advertised-dev
+  ancestry message while infrastructure failures retain their cause.
 
 - Normalized release-package discovery directories to forward-slash manifest
   paths, with a Windows-separator regression, so release-map validation does

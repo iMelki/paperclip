@@ -21,8 +21,9 @@ This file is the durable local index for active `paperclip` issues.
     states before scanning substitute bytes, and uses language-aware detection
     for PowerShell here-strings, shell heredocs, and remote-mutating Git forms.
     Focused broken/restored receipts and the issue-state update are complete;
-    #76 is closed. Hosted exact-head readback for this additional hardening
-    remains pending.
+    #76 is closed. PR #78 completed its first repaired hosted matrix green;
+    second-review hardening and portable evidence are complete locally, with
+    the next exact-head hosted readback still pending.
 
 ## Active Issues
 
@@ -51,14 +52,17 @@ This file is the durable local index for active `paperclip` issues.
     exact configured push destination. Both real platform callers passed their
     broken/restored proofs. The first real `HEAD:topic` push exposed and then
     proved the valid literal-`HEAD` protocol form without weakening object
-    binding; post-merge-base validation is green and hosted validation remains
-    pending.
+    binding. Both first repaired heads completed the full hosted matrix green;
+    the final review hardening has 121/121 focused tests, real platform-caller
+    proof, and a real exact-Vitest include-glob reject/restore receipt. The next
+    exact-head hosted review remains pending.
 
 - [#67 - CI never validates dev: pr.yml is scoped to PRs into master](https://github.com/iMelki/paperclip/issues/67)
   - Bootstrap prepared: PR CI covers `master` and `dev`, never `push: dev`, and a
     static gate fails if either branch disappears or a push event is added. The
-    bootstrap PR launched the hosted jobs against its current workflow; read back
-    their exact-head outcomes before closing this issue.
+    bootstrap PR launched and completed the full hosted matrix on two repaired
+    heads. The policy now mechanically requires the stable-runner regression;
+    read back the final repaired head before closing this issue.
 
 - [#68 - Deep gitleaks history scan fails; no pushed-range mode](https://github.com/iMelki/paperclip/issues/68)
   - `verify-gitleaks.mjs --history` exits 2 with 24 pre-existing findings across 7837
