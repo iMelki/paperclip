@@ -6,18 +6,27 @@ This file is the durable local index for active `paperclip` issues.
 
 ## Active Issues
 
-- [#76 - Security gate fails open: three swallowed fs errors in check-no-git-push.mjs](https://github.com/iMelki/paperclip/issues/76) — **resolved**
-  - All three swallows now fail closed and name the unreadable path and errno, a
-    scan of zero files is an error in its own right, and the success line carries
-    the scanned-file denominator. Swallow #2 (`readdirSync`), previously inferred
-    from code shape, was reproduced under a real EPERM before and after the fix.
-    An absent optional scan root is still tolerated and reported so a different
-    repo layout does not fail the check. Cross-check of the sibling `check:`/
-    `verify:` gates found no other member of this fail-open family; the only
-    remaining bare swallow in that neighbourhood is
-    `.github/scripts/check-pr-dependencies.mjs:67`, which is advisory-only
-    (always returns `passed: true`) and under-reports new dependencies rather
-    than clearing a violation.
+- [#76 - Security gate fails open: incomplete tree coverage in check-no-git-push.mjs](https://github.com/iMelki/paperclip/issues/76) — **issue closed after first repair; adversarial follow-up prepared**
+  - The first repair closed unreadable-file/directory and zero-file failures, and
+    the GitHub issue is currently closed, but adversarial follow-up review showed it
+    still tolerated one missing required root, skipped directory symlinks, omitted
+    `.mts`/`.cts`/`.jsx`, and had no `dev` pre-push invoker. The current repair
+    declares all four Paperclip roots required, rejects symlinks, junctions,
+    generated/cache directories, unknown entries and file types, uses
+    language-aware command detection including PowerShell here-strings and shell
+    heredocs, reconciles every tracked in-scope path
+    against the visible tree, rejects skip-worktree/assume-unchanged index
+    states before scanning substitute bytes, and invokes the gate locally on every push.
+    Focused broken/restored receipts are complete; hosted readback and an exact
+    issue-state update remain required.
+
+- [#77 - check-no-git-push extension allowlist is fail-open by omission](https://github.com/iMelki/paperclip/issues/77) — **local repair and proof complete**
+  - The scanner now rejects every undeclared file type under its required roots.
+    Only explicit declaration/document exclusions remain outside content scanning,
+    so a newly introduced extension becomes a named integrity failure rather than
+    disappearing from the denominator. A real scratch caller rejected the hostile
+    unknown extension at exit 2, then passed after a hash-verified restore; hosted
+    exact-head proof remains pending.
 
 - [#46 - Make React Doctor hook execution reproducible and fail closed](https://github.com/iMelki/paperclip/issues/46)
   - Commit `124a48cc` removed the floating `npx react-doctor@latest` path and
@@ -28,26 +37,29 @@ This file is the durable local index for active `paperclip` issues.
     offline/Windows/Linux, and authenticated-consumer qualification evidence.
 
 - [#73 - Push lockout: the exhaustive pre-push gate rejects every push](https://github.com/iMelki/paperclip/issues/73)
-  - The old pre-push hook required the whole suite to be green even when a change only
-    repaired an existing failure. It now runs full typecheck and uncapped tests related
-    to the outgoing source changes, so unrelated baseline failures cannot block their
-    own repair. #67 remains the required follow-up for exhaustive validation on `dev`.
+  - Repair prepared: retain the full typecheck but replace uncapped import-graph
+    selection with exact changed/sibling suites routed to Node or Vitest. Uncovered
+    live production, malformed Git updates, and child failures reject; non-runnable
+    deletions and other hosted-only changes must travel through a topic PR. The plan is bound to one
+    pristine checked-out HEAD with repository-wide normal index state and the
+    exact configured push destination. Both real
+    platform callers passed their broken/restored proofs; post-merge-base and hosted
+    validation remain pending.
 
 - [#67 - CI never validates dev: pr.yml is scoped to PRs into master](https://github.com/iMelki/paperclip/issues/67)
-  - `.github/workflows/pr.yml` fires only on `pull_request: branches: [master]`, while
-    `origin/dev` was 1212 commits ahead of `origin/master` (3 PRs ever opened into
-    `dev`). No CI run has validated that work. #73 replaced the all-or-nothing local
-    full-suite hook with changed-workspace regression checks, but a Windows pre-push
-    cannot catch POSIX-only defects or provide exhaustive validation. Extending the trigger to `dev`
-    **increases** Actions spend (~+60-120 min/2 d); do NOT add `push: dev`. Operator
-    decision — see the issue for the costed options.
+  - Bootstrap prepared: PR CI covers `master` and `dev`, never `push: dev`, and a
+    static gate fails if either branch disappears or a push event is added. The
+    first bootstrap PR cannot trigger a rule absent from its base; after merge,
+    refresh dependent PRs and read back the hosted jobs before closing this issue.
 
 - [#68 - Deep gitleaks history scan fails; no pushed-range mode](https://github.com/iMelki/paperclip/issues/68)
   - `verify-gitleaks.mjs --history` exits 2 with 24 pre-existing findings across 7837
     commits, all in test fixtures and mock data. The pre-push gate therefore does not
     call it: an unpassable gate trains everyone into `--no-verify`, which would also
-    disable the full typecheck and suite. Triage the 24 findings, add a
-    `--range <base>..<head>` mode, then re-add the scan to `pre-push-check.{ps1,sh}`.
+    disable the full typecheck and suite. Exact `--range <base>..<head>` support
+    and local outgoing-range scans are prepared for pre-push and PR CI. Triaging
+    the 24 historical findings remains open; they are deliberately outside the
+    new commit ranges.
 
 - [#71 - Pre-commit exceeds its declared budget; 87% of the cost is vitest module import](https://github.com/iMelki/paperclip/issues/71)
   - `CONTRIBUTING.md` now declares the budget (p95 <= 90 s, hard cap 180 s) and this repo

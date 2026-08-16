@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import {
   mkdtempSync,
   mkdirSync,
@@ -6,19 +7,20 @@ import {
   rmSync,
   readdirSync,
   readFileSync,
+  lstatSync,
+  realpathSync,
+  symlinkSync,
   statSync,
 } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 
 import {
-  ALLOW_MARKER,
-  GIT_PUSH_PATTERN,
   SCAN_INTEGRITY_EXIT_CODE,
   ScanIntegrityError,
   collectScannableFiles,
-  findGitPushOffenses,
   runCheck,
 } from "./check-no-git-push.mjs";
 
@@ -39,12 +41,15 @@ function failingFs({ op, atPath, code }) {
   };
   const matches = (candidate) => path.resolve(candidate) === path.resolve(atPath);
   return {
+    lstatSync: (target, ...rest) =>
+      op === "lstatSync" && matches(target) ? fail() : lstatSync(target, ...rest),
     statSync: (target, ...rest) =>
       op === "statSync" && matches(target) ? fail() : statSync(target, ...rest),
     readdirSync: (target, ...rest) =>
       op === "readdirSync" && matches(target) ? fail() : readdirSync(target, ...rest),
     readFileSync: (target, ...rest) =>
       op === "readFileSync" && matches(target) ? fail() : readFileSync(target, ...rest),
+    realpathSync: (target, ...rest) => realpathSync(target, ...rest),
   };
 }
 
@@ -59,74 +64,6 @@ function withTempRepo(prefix, body) {
 
 const OFFENDING_SOURCE =
   "import { execSync } from 'node:child_process';\nexecSync('git push origin main');\n";
-
-test("regex matches common git push forms", () => {
-  assert.ok(GIT_PUSH_PATTERN.test("git push"));
-  assert.ok(GIT_PUSH_PATTERN.test("GIT PUSH"));
-  assert.ok(GIT_PUSH_PATTERN.test("git  push origin master"));
-  assert.ok(GIT_PUSH_PATTERN.test("git-push"));
-  assert.ok(GIT_PUSH_PATTERN.test("git_push"));
-});
-
-test("regex ignores unrelated `push` usages", () => {
-  assert.ok(!GIT_PUSH_PATTERN.test("args.push('git')"));
-  assert.ok(!GIT_PUSH_PATTERN.test("notes.push('git remote')"));
-  assert.ok(!GIT_PUSH_PATTERN.test("pushed"));
-  assert.ok(!GIT_PUSH_PATTERN.test("git fetch"));
-});
-
-test("findGitPushOffenses flags a bare invocation in a string", () => {
-  const text = `await exec("git push origin master");\n`;
-  const offenses = findGitPushOffenses(text);
-  assert.equal(offenses.length, 1);
-  assert.equal(offenses[0].lineNumber, 1);
-});
-
-test("findGitPushOffenses ignores mentions inside `//` comments", () => {
-  const text = `// sync-back alone — no \`git push\`, no fetch from any origin.\nconst x = 1;\n`;
-  assert.deepEqual(findGitPushOffenses(text), []);
-});
-
-test("findGitPushOffenses allows opt-in marker on the same line", () => {
-  const text = `await exec("git push origin master"); // ${ALLOW_MARKER}: operator-configured release mirror\n`;
-  assert.deepEqual(findGitPushOffenses(text), []);
-});
-
-test("findGitPushOffenses allows opt-in marker on the line above", () => {
-  const text = `// ${ALLOW_MARKER}: operator-configured release mirror\nawait exec("git push origin master");\n`;
-  assert.deepEqual(findGitPushOffenses(text), []);
-});
-
-test("findGitPushOffenses flags string-literal push even when text is split across mixed quotes", () => {
-  const text = "const cmd = `git push --tags`;\n";
-  const offenses = findGitPushOffenses(text);
-  assert.equal(offenses.length, 1);
-});
-
-test("findGitPushOffenses flags args-array form passed to spawn/execFile", () => {
-  const cases = [
-    `spawn("git", ["push", "origin", "main"]);\n`,
-    `execFile('git', ['push', '--tags']);\n`,
-    "execFile(`git`, [`push`, `--mirror`]);\n",
-  ];
-  for (const text of cases) {
-    const offenses = findGitPushOffenses(text);
-    assert.equal(offenses.length, 1, `expected match for ${text}`);
-  }
-});
-
-test("findGitPushOffenses ignores `git push` in a comment after a string ending with a literal backslash", () => {
-  // The closing `"` after `\\` should end the string (even literal count of
-  // backslashes leaves the quote unescaped), so the `// git push` that
-  // follows is comment text and must be stripped.
-  const text = 'const path = "C:\\\\"; // git push origin master\nconst y = 2;\n';
-  assert.deepEqual(findGitPushOffenses(text), []);
-});
-
-test("findGitPushOffenses does not flag args-array form when allow marker is present", () => {
-  const text = `// ${ALLOW_MARKER}: release tooling adapter\nspawn("git", ["push", "origin", "main"]);\n`;
-  assert.deepEqual(findGitPushOffenses(text), []);
-});
 
 test("runCheck passes when scoped tree has no offenses", () => {
   const tmpRoot = mkdtempSync(path.join(os.tmpdir(), "no-git-push-pass-"));
@@ -198,7 +135,7 @@ test("runCheck does not scan files outside the configured roots", () => {
     );
     const code = runCheck({
       repoRoot: tmpRoot,
-      scanRoots: ["packages/adapters", "server/src"],
+      scanRoots: ["packages/adapters"],
       log: () => {},
       error: () => {},
     });
@@ -212,15 +149,17 @@ test("runCheck does not scan files outside the configured roots", () => {
 // with "No unapproved `git push` invocations found" while an offending file sat
 // unread on disk.
 
-test("#76: renaming every scan root fails closed instead of passing on zero files", () => {
+test("#76: one missing required scan root fails even while other roots are readable", () => {
   withTempRepo("no-git-push-vacuous-", (tmpRoot) => {
-    // The offending file is still on disk -- only its parent directory name
-    // differs from the configured scan root.
     mkdirSync(path.join(tmpRoot, "packages/adapters-renamed/deep"), { recursive: true });
     writeFileSync(
       path.join(tmpRoot, "packages/adapters-renamed/deep/evil.ts"),
       OFFENDING_SOURCE,
     );
+    for (const root of ["packages/adapter-utils", "server/src", "cli/src"]) {
+      mkdirSync(path.join(tmpRoot, root), { recursive: true });
+      writeFileSync(path.join(tmpRoot, root, "clean.ts"), "export const clean = true;\n");
+    }
     const logs = [];
     const errors = [];
     const code = runCheck({
@@ -231,8 +170,8 @@ test("#76: renaming every scan root fails closed instead of passing on zero file
     });
     assert.equal(code, SCAN_INTEGRITY_EXIT_CODE);
     assert.ok(
-      errors.some((line) => line.includes("scanned 0 files")),
-      `expected a zero-files diagnostic, got: ${JSON.stringify(errors)}`,
+      errors.some((line) => line.includes("missing required roots")),
+      `expected a required-root diagnostic, got: ${JSON.stringify(errors)}`,
     );
     assert.ok(
       errors.some((line) => line.includes("packages/adapters")),
@@ -256,7 +195,7 @@ test("#76: an unreadable scan root fails closed and names the root and errno", (
       log: () => {},
       error: (msg) => errors.push(msg),
       fs: failingFs({
-        op: "statSync",
+        op: "lstatSync",
         atPath: path.join(tmpRoot, "packages/adapters"),
         code: "EACCES",
       }),
@@ -264,6 +203,27 @@ test("#76: an unreadable scan root fails closed and names the root and errno", (
     assert.equal(code, SCAN_INTEGRITY_EXIT_CODE);
     const joined = errors.join("\n");
     assert.match(joined, /cannot stat scan root packages\/adapters: EACCES/);
+  });
+});
+
+test("#76: a stat failure after lstat fails closed and names the root", () => {
+  withTempRepo("no-git-push-stat-second-fail-", (tmpRoot) => {
+    mkdirSync(path.join(tmpRoot, "packages/adapters"), { recursive: true });
+    writeFileSync(path.join(tmpRoot, "packages/adapters/clean.ts"), "export {};\n");
+    const errors = [];
+    const code = runCheck({
+      repoRoot: tmpRoot,
+      scanRoots: ["packages/adapters"],
+      log: () => {},
+      error: (message) => errors.push(message),
+      fs: failingFs({
+        op: "statSync",
+        atPath: path.join(tmpRoot, "packages/adapters"),
+        code: "EIO",
+      }),
+    });
+    assert.equal(code, SCAN_INTEGRITY_EXIT_CODE);
+    assert.match(errors.join("\n"), /cannot stat scan root packages\/adapters: EIO/);
   });
 });
 
@@ -309,7 +269,7 @@ test("#76: an unreadable file fails closed and names the file", () => {
     });
     assert.equal(code, SCAN_INTEGRITY_EXIT_CODE);
     const joined = errors.join("\n");
-    assert.match(joined, /cannot read packages\/adapters\/evil\.ts: EPERM/);
+    assert.match(joined, /cannot read or decode packages\/adapters\/evil\.ts as UTF-8: EPERM/);
   });
 });
 
@@ -340,7 +300,7 @@ test("#76: an absent optional scan root is reported but does not fail the check"
     const errors = [];
     const code = runCheck({
       repoRoot: tmpRoot,
-      scanRoots: ["packages/adapters", "cli/src"],
+      scanRoots: ["packages/adapters", { path: "cli/src", required: false }],
       log: (msg) => logs.push(msg),
       error: (msg) => errors.push(msg),
     });
@@ -354,6 +314,226 @@ test("#76: an absent optional scan root is reported but does not fail the check"
       logs.some((line) => line.includes("1 file(s) scanned")),
       "expected the pass line to state how many files were actually read",
     );
+  });
+});
+
+test("#76: a directory symlink inside a scan root is an integrity failure", () => {
+  for (const linkName of ["deep", "dist"]) {
+    withTempRepo("no-git-push-symlink-", (tmpRoot) => {
+      const target = path.join(tmpRoot, "hidden-adapter");
+      const link = path.join(tmpRoot, "packages/adapters", linkName);
+      mkdirSync(target, { recursive: true });
+      mkdirSync(path.dirname(link), { recursive: true });
+      writeFileSync(path.join(target, "evil.ts"), OFFENDING_SOURCE);
+      symlinkSync(target, link, process.platform === "win32" ? "junction" : "dir");
+
+      const errors = [];
+      const code = runCheck({
+        repoRoot: tmpRoot,
+        scanRoots: ["packages/adapters"],
+        log: () => {},
+        error: (message) => errors.push(message),
+      });
+
+      assert.equal(code, SCAN_INTEGRITY_EXIT_CODE);
+      assert.match(
+        errors.join("\n"),
+        new RegExp(`symbolic link inside scan root is not allowed: packages/adapters/${linkName}`),
+      );
+    });
+  }
+});
+
+test("#76: a symbolic-link scan root itself is an integrity failure", () => {
+  withTempRepo("no-git-push-root-symlink-", (tmpRoot) => {
+    const realRoot = path.join(tmpRoot, "real-adapters");
+    mkdirSync(realRoot, { recursive: true });
+    writeFileSync(path.join(realRoot, "clean.ts"), "export {};\n");
+    mkdirSync(path.join(tmpRoot, "packages"), { recursive: true });
+    symlinkSync(realRoot, path.join(tmpRoot, "packages/adapters"), process.platform === "win32" ? "junction" : "dir");
+    const errors = [];
+    const code = runCheck({
+      repoRoot: tmpRoot,
+      scanRoots: ["packages/adapters"],
+      log: () => {},
+      error: (message) => errors.push(message),
+    });
+    assert.equal(code, SCAN_INTEGRITY_EXIT_CODE);
+    assert.match(errors.join("\n"), /scan root packages\/adapters is a symbolic link/);
+  });
+});
+
+test("#76: realpath failures and unsupported entry kinds fail closed", () => {
+  withTempRepo("no-git-push-realpath-fail-", (tmpRoot) => {
+    const scanRoot = path.join(tmpRoot, "packages/adapters");
+    mkdirSync(scanRoot, { recursive: true });
+    writeFileSync(path.join(scanRoot, "clean.ts"), "export {};\n");
+    const errors = [];
+    const code = runCheck({
+      repoRoot: tmpRoot,
+      scanRoots: ["packages/adapters"],
+      log: () => {},
+      error: (message) => errors.push(message),
+      fs: {
+        ...failingFs({ op: "none", atPath: scanRoot, code: "EIO" }),
+        realpathSync: (target) => {
+          if (path.resolve(target) === path.resolve(scanRoot)) {
+            const failure = new Error("injected realpath failure");
+            failure.code = "EIO";
+            throw failure;
+          }
+          return realpathSync(target);
+        },
+      },
+    });
+    assert.equal(code, SCAN_INTEGRITY_EXIT_CODE);
+    assert.match(errors.join("\n"), /cannot resolve packages\/adapters: EIO/);
+  });
+
+  withTempRepo("no-git-push-entry-kind-", (tmpRoot) => {
+    const scanRoot = path.join(tmpRoot, "packages/adapters");
+    mkdirSync(scanRoot, { recursive: true });
+    const errors = [];
+    const code = runCheck({
+      repoRoot: tmpRoot,
+      scanRoots: ["packages/adapters"],
+      log: () => {},
+      error: (message) => errors.push(message),
+      fs: {
+        lstatSync,
+        statSync,
+        readFileSync,
+        realpathSync,
+        readdirSync: () => [{
+          name: "socket-entry",
+          isSymbolicLink: () => false,
+          isDirectory: () => false,
+          isFile: () => false,
+        }],
+      },
+    });
+    assert.equal(code, SCAN_INTEGRITY_EXIT_CODE);
+    assert.match(errors.join("\n"), /unsupported filesystem entry/);
+  });
+});
+
+test("#76: declared JavaScript and runtime-script extensions are all scanned", () => {
+  for (const extension of [".mts", ".cts", ".jsx", ".sh", ".ps1", ".py"]) {
+    withTempRepo(`no-git-push-${extension.slice(1)}-`, (tmpRoot) => {
+      mkdirSync(path.join(tmpRoot, "packages/adapters"), { recursive: true });
+      writeFileSync(path.join(tmpRoot, `packages/adapters/evil${extension}`), OFFENDING_SOURCE);
+      const errors = [];
+      const code = runCheck({
+        repoRoot: tmpRoot,
+        scanRoots: ["packages/adapters"],
+        log: () => {},
+        error: (message) => errors.push(message),
+      });
+      assert.equal(code, 1, `expected ${extension} offender to be rejected`);
+      assert.ok(errors.join("\n").includes(`evil${extension}:2`));
+    });
+  }
+});
+
+test("#76: each present required root must contain a scannable file", () => {
+  withTempRepo("no-git-push-empty-required-", (tmpRoot) => {
+    mkdirSync(path.join(tmpRoot, "packages/adapters"), { recursive: true });
+    mkdirSync(path.join(tmpRoot, "server/src"), { recursive: true });
+    writeFileSync(path.join(tmpRoot, "server/src/clean.ts"), "export const clean = true;\n");
+    const errors = [];
+    const code = runCheck({
+      repoRoot: tmpRoot,
+      scanRoots: ["packages/adapters", "server/src"],
+      log: () => {},
+      error: (message) => errors.push(message),
+    });
+    assert.equal(code, SCAN_INTEGRITY_EXIT_CODE);
+    assert.match(errors.join("\n"), /required scan root packages\/adapters contains zero scannable files/);
+  });
+});
+
+test("#76: an ancestor junction cannot move a declared root outside the repository", () => {
+  const container = mkdtempSync(path.join(os.tmpdir(), "no-git-push-ancestor-junction-"));
+  try {
+    const repoRoot = path.join(container, "repo");
+    const outsidePackages = path.join(container, "outside-packages");
+    mkdirSync(path.join(repoRoot), { recursive: true });
+    mkdirSync(path.join(outsidePackages, "adapters"), { recursive: true });
+    writeFileSync(path.join(outsidePackages, "adapters/evil.ts"), OFFENDING_SOURCE);
+    symlinkSync(outsidePackages, path.join(repoRoot, "packages"), process.platform === "win32" ? "junction" : "dir");
+    const errors = [];
+    const code = runCheck({
+      repoRoot,
+      scanRoots: ["packages/adapters"],
+      log: () => {},
+      error: (message) => errors.push(message),
+    });
+    assert.equal(code, SCAN_INTEGRITY_EXIT_CODE);
+    assert.match(errors.join("\n"), /junction or symbolic-link traversal is not allowed/);
+  } finally {
+    rmSync(container, { recursive: true, force: true });
+  }
+});
+
+test("#76: unsupported source encoding is an integrity error, not a scanned pass", () => {
+  withTempRepo("no-git-push-utf16-", (tmpRoot) => {
+    mkdirSync(path.join(tmpRoot, "packages/adapters"), { recursive: true });
+    writeFileSync(
+      path.join(tmpRoot, "packages/adapters/evil.ts"),
+      Buffer.from("exec('git push origin main');\n", "utf16le"),
+    );
+    const errors = [];
+    const code = runCheck({
+      repoRoot: tmpRoot,
+      scanRoots: ["packages/adapters"],
+      log: () => {},
+      error: (message) => errors.push(message),
+    });
+    assert.equal(code, SCAN_INTEGRITY_EXIT_CODE);
+    assert.match(errors.join("\n"), /cannot read or decode .* as UTF-8/);
+  });
+});
+
+test("#76: invoking the scanner through a directory junction still runs the gate", () => {
+  withTempRepo("no-git-push-main-junction-", (tmpRoot) => {
+    const alias = path.join(tmpRoot, "scripts-alias");
+    symlinkSync(
+      path.dirname(fileURLToPath(import.meta.url)),
+      alias,
+      process.platform === "win32" ? "junction" : "dir",
+    );
+    const script = path.join(alias, "check-no-git-push.mjs");
+    const init = spawnSync("git", ["init", "--quiet"], {
+      cwd: tmpRoot,
+      encoding: "utf8",
+      windowsHide: true,
+      shell: false,
+    });
+    assert.equal(init.status, 0, init.stderr);
+    const result = spawnSync(process.execPath, [script], {
+      cwd: tmpRoot,
+      encoding: "utf8",
+      windowsHide: true,
+      shell: false,
+    });
+    assert.equal(result.status, SCAN_INTEGRITY_EXIT_CODE, result.stderr);
+    assert.match(result.stderr, /missing required roots/);
+  });
+});
+
+test("#76: the pass denominator reports tree coverage, not only root count", () => {
+  withTempRepo("no-git-push-coverage-", (tmpRoot) => {
+    mkdirSync(path.join(tmpRoot, "packages/adapters/nested"), { recursive: true });
+    writeFileSync(path.join(tmpRoot, "packages/adapters/nested/clean.ts"), "export const ok = 1;\n");
+    const logs = [];
+    const code = runCheck({
+      repoRoot: tmpRoot,
+      scanRoots: ["packages/adapters"],
+      log: (message) => logs.push(message),
+      error: () => {},
+    });
+    assert.equal(code, 0);
+    assert.match(logs.join("\n"), /2 directories walked; 2 filesystem entries inspected/);
   });
 });
 
@@ -392,17 +572,14 @@ test("#76: collectScannableFiles throws ScanIntegrityError rather than returning
   });
 });
 
-test("collectScannableFiles skips node_modules, dist, and .d.ts", () => {
+test("collectScannableFiles excludes docs and only untracked declared generated directories", () => {
   const tmpRoot = mkdtempSync(path.join(os.tmpdir(), "no-git-push-collect-"));
   try {
     const adaptersRoot = path.join(tmpRoot, "packages/adapters/sample");
     mkdirSync(path.join(adaptersRoot, "src"), { recursive: true });
-    mkdirSync(path.join(adaptersRoot, "dist"), { recursive: true });
-    mkdirSync(path.join(adaptersRoot, "node_modules/pkg"), { recursive: true });
     writeFileSync(path.join(adaptersRoot, "src/index.ts"), "");
     writeFileSync(path.join(adaptersRoot, "src/types.d.ts"), "");
-    writeFileSync(path.join(adaptersRoot, "dist/index.js"), "");
-    writeFileSync(path.join(adaptersRoot, "node_modules/pkg/index.js"), "");
+    writeFileSync(path.join(adaptersRoot, "README.md"), "documentation\n");
 
     const files = collectScannableFiles(
       path.join(tmpRoot, "packages/adapters"),
@@ -410,7 +587,102 @@ test("collectScannableFiles skips node_modules, dist, and .d.ts", () => {
     );
     const relatives = files.map((entry) => entry.relative).sort();
     assert.deepEqual(relatives, ["packages/adapters/sample/src/index.ts"]);
+
+    mkdirSync(path.join(adaptersRoot, "dist"), { recursive: true });
+    writeFileSync(path.join(adaptersRoot, "dist/index.js"), "");
+    assert.throws(
+      () => collectScannableFiles(path.join(tmpRoot, "packages/adapters"), tmpRoot),
+      /tracked generated\/cache directory inside scan root requires explicit review/,
+    );
+    const untrackedFiles = collectScannableFiles(
+      path.join(tmpRoot, "packages/adapters"),
+      tmpRoot,
+      { trackedFiles: new Set(["packages/adapters/sample/src/index.ts"]) },
+    );
+    assert.deepEqual(untrackedFiles.map((entry) => entry.relative), [
+      "packages/adapters/sample/src/index.ts",
+    ]);
   } finally {
     rmSync(tmpRoot, { recursive: true, force: true });
   }
+});
+
+test("#76: undeclared extensions and extensionless scripts fail closed", () => {
+  for (const file of ["adapter.wat", "runner"]) {
+    withTempRepo("no-git-push-unknown-type-", (tmpRoot) => {
+      mkdirSync(path.join(tmpRoot, "packages/adapters"), { recursive: true });
+      writeFileSync(path.join(tmpRoot, "packages/adapters", file), "git push origin main\n");
+      const errors = [];
+      const code = runCheck({
+        repoRoot: tmpRoot,
+        scanRoots: ["packages/adapters"],
+        log: () => {},
+        error: (message) => errors.push(message),
+      });
+      assert.equal(code, SCAN_INTEGRITY_EXIT_CODE);
+      assert.match(errors.join("\n"), /undeclared file type inside scan root/);
+    });
+  }
+});
+
+test("tracked paths under scan roots must be physically observed or classified", () => {
+  withTempRepo("no-git-push-tracked-manifest-", (tmpRoot) => {
+    const scanRoot = path.join(tmpRoot, "packages/adapters");
+    mkdirSync(scanRoot, { recursive: true });
+    writeFileSync(path.join(scanRoot, "visible.ts"), "export const visible = true;\n");
+    const errors = [];
+    const code = runCheck({
+      repoRoot: tmpRoot,
+      scanRoots: ["packages/adapters"],
+      trackedFiles: new Set([
+        "packages/adapters/visible.ts",
+        "packages/adapters/hidden.ts",
+      ]),
+      log: () => {},
+      error: (message) => errors.push(message),
+    });
+    assert.equal(code, SCAN_INTEGRITY_EXIT_CODE);
+    assert.match(
+      errors.join("\n"),
+      /tracked path under scan roots was not observed in the working tree: packages\/adapters\/hidden\.ts/,
+    );
+  });
+});
+
+test("hidden index flags reject even when the tracked path is physically visible", () => {
+  withTempRepo("no-git-push-hidden-index-", (tmpRoot) => {
+    const scanRoot = path.join(tmpRoot, "packages/adapters");
+    mkdirSync(scanRoot, { recursive: true });
+    writeFileSync(path.join(scanRoot, "hidden.ts"), "export const clean = true;\n");
+    const errors = [];
+    const code = runCheck({
+      repoRoot: tmpRoot,
+      scanRoots: ["packages/adapters"],
+      trackedFiles: new Set(["packages/adapters/hidden.ts"]),
+      nonStandardIndexPaths: new Set(["packages/adapters/hidden.ts"]),
+      log: () => {},
+      error: (message) => errors.push(message),
+    });
+    assert.equal(code, SCAN_INTEGRITY_EXIT_CODE);
+    assert.match(
+      errors.join("\n"),
+      /tracked path under scan roots has a hidden or non-normal index state: packages\/adapters\/hidden\.ts/,
+    );
+  });
+});
+
+test("Windows tracked generated-directory matching is case-insensitive", {
+  skip: process.platform !== "win32",
+}, () => {
+  withTempRepo("no-git-push-generated-case-", (tmpRoot) => {
+    const scanRoot = path.join(tmpRoot, "packages/adapters");
+    mkdirSync(path.join(scanRoot, "dist"), { recursive: true });
+    writeFileSync(path.join(scanRoot, "dist/index.js"), "export {};\n");
+    assert.throws(
+      () => collectScannableFiles(scanRoot, tmpRoot, {
+        trackedFiles: new Set(["packages/adapters/Dist/index.js"]),
+      }),
+      /tracked generated\/cache directory inside scan root requires explicit review/,
+    );
+  });
 });

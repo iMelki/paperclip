@@ -144,40 +144,41 @@ The pre-commit hook is scoped to your staged change so it stays in the seconds-t
 #### Where push verification happens
 
 `.husky/pre-push` runs `scripts/pre-push-check.ps1` (or the `.sh` mirror): the workspace
-link preflight, the forbidden-token check, full `pnpm -r typecheck`, and every uncapped
-Vitest suite related to the outgoing source changes. It rejects regressions in the push
-without re-failing unrelated existing test failures. This is intentional: the former
-full-suite pre-push hook made the repository unpushable while its baseline was red (#73).
+link preflight, the forbidden-token check, the fail-closed adapter/runtime `git push`
+scanner, the PR-trigger policy, full `pnpm -r typecheck`, and a deterministic exact-test
+plan. The planner reads Git's four-field pre-push protocol rather than guessing from an
+upstream branch. It accepts one pristine checked-out HEAD, verifies the exact push URL,
+and bases a new topic branch on the destination's advertised `dev` object. Tests cover
+the resulting current-tree paths; Gitleaks covers every commit in the exact range.
 
-The exhaustive suite needs to move to CI on `dev` (#67). Until then, a clean full-suite
-receipt is useful evidence but is not a condition for pushing a fix to an existing failure.
+Changed test files run directly. Changed production files select only co-located or named
+sibling suites; live production without a discoverable sibling is an explicit failure,
+not an empty pass. A deleted test, or deleted production without a surviving sibling, is
+assigned to hosted CI so deletion remains possible through a reviewed topic PR. Node test files use `node --test`; suites owned by
+the root Vitest projects use `run-vitest-stable.mjs --files`; Playwright, unregistered
+workspace, workflow, hook, manifest, and test-config changes are declared for hosted CI.
+Those hosted-only changes may be pushed to a topic branch, but not directly to `dev` or
+`master`. Documentation is explicitly non-production; every other changed path has a
+local test or hosted-CI owner rather than falling through an empty plan.
 
-It deliberately does **not** run the deep Gitleaks *history* scan. That scan exits 2 on 24
-pre-existing findings across 7837 commits (all test fixtures and mock data), which would
-make the gate unpassable for reasons no individual push introduced — and an unpassable gate
-just trains everyone into `--no-verify`, which disables the typecheck and suite above it.
-New content is already scanned at pre-commit by `verify-gitleaks.mjs --staged`. Restoring a
-`--range base..head` scan is tracked in
-[#68](https://github.com/iMelki/paperclip/issues/68).
+`.github/workflows/pr.yml` runs on pull requests into both `master` and `dev`; it must not
+run on every push to `dev`. Hosted CI owns Linux/POSIX behaviour, clean frozen-lockfile
+installs, and exhaustive suites. Its secret scan uses the exact PR commit range. The known
+24 historical fixture findings remain tracked in
+[#68](https://github.com/iMelki/paperclip/issues/68) without making every dev PR red.
 
-It is deliberately not CI's job. `.github/workflows/pr.yml` is scoped to
-`pull_request: branches: [master]`, while all development happens on `dev` — so no CI
-run validates a commit until the promotion PR. CI is reserved for the things only CI
-can do: Linux/POSIX behaviour (every dev host here is Windows), clean-environment
-installs from a frozen lockfile, and verification a reviewer can trust because it did
-not come from a developer's machine.
-
-The push hook removes the pre-commit representative cap, but it still runs only the
-outgoing change's related suite set. **If you disable or bypass the pre-push hook, you
-lose this uncapped regression check**. Note that a missing `.husky/pre-push` looks exactly
-like a passing one, because the husky shim exits 0 when the hook file is absent.
+**If you disable or bypass the pre-push hook, you lose the local security scanners, full
+typecheck, deterministic exact suites, and the direct-protected-branch CI policy.** A
+missing `.husky/pre-push` looks exactly like a pass because the Husky shim exits 0 when the
+hook file is absent.
 
 To reproduce the full sweep on demand:
 
 ```bash
 pnpm run test:run                          # full suite on its own
 PAPERCLIP_PRECOMMIT_ALL=1 git commit ...   # full typecheck + full test suite at commit time
-PAPERCLIP_PRECOMMIT_RELATED_CAP=0 ...      # uncapped related run (can exceed the full suite)
+node scripts/run-vitest-stable.mjs --files path/to/exact.test.ts
+node scripts/run-pre-push-tests.mjs --changed-file path/to/source.ts --target-ref refs/heads/topic --dry-run
 ```
 
 #### Measured cost (2026-08-13, contended host: ~120 node processes, ~58% CPU)
@@ -192,7 +193,7 @@ PAPERCLIP_PRECOMMIT_RELATED_CAP=0 ...      # uncapped related run (can exceed th
 Reference points: full `pnpm -r typecheck` is **184.3 s** warm across all 32 workspace
 packages, and the full suite is ~75 min.
 
-Two things follow, and they are why the cap exists and why it is not enough:
+Two things follow, and they are why pre-commit remains capped while pre-push uses exact suites:
 
 - **Cost is import, not execution.** The capped 12-suite hub run spent **227.8 s of 262.7 s
   (87%) importing modules** and only 29.6 s executing tests — about 22-25 s per suite,

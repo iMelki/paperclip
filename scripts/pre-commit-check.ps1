@@ -136,20 +136,15 @@ if ($runAll) {
     Write-Fail "Unit tests failed."
   }
 } elseif (Test-StagedMatch '^(server|ui|cli|packages|tests)/|(^|/)(package\.json|pnpm-lock\.yaml|vitest\.[^/]+|vitest\.config\.[^/]+)$|\.test\.[mc]?tsx?$|\.spec\.[mc]?tsx?$') {
-  # Run only the suites whose module graph reaches a staged file. The full suite is a
-  # PRE-PUSH gate, not a pre-COMMIT one -- see .husky/pre-push and scripts/pre-push-check.ps1.
+  # Run only the suites whose module graph reaches a staged file. Pre-push replaces
+  # this approximate graph with exact changed/sibling suites; exhaustive Linux lanes
+  # run on pull requests into dev and master.
   #
-  # It is deliberately NOT a CI gate. An earlier version of this comment claimed
-  # ".github/workflows/pr.yml already runs it on every PR"; that was false for the branch
-  # this hook actually runs on. pr.yml is scoped to `pull_request: branches: [master]`,
-  # while all development happens on `dev` -- origin/dev was 1212 commits ahead of
-  # origin/master on 2026-08-13, with only 3 PRs ever opened into dev. No CI run has
-  # validated any of those commits, so relaxing this hook against a CI backstop that never
-  # fires here would have been a straight coverage loss.
+  # `.github/workflows/pr.yml` now covers pull requests into both long-lived branches
+  # and a static policy rejects removing either trigger or adding push:dev.
   #
-  # The cap is only safe because pre-push runs the full suite. If you remove or bypass the
-  # pre-push hook, restore the full suite here. Set PAPERCLIP_PRECOMMIT_ALL=1 for a full
-  # local sweep on demand.
+  # The cap is safe only with both backstops: deterministic exact pre-push suites and
+  # exhaustive hosted PR CI. Set PAPERCLIP_PRECOMMIT_ALL=1 for a full local sweep.
   $relatedSeeds = @($stagedFiles | Where-Object { $_ -match '\.([mc]?[jt]sx?|json)$' })
   if ($relatedSeeds.Count -eq 0) {
     Write-InfoLine "Skipping unit tests (no staged JavaScript/TypeScript sources)."

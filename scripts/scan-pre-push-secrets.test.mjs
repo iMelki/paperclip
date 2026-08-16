@@ -1,0 +1,108 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+
+import { parsePushUpdates } from "./run-pre-push-tests.mjs";
+import {
+  PrePushSecretScanError,
+  buildPrePushSecretScans,
+  executePrePushSecretScans,
+} from "./scan-pre-push-secrets.mjs";
+
+const A = "a".repeat(40);
+const B = "b".repeat(40);
+const C = "c".repeat(40);
+const ZERO = "0".repeat(40);
+
+test("builds one exact scan per update and uses authoritative dev for a new branch", () => {
+  const updates = parsePushUpdates([
+    `refs/heads/topic ${B} refs/heads/topic ${A}`,
+    `refs/heads/new ${C} refs/heads/new ${ZERO}`,
+    `(delete) ${ZERO} refs/heads/old ${A}`,
+  ].join("\n"));
+  const calls = [];
+  const git = (_repoRoot, args) => {
+    calls.push(args);
+    if (args[0] === "remote") return "git@example.test:paperclip.git\n";
+    if (args[0] === "ls-remote") return `${A}\trefs/heads/dev\n`;
+    if (args[0] === "merge-base") return "";
+    throw new Error(`unexpected Git call: ${args.join(" ")}`);
+  };
+  assert.deepEqual(buildPrePushSecretScans({
+    repoRoot: "C:/repo",
+    remoteName: "origin",
+    remoteLocation: "git@example.test:paperclip.git",
+    updates,
+    git,
+  }), [
+    {
+      localRef: "refs/heads/topic",
+      remoteRef: "refs/heads/topic",
+      args: ["--range", `${A}..${B}`],
+    },
+    {
+      localRef: "refs/heads/new",
+      remoteRef: "refs/heads/new",
+      args: ["--range", `${A}..${C}`],
+    },
+  ]);
+  assert.ok(calls.some((args) => args[0] === "ls-remote"));
+  assert.deepEqual(calls.at(-1), ["merge-base", "--is-ancestor", A, C]);
+});
+
+test("rejects an unsafe remote before constructing any scan", () => {
+  const updates = parsePushUpdates(`refs/heads/topic ${B} refs/heads/topic ${A}\n`);
+  assert.throws(
+    () => buildPrePushSecretScans({
+      repoRoot: "C:/repo",
+      remoteName: "../origin",
+      remoteLocation: "git@example.test:paperclip.git",
+      updates,
+    }),
+    PrePushSecretScanError,
+  );
+  assert.throws(
+    () => buildPrePushSecretScans({
+      repoRoot: "C:/repo",
+      remoteName: "-x",
+      remoteLocation: "git@example.test:paperclip.git",
+      updates,
+    }),
+    /unsafe or missing remote name/,
+  );
+});
+
+test("rejects a push destination that does not match the configured remote", () => {
+  const updates = parsePushUpdates(`refs/heads/topic ${B} refs/heads/topic ${A}\n`);
+  assert.throws(
+    () => buildPrePushSecretScans({
+      repoRoot: "C:/repo",
+      remoteName: "origin",
+      remoteLocation: "git@example.test:other.git",
+      updates,
+      git: () => "git@example.test:paperclip.git\n",
+    }),
+    /does not match a configured push URL/,
+  );
+});
+
+test("propagates the first verifier failure and restored children pass", () => {
+  const scans = [
+    { localRef: "refs/heads/a", remoteRef: "refs/heads/a", args: ["--range", `${A}..${B}`] },
+    { localRef: "refs/heads/b", remoteRef: "refs/heads/b", args: ["--range", `${B}..${C}`] },
+  ];
+  let calls = 0;
+  const failing = executePrePushSecretScans(scans, {
+    spawn: () => ({ status: ++calls === 2 ? 23 : 0 }),
+    log: () => {},
+    error: () => {},
+  });
+  assert.equal(failing, 23);
+  assert.equal(calls, 2);
+
+  const passing = executePrePushSecretScans(scans, {
+    spawn: () => ({ status: 0 }),
+    log: () => {},
+    error: () => {},
+  });
+  assert.equal(passing, 0);
+});
