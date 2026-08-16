@@ -1,5 +1,4 @@
 #!/usr/bin/env node
-import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -9,6 +8,7 @@ import {
   sanitizeGitLocalEnvironment,
 } from "./git-local-env.mjs";
 import { loadShardDurations, selectGeneralServerShard } from "./general-server-shard.mjs";
+import { forEachExactVitestFile, runVitestDirect } from "./run-vitest-direct.mjs";
 
 const repoRoot = process.cwd();
 const gitLocalEnvironmentVariableNames = resolveGitLocalEnvironmentVariableNames({ cwd: repoRoot });
@@ -152,7 +152,9 @@ function parseCliOptions(argv) {
   let group = null;
   let dryRun = false;
   let related = false;
+  let exact = false;
   const relatedFiles = [];
+  const exactFiles = [];
 
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
@@ -165,9 +167,19 @@ function parseCliOptions(argv) {
       continue;
     }
 
+    if (arg === "--files") {
+      exact = true;
+      continue;
+    }
+
     // Once --related is set, bare arguments are the changed source files to trace.
     if (related && !arg.startsWith("--")) {
       relatedFiles.push(arg);
+      continue;
+    }
+
+    if (exact && !arg.startsWith("--")) {
+      exactFiles.push(arg);
       continue;
     }
 
@@ -223,11 +235,43 @@ function parseCliOptions(argv) {
     fail(`Unknown argument "${arg}".`);
   }
 
+  if (related && exact) {
+    fail("--related and --files are mutually exclusive.");
+  }
+
   if (related) {
-    if (mode !== allModeName || group !== null || shardIndex !== null || dryRun) {
+    if (mode !== allModeName || group !== null || shardIndex !== null || shardCount !== null || dryRun) {
       fail("--related cannot be combined with --mode/--group/--shard-*/--dry-run.");
     }
-    return { mode, shardIndex: null, shardCount: null, group: null, dryRun: false, related, relatedFiles };
+    return {
+      mode,
+      shardIndex: null,
+      shardCount: null,
+      group: null,
+      dryRun: false,
+      related,
+      relatedFiles,
+      exact: false,
+      exactFiles: [],
+    };
+  }
+
+  if (exact) {
+    if (mode !== allModeName || group !== null || shardIndex !== null || shardCount !== null || dryRun) {
+      fail("--files cannot be combined with --mode/--group/--shard-*/--dry-run.");
+    }
+    if (exactFiles.length === 0) fail("--files requires at least one exact test path.");
+    return {
+      mode,
+      shardIndex: null,
+      shardCount: null,
+      group: null,
+      dryRun: false,
+      related: false,
+      relatedFiles: [],
+      exact,
+      exactFiles,
+    };
   }
 
   if (!new Set([allModeName, generalModeName, serializedModeName]).has(mode)) {
@@ -307,16 +351,11 @@ function runVitest(args, label, { serverExcludes = [], subcommand = "run" } = {}
     writeFileSync(excludeFile, `${JSON.stringify(serverExcludes)}\n`, "utf8");
     env.PAPERCLIP_VITEST_EXCLUDE_FILE = excludeFile;
   }
-  const result = spawnSync(
-    "pnpm",
-    ["exec", "vitest", subcommand, ...commonVitestArgs, ...args],
-    {
-      cwd: repoRoot,
-      env,
-      shell: process.platform === "win32",
-      stdio: "inherit",
-    },
-  );
+  const result = runVitestDirect([subcommand, ...commonVitestArgs, ...args], {
+    cwd: repoRoot,
+    env,
+    stdio: "inherit",
+  });
   if (result.error) {
     console.error(`[test:run] Failed to start Vitest: ${result.error.message}`);
     process.exit(1);
@@ -435,14 +474,14 @@ function runGeneralGroup(routeTests, groupName, shardIndex = null, shardCount = 
  * This inverts the usual test-impact-analysis convention (Azure DevOps / Datadog / Google all
  * fall back to running MORE tests when selection is untrustworthy). That is deliberate: those
  * systems' selection guards a MERGE. This one guards a local commit, and it is not the
- * authoritative gate — exhaustiveness lands at PRE-PUSH (.husky/pre-push runs the full suite,
- * uncapped and without --related). Correctness gates (forbidden tokens, gitleaks, react-doctor,
- * typecheck) are untouched by this cap.
+ * approximate local gate. Pre-push runs deterministic exact changed/sibling suites, while
+ * pull requests into dev and master run the exhaustive hosted lanes. Correctness gates
+ * (forbidden tokens, gitleaks, react-doctor, typecheck) are untouched by this cap.
  *
- * HARD PRECONDITION: this cap is only safe in a checkout where the pre-push hook is installed
- * AND actually dispatches. A missing .husky/pre-push is indistinguishable from a passing one —
- * the husky shim exits 0 when the hook file is absent — so "no output" is not proof of a gate.
- * Verify with: git config --get core.hooksPath, then confirm <that dir>/../pre-push exists.
+ * HARD PRECONDITION: this cap is only safe when pre-push actually dispatches and hosted PR CI
+ * covers the target branch. A missing .husky/pre-push is indistinguishable from a pass, so
+ * "no output" is not evidence. Resolve core.hooksPath and verify its dispatcher plus the
+ * repository .husky/pre-push target.
  *
  * Override with PAPERCLIP_PRECOMMIT_RELATED_CAP (0 disables the cap and restores the
  * uncapped related run).
@@ -571,10 +610,8 @@ async function runRelatedSuites(files) {
       `The staged change reaches a hub module, so the related set has degenerated toward the ` +
       `full suite.\n` +
       `[test:run] Running the ${subset.length} suites closest to the change locally. ` +
-      `The full suite runs at PRE-PUSH (.husky/pre-push), uncapped and without --related, ` +
-      `before anything leaves this machine — that is the authoritative gate, not CI. ` +
-      `.github/workflows/pr.yml is scoped to 'pull_request: branches: [master]', so nothing ` +
-      `in CI runs the suite on pushes to dev or on PRs into dev.\n` +
+      `Pre-push runs exact changed/sibling suites without import-graph expansion, and ` +
+      `pull requests into dev or master run the exhaustive hosted lanes.\n` +
       `[test:run] For a full local sweep before pushing: PAPERCLIP_PRECOMMIT_ALL=1 git commit ...` +
       ` (or PAPERCLIP_PRECOMMIT_RELATED_CAP=0 to run all ${selected.length}).`,
   );
@@ -588,6 +625,22 @@ async function runRelatedSuites(files) {
     ],
     `related subset: ${subset.length} of ${selected.length} suite(s)`,
   );
+}
+
+function runExactSuites(files) {
+  const invalid = files.filter((file) => !/\.(?:test|spec)\.[mc]?[jt]sx?$/i.test(file));
+  if (invalid.length > 0) {
+    fail(`--files accepts only exact test paths; received: ${invalid.join(", ")}`);
+  }
+  // Run each exact file separately. Some workspace projects deliberately include
+  // only *.test.ts while others include *.spec.ts; one accepted file must never
+  // let an excluded file disappear behind an otherwise successful invocation.
+  forEachExactVitestFile(files, (file) => {
+    runVitest(
+      ["--pool=forks", "--isolate", ...serializedServerVitestArgs, file],
+      `exact pre-push selection: ${file}`,
+    );
+  });
 }
 
 function runSerializedSuites(routeTests, shardIndex, shardCount) {
@@ -679,6 +732,11 @@ if (options.dryRun) {
 if (options.related) {
   // Top-level await: resolving the related set needs vitest's async Node API.
   await runRelatedSuites(options.relatedFiles);
+  process.exit(0);
+}
+
+if (options.exact) {
+  runExactSuites(options.exactFiles);
   process.exit(0);
 }
 
