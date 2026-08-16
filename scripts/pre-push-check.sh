@@ -110,6 +110,24 @@ run_step "workspace link preflight" "Workspace link preflight failed." \
 [ "$FAILED" -eq 0 ] && run_step "forbidden token check" "Forbidden tokens found." \
   "$PNPM_BIN" run check:tokens
 
+# Adapter/runtime `git push` gate -- measured 0.33s, plus 0.27s for its own regression
+# suite. Both are here because until now they ran in ZERO automated contexts for dev
+# work: the gate's only caller was .github/workflows/pr.yml, which triggers on
+# `pull_request: branches: [master]`, so every commit that lands on dev -- which is all
+# of them -- reached the branch unchecked (#76).
+#
+# The test suite runs alongside the gate deliberately. This gate's failure mode is not
+# "it reports an offense that is not there", it is "it reports a pass it did not earn",
+# and the only thing that catches that is its own fail-closed fixtures. A gate whose
+# negative fixtures never execute is a gate on the honour system.
+[ "$FAILED" -eq 0 ] && run_step "adapter/runtime git push gate" \
+  "Adapter/runtime code contains an unapproved \`git push\`, or the gate could not read what it must scan." \
+  "$PNPM_BIN" run check:no-git-push
+
+[ "$FAILED" -eq 0 ] && run_step "git push gate self-test (fail-closed fixtures)" \
+  "The git push gate's own fail-closed regression suite failed." \
+  "$PNPM_BIN" run test:check-no-git-push
+
 # NO deep history secret scan here -- deliberately, and this is not a coverage cut.
 # The first draft ran `verify-gitleaks.mjs --history`: measured 2026-08-13 it scanned
 # 7837 commits in 28.3s and exited 2 with 24 pre-existing findings, all in test fixtures

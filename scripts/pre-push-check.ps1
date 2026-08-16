@@ -186,7 +186,30 @@ if (-not $failed) {
     -FailureMessage "Forbidden tokens found."
 }
 
-# 3. NO deep history secret scan here -- deliberately, and this is not a coverage cut.
+# 3. Adapter/runtime `git push` gate -- measured 0.33s, plus 0.27s for its own
+#    regression suite. Both are here because until now they ran in ZERO automated
+#    contexts for dev work: the gate's only caller was .github/workflows/pr.yml,
+#    which triggers on `pull_request: branches: [master]`, so every commit that
+#    lands on dev -- which is all of them -- reached the branch unchecked (#76).
+#
+#    The test suite runs alongside the gate deliberately. This gate's failure mode
+#    is not "it reports an offense that is not there", it is "it reports a pass it
+#    did not earn", and the only thing that catches that is its own fail-closed
+#    fixtures. A gate whose negative fixtures never execute is a gate on the honour
+#    system.
+if (-not $failed) {
+  Invoke-Step -Name "adapter/runtime git push gate" `
+    -Action { & $pnpm @("run", "check:no-git-push") } `
+    -FailureMessage 'Adapter/runtime code contains an unapproved `git push`, or the gate could not read what it must scan.'
+}
+
+if (-not $failed) {
+  Invoke-Step -Name "git push gate self-test (fail-closed fixtures)" `
+    -Action { & $pnpm @("run", "test:check-no-git-push") } `
+    -FailureMessage "The git push gate's own fail-closed regression suite failed."
+}
+
+# 4. NO deep history secret scan here -- deliberately, and this is not a coverage cut.
 #
 #    The first draft of this gate ran `verify-gitleaks.mjs --history`. Measured
 #    2026-08-13 it scanned 7837 commits in 28.3s and exited 2 with 24 findings, all
@@ -207,7 +230,7 @@ if (-not $failed) {
 #    a range mode that verify-gitleaks.mjs does not yet expose (it hardcodes
 #    --log-opts=--all). Tracked as a follow-up issue along with triaging the 24 findings.
 
-# 4. Full typecheck across every workspace package. pre-commit only typechecks the
+# 5. Full typecheck across every workspace package. pre-commit only typechecks the
 #    affected packages plus their dependents; this is the unscoped sweep.
 if (-not $failed) {
   Invoke-Step -Name "full TypeScript check (pnpm -r typecheck)" `
@@ -215,7 +238,7 @@ if (-not $failed) {
     -FailureMessage "TypeScript check failed."
 }
 
-# 5. Test every suite related to this push, without pre-commit's representative cap.
+# 6. Test every suite related to this push, without pre-commit's representative cap.
 #    This preserves a real regression gate without making a red unrelated suite block
 #    the commit that repairs it (#73).
 if (-not $failed -and $testFiles.Count -gt 0) {

@@ -40,14 +40,43 @@
     {
       "id": "adapter-runtime-no-git-push",
       "path": "scripts/check-no-git-push.mjs",
-      "description": "Rejects `git push` in adapter/runtime source, and rejects its own run when it could not read what it was supposed to scan (renamed/unreadable scan root, unreadable directory, unreadable file, or zero files scanned).",
+      "description": "Rejects `git push` in adapter/runtime source, and rejects its own run when it could not read what it was supposed to scan: an absent/renamed REQUIRED scan root, a required root present but holding zero scannable files, an unreadable directory or file, an unresolvable or dangling symlink, or zero files scanned overall. Directory symlinks are resolved and traversed (cycle-safe) rather than silently dropped.",
       "negativeFixture": "scripts/check-no-git-push.test.mjs",
       "observedFailure": {
         "date": "2026-08-16",
         "command": "node scripts/check-no-git-push.mjs (run in a scratch fixture whose four scan roots were renamed, with the offending file still on disk)",
         "reason": "Exited 2 with 'scanned 0 files and therefore cannot report a pass' and named all four absent roots. Under real EPERM the same run exits 2 with 'cannot list directory packages/adapters/deep: EPERM' and 'cannot read packages/adapters/evil.ts: EPERM'. The pre-fix script exited 0 printing the success line in all three cases, having read nothing.",
         "restoredPass": "With the roots restored and readable, the same fixture exits 0 and prints the denominator '4 file(s) scanned across 4 of 4 scan root(s)'; a seeded offender still exits 1 and names the file and line. Against the real checkout the gate reports 1273 files scanned across 4 of 4 roots.",
-        "preFixTestRun": "Run against a scratch copy of the pre-fix module (94a4a440c), the suite is 14 pass / 8 fail; against the fixed module it is 22 pass / 0 fail. The 8 are the seven new #76 fixtures plus the happy-path assertion that the pass line carries a non-zero scanned-file count."
+        "preFixTestRun": "Run against a scratch copy of the pre-fix module (94a4a440c), the suite is 14 pass / 8 fail; against the fixed module it is 22 pass / 0 fail. The 8 are the seven new #76 fixtures plus the happy-path assertion that the pass line carries a non-zero scanned-file count.",
+        "reopened": {
+          "date": "2026-08-16",
+          "why": "The first #76 fix left three working bypasses. Each was reproduced against the frozen pre-fix module (79dcf8e1d) with a live control before any code changed.",
+          "bypasses": [
+            {
+              "id": "B",
+              "summary": "readdirSync(dir,{withFileTypes:true}) reports a symlink-to-directory with isDirectory()===false, so the entry fell to the FILE branch, failed the extension test on its extension-less name, and its ENTIRE subtree was dropped silently.",
+              "observedPreFix": "exit 0, \"4 file(s) scanned across 4 of 4 scan root(s)\", offender readable on disk through the link. Every telemetry signal read healthy because the denominator counted ROOTS, not the tree.",
+              "committable": "git stores the link as mode 120000 with blob content \"../../hidden\" (verified with git ls-files -s in a scratch repo), so a Linux CI checkout materialises a real symlink and takes the same branch. Not Windows-only.",
+              "observedPostFix": "exit 1, naming packages/adapters/deep/evil.ts through the link."
+            },
+            {
+              "id": "A",
+              "summary": "Renaming ONE of four scan roots -- the one holding the offender -- was merely logged. Only renaming ALL FOUR tripped the vacuity guard.",
+              "observedPreFix": "exit 0 with \"3 file(s) scanned across 3 of 4 scan root(s)\" and the offender readable under the renamed directory.",
+              "observedPostFix": "exit 2, \"required scan roots ABSENT: packages/adapter-utils\". Absence is now decided BY DECLARATION: a bare string root is required (fail-closed default), tolerance must be written as { path, optional: true }. A required root that exists but yields zero scannable files also fails closed."
+            },
+            {
+              "id": "C",
+              "summary": "SCANNABLE_EXTENSIONS omitted .mts/.cts/.jsx, so an offender renamed to .mts was never read.",
+              "observedPreFix": "exit 0 with the offender unscanned whenever any sibling .ts file padded the file count.",
+              "observedPostFix": "exit 1 for each of .mts/.cts/.jsx; .d.mts/.d.cts remain skipped as declarations."
+            }
+          ],
+          "preFixTestRun": "The committed suite run against a scratch shim over the frozen pre-fix module (79dcf8e1d) is 21 pass / 17 fail; against the fixed module it is 38 pass / 0 fail / 0 skipped. The 17 are every bypass fixture plus the four pre-existing fixtures that relied on blanket tolerance of an absent root.",
+          "notARegressionFixture": "The symlink-cycle test passes against the pre-fix module too, because pre-fix never followed a directory symlink and so could not loop. It guards the hazard the fix introduces, not a bypass.",
+          "coverageDelta": "On the real checkout the file count is unchanged at 1273 (there are no committed symlinks and no .mts/.cts/.jsx under the scan roots today), so this closes adversarial and future holes without altering current coverage. The pass line now reports the TREE: \"1273 file(s) scanned across 114 director(ies), 0 symlink(s) resolved; per root: packages/adapters=247, packages/adapter-utils=55, server/src=820, cli/src=151\".",
+          "wiring": "Until now the gate ran in ZERO automated contexts for dev work: its only caller was .github/workflows/pr.yml, triggered on pull_request: branches:[master], while all development happens on dev. It is now also a step in the local pre-push tier (scripts/pre-push-check.ps1 and .sh)."
+        }
       }
     },
     {
