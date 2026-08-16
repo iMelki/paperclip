@@ -6,18 +6,48 @@ This file is the durable local index for active `paperclip` issues.
 
 ## Active Issues
 
-- [#76 - Security gate fails open: three swallowed fs errors in check-no-git-push.mjs](https://github.com/iMelki/paperclip/issues/76) — **resolved**
-  - All three swallows now fail closed and name the unreadable path and errno, a
-    scan of zero files is an error in its own right, and the success line carries
-    the scanned-file denominator. Swallow #2 (`readdirSync`), previously inferred
-    from code shape, was reproduced under a real EPERM before and after the fix.
-    An absent optional scan root is still tolerated and reported so a different
-    repo layout does not fail the check. Cross-check of the sibling `check:`/
-    `verify:` gates found no other member of this fail-open family; the only
-    remaining bare swallow in that neighbourhood is
-    `.github/scripts/check-pr-dependencies.mjs:67`, which is advisory-only
+- [#76 - Security gate fails open: three swallowed fs errors in check-no-git-push.mjs](https://github.com/iMelki/paperclip/issues/76) — **resolved (reopened once, then closed)**
+  - First pass: all three swallows fail closed naming the unreadable path and
+    errno, a scan of zero files is an error in its own right, and the success
+    line carries a denominator. Swallow #2 (`readdirSync`), previously inferred
+    from code shape, was reproduced under a real EPERM.
+  - **Reopened.** That fix left three working bypasses, each reproduced against
+    the frozen pre-fix module with controls before being fixed
+    (`bf81b90e9acd8a5a6acde731d151f55f301c63b2`):
+    - **Directory symlink.** `readdirSync(..., { withFileTypes: true })`
+      describes the link, not its target, so a symlink-to-directory reports
+      `isDirectory() === false`, fell to the file branch, failed the extension
+      test on its extension-less name, and its whole subtree vanished — exit 0,
+      "4 of 4 scan roots". Committable: git stores it as mode 120000, so Linux
+      CI hits the same branch. Symlinks are now resolved and traversed,
+      cycle-safe; dangling links fail closed.
+    - **Renaming ONE root.** Only renaming *all four* tripped the vacuity guard.
+      Absence is now settled by declaration — a bare string root is required,
+      tolerance must be written as `{ path, optional: true }`, and a required
+      root that is present but empty of scannable files also fails closed. This
+      supersedes the earlier note that "an absent optional scan root is still
+      tolerated": tolerance is no longer the default, only a declaration.
+    - **Extensions.** `.mts`/`.cts`/`.jsx` were unscanned; added.
+  - The denominator now describes the tree (files, directories, symlinks
+    resolved, per-root breakdown) rather than a count of scan roots — the root
+    count is what made the symlink bypass read healthy.
+  - **Wiring.** The gate previously ran in zero automated contexts for dev work
+    (only `.github/workflows/pr.yml`, on `pull_request: branches: [master]`). It
+    and its own fail-closed suite are now steps in the local pre-push tier
+    (0.33s + 0.27s). Exhaustive dev CI remains #67.
+  - Cross-check of the sibling `check:`/`verify:` gates found no other member of
+    this fail-open family; the only remaining bare swallow in that neighbourhood
+    is `.github/scripts/check-pr-dependencies.mjs:67`, which is advisory-only
     (always returns `passed: true`) and under-reports new dependencies rather
     than clearing a violation.
+
+- [#77 - check-no-git-push: extension allowlist is fail-open by omission](https://github.com/iMelki/paperclip/issues/77) — **open**
+  - Bypass C's root cause survives its own fix: the scanner still selects files
+    by an allowlist of extensions, so the next extension the repo adopts is
+    unscanned by default and nothing fails when that happens. Latent today (no
+    `.vue`/`.svelte`/`.astro` under the scan roots). Preferred fix is the direct
+    analogue of the scan-root change — make undeclared drift loud rather than
+    tolerated.
 
 - [#46 - Make React Doctor hook execution reproducible and fail closed](https://github.com/iMelki/paperclip/issues/46)
   - Commit `124a48cc` removed the floating `npx react-doctor@latest` path and

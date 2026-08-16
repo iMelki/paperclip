@@ -2,6 +2,29 @@
 
 ## Unreleased
 
+- Closed three working bypasses left by the first `git push` gate fix (#76), and
+  wired the gate so it actually runs on `dev`.
+  A symlink-to-directory is reported by `readdirSync(..., { withFileTypes: true })`
+  with `isDirectory() === false`, so it fell to the file branch, failed the
+  extension test on its extension-less name, and its entire subtree was dropped
+  silently — exit 0, "4 of 4 scan root(s)", offender readable through the link.
+  Git stores such a link as mode 120000, so Linux CI takes the same branch. The
+  walker now resolves symlinks and classifies by the target, with a
+  realpath-keyed visited set so a cycle terminates; dangling or unresolvable
+  links fail closed. Renaming a *single* scan root also passed (only renaming all
+  four tripped the vacuity guard), so scan roots are now declared: a bare string
+  is required, tolerance must be written as `{ path, optional: true }`, and a
+  required root that is absent — or present but holding zero scannable files —
+  fails closed. `.mts`, `.cts` and `.jsx` are now scanned (`.d.mts`/`.d.cts` skipped
+  as declarations). The success line reports the tree actually walked
+  (`N file(s) scanned across M director(ies), K symlink(s) resolved; per root: ...`)
+  instead of a count of scan roots, which is the number that made the symlink
+  bypass read healthy. The gate and its own fail-closed regression suite are now
+  steps in the local pre-push tier; previously the gate's only caller was
+  `.github/workflows/pr.yml` on `pull_request: branches: [master]`, so it ran in
+  no automated context for dev work. Residual: the extension allowlist is still
+  fail-open by omission (#77).
+
 - Made the adapter/runtime `git push` gate fail closed (#76).
   `scripts/check-no-git-push.mjs` swallowed three filesystem errors
   (`statSync` on a scan root, `readdirSync` mid-walk, `readFileSync` on a
