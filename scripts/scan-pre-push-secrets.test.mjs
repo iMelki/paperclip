@@ -15,6 +15,7 @@ import {
 const A = "a".repeat(40);
 const B = "b".repeat(40);
 const C = "c".repeat(40);
+const D = "d".repeat(40);
 const ZERO = "0".repeat(40);
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const scannerScript = path.join(repoRoot, "scripts", "scan-pre-push-secrets.mjs");
@@ -29,7 +30,7 @@ test("builds one exact scan per update and uses authoritative dev for a new bran
   const git = (_repoRoot, args) => {
     calls.push(args);
     if (args[0] === "remote") return "git@example.test:paperclip.git\n";
-    if (args[0] === "ls-remote") return `${A}\trefs/heads/dev\n`;
+    if (args[0] === "ls-remote") return `${D}\trefs/heads/dev\n`;
     if (args[0] === "merge-base") return "";
     throw new Error(`unexpected Git call: ${args.join(" ")}`);
   };
@@ -48,11 +49,11 @@ test("builds one exact scan per update and uses authoritative dev for a new bran
     {
       localRef: "refs/heads/new",
       remoteRef: "refs/heads/new",
-      args: ["--range", `${A}..${C}`],
+      args: ["--range", `${D}..${C}`],
     },
   ]);
   assert.ok(calls.some((args) => args[0] === "ls-remote"));
-  assert.deepEqual(calls.at(-1), ["merge-base", "--is-ancestor", A, C]);
+  assert.deepEqual(calls.at(-1), ["merge-base", "--is-ancestor", D, C]);
 });
 
 test("new-branch secret scans name divergence but preserve other Git failures", () => {
@@ -71,7 +72,7 @@ test("new-branch secret scans name divergence but preserve other Git failures", 
   });
   assert.throws(
     () => build(new PrePushIntegrityError("git merge-base failed with exit 1", { exitCode: 1 })),
-    /new branch refs\/heads\/new must contain advertised refs\/heads\/dev object/,
+    /pushed ref refs\/heads\/new must contain advertised refs\/heads\/dev object/,
   );
   const original = new PrePushIntegrityError("git merge-base failed with exit 128", { exitCode: 128 });
   assert.throws(() => build(original), (error) => error === original);

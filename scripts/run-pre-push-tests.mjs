@@ -179,7 +179,7 @@ export function assertAdvertisedDevAncestor({
   } catch (error) {
     if (error instanceof PrePushIntegrityError && error.exitCode === 1) {
       throw new PrePushIntegrityError(
-        `new branch ${remoteRef} must contain advertised refs/heads/dev object ${remoteDevOid}`,
+        `pushed ref ${remoteRef} must contain advertised refs/heads/dev object ${remoteDevOid}`,
         { cause: error, exitCode: 1 },
       );
     }
@@ -251,40 +251,12 @@ export function resolveOutgoingChangedFiles({
   updates,
   git = runGit,
 }) {
-  if (
-    updates.some((update) => !update.deletion) &&
-    !updates.some((update) => update.creation && !update.deletion)
-  ) {
-    assertRemoteLocationMatchesConfig({ repoRoot, remoteName, remoteLocation, git });
-  }
+  const contentUpdates = updates.filter((update) => !update.deletion);
+  const remoteDevOid = contentUpdates.length > 0
+    ? resolveAuthoritativeRemoteDevOid({ repoRoot, remoteName, remoteLocation, git })
+    : null;
   const changedFiles = new Set();
-  let remoteDevOid = null;
-  for (const update of updates) {
-    if (update.deletion) continue;
-    if (!update.creation) {
-      const output = git(
-        repoRoot,
-        [
-          "diff",
-          "--name-only",
-          "-z",
-          "--no-renames",
-          "--diff-filter=ACDMRTUXB",
-          update.remoteOid,
-          update.localOid,
-          "--",
-        ],
-      );
-      parseNullDelimited(output).forEach((file) => changedFiles.add(file));
-      continue;
-    }
-
-    remoteDevOid ??= resolveAuthoritativeRemoteDevOid({
-      repoRoot,
-      remoteName,
-      remoteLocation,
-      git,
-    });
+  for (const update of contentUpdates) {
     assertAdvertisedDevAncestor({
       repoRoot,
       remoteDevOid,
