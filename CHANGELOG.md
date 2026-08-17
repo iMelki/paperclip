@@ -64,7 +64,12 @@ All notable changes to this repository should be recorded here.
   support PATH-derived, per-user, and Scoop Git installs with a clear failure
   when no complete Git shell is available. Process-session stdin and EOF writes
   are now ordered, and cleanup waits for proven wrapper termination before
-  removing the remote session or workspace. The environment transport remains
+  removing the remote session or workspace. Gemini version detection now uses
+  the shared trusted Windows shim launcher, supports install paths with spaces,
+  downgrades pre-0.33 CLIs to `--experimental-acp`, and reports probe failures
+  before retaining `--acp`. Adapter-utils managed-runtime host archives now
+  bind to System32 `tar.exe` on Windows so Git Bash cannot reinterpret
+  drive-letter paths as remote archives. The environment transport remains
   bounded; #64 tracks reducing or replacing the oversized ambient-env payload.
 
 - Replaced the unsupported fork Dependency Review call in the trusted PR-review
@@ -88,6 +93,11 @@ All notable changes to this repository should be recorded here.
   supports isolated caller-test logging, and the PowerShell caller streams long
   step output as it arrives. Exact Vitest paths now run independently so an
   included suite cannot mask a second path excluded by its project config;
+  capped and uncapped pre-commit related selections also run every selected
+  suite in a separate Vitest process so coordinator-owned environment and mock
+  state cannot leak across otherwise independent suites. Linux-only Bubblewrap
+  characterization cases now skip unsupported hosts while portable parsers
+  continue to run on every platform;
   option-shaped missing values and non-array selector inputs reject before work,
   and only a real non-ancestor Git result is translated into the advertised-dev
   ancestry message while infrastructure failures retain their cause.
