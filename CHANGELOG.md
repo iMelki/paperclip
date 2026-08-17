@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- Corrected the deterministic pre-push baseline for existing topic branches
+  after they merge current `dev` (#73). The old path diffed the remote topic tip
+  to `HEAD`, so a real PR #66 push re-selected five already-published `dev`
+  files and failed on their missing local siblings. Every content update now
+  validates the configured destination, resolves its advertised `dev`, requires
+  that object to be an ancestor, and tests the final `dev..HEAD` tree. The
+  Gitleaks caller deliberately retains the exact outgoing
+  `remote-topic..HEAD` commit range. A deliberate old-baseline regression failed
+  for the exact A-versus-C range mismatch; the restored planner/secret suites
+  passed 22/22 and the real hook passed all exact suites without a bypass.
+
 - Extended the adapter/runtime `git push` gate repair after adversarial review (#76, #77).
   `scripts/check-no-git-push.mjs` swallowed three filesystem errors
   (`statSync` on a scan root, `readdirSync` mid-walk, `readFileSync` on a

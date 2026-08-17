@@ -6,11 +6,6 @@ This file is the durable local index for active `paperclip` issues.
 
 ## Recently Closed Issues
 
-- [#73 - Push lockout: the exhaustive pre-push gate rejects every push](https://github.com/iMelki/paperclip/issues/73) — **closed and merged**
-  - The bounded exact changed/sibling pre-push gate landed on `dev`; PR #78
-    completed its full hosted matrix and merged as `9983a44a`. The separate
-    pre-commit performance work remains open under #71.
-
 - [#76 - Security gate fails open: incomplete tree coverage in check-no-git-push.mjs](https://github.com/iMelki/paperclip/issues/76) — **closed after the reopened fix; stronger adversarial hardening prepared**
   - The first repair closed unreadable-file/directory and zero-file failures.
     Reopened proof in `bf81b90e` then reproduced three live bypasses: renaming
@@ -31,6 +26,18 @@ This file is the durable local index for active `paperclip` issues.
     the next exact-head hosted readback still pending.
 
 ## Active Issues
+
+- [#73 - Push lockout: the exhaustive pre-push gate rejects every push](https://github.com/iMelki/paperclip/issues/73) — **reopened after a real existing-topic push**
+  - PR #78 replaced the uncapped related sweep and merged as `9983a44a`, but a
+    PR #66 push after merging that `dev` tip exposed one uncovered existing-ref
+    path: the planner diffed the old remote topic tip to `HEAD`, re-selected five
+    already-published `dev` files, and rejected them for missing siblings.
+  - Commit `43011d50` resolves advertised `dev` for every content update,
+    requires it as an ancestor, and tests the final `dev..HEAD` tree while the
+    secret scanner keeps the exact outgoing topic range. Deliberate old-baseline
+    proof failed for A versus C, focused planner/secret tests passed 22/22, and
+    the real hook passed 31-project typecheck plus 35 Node and ten isolated
+    Vitest suites. Exact-head hosted review remains the closing gate.
 
 - [#77 - check-no-git-push extension allowlist is fail-open by omission](https://github.com/iMelki/paperclip/issues/77) — **local repair and proof complete**
   - The scanner now rejects every undeclared file type under its required roots.
