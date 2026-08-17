@@ -119,13 +119,13 @@
     {
       "id": "stable-vitest-exact-mode",
       "path": "scripts/run-vitest-stable.mjs",
-      "description": "Runs each exact selected Vitest file independently so an included test cannot mask an unmatched project file, while rejecting incompatible grouping, sharding, related, or dry-run options.",
+      "description": "Runs every exact or related selected Vitest file independently so one suite cannot mask, contaminate, or retain coordinator-owned state for another, while rejecting incompatible grouping, sharding, related, or dry-run options.",
       "negativeFixture": "scripts/__tests__/run-vitest-stable-shard.test.mjs",
       "observedFailure": {
         "date": "2026-08-16",
         "command": "node --test scripts/__tests__/run-vitest-stable-shard.test.mjs",
-        "reason": "Supplying shard-count alone with --files or --related raises the declared --shard-* incompatibility. A real exact invocation then ran one valid shared test before rejecting an existing .spec.ts file excluded by that project's include glob, proving the valid file could not mask it.",
-        "restoredPass": "Renaming the fixture to the supported .test.ts form made both exact per-file invocations pass (10 tests total); valid related and duration-balanced shard configurations remained deterministic, and the shard suite passed 12/12."
+        "reason": "Supplying shard-count alone with --files or --related raises the declared --shard-* incompatibility. A real exact invocation then ran one valid shared test before rejecting an existing .spec.ts file excluded by that project's include glob, proving the valid file could not mask it. On 2026-08-17 UTC, deliberately restoring the uncapped related branch to one batched Vitest coordinator made the owning test fail for the exact reason 'related selection must never launch a batched Vitest coordinator directly'.",
+        "restoredPass": "Renaming the fixture to the supported .test.ts form made both exact per-file invocations pass (10 tests total). Restoring the isolated related dispatcher returned the shard suite to 13/13 and the real pre-commit caller resolved 322 candidates, ran its 12-suite cap in separate processes, and passed 335 tests with 21 declared platform skips and zero failures. Portable receipt: doc/evidence/precommit-related-isolation/2026-08-18-pr66-receipt.json."
       }
     },
     {
