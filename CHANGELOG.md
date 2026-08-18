@@ -22,7 +22,9 @@
   the earlier, attributable PATH-resolution error introduced by this branch.
   The final exact-head review also hardened the late-EOF test helper so a
   missing output marker closes stdin, reaps its child, and consumes the pending
-  exit result before returning the timeout.
+  exit result before returning the timeout. The fixture launches its idle child
+  through `process.execPath -e` so the same custody proof is executable on both
+  Windows and POSIX hosts.
 
 - Corrected the deterministic pre-push baseline for existing topic branches
   after they merge current `dev` (#73). The old path diffed the remote topic tip

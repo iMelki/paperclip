@@ -114,10 +114,13 @@ describe("sandbox adapter execution targets", () => {
       endAfterStdout?: string;
       markerTimeoutMs?: number;
       onSpawn?: (child: ChildProcessWithoutNullStreams) => void;
+      spawnArgs?: string[];
     } = {},
   ): Promise<{ stdout: string; stderr: string; code: number | null }> {
     const target = resolveTestScriptSpawn(command);
-    const child = spawn(target.command, target.args, { stdio: ["pipe", "pipe", "pipe"] });
+    const child = spawn(target.command, [...target.args, ...(options.spawnArgs ?? [])], {
+      stdio: ["pipe", "pipe", "pipe"],
+    });
     options.onSpawn?.(child);
     let stdout = "";
     let stderr = "";
@@ -1154,20 +1157,17 @@ describe("sandbox adapter execution targets", () => {
     }, 15_000);
 
     it("reaps the proxy child when the late-EOF output marker never arrives", async () => {
-      const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-process-session-marker-timeout-"));
-      cleanupDirs.push(rootDir);
-      const scriptPath = path.join(rootDir, "idle-proxy.mjs");
-      await writeFile(scriptPath, "process.stdin.resume(); setInterval(() => {}, 1_000);\n", "utf8");
       let child: ChildProcessWithoutNullStreams | null = null;
 
       try {
         await expect(
-          runProxyWithInput(scriptPath, "", {
+          runProxyWithInput(process.execPath, "", {
             endAfterStdout: "never-emitted-marker",
             markerTimeoutMs: 50,
             onSpawn: (spawnedChild) => {
               child = spawnedChild;
             },
+            spawnArgs: ["-e", "process.stdin.resume(); setInterval(() => {}, 1_000);"],
           }),
         ).rejects.toThrow("Timed out waiting for proxy output before closing stdin.");
         expect(child).not.toBeNull();
