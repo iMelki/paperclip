@@ -1,9 +1,9 @@
 {
   "schemaVersion": "paperclip.precommit-related-isolation-receipt.v1",
   "recordedAtUtc": "2026-08-18T07:50:00Z",
-  "scope": "PR #69 review-repair commit: the pre-commit related expansion selected a pre-existing failing suite; the documented cap knob was used with full attribution instead of any bypass.",
+  "scope": "PR #69 review-repair commit: the pre-commit 'related'-suite expansion selected a pre-existing failing suite; the documented cap knob was used with full attribution instead of any bypass.",
   "commit": "670447a38c5a8fe4bfda9cd79431cbe6419c773e",
-  "uncappedRelatedRun": {
+  "cappedRelatedRun": {
     "candidates": 327,
     "cap": 12,
     "executed": {

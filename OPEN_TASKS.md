@@ -48,13 +48,14 @@ This file is the durable local index for active `paperclip` issues.
     site. Remaining residuals keep this issue open: `ssh.ts:150` legacy quoter
     and `ssh.ts:342` bare-`sh` spawn (trace SSH callers first; do not batch),
     `remote-managed-runtime.ts:184` posix-only `localPath` validation (fails
-    2 Windows-host tests at the `dev` tip and blocks pre-commit related
-    expansions that select that suite — the #47 phenomenon class), and
+    2 Windows-host tests at the `dev` tip and blocks pre-commit
+    `related`-suite expansions that select that suite — the #47 phenomenon
+    class), and
     enforcement that prevents new bare-shell/bare-tool spawns.
 
 - [#47 - dev tip fails 2 Windows path tests — hook rejects all commits](https://github.com/iMelki/paperclip/issues/47)
   - Open. The same phenomenon recurred 2026-08-18 during the PR #69 repair
-    commit: the pre-commit related expansion selected
+    commit: the pre-commit `related`-suite expansion selected
     `remote-managed-runtime.test.ts`, which fails 2 Windows-host tests at the
     `dev` tip (tracked as a #63 residual). The commit used the hook's
     documented `PAPERCLIP_PRECOMMIT_RELATED_CAP` knob with full attribution;
