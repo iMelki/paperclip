@@ -50,9 +50,11 @@ This file is the durable local index for active `paperclip` issues.
     the real hook passed 31-project typecheck plus 35 Node and ten isolated
     Vitest suites. The first exact-head hosted matrix then exposed a latent
     streamed-proxy `ERR_STREAM_WRITE_AFTER_END` race; the socket-state guard,
-    owning 41-test suite, and adapter-utils typecheck are green locally. A
-    repaired-head hosted matrix and genuine CodeRabbit review remain the
-    closing gates.
+    owning suite, and adapter-utils typecheck are green locally. A hosted matrix
+    for the repaired head confirmed that fix and exposed one stale OpenCode
+    startup-error assertion; its focused repair is green. Genuine CodeRabbit
+    review completed with bounded lifecycle follow-ups now in repair. One final
+    hosted matrix and exact-head review remain the closing gates.
 
 - [#77 - check-no-git-push extension allowlist is fail-open by omission](https://github.com/iMelki/paperclip/issues/77) — **local repair and proof complete**
   - The scanner now rejects every undeclared file type under its required roots.

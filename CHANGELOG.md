@@ -6,13 +6,20 @@
   events after a remote terminal frame has already ended its socket (#59).
   The exact PR #66 hosted shard exposed the race as
   `ERR_STREAM_WRITE_AFTER_END`; the proxy now ignores writes once it is
-  exiting, destroyed, or writable-ended, and the owning streamed-order test
-  mechanically verifies that guard in the generated proxy. The same real hook
+  exiting, destroyed, or writable-ended. The owning streamed-order test now
+  holds stdin open through terminal output and proves a late EOF exits cleanly;
+  buffered data is also drained before a runner rejection without accepting a
+  buffered terminal frame as proof, and the terminal error uses a flush-safe
+  socket close so backpressure cannot discard queued data. Remote termination
+  probes use bounded deadline-clamped backoff, and proven wrappers receive a
+  separate bounded cleanup window. The same real hook
   also exposed a cluster of POSIX-only `0600`/`0700` assertions, a bare `sh`
   fixture, and literal `/` temp-path prefixes in the Codex credential tests;
   Windows now retains the functional credential/rotation assertions, POSIX
   continues to verify permission bits, shell-backed fixtures use the reviewed
-  Git-for-Windows resolver, and temp paths use native joins (#22).
+  Git-for-Windows resolver, and temp paths use native joins (#22). The next
+  hosted shard exposed a stale OpenCode missing-command assertion; it now checks
+  the earlier, attributable PATH-resolution error introduced by this branch.
 
 - Corrected the deterministic pre-push baseline for existing topic branches
   after they merge current `dev` (#73). The old path diffed the remote topic tip

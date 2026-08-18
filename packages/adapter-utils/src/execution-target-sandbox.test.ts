@@ -107,7 +107,11 @@ describe("sandbox adapter execution targets", () => {
     throw new Error(message);
   }
 
-  async function runProxyWithInput(command: string, input: string): Promise<{ stdout: string; stderr: string; code: number | null }> {
+  async function runProxyWithInput(
+    command: string,
+    input: string,
+    options: { endAfterStdout?: string } = {},
+  ): Promise<{ stdout: string; stderr: string; code: number | null }> {
     const target = resolveTestScriptSpawn(command);
     const child = spawn(target.command, target.args, { stdio: ["pipe", "pipe", "pipe"] });
     let stdout = "";
@@ -120,10 +124,7 @@ describe("sandbox adapter execution targets", () => {
     child.stderr.on("data", (chunk) => {
       stderr += chunk;
     });
-    // Deliberately coalesce data and EOF into one turn. The bridge must retain
-    // that receipt order even when each remote queue write is asynchronous.
-    child.stdin.end(input);
-    const code = await new Promise<number | null>((resolve, reject) => {
+    const exitPromise = new Promise<number | null>((resolve, reject) => {
       const proxyTimeoutMs = process.platform === "win32" ? 10_000 : 5_000;
       const timeout = setTimeout(() => {
         child.kill("SIGKILL");
@@ -141,6 +142,22 @@ describe("sandbox adapter execution targets", () => {
         setTimeout(() => resolve(exitCode), process.platform === "win32" ? 1_000 : 0);
       });
     });
+    if (options.endAfterStdout) {
+      child.stdin.write(input);
+      await waitForCondition(
+        () => stdout.includes(options.endAfterStdout!),
+        "Timed out waiting for proxy output before closing stdin.",
+        3_000,
+      );
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      expect(child.exitCode).toBeNull();
+      child.stdin.end();
+    } else {
+      // Deliberately coalesce data and EOF into one turn. The bridge must retain
+      // that receipt order even when each remote queue write is asynchronous.
+      child.stdin.end(input);
+    }
+    const code = await exitPromise;
     return { stdout, stderr, code };
   }
 
@@ -683,10 +700,15 @@ describe("sandbox adapter execution targets", () => {
 
       const delegate = createLocalSandboxRunner();
       let sessionDir: string | null = null;
+      let cleanupTimeoutMs: number | undefined;
       const runner = {
         execute: async (input: Parameters<typeof delegate.execute>[0]) => {
           const launchedSessionDir = input.env?.PAPERCLIP_PROCESS_SESSION_DIR;
           if (launchedSessionDir) sessionDir = launchedSessionDir;
+          const script = input.args?.[1] ?? "";
+          if (sessionDir && script.includes(`rm -rf '${sessionDir}'`)) {
+            cleanupTimeoutMs = input.timeoutMs;
+          }
           return delegate.execute(input);
         },
       };
@@ -726,6 +748,7 @@ describe("sandbox adapter execution targets", () => {
           .then(() => true)
           .catch(() => false);
         expect(sessionStillExists).toBe(false);
+        expect(cleanupTimeoutMs).toBe(5_000);
 
         // This is the Windows regression guard: no descendant may retain a cwd
         // handle after stop returns, so the surrounding workspace is removable.
@@ -736,7 +759,7 @@ describe("sandbox adapter execution targets", () => {
         if (!stopped) await bridge?.stop();
       }
     },
-    15_000,
+    30_000,
   );
 
   it("retains the remote session when wrapper termination cannot be proven", async () => {
@@ -1106,9 +1129,71 @@ describe("sandbox adapter execution targets", () => {
       try {
         const proxyTarget = resolveTestScriptSpawn(bridge!.agentCommand);
         const proxySource = await readFile(proxyTarget.args[0] ?? proxyTarget.command, "utf8");
-        expect(proxySource).toContain("if (exiting || socket.destroyed || socket.writableEnded) return;");
-        const result = await runProxyWithInput(bridge!.agentCommand, "hello\n");
+        expect(proxySource).toMatch(
+          /if\s*\(\s*exiting\s*\|\|\s*socket\.destroyed\s*\|\|\s*socket\.writableEnded\s*\)\s*return/,
+        );
+        const result = await runProxyWithInput(bridge!.agentCommand, "hello\n", {
+          endAfterStdout: "out:hello\n",
+        });
         expect(result).toEqual({ stdout: "out:hello\n", stderr: "err:hello\n", code: 0 });
+      } finally {
+        await bridge?.stop();
+      }
+    }, 15_000);
+
+    it("delivers buffered stream data before a runner rejection", async () => {
+      const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-process-session-stream-reject-"));
+      cleanupDirs.push(rootDir);
+      const delegate = createLocalSandboxRunner();
+      const bufferedOutput = `${"x".repeat(256 * 1024)}\n`;
+      const bufferedFrame = {
+        seq: 2,
+        type: "data",
+        stream: "stdout",
+        data: Buffer.from(bufferedOutput).toString("base64"),
+      };
+      const bufferedTerminal = { seq: 3, type: "exit", code: 0, signal: null };
+      const runner = {
+        execute: async (
+          input: Parameters<NonNullable<AdapterSandboxExecutionTarget["runner"]>["execute"]>[0],
+        ) => {
+          if (input.useSession) {
+            await input.onLog?.("stdout", `${JSON.stringify(bufferedFrame)}\n`);
+            await input.onLog?.("stdout", `${JSON.stringify(bufferedTerminal)}\n`);
+            throw new Error("stream transport failed");
+          }
+          return delegate.execute(input);
+        },
+      };
+      const target: AdapterSandboxExecutionTarget = {
+        kind: "remote",
+        transport: "sandbox",
+        providerKey: "stream-reject-test",
+        remoteCwd: rootDir,
+        timeoutMs: 30_000,
+        runner,
+      };
+
+      const bridge = await startAdapterExecutionTargetProcessSessionBridge({
+        runId: "run-stream-reject",
+        target,
+        runtimeRootDir: path.posix.join(rootDir, ".paperclip-runtime", "acpx"),
+        adapterKey: "acpx",
+        command: "unused-agent-command",
+        args: [],
+        cwd: rootDir,
+        env: {},
+        timeoutSec: 5,
+        onLog: async () => {},
+        streamOutputViaSession: true,
+      });
+      expect(bridge).not.toBeNull();
+
+      try {
+        const result = await runProxyWithInput(bridge!.agentCommand, "");
+        expect(result.stdout).toBe(bufferedOutput);
+        expect(result.stderr).toContain("stream transport failed");
+        expect(result.code).toBe(1);
       } finally {
         await bridge?.stop();
       }

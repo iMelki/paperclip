@@ -95,7 +95,7 @@ Largest-function and complexity proxy review:
   extracted, nesting is at most four levels, and splitting the shared coverage
   sets from result construction would increase state drift. The exception was
   independently reviewed on the repaired snapshot.
-- `resolveOutgoingChangedFiles` is 35 physical lines. New and existing content
+- `resolveOutgoingChangedFiles` is 37 physical lines. New and existing content
   updates deliberately share one configured-destination readback, advertised
   `dev` ancestry proof, rename-visible `dev..HEAD` range, and result set.
   Gitleaks remains separately bound to exact outgoing commits. Independent

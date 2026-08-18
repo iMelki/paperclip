@@ -1297,7 +1297,9 @@ const PROCESS_SESSION_REMOTE_SCRIPT = "paperclip-process-session-remote.mjs";
 const PROCESS_SESSION_REMOTE_STREAM_SCRIPT = "paperclip-process-session-remote-stream.mjs";
 const PROCESS_SESSION_AUTH_TIMEOUT_MS = 5_000;
 const PROCESS_SESSION_STOP_TIMEOUT_MS = 5_000;
-const PROCESS_SESSION_STOP_POLL_INTERVAL_MS = 50;
+const PROCESS_SESSION_CLEANUP_TIMEOUT_MS = 5_000;
+const PROCESS_SESSION_STOP_POLL_INTERVAL_MS = 100;
+const PROCESS_SESSION_STOP_POLL_MAX_INTERVAL_MS = 500;
 
 async function waitForProcessSessionWrapperTermination(
   termination: Promise<void>,
@@ -1331,20 +1333,23 @@ async function waitForRemoteProcessExit(input: {
     "  printf 'exited\\n'",
     "fi",
   ].join("\n");
+  let pollIntervalMs = PROCESS_SESSION_STOP_POLL_INTERVAL_MS;
   while (Date.now() < deadline) {
-    const remainingMs = Math.max(100, Math.min(1_000, deadline - Date.now()));
+    const remainingMs = deadline - Date.now();
+    if (remainingMs <= 0) break;
     const result = await input.runner.execute({
       command: input.shellCommand,
       args: shellCommandArgs(probeScript),
       cwd: input.remoteCwd,
-      timeoutMs: remainingMs,
+      timeoutMs: Math.min(1_000, remainingMs),
       bypassSession: true,
     }).catch(() => null);
     if (result && !result.timedOut && result.exitCode === 0 && result.stdout.trim() === "exited") {
       return true;
     }
-    const delayMs = Math.min(PROCESS_SESSION_STOP_POLL_INTERVAL_MS, deadline - Date.now());
+    const delayMs = Math.min(pollIntervalMs, deadline - Date.now());
     if (delayMs > 0) await new Promise((resolve) => setTimeout(resolve, delayMs));
+    pollIntervalMs = Math.min(PROCESS_SESSION_STOP_POLL_MAX_INTERVAL_MS, pollIntervalMs * 2);
   }
   return false;
 }
@@ -1631,13 +1636,10 @@ export async function startAdapterExecutionTargetProcessSessionBridge(input: {
   const proxyDir = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-process-session-proxy-"));
 
   const writeRemoteEventToSocket = (event: (typeof pendingRemoteEvents)[number]) => {
-    if (!socket) return false;
-    socket.write(jsonLine(event));
-    if (event.type === "exit") {
-      socket.end();
-    } else if (event.type === "error") {
-      socket.destroy();
-    }
+    if (!socket || socket.destroyed || socket.writableEnded) return false;
+    const payload = jsonLine(event);
+    if (event.type === "exit" || event.type === "error") socket.end(payload);
+    else socket.write(payload);
     return true;
   };
 
@@ -1812,6 +1814,13 @@ export async function startAdapterExecutionTargetProcessSessionBridge(input: {
         if (nextFrame) deliverOrderedFrame(nextFrame);
       }
     };
+    const drainPendingStreamDataFrames = () => {
+      const bufferedFrames = [...pendingStreamFrames.entries()].sort(([left], [right]) => left - right);
+      pendingStreamFrames.clear();
+      for (const [, frame] of bufferedFrames) {
+        if (frame.type === "data") deliverRemoteEvent(frame);
+      }
+    };
     const parseFrameLine = (line: string) => {
       if (!line.trim()) return;
       let frame: (typeof pendingRemoteEvents)[number] & { seq?: number };
@@ -1885,10 +1894,13 @@ export async function startAdapterExecutionTargetProcessSessionBridge(input: {
       })
       .catch((error) => {
         if (!stopping) {
-          deliverRemoteEvent({
-            type: "error",
-            message: error instanceof Error ? error.message : String(error),
-          });
+          drainPendingStreamDataFrames();
+          if (!sawTerminal) {
+            deliverRemoteEvent({
+              type: "error",
+              message: error instanceof Error ? error.message : String(error),
+            });
+          }
         }
       });
   } else {
@@ -1938,12 +1950,12 @@ export async function startAdapterExecutionTargetProcessSessionBridge(input: {
       if (pollTimer) clearTimeout(pollTimer);
       await serverClosed;
       let sessionRemoved = false;
-      if (wrapperTerminated && remainingStopMs() > 0) {
+      if (wrapperTerminated) {
         const removeResult = await runner.execute({
           command: shellCommand,
           args: shellCommandArgs(`rm -rf ${shellQuote(sessionDir)}`),
           cwd: target.remoteCwd,
-          timeoutMs: remainingStopMs(),
+          timeoutMs: PROCESS_SESSION_CLEANUP_TIMEOUT_MS,
           bypassSession: true,
         }).catch(() => null);
         sessionRemoved = Boolean(
@@ -1951,9 +1963,12 @@ export async function startAdapterExecutionTargetProcessSessionBridge(input: {
         );
       }
       if (!sessionRemoved) {
+        const cleanupFailure = wrapperTerminated
+          ? `remote session removal was not confirmed within ${PROCESS_SESSION_CLEANUP_TIMEOUT_MS}ms`
+          : `wrapper termination was not proven within ${PROCESS_SESSION_STOP_TIMEOUT_MS}ms`;
         await onLog(
           "stderr",
-          `[paperclip] ACP process session cleanup was not proven within ${PROCESS_SESSION_STOP_TIMEOUT_MS}ms; retaining ${sessionDir} when present.\n`,
+          `[paperclip] ACP process session cleanup was not proven: ${cleanupFailure}; retaining ${sessionDir} when present.\n`,
         );
       }
       await fs.rm(proxyDir, { recursive: true, force: true }).catch(() => undefined);
