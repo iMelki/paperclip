@@ -4,7 +4,7 @@ import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { shellQuotePath } from "./shell-path.js";
+import { dirnamePortablePath, shellQuotePath } from "./shell-path.js";
 
 export interface GitCommandResult {
   stdout: string;
@@ -326,7 +326,12 @@ export function buildRemoteGitDeltaBundleScript(input: {
     "set -e",
     input.cleanupBundle ? `cleanup() { ${cleanupParts.join("; ")}; }` : "",
     input.cleanupBundle ? "trap cleanup EXIT" : "",
-    `mkdir -p ${shellQuote(path.posix.dirname(input.bundlePath))}`,
+    // The parent must be derived before shell-path normalization:
+    // `path.posix.dirname` on a backslash-form Windows bundle path returns "."
+    // while the quoted bundle path below normalizes to `/c/...`, so the script
+    // would mkdir the wrong directory. `dirnamePortablePath` handles both
+    // separator families and stays a plain POSIX dirname for sandbox paths.
+    `mkdir -p ${shellQuote(dirnamePortablePath(input.bundlePath))}`,
     `rm -f ${bundlePath}`,
     // Choose the bundle boundary. A thin bundle `HEAD --not <baseSha>` records
     // baseSha as a prerequisite the importer (host) must already hold. That

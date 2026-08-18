@@ -124,6 +124,32 @@ describe("git workspace sync", () => {
     }
   });
 
+  it("derives the bundle parent directory portably for a backslash Windows bundle path", () => {
+    // A missing backslash-form parent is the regression shape: posix.dirname
+    // on `C:\work\missing\bundle.bundle` returns ".", so the script would
+    // mkdir "." while Git writes the bundle to `/c/work/missing/...`.
+    const script = buildRemoteGitDeltaBundleScript({
+      remoteDir: "C:\\sandbox\\repo",
+      baseSha: "0000000000000000000000000000000000000000",
+      exportRef: "refs/paperclip/export/test",
+      bundlePath: "C:\\work\\missing\\bundle.bundle",
+    });
+
+    expect(script).toContain("mkdir -p '/c/work/missing'");
+    expect(script).toContain("rm -f '/c/work/missing/bundle.bundle'");
+    expect(script).not.toContain("mkdir -p '.'");
+    expect(script).not.toContain("C:\\");
+
+    const posixScript = buildRemoteGitDeltaBundleScript({
+      remoteDir: "/sandbox/repo",
+      baseSha: "0000000000000000000000000000000000000000",
+      exportRef: "refs/paperclip/export/test",
+      bundlePath: "/tmp/work/missing/bundle.bundle",
+    });
+
+    expect(posixScript).toContain("mkdir -p '/tmp/work/missing'");
+  });
+
   it("creates a shallow standalone clone from the local HEAD snapshot", async () => {
     const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-git-sync-"));
     cleanupDirs.push(rootDir);
