@@ -1,14 +1,15 @@
 #!/usr/bin/env sh
-# Exhaustive tier. See scripts/pre-push-check.ps1 for why the full suite lives here
-# rather than at pre-commit (throughput) or in CI (pr.yml never fires on `dev`).
+# Deterministic local tier. Git supplies the remote name/location as arguments
+# and every ref update on stdin; both must reach the platform caller unchanged.
 #
 # Exit status is propagated explicitly rather than relying on the husky dispatcher's
 # `sh -e`, so this hook rejects a push for exactly one reason: a step failed.
 if command -v pwsh >/dev/null 2>&1; then
-  pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/pre-push-check.ps1
+  pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/pre-push-check.ps1 \
+    -RemoteName "$1" -RemoteLocation "$2"
   status=$?
 else
-  sh scripts/pre-push-check.sh
+  sh scripts/pre-push-check.sh "$@"
   status=$?
 fi
 exit $status

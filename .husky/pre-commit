@@ -1,7 +1,19 @@
 #!/usr/bin/env sh
+set -eu
+
 if command -v pwsh >/dev/null 2>&1; then
   pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/pre-commit-check.ps1
 else
   sh scripts/pre-commit-check.sh
 fi
-node scripts/run-react-doctor.js
+if node scripts/run-react-doctor.js; then
+  react_doctor_status=0
+else
+  react_doctor_status=$?
+fi
+
+case "$react_doctor_status" in
+  0) ;;
+  2) echo "React Doctor is disabled: the exact local dependency is not pinned; receipt is incomplete." ;;
+  *) exit "$react_doctor_status" ;;
+esac

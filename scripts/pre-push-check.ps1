@@ -1,160 +1,123 @@
 <#
 .SYNOPSIS
-  Paperclip pre-push gate: changed-workspace verification.
+  Paperclip pre-push gate: deterministic changed-workspace verification.
 
 .DESCRIPTION
-  This hook verifies the changed workspace without re-failing unrelated, known-red
-  suites. It supplements the smaller pre-commit check; it is not a replacement for
-  exhaustive CI on dev (tracked in #67).
+  Reads Git's real four-field pre-push protocol, resolves every outgoing path,
+  runs cheap fail-closed policy checks, performs the full TypeScript check, and
+  executes only exact changed or deterministic sibling tests. Runner ownership
+  is explicit: Node test files use node:test, registered workspace suites use
+  Vitest, and Playwright/unregistered/config changes are declared for hosted PR
+  CI. Direct pushes of hosted-only changes to dev or master are rejected.
 
-    * pre-commit is scoped and capped (affected typecheck + `vitest --related` with a
-      hard suite cap). It guards a local commit. It is explicitly NOT authoritative,
-      because on a hub module it selects 160-288 of 1130 specs and an uncapped run
-      costs MORE than the full suite it replaced -- cost is dominated by module
-      import (measured 2026-08-13: 247.3s import vs 16.2s execution for 12 suites).
-
-    * CI cannot cover this repo's real work. `.github/workflows/pr.yml` is scoped to
-      `pull_request: branches: [master]`, while all development happens on `dev`
-      (origin/dev was 1212 commits ahead of origin/master on 2026-08-13, with only 3
-      PRs ever opened into dev). No CI run has validated those commits. CI is
-      reserved for what only CI can do -- Linux/POSIX behaviour, clean-environment
-      installs, and reviewer-independent verification -- not for exhaustiveness.
-
-  The prior version ran the full suite here. That made every push reject while the
-  baseline suite was red, including fixes to the failing suites (#73). The hook now
-  runs the full TypeScript check plus uncapped tests related to the outgoing source
-  changes. A failure still rejects the push; unrelated existing failures do not.
-
-  FAIL-CLOSED CONTRACT
-  This script has no skip flag. Every selected step's exit code is captured explicitly
-  and a non-zero result rejects the push. `git push --no-verify` remains Git's visible
-  bypass; no environment-variable bypass is provided here.
-
-  Steps are ordered cheapest-first so a cheap failure never pays for the expensive one.
+  There is no environment-variable skip. Git's visible --no-verify bypass is
+  unchanged. A malformed/empty update stream, unresolved Git range, missing
+  test, uncovered production file, or non-zero child exit rejects the push.
 #>
 
 [CmdletBinding()]
 param(
+  [string]$RemoteName,
+  [string]$RemoteLocation,
   [string[]]$ChangedFiles,
+  [string]$TargetRef = 'refs/heads/topic',
   [switch]$DryRun,
   [string]$LogPath
 )
 
 Set-StrictMode -Version Latest
-$ErrorActionPreference = "Stop"
+$ErrorActionPreference = 'Stop'
+if (Get-Variable -Name PSNativeCommandUseErrorActionPreference -ErrorAction SilentlyContinue) {
+  $PSNativeCommandUseErrorActionPreference = $false
+}
 
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-$repoRoot = Resolve-Path (Join-Path $scriptDir "..") | Select-Object -ExpandProperty Path
+$repoRoot = Resolve-Path (Join-Path $scriptDir '..') | Select-Object -ExpandProperty Path
 Set-Location $repoRoot
 
-$failed = $false
+$nodeCommand = Get-Command node -ErrorAction SilentlyContinue
+if (-not $nodeCommand) { throw 'node was not found on PATH.' }
+$node = $nodeCommand.Source
 
-$pnpmCommand = Get-Command pnpm.cmd -ErrorAction SilentlyContinue
-if (-not $pnpmCommand) {
-  $pnpmCommand = Get-Command pnpm -ErrorAction SilentlyContinue
+$previousErrorActionPreference = $ErrorActionPreference
+try {
+  $ErrorActionPreference = 'Continue'
+  $gitLogOutput = @(& git rev-parse --git-path 'paperclip-gate-logs/pre-push' 2>&1)
+  $gitLogExit = $LASTEXITCODE
+} finally {
+  $ErrorActionPreference = $previousErrorActionPreference
 }
-if (-not $pnpmCommand) {
-  throw "pnpm was not found on PATH."
+$gitLogPath = if ($gitLogOutput.Count -eq 1) { [string]$gitLogOutput[0] } else { '' }
+if ($gitLogExit -ne 0 -or [string]::IsNullOrWhiteSpace($gitLogPath)) {
+  throw 'Could not resolve the Git-private pre-push log directory.'
 }
-$pnpm = $pnpmCommand.Source
-
-function Get-OutgoingChangedFiles {
-  if ($ChangedFiles) {
-    return @($ChangedFiles | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
-  }
-
-  $upstream = & git rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' 2>$null
-  if ($LASTEXITCODE -eq 0 -and -not [string]::IsNullOrWhiteSpace($upstream)) {
-    $mergeBase = & git merge-base HEAD $upstream
-    if ($LASTEXITCODE -eq 0 -and -not [string]::IsNullOrWhiteSpace($mergeBase)) {
-      $files = @(& git diff --name-only "$mergeBase..HEAD")
-      if ($LASTEXITCODE -eq 0) {
-        return @($files | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
-      }
-    }
-  }
-
-  $files = @(& git diff-tree --no-commit-id --name-only -r HEAD)
-  if ($LASTEXITCODE -ne 0) {
-    throw 'Could not resolve outgoing source files for the pre-push test selection.'
-  }
-  return @($files | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+if ([IO.Path]::IsPathRooted($gitLogPath)) {
+  $logDirectory = [IO.Path]::GetFullPath($gitLogPath)
+} else {
+  $logDirectory = [IO.Path]::GetFullPath((Join-Path $repoRoot $gitLogPath))
 }
-
-function Test-TestBearingPath {
-  param([string]$Path)
-  return $Path -match '^(server|ui|cli|packages|tests)/' -or
-    $Path -match '(^|/)(package\.json|pnpm-lock\.yaml|vitest\.[^/]+|vitest\.config\.[^/]+)$' -or
-    $Path -match '\.(test|spec)\.[mc]?[jt]sx?$'
-}
-
-function Write-Fail {
-  param([string]$Message)
-  Write-GateLine -Message "FAIL: $Message" -Color Red
-  $script:failed = $true
-}
-
-function Write-Pass {
-  Write-GateLine -Message "PASS" -Color Green
-}
-
-# Deliberately returns nothing. An earlier draft returned the exit code and callers
-# piped it to Out-Null -- which also swallowed the child process's stdout, hiding the
-# very output an operator needs to diagnose a rejected push. Failure state travels
-# through $script:failed instead, so the step's output streams through untouched.
-function Invoke-Step {
-  param(
-    [string]$Name,
-    [scriptblock]$Action,
-    [string]$FailureMessage
-  )
-  Write-GateLine -Message ''
-  Write-GateLine -Message "Running $Name..."
-  $stepStart = Get-Date
-  # Transcript misses stdout produced by some native children. Capture the child stream
-  # explicitly, then write it to both the terminal and the durable gate log.
-  $stepOutput = @(& $Action 2>&1)
-  $stepExit = $LASTEXITCODE
-  foreach ($line in $stepOutput) {
-    $rendered = [string]$line
-    Add-Content -LiteralPath $LogPath -Value $rendered
-    Write-Host $rendered
-  }
-  $elapsed = [math]::Round(((Get-Date) - $stepStart).TotalSeconds, 1)
-  if ($stepExit -eq 0) {
-    Write-GateLine -Message "  ($Name took ${elapsed}s)" -Color DarkGray
-    Write-Pass
-  } else {
-    Write-GateLine -Message "  ($Name took ${elapsed}s, exit $stepExit)" -Color DarkGray
-    Write-Fail $FailureMessage
-  }
-}
-
-$outgoingFiles = @(Get-OutgoingChangedFiles)
-$testFiles = @($outgoingFiles | Where-Object { Test-TestBearingPath $_ })
-
-if ($DryRun) {
-  [ordered]@{
-    mode = 'changed-workspace'
-    outgoingFiles = $outgoingFiles
-    testFiles = $testFiles
-    runsFullTypecheck = $true
-    runsUncappedRelatedTests = $testFiles.Count -gt 0
-  } | ConvertTo-Json -Depth 4
-  exit 0
-}
-
 if ([string]::IsNullOrWhiteSpace($LogPath)) {
-  $logDirectory = Join-Path $repoRoot '.local-logs/pre-push'
-  New-Item -ItemType Directory -Force -Path $logDirectory | Out-Null
   $LogPath = Join-Path $logDirectory ("{0:yyyyMMddTHHmmssZ}-{1}.log" -f [DateTime]::UtcNow, $PID)
 }
 
+$planArgs = @(
+  (Join-Path $repoRoot 'scripts/run-pre-push-tests.mjs'),
+  '--repo-root',
+  $repoRoot
+)
+$updatesPath = $null
+
+try {
+if ($ChangedFiles -and $ChangedFiles.Count -gt 0) {
+  if (-not $DryRun) {
+    throw 'ChangedFiles is available only with DryRun; a real gate requires Git update objects for secret scanning.'
+  }
+  foreach ($file in $ChangedFiles) {
+    if (-not [string]::IsNullOrWhiteSpace($file)) {
+      $planArgs += @('--changed-file', $file)
+    }
+  }
+  $planArgs += @('--target-ref', $TargetRef)
+} else {
+  if ([string]::IsNullOrWhiteSpace($RemoteName)) {
+    throw 'RemoteName is required when ChangedFiles is not supplied.'
+  }
+  if ([string]::IsNullOrWhiteSpace($RemoteLocation)) {
+    throw 'RemoteLocation is required when ChangedFiles is not supplied.'
+  }
+  New-Item -ItemType Directory -Force -Path $logDirectory | Out-Null
+  $updatesPath = "$LogPath.updates"
+  $updates = [Console]::In.ReadToEnd()
+  if ([string]::IsNullOrWhiteSpace($updates)) {
+    throw 'Git supplied no pre-push ref updates on stdin.'
+  }
+  [IO.File]::WriteAllText($updatesPath, $updates, [Text.UTF8Encoding]::new($false))
+  $planArgs += @(
+    '--remote-name', $RemoteName,
+    '--remote-location', $RemoteLocation,
+    '--updates-file', $updatesPath
+  )
+}
+
+if ($DryRun) {
+  & $node @planArgs --dry-run
+  exit $LASTEXITCODE
+}
+
+$pnpmCommand = Get-Command pnpm.cmd -ErrorAction SilentlyContinue
+if (-not $pnpmCommand) { $pnpmCommand = Get-Command pnpm -ErrorAction SilentlyContinue }
+if (-not $pnpmCommand) { throw 'pnpm was not found on PATH.' }
+$pnpm = $pnpmCommand.Source
+
+New-Item -ItemType Directory -Force -Path $logDirectory | Out-Null
 [IO.File]::AppendAllText(
   $LogPath,
   ("Paperclip pre-push check started {0:O}{1}" -f [DateTimeOffset]::UtcNow, [Environment]::NewLine),
   [Text.UTF8Encoding]::new($false)
 )
+
+$failed = $false
+
 function Write-GateLine {
   param(
     [string]$Message,
@@ -164,85 +127,109 @@ function Write-GateLine {
   Write-Host $Message -ForegroundColor $Color
 }
 
+function Write-Fail {
+  param([string]$Message)
+  Write-GateLine -Message "FAIL: $Message" -Color Red
+  $script:failed = $true
+}
+
+function Invoke-Step {
+  param(
+    [string]$Name,
+    [scriptblock]$Action,
+    [string]$FailureMessage
+  )
+  Write-GateLine -Message ''
+  Write-GateLine -Message "Running $Name..."
+  $stepStart = Get-Date
+  $previousErrorActionPreference = $ErrorActionPreference
+  try {
+    $ErrorActionPreference = 'Continue'
+    & $Action 2>&1 | ForEach-Object {
+      $rendered = [string]$_
+      Add-Content -LiteralPath $LogPath -Value $rendered -ErrorAction Stop
+      Write-Host $rendered
+    }
+    $stepExit = $LASTEXITCODE
+  } finally {
+    $ErrorActionPreference = $previousErrorActionPreference
+  }
+  $elapsed = [math]::Round(((Get-Date) - $stepStart).TotalSeconds, 1)
+  if ($stepExit -eq 0) {
+    Write-GateLine -Message "  ($Name took ${elapsed}s)" -Color DarkGray
+    Write-GateLine -Message 'PASS' -Color Green
+  } else {
+    Write-GateLine -Message "  ($Name took ${elapsed}s, exit $stepExit)" -Color DarkGray
+    Write-Fail $FailureMessage
+  }
+}
+
 Write-GateLine -Message "Full gate output: $LogPath" -Color DarkGray
-
 $start = Get-Date
-Write-GateLine -Message 'Paperclip - Pre-Push Check (changed-workspace tier)'
-Write-GateLine -Message '================================================'
+Write-GateLine -Message 'Paperclip - Pre-Push Check (deterministic changed-workspace tier)'
+Write-GateLine -Message '=================================================================='
 Write-GateLine -Message "Started $($start.ToString('HH:mm:ss'))."
-Write-GateLine -Message "Outgoing files: $($outgoingFiles.Count); test-bearing files: $($testFiles.Count)."
-Write-GateLine -Message 'Runs full typecheck and uncapped tests related to this push; #67 owns exhaustive dev CI.'
+Write-GateLine -Message 'Exact local suites plus hosted dev PR CI replace uncapped import-graph selection.'
 
-# 1. Workspace link preflight -- seconds. Every later step depends on it, and it is
-#    the cheapest way to catch a broken workspace before paying for a typecheck.
-Invoke-Step -Name "workspace link preflight" `
-  -Action { & $pnpm @("run", "preflight:workspace-links") } `
-  -FailureMessage "Workspace link preflight failed."
+Invoke-Step -Name 'adapter/runtime no-git-push policy' `
+  -Action { & $node scripts/check-no-git-push.mjs } `
+  -FailureMessage 'Adapter/runtime git-push policy failed or could not scan its full subject.'
 
-# 2. Forbidden tokens -- seconds, repo-wide.
 if (-not $failed) {
-  Invoke-Step -Name "forbidden token check" `
-    -Action { & $pnpm @("run", "check:tokens") } `
-    -FailureMessage "Forbidden tokens found."
+  Invoke-Step -Name 'PR workflow trigger policy' `
+    -Action { & $node scripts/check-pr-workflow-trigger.mjs } `
+    -FailureMessage 'PR workflow must cover master and dev without a push:dev trigger.'
 }
 
-# 3. NO deep history secret scan here -- deliberately, and this is not a coverage cut.
-#
-#    The first draft of this gate ran `verify-gitleaks.mjs --history`. Measured
-#    2026-08-13 it scanned 7837 commits in 28.3s and exited 2 with 24 findings, all
-#    pre-existing and all in test fixtures and mock data (paperclip-runner protocol
-#    fixtures, devtools/browser/src/App.tsx, and assorted *.test.ts). That makes the
-#    gate unpassable for reasons no individual push introduced or can fix, and an
-#    unpassable gate does not protect a repo -- it trains everyone to use --no-verify,
-#    which disables the test coverage above too.
-#
-#    Scanning all history on every push is also the wrong scope: history is immutable,
-#    so this re-litigates the same 7837 commits forever. New content is already scanned
-#    by the pre-commit gate (verify-gitleaks.mjs --staged) before it can enter history.
-#
-#    Coverage delta, stated plainly: relative to this file's first draft this removes a
-#    check; relative to what existed before this hook (no pre-push hook at all) it
-#    removes nothing. The genuinely useful scope -- scanning only the commit range being
-#    pushed, which would catch content that bypassed pre-commit via --no-verify -- needs
-#    a range mode that verify-gitleaks.mjs does not yet expose (it hardcodes
-#    --log-opts=--all). Tracked as a follow-up issue along with triaging the 24 findings.
-
-# 4. Full typecheck across every workspace package. pre-commit only typechecks the
-#    affected packages plus their dependents; this is the unscoped sweep.
 if (-not $failed) {
-  Invoke-Step -Name "full TypeScript check (pnpm -r typecheck)" `
-    -Action { & $pnpm @("-r", "typecheck") } `
-    -FailureMessage "TypeScript check failed."
-}
-
-# 5. Test every suite related to this push, without pre-commit's representative cap.
-#    This preserves a real regression gate without making a red unrelated suite block
-#    the commit that repairs it (#73).
-if (-not $failed -and $testFiles.Count -gt 0) {
-  Invoke-Step -Name "uncapped unit/integration suites related to this push" `
+  Invoke-Step -Name 'outgoing commit secret scan' `
     -Action {
-      $env:PAPERCLIP_PRECOMMIT_RELATED_CAP = '0'
-      try {
-        & node scripts/run-vitest-stable.mjs --related @testFiles
-      } finally {
-        Remove-Item Env:PAPERCLIP_PRECOMMIT_RELATED_CAP -ErrorAction SilentlyContinue
-      }
+      & $node scripts/scan-pre-push-secrets.mjs `
+        --repo-root $repoRoot `
+        --remote-name $RemoteName `
+        --remote-location $RemoteLocation `
+        --updates-file $updatesPath
     } `
-    -FailureMessage "A test related to this push failed."
-} elseif (-not $failed) {
-  Write-GateLine -Message 'Skipping unit tests: this push has no test-bearing source files.' -Color DarkGray
+    -FailureMessage 'An outgoing commit contains a secret or its exact scan failed.'
+}
+
+if (-not $failed) {
+  Invoke-Step -Name 'workspace link preflight' `
+    -Action { & $pnpm @('run', 'preflight:workspace-links') } `
+    -FailureMessage 'Workspace link preflight failed.'
+}
+
+if (-not $failed) {
+  Invoke-Step -Name 'forbidden token check' `
+    -Action { & $pnpm @('run', 'check:tokens') } `
+    -FailureMessage 'Forbidden tokens found.'
+}
+
+if (-not $failed) {
+  Invoke-Step -Name 'full TypeScript check (pnpm -r typecheck)' `
+    -Action { & $pnpm @('-r', 'typecheck') } `
+    -FailureMessage 'TypeScript check failed.'
+}
+
+if (-not $failed) {
+  Invoke-Step -Name 'deterministic exact test plan' `
+    -Action { & $node @planArgs } `
+    -FailureMessage 'Exact test selection, hosted-CI policy, or a selected test failed.'
 }
 
 $totalMinutes = [math]::Round(((Get-Date) - $start).TotalMinutes, 1)
 Write-GateLine -Message ''
-Write-GateLine -Message '================================================'
+Write-GateLine -Message '=================================================================='
 if ($failed) {
   Write-GateLine -Message "PRE-PUSH CHECK FAILED after ${totalMinutes} min" -Color Red
-  Write-GateLine -Message 'The push was rejected. Fix the failure in this push before retrying.'
-  $exitCode = 1
-} else {
-  Write-GateLine -Message "PRE-PUSH CHECK PASSED in ${totalMinutes} min" -Color Green
-  $exitCode = 0
+  Write-GateLine -Message 'The push was rejected. Fix the named failure before retrying.'
+  exit 1
 }
 
-exit $exitCode
+Write-GateLine -Message "PRE-PUSH CHECK PASSED in ${totalMinutes} min" -Color Green
+exit 0
+} finally {
+  if ($updatesPath -and (Test-Path -LiteralPath $updatesPath)) {
+    Remove-Item -LiteralPath $updatesPath -Force -ErrorAction SilentlyContinue
+  }
+}

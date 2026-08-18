@@ -673,4 +673,27 @@ describe("SkillStudio editor frontmatter", () => {
     );
     expect(staleForkLink).toBeUndefined();
   });
+
+  it("confirms before replacing non-empty ad-hoc input with a saved input", async () => {
+    mockCompanySkillsApi.testInputs.mockResolvedValueOnce([{
+      id: "input-1", companyId: "company-1", skillId: "source-skill",
+      name: "saved-input.md", content: "Saved input body",
+      createdBy: null, deletedAt: null,
+      createdAt: new Date("2026-01-01T00:00:00Z"),
+      updatedAt: new Date("2026-01-01T00:00:00Z"),
+    }]);
+
+    const node = await renderStudio();
+    await waitFor(() => expect(node.querySelector('[data-file-tree-path="saved-input.md"]')).toBeTruthy());
+
+    await click(node.querySelector('button[aria-label="New input"]') as HTMLButtonElement);
+    await waitFor(() => expect(node.textContent).toContain("New input (not saved)"));
+    const editor = node.querySelector('textarea[aria-label="Skill test input"]') as HTMLTextAreaElement;
+    await inputValue(editor, "Unsaved ad-hoc input");
+    await click(node.querySelector('[data-file-tree-path="saved-input.md"]') as HTMLButtonElement);
+
+    await waitFor(() => expect(document.body.textContent).toContain("Discard this unsaved test input?"));
+    expect(editor.value).toBe("Unsaved ad-hoc input");
+    expect(node.querySelector('[data-file-tree-path="saved-input.md"]')?.getAttribute("aria-selected")).toBe("false");
+  });
 });

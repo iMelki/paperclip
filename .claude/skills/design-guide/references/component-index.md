@@ -232,6 +232,29 @@ Use in property rows, comment headers, assignee displays, and anywhere a user/ag
 
 ## Dialog & Form Components
 
+### ActionReviewDialog
+
+**File:** `ActionReviewDialog.tsx`
+**Usage:** Accessible review step for consequential actions — the replacement for native `window.confirm()` (#48 / EUX-09). Composes the AlertDialog primitive and renders the typed four-question consequence contract (`immediateEffect`, `confirmedEffect`, `resultLocation`, `willNotHappen`). `tone="destructive"` for deletes/kills; `typedConfirmation` gates irreversible actions behind typing the entity name. Most call sites should use the `useConfirmDialog()` hook instead of rendering this directly.
+
+```tsx
+const { confirm, confirmDialog } = useConfirmDialog();
+const ok = await confirm({
+  title: "Delete file?",
+  tone: "destructive",
+  confirmLabel: "Delete file",
+  consequences: {
+    immediateEffect: "The file is removed from this agent's instructions.",
+    confirmedEffect: "The server deletes the file from the agent's configuration.",
+    resultLocation: "The file list refreshes and the entry file is selected.",
+    willNotHappen: "Other instruction files and the agent's settings are not changed.",
+  },
+});
+if (!ok) return;
+mutation.mutate();
+// render {confirmDialog} in the component's JSX
+```
+
 ### NewIssueDialog
 
 **File:** `NewIssueDialog.tsx`
@@ -306,6 +329,11 @@ import { cn } from "@/lib/utils";
 | `formatDate(date)` | Date display: `Jan 15, 2025` |
 | `relativeTime(date)` | Relative time: `2m ago`, `Jan 15` |
 | `formatTokens(count)` | Token counts: `1.2M`, `500k` |
+
+### useConfirmDialog
+
+**File:** `ui/src/hooks/useConfirmDialog.tsx`
+**Usage:** Promise-based `window.confirm()` replacement built on `ActionReviewDialog`. `confirm(request)` resolves `true` on confirm, `false` on cancel/Escape/overlay dismissal. Render the returned `confirmDialog` node in the owning component's JSX.
 
 ### useKeyboardShortcuts
 

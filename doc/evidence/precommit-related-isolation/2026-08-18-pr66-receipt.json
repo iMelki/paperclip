@@ -1,0 +1,68 @@
+{
+  "schemaVersion": "paperclip.precommit-related-isolation-receipt.v1",
+  "recordedAtUtc": "2026-08-17T22:47:44.8438905Z",
+  "recordedAtLocal": "2026-08-18T01:47:44.8438905+03:00",
+  "lineage": {
+    "baseDevCommit": "9983a44a81e08b6d0c8020f30026013a887b6966",
+    "repairMergeCommit": "238a4951bae9f45c27a2beddef0b3c0c0a884683",
+    "testedImplementationCommit": "5a8e9852e549260c12465ac72e5861cad0c9d4e0",
+    "relationship": "The repair merge contains baseDevCommit and is the direct parent of testedImplementationCommit."
+  },
+  "implementation": {
+    "runner": {
+      "path": "scripts/run-vitest-stable.mjs",
+      "sha256": "d0deabbc4eb4fceb91f3506098eff28de4562d26deb73dc300bde166575ca6d3",
+      "physicalLines": 741
+    },
+    "owningTest": {
+      "path": "scripts/__tests__/run-vitest-stable-shard.test.mjs",
+      "sha256": "b80d458f5d1a25eb2c65f796aa3f8341b78c783778c32f7db04eab226730fca5",
+      "physicalLines": 233
+    }
+  },
+  "negativeProof": {
+    "command": "node --test scripts/__tests__/run-vitest-stable-shard.test.mjs",
+    "broken": "The cap-equals-zero branch was deliberately changed back to one batched Vitest related coordinator.",
+    "observedFailure": "The owning test failed for the exact reason: related selection must never launch a batched Vitest coordinator directly.",
+    "restored": "The runner was restored byte-for-byte to the recorded SHA-256; the owning suite passed 13/13 and the direct launcher plus shard bundle passed 16/16."
+  },
+  "realCaller": {
+    "command": "git commit -m fix(adapter-utils): harden Windows managed runtimes",
+    "outcome": "pass",
+    "affectedTypecheck": {
+      "workspaceProjectsSelected": 15,
+      "workspaceProjectsTotal": 32,
+      "outcome": "pass"
+    },
+    "relatedSelection": {
+      "changedSourceFiles": 10,
+      "candidateSuites": 322,
+      "cap": 12,
+      "selectedSuites": 12,
+      "passedTests": 335,
+      "skippedTests": 21,
+      "failedTests": 0,
+      "execution": "one Vitest process per selected suite"
+    },
+    "forbiddenTokenGate": "pass",
+    "gitleaks": {
+      "version": "8.30.1",
+      "scannedBytes": 15165,
+      "findings": 0,
+      "outcome": "pass"
+    },
+    "reactDoctor": {
+      "outcome": "incomplete",
+      "exitCode": 2,
+      "reason": "pinned-package-missing",
+      "classification": "declared disabled state tracked by issue #46; not reported as a pass"
+    }
+  },
+  "maintainability": {
+    "runRelatedSuitesPhysicalLines": 47,
+    "runRelatedFilesIndependentlyPhysicalLines": 9,
+    "decision": "Keep candidate resolution, cap routing, and operator diagnostics cohesive; reuse the canonical per-file launcher instead of duplicating process logic.",
+    "independentReview": "approved"
+  },
+  "hostedStatus": "pending repaired PR #66 head push"
+}

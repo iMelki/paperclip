@@ -1,32 +1,95 @@
 # Paperclip Open Tasks
 
-Last updated: 2026-08-13
+Last updated: 2026-08-18
 
 This file is the durable local index for active `paperclip` issues.
 
+## Recently Closed Issues
+
+- [#76 - Security gate fails open: incomplete tree coverage in check-no-git-push.mjs](https://github.com/iMelki/paperclip/issues/76) — **closed after the reopened fix; stronger adversarial hardening prepared**
+  - The first repair closed unreadable-file/directory and zero-file failures.
+    Reopened proof in `bf81b90e` then reproduced three live bypasses: renaming
+    one required root still passed, a committed directory symlink dropped its
+    whole target subtree, and `.mts`/`.cts`/`.jsx` files were unscanned. That
+    upstream repair (`bf81b90e`, documented by `5a09494a`) declared roots,
+    traversed links cycle-safely, added the extensions, improved tree telemetry,
+    and wired the gate into pre-push.
+  - The current hardening supersedes traversal with fail-closed rejection for
+    symlinks, junctions, tracked generated/cache directories, unknown entries,
+    encodings, and undeclared file types. It reconciles every tracked in-scope
+    path against the visible tree, rejects skip-worktree/assume-unchanged index
+    states before scanning substitute bytes, and uses language-aware detection
+    for PowerShell here-strings, shell heredocs, and remote-mutating Git forms.
+    Focused broken/restored receipts and the issue-state update are complete;
+    #76 is closed. PR #78 completed its first repaired hosted matrix green;
+    second-review hardening and portable evidence are complete locally, with
+    the next exact-head hosted readback still pending.
+
 ## Active Issues
 
-- [#73 - Push lockout: the exhaustive pre-push gate rejects every push](https://github.com/iMelki/paperclip/issues/73)
-  - The old pre-push hook required the whole suite to be green even when a change only
-    repaired an existing failure. It now runs full typecheck and uncapped tests related
-    to the outgoing source changes, so unrelated baseline failures cannot block their
-    own repair. #67 remains the required follow-up for exhaustive validation on `dev`.
+- [#22 - Make complete validation and package builds Windows-portable](https://github.com/iMelki/paperclip/issues/22)
+  - The real PR #66 commit hook exposed one additional baseline cluster: Codex
+    credential tests required POSIX `0600`/`0700` bits from Windows `stat`,
+    which reports non-POSIX permission metadata, one fixture invoked bare
+    `sh`, and one diagnostic test built temp prefixes with a literal `/`. The
+    portable repair keeps credential/rotation behavior on every platform,
+    reserves permission-only checks for POSIX, uses the reviewed Git-for-Windows
+    shell resolver, and joins host temp paths natively. The broader issue
+    remains open for its complete Windows validation acceptance criteria and
+    Windows ACL proof.
+
+- [#73 - Push lockout: the exhaustive pre-push gate rejects every push](https://github.com/iMelki/paperclip/issues/73) — **reopened after a real existing-topic push**
+  - PR #78 replaced the uncapped related sweep and merged as `9983a44a`, but a
+    PR #66 push after merging that `dev` tip exposed one uncovered existing-ref
+    path: the planner diffed the old remote topic tip to `HEAD`, re-selected five
+    already-published `dev` files, and rejected them for missing siblings.
+  - Commit `43011d50` resolves advertised `dev` for every content update,
+    requires it as an ancestor, and tests the final `dev..HEAD` tree while the
+    secret scanner keeps the exact outgoing topic range. Deliberate old-baseline
+    proof failed for A versus C, focused planner/secret tests passed 22/22, and
+    the real hook passed 31-project typecheck plus 35 Node and ten isolated
+    Vitest suites. The first exact-head hosted matrix then exposed a latent
+    streamed-proxy `ERR_STREAM_WRITE_AFTER_END` race; the socket-state guard,
+    owning suite, and adapter-utils typecheck are green locally. A hosted matrix
+    for the repaired head confirmed that fix and exposed one stale OpenCode
+    startup-error assertion; its focused repair is green. The next hosted matrix
+    passed, and genuine exact-head CodeRabbit review found one bounded
+    test-helper child-custody gap. Its first repair was green on Windows but the
+    hosted matrix caught a POSIX-only direct `.mjs` fixture `EACCES`; the fixture
+    now uses the current Node executable explicitly. One final real-hook push,
+    hosted matrix, and exact-head review remain the closing gates.
+
+- [#77 - check-no-git-push extension allowlist is fail-open by omission](https://github.com/iMelki/paperclip/issues/77) — **local repair and proof complete**
+  - The scanner now rejects every undeclared file type under its required roots.
+    Only explicit declaration/document exclusions remain outside content scanning,
+    so a newly introduced extension becomes a named integrity failure rather than
+    disappearing from the denominator. A real scratch caller rejected the hostile
+    unknown extension at exit 2, then passed after a hash-verified restore; hosted
+    exact-head proof remains pending.
+
+- [#46 - Make React Doctor hook execution reproducible and fail closed](https://github.com/iMelki/paperclip/issues/46)
+  - Commit `124a48cc` removed the floating `npx react-doctor@latest` path and
+    added bounded local resolution, minimized child environment, normalized
+    receipts, timeout/termination handling, and negative-proof evidence. The
+    quality gate remains explicitly disabled until React Doctor is declared in
+    the manifest/lockfile and receives license, dependency-closure,
+    offline/Windows/Linux, and authenticated-consumer qualification evidence.
 
 - [#67 - CI never validates dev: pr.yml is scoped to PRs into master](https://github.com/iMelki/paperclip/issues/67)
-  - `.github/workflows/pr.yml` fires only on `pull_request: branches: [master]`, while
-    `origin/dev` was 1212 commits ahead of `origin/master` (3 PRs ever opened into
-    `dev`). No CI run has validated that work. #73 replaced the all-or-nothing local
-    full-suite hook with changed-workspace regression checks, but a Windows pre-push
-    cannot catch POSIX-only defects or provide exhaustive validation. Extending the trigger to `dev`
-    **increases** Actions spend (~+60-120 min/2 d); do NOT add `push: dev`. Operator
-    decision — see the issue for the costed options.
+  - Bootstrap prepared: PR CI covers `master` and `dev`, never `push: dev`, and a
+    static gate fails if either branch disappears or a push event is added. The
+    bootstrap PR launched and completed the full hosted matrix on two repaired
+    heads. The policy now mechanically requires the stable-runner regression;
+    read back the final repaired head before closing this issue.
 
 - [#68 - Deep gitleaks history scan fails; no pushed-range mode](https://github.com/iMelki/paperclip/issues/68)
   - `verify-gitleaks.mjs --history` exits 2 with 24 pre-existing findings across 7837
     commits, all in test fixtures and mock data. The pre-push gate therefore does not
     call it: an unpassable gate trains everyone into `--no-verify`, which would also
-    disable the full typecheck and suite. Triage the 24 findings, add a
-    `--range <base>..<head>` mode, then re-add the scan to `pre-push-check.{ps1,sh}`.
+    disable the full typecheck and suite. Exact `--range <base>..<head>` support
+    and local outgoing-range scans are prepared for pre-push and PR CI. Triaging
+    the 24 historical findings remains open; they are deliberately outside the
+    new commit ranges.
 
 - [#71 - Pre-commit exceeds its declared budget; 87% of the cost is vitest module import](https://github.com/iMelki/paperclip/issues/71)
   - `CONTRIBUTING.md` now declares the budget (p95 <= 90 s, hard cap 180 s) and this repo
@@ -37,6 +100,12 @@ This file is the durable local index for active `paperclip` issues.
     affected-package typecheck buys less than assumed (`pnpm -r` already parallelizes, so
     the 32-package sweep costs ~the slowest package), and the previously cited "~13 min
     `pnpm -r typecheck`" baseline did not reproduce (184.3 s warm).
+  - 2026-08-18: related selections now launch every capped or uncapped suite in
+    a separate Vitest process. The real PR #66 commit hook resolved 322
+    candidates, ran the 12 closest suites, and passed 335 tests with 21 declared
+    platform skips. This fixes cross-suite state leakage but not the budget:
+    the largest suite alone took 189.3 s on the recovered host, so #71 remains
+    open.
 
 - [Day-0 branch/worktree consolidation plan](doc/plans/2026-08-02-day0-branch-consolidation.md)
   - Preserve concurrent dirty branches and locked worktrees. Consolidate only

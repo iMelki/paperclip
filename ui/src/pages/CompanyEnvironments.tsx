@@ -43,6 +43,7 @@ import { useToast } from "@/context/ToastContext";
 import { queryKeys } from "@/lib/queryKeys";
 import { Link, useNavigate, useParams } from "@/lib/router";
 import { buildSameOriginWebSocketUrl } from "@/lib/websocket-url";
+import { useConfirmDialog } from "@/hooks/useConfirmDialog";
 import {
   Field,
   ToggleField,
@@ -1149,6 +1150,7 @@ export function CompanyEnvironments({ mode = "list" }: CompanyEnvironmentsProps)
   const { setBreadcrumbs } = useBreadcrumbs();
   const { pushToast } = useToast();
   const queryClient = useQueryClient();
+  const { confirm, confirmDialog } = useConfirmDialog();
   const isEnvironmentFormPage = mode === "create" || mode === "edit";
   const editingEnvironmentId = mode === "edit" ? routeEnvironmentId ?? null : null;
   const [environmentForm, setEnvironmentForm] = useState<EnvironmentFormState>(createEmptyEnvironmentForm);
@@ -1444,12 +1446,23 @@ export function CompanyEnvironments({ mode = "list" }: CompanyEnvironmentsProps)
     selectedCompanyId,
   ]);
 
-  function confirmDiscardEnvironmentChanges() {
-    return (
-      !environmentHasUnsavedChanges ||
-      typeof window === "undefined" ||
-      window.confirm(DISCARD_ENVIRONMENT_CHANGES_MESSAGE)
-    );
+  const requestDiscardEnvironmentChanges = useCallback(() => {
+    return confirm({
+      title: DISCARD_ENVIRONMENT_CHANGES_MESSAGE,
+      tone: "destructive",
+      confirmLabel: "Discard changes",
+      consequences: {
+        immediateEffect: "Your unsaved edits to this environment are discarded.",
+        confirmedEffect: "Nothing is sent to the server; the saved environment stays as it was.",
+        resultLocation: "The environments list shows the last saved configuration.",
+        willNotHappen: "The saved environment and its secrets are not modified or deleted.",
+      },
+    });
+  }, [confirm]);
+
+  async function confirmDiscardEnvironmentChanges() {
+    if (!environmentHasUnsavedChanges) return true;
+    return requestDiscardEnvironmentChanges();
   }
 
   // The form page is routed, so leaving it (tab close, reload, or an in-app
@@ -1490,9 +1503,14 @@ export function CompanyEnvironments({ mode = "list" }: CompanyEnvironmentsProps)
         return;
       }
 
-      if (window.confirm(DISCARD_ENVIRONMENT_CHANGES_MESSAGE)) return;
+      // Block the navigation now, then replay it if the operator confirms
+      // discarding the draft in the review dialog.
       event.preventDefault();
       event.stopPropagation();
+      void (async () => {
+        if (!(await requestDiscardEnvironmentChanges())) return;
+        navigate(`${nextUrl.pathname}${nextUrl.search}${nextUrl.hash}`);
+      })();
     }
 
     window.addEventListener("beforeunload", handleBeforeUnload);
@@ -1501,11 +1519,11 @@ export function CompanyEnvironments({ mode = "list" }: CompanyEnvironmentsProps)
       window.removeEventListener("beforeunload", handleBeforeUnload);
       document.removeEventListener("click", handleDocumentClick, true);
     };
-  }, [environmentHasUnsavedChanges]);
+  }, [environmentHasUnsavedChanges, navigate, requestDiscardEnvironmentChanges]);
 
-  function closeEnvironmentForm() {
+  async function closeEnvironmentForm() {
     if (environmentMutation.isPending) return;
-    if (!confirmDiscardEnvironmentChanges()) return;
+    if (!(await confirmDiscardEnvironmentChanges())) return;
     initializedFormKeyRef.current = null;
     setEnvironmentForm(createEmptyEnvironmentForm());
     setEnvironmentFormBaselineKey(null);
@@ -1998,7 +2016,7 @@ export function CompanyEnvironments({ mode = "list" }: CompanyEnvironmentsProps)
           <div className="flex flex-wrap justify-end gap-2 border-t border-border/60 bg-background px-6 py-4">
             <Button
               variant="outline"
-              onClick={closeEnvironmentForm}
+              onClick={() => void closeEnvironmentForm()}
               disabled={environmentMutation.isPending}
             >
               Cancel
@@ -2028,6 +2046,7 @@ export function CompanyEnvironments({ mode = "list" }: CompanyEnvironmentsProps)
         </div>
         </SecretRefHintsContext.Provider>
       ) : null}
+      {confirmDialog}
     </div>
   );
 }

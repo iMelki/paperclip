@@ -464,8 +464,27 @@ async function withTempDir<T>(prefix: string, fn: (dir: string) => Promise<T>): 
   }
 }
 
+export function resolveHostTarCommand(
+  {
+    platform = process.platform,
+    systemRoot = process.env.SystemRoot ?? process.env.WINDIR ?? "C:\\Windows",
+  }: {
+    platform?: NodeJS.Platform;
+    systemRoot?: string;
+  } = {},
+): string {
+  if (platform !== "win32") return "tar";
+  if (!path.win32.isAbsolute(systemRoot)) {
+    throw new Error(`Windows SystemRoot must be absolute to resolve host tar: "${systemRoot}"`);
+  }
+  // Husky launches through Git for Windows, whose /usr/bin/tar shadows the
+  // native bsdtar and interprets `C:\\...` archive paths as `host:path` remote
+  // archives. Bind Windows archive work to the host OS binary instead of PATH.
+  return path.win32.join(systemRoot, "System32", "tar.exe");
+}
+
 async function execTar(args: string[]): Promise<void> {
-  await execFile("tar", args, {
+  await execFile(resolveHostTarCommand(), args, {
     env: {
       ...process.env,
       COPYFILE_DISABLE: "1",

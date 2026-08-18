@@ -23,6 +23,7 @@ import {
   Zap,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { useConfirmDialog } from "@/hooks/useConfirmDialog";
 import { Badge } from "@/components/ui/badge";
 import { InlineBanner } from "@/components/InlineBanner";
 import { BuiltInLifecycleChip } from "@/components/BuiltInAgentBadges";
@@ -255,6 +256,98 @@ function SubSection({ title, children }: { title: string; children: React.ReactN
 
 // Onboarding seam (design §6 + §12.5): the TeamCard tile in its "Pick a starter
 // team" 3-col grid, with the first defaultInstall tile selected.
+function ActionReviewDialogDemo() {
+  const { confirm, confirmDialog } = useConfirmDialog();
+  const [lastResult, setLastResult] = useState<string | null>(null);
+
+  const run = (label: string, promise: Promise<boolean>) => {
+    void promise.then((confirmed) =>
+      setLastResult(`${label}: ${confirmed ? "confirmed" : "cancelled"}`),
+    );
+  };
+
+  return (
+    <div className="space-y-3">
+      <div className="flex flex-wrap items-center gap-2">
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={() =>
+            run(
+              "standard",
+              confirm({
+                title: "Duplicate Support Agent?",
+                confirmLabel: "Duplicate",
+                consequences: {
+                  immediateEffect: "A new agent named Support Agent (copy) is created.",
+                  confirmedEffect: "The copy is saved on the server, paused until reviewed.",
+                  resultLocation: "The new agent's dashboard; a toast confirms.",
+                  willNotHappen: "The original agent is not modified.",
+                },
+              }),
+            )
+          }
+        >
+          Standard review
+        </Button>
+        <Button
+          variant="destructive"
+          size="sm"
+          onClick={() =>
+            run(
+              "destructive",
+              confirm({
+                title: "Archive company?",
+                tone: "destructive",
+                confirmLabel: "Archive company",
+                consequences: {
+                  immediateEffect: "The company is hidden from the sidebar.",
+                  confirmedEffect: "Its status is set to archived in the database.",
+                  resultLocation:
+                    "You switch to the next active company when one remains; otherwise no company is selected.",
+                  willNotHappen: "No agents, issues, or data are deleted.",
+                },
+              }),
+            )
+          }
+        >
+          Destructive tone
+        </Button>
+        <Button
+          variant="destructive"
+          size="sm"
+          onClick={() =>
+            run(
+              "typed gate",
+              confirm({
+                title: "Delete this agent?",
+                description: "This cannot be undone.",
+                tone: "destructive",
+                confirmLabel: "Delete agent",
+                typedConfirmation: "Support Agent",
+                consequences: {
+                  immediateEffect: "The agent is permanently deleted.",
+                  confirmedEffect: "The server removes the agent record.",
+                  resultLocation: "You return to the Agents list.",
+                  willNotHappen: "Other agents and issues are not affected.",
+                },
+              }),
+            )
+          }
+        >
+          Typed gate (irreversible)
+        </Button>
+      </div>
+      {lastResult ? (
+        <p className="text-xs text-muted-foreground">
+          Last review result: <span className="font-mono">{lastResult}</span>
+        </p>
+      ) : null}
+      {confirmDialog}
+    </div>
+  );
+}
+
 function TeamCardShowcase() {
   const [selectedId, setSelectedId] = useState(onboardingTeams[0]?.id ?? null);
   return (
@@ -971,6 +1064,22 @@ export function DesignGuide() {
             </SheetFooter>
           </SheetContent>
         </Sheet>
+      </Section>
+
+      {/* ============================================================ */}
+      {/*  ACTION REVIEW DIALOG                                         */}
+      {/* ============================================================ */}
+      <Section title="Action Review Dialog">
+        <p className="text-sm text-muted-foreground mb-3">
+          Accessible replacement for native <code className="font-mono text-xs">window.confirm()</code> on
+          consequential actions (#48 / EUX-09). Every review answers four questions: what happens now, what
+          runs after confirm, where the result appears, and what will not happen. Use{" "}
+          <code className="font-mono text-xs">useConfirmDialog()</code> for promise-based call sites; reserve
+          the destructive tone for deletes/kills and the typed gate for irreversible actions.
+        </p>
+        <SubSection title="Tones and typed gate">
+          <ActionReviewDialogDemo />
+        </SubSection>
       </Section>
 
       {/* ============================================================ */}

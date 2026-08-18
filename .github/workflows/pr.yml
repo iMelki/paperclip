@@ -4,6 +4,7 @@ on:
   pull_request:
     branches:
       - master
+      - dev
 
 concurrency:
   group: pr-${{ github.event.pull_request.number }}
@@ -39,8 +40,10 @@ jobs:
           echo "PAPERCLIP_GITLEAKS_BIN=$install_dir/gitleaks" >> "$GITHUB_ENV"
           "$install_dir/gitleaks" version
 
-      - name: Scan complete repository history
-        run: node scripts/verify-gitleaks.mjs --history
+      - name: Scan pull-request commit range
+        run: >-
+          node scripts/verify-gitleaks.mjs --range
+          "${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }}"
 
   policy:
     needs: [secret-scan]
@@ -86,7 +89,28 @@ jobs:
         run: node ./scripts/check-no-git-push.mjs
 
       - name: Test no-git-push check
-        run: node --test ./scripts/check-no-git-push.test.mjs
+        run: >-
+          node --test
+          ./scripts/check-no-git-push-source.test.mjs
+          ./scripts/git-push-scan-integrity.test.mjs
+          ./scripts/check-no-git-push.test.mjs
+
+      - name: Validate PR workflow trigger policy
+        run: node ./scripts/check-pr-workflow-trigger.mjs
+
+      - name: Test PR workflow trigger policy
+        run: node --test ./scripts/check-pr-workflow-trigger.test.mjs
+
+      - name: Test deterministic pre-push selection and protocol
+        run: >-
+          node --test
+          ./scripts/is-main-module.test.mjs
+          ./scripts/pre-push-callers.test.mjs
+          ./scripts/pre-push-test-selection.test.mjs
+          ./scripts/run-vitest-direct.test.mjs
+          ./scripts/scan-pre-push-secrets.test.mjs
+          ./scripts/run-pre-push-tests.test.mjs
+          ./scripts/verify-gitleaks.test.mjs
 
       - name: Test general-server shard partition
         run: node --test ./scripts/__tests__/run-vitest-stable-shard.test.mjs

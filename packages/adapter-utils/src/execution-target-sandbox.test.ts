@@ -1,6 +1,6 @@
 import { createServer } from "node:http";
 import net from "node:net";
-import { execFile, spawn } from "node:child_process";
+import { execFile, spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -107,9 +107,21 @@ describe("sandbox adapter execution targets", () => {
     throw new Error(message);
   }
 
-  async function runProxyWithInput(command: string, input: string): Promise<{ stdout: string; stderr: string; code: number | null }> {
+  async function runProxyWithInput(
+    command: string,
+    input: string,
+    options: {
+      endAfterStdout?: string;
+      markerTimeoutMs?: number;
+      onSpawn?: (child: ChildProcessWithoutNullStreams) => void;
+      spawnArgs?: string[];
+    } = {},
+  ): Promise<{ stdout: string; stderr: string; code: number | null }> {
     const target = resolveTestScriptSpawn(command);
-    const child = spawn(target.command, target.args, { stdio: ["pipe", "pipe", "pipe"] });
+    const child = spawn(target.command, [...target.args, ...(options.spawnArgs ?? [])], {
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    options.onSpawn?.(child);
     let stdout = "";
     let stderr = "";
     child.stdout.setEncoding("utf8");
@@ -120,14 +132,12 @@ describe("sandbox adapter execution targets", () => {
     child.stderr.on("data", (chunk) => {
       stderr += chunk;
     });
-    // Deliberately coalesce data and EOF into one turn. The bridge must retain
-    // that receipt order even when each remote queue write is asynchronous.
-    child.stdin.end(input);
-    const code = await new Promise<number | null>((resolve, reject) => {
+    const exitPromise = new Promise<number | null>((resolve, reject) => {
+      const proxyTimeoutMs = process.platform === "win32" ? 10_000 : 5_000;
       const timeout = setTimeout(() => {
         child.kill("SIGKILL");
         reject(new Error("Timed out waiting for process session proxy."));
-      }, 5000);
+      }, proxyTimeoutMs);
       child.on("error", (error) => {
         clearTimeout(timeout);
         reject(error);
@@ -140,7 +150,30 @@ describe("sandbox adapter execution targets", () => {
         setTimeout(() => resolve(exitCode), process.platform === "win32" ? 1_000 : 0);
       });
     });
-    return { stdout, stderr, code };
+    try {
+      if (options.endAfterStdout) {
+        child.stdin.write(input);
+        await waitForCondition(
+          () => stdout.includes(options.endAfterStdout!),
+          "Timed out waiting for proxy output before closing stdin.",
+          options.markerTimeoutMs ?? 3_000,
+        );
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        expect(child.exitCode).toBeNull();
+        child.stdin.end();
+      } else {
+        // Deliberately coalesce data and EOF into one turn. The bridge must retain
+        // that receipt order even when each remote queue write is asynchronous.
+        child.stdin.end(input);
+      }
+      const code = await exitPromise;
+      return { stdout, stderr, code };
+    } catch (error) {
+      if (!child.stdin.destroyed && !child.stdin.writableEnded) child.stdin.end();
+      if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+      await exitPromise.catch(() => undefined);
+      throw error;
+    }
   }
 
   function combinedStream(
@@ -254,7 +287,7 @@ describe("sandbox adapter execution targets", () => {
     } finally {
       await bridge?.stop();
     }
-  });
+  }, 15_000);
 
   it("test_process_session_poll_exec_parents_to_run_context", async () => {
     // The poll timer runs run-time execs for the whole run. Its `sandbox.exec`
@@ -660,6 +693,149 @@ describe("sandbox adapter execution targets", () => {
     }
   }, 15_000);
 
+  it.each([
+    ["non-stream", false],
+    ["streamed", true],
+  ])(
+    "waits for the %s wrapper to exit before removing its session and workspace",
+    async (_mode, streamOutputViaSession) => {
+      const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-process-session-stop-"));
+      cleanupDirs.push(rootDir);
+      const childExitMarker = path.join(rootDir, "child-exited.txt");
+      const childPath = path.join(rootDir, "stdin-lifecycle-child.mjs");
+      await writeFile(
+        childPath,
+        [
+          'import { writeFileSync } from "node:fs";',
+          `process.on("exit", () => writeFileSync(${JSON.stringify(childExitMarker)}, "exited", "utf8"));`,
+          "process.stdin.resume();",
+        ].join("\n"),
+        "utf8",
+      );
+
+      const delegate = createLocalSandboxRunner();
+      let sessionDir: string | null = null;
+      let cleanupTimeoutMs: number | undefined;
+      const runner = {
+        execute: async (input: Parameters<typeof delegate.execute>[0]) => {
+          const launchedSessionDir = input.env?.PAPERCLIP_PROCESS_SESSION_DIR;
+          if (launchedSessionDir) sessionDir = launchedSessionDir;
+          const script = input.args?.[1] ?? "";
+          if (sessionDir && script.includes(`rm -rf '${sessionDir}'`)) {
+            cleanupTimeoutMs = input.timeoutMs;
+          }
+          return delegate.execute(input);
+        },
+      };
+      const target: AdapterSandboxExecutionTarget = {
+        kind: "remote",
+        transport: "sandbox",
+        providerKey: "local-test",
+        remoteCwd: rootDir,
+        timeoutMs: 30_000,
+        runner,
+      };
+
+      const bridge = await startAdapterExecutionTargetProcessSessionBridge({
+        runId: "run-process-session-stop",
+        target,
+        runtimeRootDir: path.posix.join(rootDir, ".paperclip-runtime", "acpx"),
+        adapterKey: "acpx",
+        command: process.execPath,
+        args: [childPath],
+        cwd: rootDir,
+        env: {},
+        timeoutSec: streamOutputViaSession ? 15 : 5,
+        onLog: async () => {},
+        streamOutputViaSession,
+      });
+      expect(bridge).not.toBeNull();
+
+      let stopped = false;
+      try {
+        await bridge!.stop();
+        stopped = true;
+
+        expect(await readFile(childExitMarker, "utf8")).toBe("exited");
+        expect(sessionDir).not.toBeNull();
+        if (sessionDir === null) throw new Error("Expected the process-session directory path.");
+        const sessionStillExists = await readdir(sessionDir)
+          .then(() => true)
+          .catch(() => false);
+        expect(sessionStillExists).toBe(false);
+        expect(cleanupTimeoutMs).toBe(5_000);
+
+        // This is the Windows regression guard: no descendant may retain a cwd
+        // handle after stop returns, so the surrounding workspace is removable.
+        await rm(rootDir, { recursive: true });
+        const cleanupIndex = cleanupDirs.lastIndexOf(rootDir);
+        if (cleanupIndex >= 0) cleanupDirs.splice(cleanupIndex, 1);
+      } finally {
+        if (!stopped) await bridge?.stop();
+      }
+    },
+    30_000,
+  );
+
+  it("retains the remote session when wrapper termination cannot be proven", async () => {
+    const executedScripts: string[] = [];
+    const logs: string[] = [];
+    let sessionDir: string | null = null;
+    const runner = {
+      execute: vi.fn(async (input: Parameters<ReturnType<typeof createLocalSandboxRunner>["execute"]>[0]) => {
+        const script = input.args?.[1] ?? "";
+        executedScripts.push(script);
+        if (input.env?.PAPERCLIP_PROCESS_SESSION_DIR) {
+          sessionDir = input.env.PAPERCLIP_PROCESS_SESSION_DIR;
+        }
+        return {
+          exitCode: 0,
+          signal: null,
+          timedOut: false,
+          stdout: script.includes("expected_sha=")
+            ? '{"uploaded":true}\n'
+            : script.includes("nohup node")
+              ? "43210\n"
+              : "",
+          stderr: "",
+          pid: null,
+          startedAt: new Date().toISOString(),
+        };
+      }),
+    };
+    const target: AdapterSandboxExecutionTarget = {
+      kind: "remote",
+      transport: "sandbox",
+      providerKey: "no-ack-test",
+      remoteCwd: "/workspace",
+      runner,
+    };
+
+    const bridge = await startAdapterExecutionTargetProcessSessionBridge({
+      runId: "run-process-session-no-ack",
+      target,
+      runtimeRootDir: "/workspace/.paperclip-runtime/acpx",
+      adapterKey: "acpx",
+      command: "agent-cli",
+      args: [],
+      cwd: "/workspace",
+      env: {},
+      timeoutSec: 5,
+      onLog: async (_stream, chunk) => {
+        logs.push(chunk);
+      },
+    });
+    expect(bridge).not.toBeNull();
+
+    await bridge!.stop();
+
+    expect(sessionDir).not.toBeNull();
+    expect(logs.join("")).toContain("process session cleanup was not proven");
+    expect(
+      executedScripts.some((script) => script.includes(`rm -rf '${sessionDir as string}'`)),
+    ).toBe(false);
+  }, 15_000);
+
   it("buffers sandbox process session output until the local proxy connects", async () => {
     const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-process-session-buffer-"));
     cleanupDirs.push(rootDir);
@@ -910,6 +1086,164 @@ describe("sandbox adapter execution targets", () => {
   });
 
   describe("streamed output (streamOutputViaSession)", () => {
+    it("delivers out-of-order streamed frames in sequence", async () => {
+      const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-process-session-stream-order-"));
+      cleanupDirs.push(rootDir);
+      const delegate = createLocalSandboxRunner();
+      const frames = [
+        { seq: 1, type: "data", stream: "stdout", data: Buffer.from("out:hello\n").toString("base64") },
+        { seq: 2, type: "data", stream: "stderr", data: Buffer.from("err:hello\n").toString("base64") },
+        { seq: 3, type: "exit", code: 0, signal: null },
+        { seq: 4, type: "wrapperExit" },
+      ];
+      const runner = {
+        execute: async (
+          input: Parameters<NonNullable<AdapterSandboxExecutionTarget["runner"]>["execute"]>[0],
+        ) => {
+          if (input.useSession) {
+            for (const index of [2, 0, 1, 3]) {
+              await input.onLog?.("stdout", `${JSON.stringify(frames[index])}\n`);
+            }
+            return {
+              exitCode: 0,
+              signal: null,
+              timedOut: false,
+              stdout: `${frames.map((frame) => JSON.stringify(frame)).join("\n")}\n`,
+              stderr: "",
+              pid: null,
+              startedAt: new Date().toISOString(),
+            };
+          }
+          return delegate.execute(input);
+        },
+      };
+      const target: AdapterSandboxExecutionTarget = {
+        kind: "remote",
+        transport: "sandbox",
+        providerKey: "stream-order-test",
+        remoteCwd: rootDir,
+        timeoutMs: 30_000,
+        runner,
+      };
+
+      const bridge = await startAdapterExecutionTargetProcessSessionBridge({
+        runId: "run-stream-order",
+        target,
+        runtimeRootDir: path.posix.join(rootDir, ".paperclip-runtime", "acpx"),
+        adapterKey: "acpx",
+        command: "unused-agent-command",
+        args: [],
+        cwd: rootDir,
+        env: {},
+        timeoutSec: 5,
+        onLog: async () => {},
+        streamOutputViaSession: true,
+      });
+      expect(bridge).not.toBeNull();
+
+      try {
+        const proxyTarget = resolveTestScriptSpawn(bridge!.agentCommand);
+        const proxySource = await readFile(proxyTarget.args[0] ?? proxyTarget.command, "utf8");
+        expect(proxySource).toMatch(
+          /if\s*\(\s*exiting\s*\|\|\s*socket\.destroyed\s*\|\|\s*socket\.writableEnded\s*\)\s*return/,
+        );
+        const result = await runProxyWithInput(bridge!.agentCommand, "hello\n", {
+          endAfterStdout: "out:hello\n",
+        });
+        expect(result).toEqual({ stdout: "out:hello\n", stderr: "err:hello\n", code: 0 });
+      } finally {
+        await bridge?.stop();
+      }
+    }, 15_000);
+
+    it("reaps the proxy child when the late-EOF output marker never arrives", async () => {
+      let child: ChildProcessWithoutNullStreams | null = null;
+
+      try {
+        await expect(
+          runProxyWithInput(process.execPath, "", {
+            endAfterStdout: "never-emitted-marker",
+            markerTimeoutMs: 50,
+            onSpawn: (spawnedChild) => {
+              child = spawnedChild;
+            },
+            spawnArgs: ["-e", "process.stdin.resume(); setInterval(() => {}, 1_000);"],
+          }),
+        ).rejects.toThrow("Timed out waiting for proxy output before closing stdin.");
+        expect(child).not.toBeNull();
+        expect(child!.stdin.destroyed || child!.stdin.writableEnded).toBe(true);
+        expect(child!.exitCode !== null || child!.signalCode !== null).toBe(true);
+      } finally {
+        const spawnedChild = child as ChildProcessWithoutNullStreams | null;
+        if (spawnedChild && spawnedChild.exitCode === null && spawnedChild.signalCode === null) {
+          spawnedChild.kill("SIGKILL");
+          await waitForCondition(
+            () => spawnedChild.exitCode !== null || spawnedChild.signalCode !== null,
+            "Timed out cleaning up the marker-timeout test child.",
+            1_000,
+          ).catch(() => undefined);
+        }
+      }
+    });
+
+    it("delivers buffered stream data before a runner rejection", async () => {
+      const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-process-session-stream-reject-"));
+      cleanupDirs.push(rootDir);
+      const delegate = createLocalSandboxRunner();
+      const bufferedOutput = `${"x".repeat(256 * 1024)}\n`;
+      const bufferedFrame = {
+        seq: 2,
+        type: "data",
+        stream: "stdout",
+        data: Buffer.from(bufferedOutput).toString("base64"),
+      };
+      const bufferedTerminal = { seq: 3, type: "exit", code: 0, signal: null };
+      const runner = {
+        execute: async (
+          input: Parameters<NonNullable<AdapterSandboxExecutionTarget["runner"]>["execute"]>[0],
+        ) => {
+          if (input.useSession) {
+            await input.onLog?.("stdout", `${JSON.stringify(bufferedFrame)}\n`);
+            await input.onLog?.("stdout", `${JSON.stringify(bufferedTerminal)}\n`);
+            throw new Error("stream transport failed");
+          }
+          return delegate.execute(input);
+        },
+      };
+      const target: AdapterSandboxExecutionTarget = {
+        kind: "remote",
+        transport: "sandbox",
+        providerKey: "stream-reject-test",
+        remoteCwd: rootDir,
+        timeoutMs: 30_000,
+        runner,
+      };
+
+      const bridge = await startAdapterExecutionTargetProcessSessionBridge({
+        runId: "run-stream-reject",
+        target,
+        runtimeRootDir: path.posix.join(rootDir, ".paperclip-runtime", "acpx"),
+        adapterKey: "acpx",
+        command: "unused-agent-command",
+        args: [],
+        cwd: rootDir,
+        env: {},
+        timeoutSec: 5,
+        onLog: async () => {},
+        streamOutputViaSession: true,
+      });
+      expect(bridge).not.toBeNull();
+
+      try {
+        const result = await runProxyWithInput(bridge!.agentCommand, "");
+        expect(result.stdout).toBe(bufferedOutput);
+        expect(result.stderr).toContain("stream transport failed");
+        expect(result.code).toBe(1);
+      } finally {
+        await bridge?.stop();
+      }
+    }, 15_000);
+
     it("bridges bidirectional sessions when the wrapper streams output to stdout", async () => {
       const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-process-session-stream-echo-"));
       cleanupDirs.push(rootDir);

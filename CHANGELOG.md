@@ -1,5 +1,94 @@
 # Changelog
 
+## Unreleased
+
+- Prevented the local ACP process-session proxy from forwarding late stdin
+  events after a remote terminal frame has already ended its socket (#59).
+  The exact PR #66 hosted shard exposed the race as
+  `ERR_STREAM_WRITE_AFTER_END`; the proxy now ignores writes once it is
+  exiting, destroyed, or writable-ended. The owning streamed-order test now
+  holds stdin open through terminal output and proves a late EOF exits cleanly;
+  buffered data is also drained before a runner rejection without accepting a
+  buffered terminal frame as proof, and the terminal error uses a flush-safe
+  socket close so backpressure cannot discard queued data. Remote termination
+  probes use bounded deadline-clamped backoff, and proven wrappers receive a
+  separate bounded cleanup window. The same real hook
+  also exposed a cluster of POSIX-only `0600`/`0700` assertions, a bare `sh`
+  fixture, and literal `/` temp-path prefixes in the Codex credential tests;
+  Windows now retains the functional credential/rotation assertions, POSIX
+  continues to verify permission bits, shell-backed fixtures use the reviewed
+  Git-for-Windows resolver, and temp paths use native joins (#22). The next
+  hosted shard exposed a stale OpenCode missing-command assertion; it now checks
+  the earlier, attributable PATH-resolution error introduced by this branch.
+  The final exact-head review also hardened the late-EOF test helper so a
+  missing output marker closes stdin, reaps its child, and consumes the pending
+  exit result before returning the timeout. The fixture launches its idle child
+  through `process.execPath -e` so the same custody proof is executable on both
+  Windows and POSIX hosts.
+
+- Corrected the deterministic pre-push baseline for existing topic branches
+  after they merge current `dev` (#73). The old path diffed the remote topic tip
+  to `HEAD`, so a real PR #66 push re-selected five already-published `dev`
+  files and failed on their missing local siblings. Every content update now
+  validates the configured destination, resolves its advertised `dev`, requires
+  that object to be an ancestor, and tests the final `dev..HEAD` tree. The
+  Gitleaks caller deliberately retains the exact outgoing
+  `remote-topic..HEAD` commit range. A deliberate old-baseline regression failed
+  for the exact A-versus-C range mismatch; the restored planner/secret suites
+  passed 22/22 and the real hook passed all exact suites without a bypass.
+
+- Extended the adapter/runtime `git push` gate repair after adversarial review (#76, #77).
+  `scripts/check-no-git-push.mjs` swallowed three filesystem errors
+  (`statSync` on a scan root, `readdirSync` mid-walk, `readFileSync` on a
+  file), so an unreadable or renamed tree produced exit 0 and the message
+  "No unapproved `git push` invocations found" having scanned zero files.
+  Renaming the four scan roots was enough to clear an offending file that was
+  still on disk. Unreadable paths now exit 2 naming the path and errno, a scan
+  of zero files is an error in its own right, and the success line carries a
+  non-zero denominator. Reopened evidence in `bf81b90e` then proved three
+  working bypasses: one renamed required root still passed, and a committed
+  mode-120000 directory symlink silently dropped its entire target subtree
+  because its directory entry described the link rather than the target,
+  and `.mts`/`.cts`/`.jsx` files were never scanned. Follow-up review also found
+  tracked paths hidden from the visible working tree. Required roots now fail
+  when absent or empty; every tracked in-scope path must be physically observed
+  or deliberately classified with normal index state; skip-worktree and
+  assume-unchanged byte-substitution attempts reject before content scanning;
+  and symlinks, junctions, tracked generated/cache
+  directories, unknown entry kinds, encodings, and undeclared file types fail
+  integrity. Declared untracked package-manager/build directories stay outside
+  the pushed-tree denominator. The language-aware scanner covers JavaScript,
+  TypeScript, shell, PowerShell, Python, and configuration sources without
+  treating URLs or regex literals as comments. Ambiguous data languages,
+  including PowerShell here-strings, cannot grant exemptions from inside
+  multiline strings. Executable substitutions inside expandable PowerShell
+  here-strings remain visible to the command gate; only column-zero PowerShell
+  closers end a here-string. Every shell heredoc body and exact delimiter line
+  remains scan-visible even when its delimiter is quoted; this intentionally
+  review-gates command-shaped literal data so a false heredoc classification
+  cannot hide a following command. Exact delimiters still receive quote removal
+  across ordinary/ANSI-quoted fragments and LF/CRLF continuations to end lexical
+  state, while unsupported forms remain conservative. Arithmetic `<<` stays in
+  arithmetic state rather than creating
+  a false heredoc that could hide a following command. Arithmetic
+  that contains a quote, expansion, or escape keeps the remaining source
+  conservatively scan-visible instead of guessing at shell parsing, and legacy
+  `$[...]` arithmetic uses the same fail-closed treatment. The gate runs in both
+  platform pre-push callers and in PR CI for `dev` and `master`.
+  The deterministic pre-push planner applies the same normal-index proof to
+  the whole repository, so substituted UI, script, package, or test bytes
+  cannot be executed in place of the pushed HEAD. Final review hardening aligns
+  lexical blanking with JavaScript's UTF-16 offsets, requires the stable-runner
+  regression in PR policy, retains native PowerShell stderr/status, and cleans
+  POSIX temporary artifacts on HUP, INT, and TERM.
+
+- Replaced the floating React Doctor `npx` hook invocation with a local-only
+  resolver, minimized child environment, and normalized fail-closed receipt.
+  The current branch intentionally remains incomplete until a separately
+  reviewed dependency pin and lock update is approved. Until then the hook
+  reports an explicit disabled state (exit 2); analyzer failures still block
+  commits. No fallback or network bootstrap is permitted.
+
 All notable changes to this repository should be recorded here.
 
 ## Unreleased
@@ -8,7 +97,14 @@ All notable changes to this repository should be recorded here.
   payload out of the Git-for-Windows `sh -c` argument, using Node-native file
   copying, resolving script wrappers through Node, and making shell discovery
   support PATH-derived, per-user, and Scoop Git installs with a clear failure
-  when no complete Git shell is available. The environment transport remains
+  when no complete Git shell is available. Process-session stdin and EOF writes
+  are now ordered, and cleanup waits for proven wrapper termination before
+  removing the remote session or workspace. Gemini version detection now uses
+  the shared trusted Windows shim launcher, supports install paths with spaces,
+  downgrades pre-0.33 CLIs to `--experimental-acp`, and reports probe failures
+  before retaining `--acp`. Adapter-utils managed-runtime host archives now
+  bind to System32 `tar.exe` on Windows so Git Bash cannot reinterpret
+  drive-letter paths as remote archives. The environment transport remains
   bounded; #64 tracks reducing or replacing the oversized ambient-env payload.
 
 - Normalized drive-letter paths before embedding them in Git workspace and
@@ -23,9 +119,28 @@ All notable changes to this repository should be recorded here.
   and every review executes the trusted PR base commit rather than hard-coded
   `master` content.
 
-- Replaced the all-or-nothing pre-push suite with full typecheck plus uncapped tests
-  related to the outgoing source changes. Existing unrelated test failures can no
-  longer prevent their own repair from being pushed; exhaustive dev CI remains #67.
+- Replaced the all-or-nothing/uncapped-related pre-push suite with a real Git
+  update parser and runner-aware exact selection. Changed tests and deterministic
+  siblings run under Node or Vitest; missing coverage fails closed; hosted-only
+  changes require a topic PR. A push must be one pristine checked-out HEAD, new
+  branches resolve the actual destination's advertised `dev`, and outgoing
+  secrets use its exact base-to-head range. Git's literal `HEAD` local-ref form
+  from an explicit `HEAD:topic` refspec is accepted without weakening the OID or
+  pristine-worktree binding. PR CI now covers `dev` without adding `push: dev`
+  and scans only the PR range rather than known-red full history. Both platform
+  callers remove their temporary update artifacts after every outcome while
+  retaining the consolidated log; the POSIX caller also removes per-step files,
+  supports isolated caller-test logging, and the PowerShell caller streams long
+  step output as it arrives. Exact Vitest paths now run independently so an
+  included suite cannot mask a second path excluded by its project config;
+  capped and uncapped pre-commit related selections also run every selected
+  suite in a separate Vitest process so coordinator-owned environment and mock
+  state cannot leak across otherwise independent suites. Linux-only Bubblewrap
+  characterization cases now skip unsupported hosts while portable parsers
+  continue to run on every platform;
+  option-shaped missing values and non-array selector inputs reject before work,
+  and only a real non-ancestor Git result is translated into the advertised-dev
+  ancestry message while infrastructure failures retain their cause.
 
 - Normalized release-package discovery directories to forward-slash manifest
   paths, with a Windows-separator regression, so release-map validation does

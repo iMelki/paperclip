@@ -191,6 +191,7 @@
   --folder-color-slate: #64748b;
   --gtc-folder-row: 1rem minmax(0, 1fr) auto;
   --gtc-folder-row-actions: 1rem minmax(0, 1fr) auto auto;
+  --gtc-action-review: minmax(0, 8rem) 1fr;
   --sz-folder-rail: 13.25rem;
   --sz-folder-sheet-max: 80dvh;
   --sz-tweak-panel-max: 70vh; /* Task Chat Redesign dev tweak panel scroll cap. */
