@@ -3,7 +3,7 @@ import { lstat, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/pr
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 
 import {
   buildRemoteGitDeltaBundleScript,
@@ -17,6 +17,7 @@ import {
   sanitizeGitRemoteUrl,
   withShallowGitWorkspaceClone,
 } from "./git-workspace-sync.js";
+import { resolveTestShellCommand } from "./test-shell.js";
 
 const execFile = promisify(execFileCallback);
 
@@ -26,6 +27,51 @@ async function git(cwd: string, args: string[]): Promise<string> {
 
 describe("git workspace sync", () => {
   const cleanupDirs: string[] = [];
+  const isolatedGitEnvNames = [
+    "GIT_ATTR_NOSYSTEM",
+    "GIT_CONFIG_COUNT",
+    "GIT_CONFIG_GLOBAL",
+    "GIT_CONFIG_NOSYSTEM",
+    "GIT_CONFIG_PARAMETERS",
+    "GIT_CONFIG_SYSTEM",
+  ] as const;
+  const originalGitEnv = new Map<string, string | undefined>();
+  let isolatedGitConfigDir = "";
+  let hostileSystemConfig = "";
+
+  beforeAll(async () => {
+    for (const name of isolatedGitEnvNames) {
+      originalGitEnv.set(name, process.env[name]);
+    }
+
+    isolatedGitConfigDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-git-config-"));
+    const emptyGlobalConfig = path.join(isolatedGitConfigDir, "global.gitconfig");
+    hostileSystemConfig = path.join(isolatedGitConfigDir, "system.gitconfig");
+    await writeFile(emptyGlobalConfig, "", "utf8");
+    await writeFile(
+      hostileSystemConfig,
+      '[core]\n\tautocrlf = true\n[url "git@github.com:"]\n\tinsteadOf = https://github.com/\n',
+      "utf8",
+    );
+
+    process.env.GIT_CONFIG_GLOBAL = emptyGlobalConfig;
+    process.env.GIT_CONFIG_SYSTEM = hostileSystemConfig;
+    process.env.GIT_CONFIG_NOSYSTEM = "1";
+    process.env.GIT_ATTR_NOSYSTEM = "1";
+    delete process.env.GIT_CONFIG_COUNT;
+    delete process.env.GIT_CONFIG_PARAMETERS;
+  });
+
+  afterAll(async () => {
+    for (const name of isolatedGitEnvNames) {
+      const value = originalGitEnv.get(name);
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+    if (isolatedGitConfigDir) {
+      await rm(isolatedGitConfigDir, { recursive: true, force: true });
+    }
+  });
 
   afterEach(async () => {
     while (cleanupDirs.length > 0) {
@@ -47,6 +93,62 @@ describe("git workspace sync", () => {
     await git(repo, ["commit", "-m", "base"]);
     return repo;
   }
+
+  it("isolates fixture repositories from host Git configuration", async () => {
+    const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-git-config-proof-"));
+    cleanupDirs.push(rootDir);
+    const repo = await createRepo(rootDir);
+    const remoteUrl = "https://github.com/example/repo.git";
+    await git(repo, ["remote", "add", "origin", remoteUrl]);
+
+    await expect(readFile(hostileSystemConfig, "utf8")).resolves.toContain("autocrlf = true");
+    await expect(git(repo, ["config", "--get", "core.autocrlf"])).rejects.toThrow();
+    expect(await git(repo, ["remote", "get-url", "origin"])).toBe(remoteUrl);
+  });
+
+  it("proves the isolation guard blocks hostile system Git configuration", async () => {
+    const noSystem = process.env.GIT_CONFIG_NOSYSTEM;
+    delete process.env.GIT_CONFIG_NOSYSTEM;
+    try {
+      const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-git-config-negative-"));
+      cleanupDirs.push(rootDir);
+      const repo = await createRepo(rootDir);
+      const remoteUrl = "https://github.com/example/repo.git";
+      await git(repo, ["remote", "add", "origin", remoteUrl]);
+
+      expect(await git(repo, ["config", "--get", "core.autocrlf"])).toBe("true");
+      expect(await git(repo, ["remote", "get-url", "origin"])).toBe("git@github.com:example/repo.git");
+    } finally {
+      if (noSystem === undefined) delete process.env.GIT_CONFIG_NOSYSTEM;
+      else process.env.GIT_CONFIG_NOSYSTEM = noSystem;
+    }
+  });
+
+  it("derives the bundle parent directory portably for a backslash Windows bundle path", () => {
+    // A missing backslash-form parent is the regression shape: posix.dirname
+    // on `C:\work\missing\bundle.bundle` returns ".", so the script would
+    // mkdir "." while Git writes the bundle to `/c/work/missing/...`.
+    const script = buildRemoteGitDeltaBundleScript({
+      remoteDir: "C:\\sandbox\\repo",
+      baseSha: "0000000000000000000000000000000000000000",
+      exportRef: "refs/paperclip/export/test",
+      bundlePath: "C:\\work\\missing\\bundle.bundle",
+    });
+
+    expect(script).toContain("mkdir -p '/c/work/missing'");
+    expect(script).toContain("rm -f '/c/work/missing/bundle.bundle'");
+    expect(script).not.toContain("mkdir -p '.'");
+    expect(script).not.toContain("C:\\");
+
+    const posixScript = buildRemoteGitDeltaBundleScript({
+      remoteDir: "/sandbox/repo",
+      baseSha: "0000000000000000000000000000000000000000",
+      exportRef: "refs/paperclip/export/test",
+      bundlePath: "/tmp/work/missing/bundle.bundle",
+    });
+
+    expect(posixScript).toContain("mkdir -p '/tmp/work/missing'");
+  });
 
   it("creates a shallow standalone clone from the local HEAD snapshot", async () => {
     const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-git-sync-"));
@@ -182,7 +284,7 @@ describe("git workspace sync", () => {
       snapshot: snapshot!,
     }, async (remoteDir) => {
       const emptyBundle = path.join(rootDir, "empty.bundle");
-      await execFile("sh", ["-c", buildRemoteGitDeltaBundleScript({
+      await execFile(resolveTestShellCommand("sh"), ["-c", buildRemoteGitDeltaBundleScript({
         remoteDir,
         baseSha: baseHead,
         exportRef: createRemoteGitExportRef("test"),
@@ -200,7 +302,7 @@ describe("git workspace sync", () => {
       const importedRef = createImportedGitRef("test");
       const exportRef = createRemoteGitExportRef("test");
       try {
-        await execFile("sh", ["-c", buildRemoteGitDeltaBundleScript({
+        await execFile(resolveTestShellCommand("sh"), ["-c", buildRemoteGitDeltaBundleScript({
           remoteDir,
           baseSha: baseHead,
           exportRef,
@@ -221,7 +323,11 @@ describe("git workspace sync", () => {
         await deleteLocalGitRef({ localDir: repo, ref: importedRef });
       }
     });
-  });
+    // Real clone/bundle/fetch I/O against the filesystem. Measured 4.4 s on
+    // Windows, i.e. straddling vitest's 5 s default — it passed or flaked
+    // depending on machine load. Give it headroom instead of leaving a coin
+    // flip in the suite. (#63; see #20 for the wider timeout-flake sweep.)
+  }, 30_000);
 
   it("imports a diverged sandbox HEAD even when the host no longer holds baseSha", async () => {
     const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-git-diverge-"));
@@ -256,7 +362,7 @@ describe("git workspace sync", () => {
     const exportRef = createRemoteGitExportRef("test");
     const importedRef = createImportedGitRef("test");
     try {
-      await execFile("sh", ["-c", buildRemoteGitDeltaBundleScript({
+      await execFile(resolveTestShellCommand("sh"), ["-c", buildRemoteGitDeltaBundleScript({
         remoteDir: sandbox,
         baseSha,
         exportRef,
@@ -318,7 +424,7 @@ describe("git workspace sync", () => {
     // The delta bundle (relative to the merge-base = fork point) names a
     // prerequisite the host lacks, so its import fails and is detected.
     const deltaBundle = path.join(rootDir, "delta.bundle");
-    await execFile("sh", ["-c", buildRemoteGitDeltaBundleScript({
+    await execFile(resolveTestShellCommand("sh"), ["-c", buildRemoteGitDeltaBundleScript({
       remoteDir: sandbox,
       baseSha,
       exportRef,
@@ -336,7 +442,7 @@ describe("git workspace sync", () => {
     // The forced full bundle is self-contained and imports into the same host.
     const fullBundle = path.join(rootDir, "full.bundle");
     try {
-      await execFile("sh", ["-c", buildRemoteGitDeltaBundleScript({
+      await execFile(resolveTestShellCommand("sh"), ["-c", buildRemoteGitDeltaBundleScript({
         remoteDir: sandbox,
         baseSha,
         exportRef,
@@ -354,7 +460,9 @@ describe("git workspace sync", () => {
     } finally {
       await deleteLocalGitRef({ localDir: host, ref: importedRef });
     }
-  });
+    // Same real-git I/O cost as the thin-bundle test above; measured 5.2 s on
+    // Windows, just over vitest's 5 s default. (#63)
+  }, 30_000);
 
   it("falls back to a full self-contained bundle when the sandbox lacks baseSha", async () => {
     const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-git-full-"));
@@ -374,7 +482,7 @@ describe("git workspace sync", () => {
     const exportRef = createRemoteGitExportRef("test");
     const importedRef = createImportedGitRef("test");
     try {
-      await execFile("sh", ["-c", buildRemoteGitDeltaBundleScript({
+      await execFile(resolveTestShellCommand("sh"), ["-c", buildRemoteGitDeltaBundleScript({
         remoteDir: sandbox,
         // A base the sandbox does not have forces the full-bundle fallback.
         baseSha: "0000000000000000000000000000000000000000",

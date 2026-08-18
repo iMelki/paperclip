@@ -4,6 +4,8 @@ import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+import { dirnamePortablePath, shellQuotePath } from "./shell-path.js";
+
 export interface GitCommandResult {
   stdout: string;
   stderr: string;
@@ -19,9 +21,14 @@ export interface GitWorkspaceSnapshot {
 
 export const GIT_ARCHIVE_EXCLUDES = [".git", ".git/*"] as const;
 
-function shellQuote(value: string) {
-  return `'${value.replace(/'/g, `'\"'\"'`)}'`;
-}
+// The scripts built here run in a POSIX shell even when the host is Windows, so
+// a drive-letter path must become `/c/...` before it is quoted: otherwise `C:`
+// parses as a separate word, and `tar` reads it as its rsh `host:path` selector
+// ("tar: Cannot connect to C:"). `toShellPath` only rewrites strings matching
+// `^[A-Za-z]:[\\/]`, so it is a no-op for the POSIX paths a real sandbox
+// supplies. This matches command-managed-runtime.ts and
+// sandbox-managed-runtime.ts, which both alias the same helper. (#63)
+const shellQuote = shellQuotePath;
 
 export async function runLocalGit(
   localDir: string,
@@ -319,7 +326,12 @@ export function buildRemoteGitDeltaBundleScript(input: {
     "set -e",
     input.cleanupBundle ? `cleanup() { ${cleanupParts.join("; ")}; }` : "",
     input.cleanupBundle ? "trap cleanup EXIT" : "",
-    `mkdir -p ${shellQuote(path.posix.dirname(input.bundlePath))}`,
+    // The parent must be derived before shell-path normalization:
+    // `path.posix.dirname` on a backslash-form Windows bundle path returns "."
+    // while the quoted bundle path below normalizes to `/c/...`, so the script
+    // would mkdir the wrong directory. `dirnamePortablePath` handles both
+    // separator families and stays a plain POSIX dirname for sandbox paths.
+    `mkdir -p ${shellQuote(dirnamePortablePath(input.bundlePath))}`,
     `rm -f ${bundlePath}`,
     // Choose the bundle boundary. A thin bundle `HEAD --not <baseSha>` records
     // baseSha as a prerequisite the importer (host) must already hold. That

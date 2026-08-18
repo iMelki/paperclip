@@ -107,6 +107,11 @@ All notable changes to this repository should be recorded here.
   drive-letter paths as remote archives. The environment transport remains
   bounded; #64 tracks reducing or replacing the oversized ambient-env payload.
 
+- Normalized drive-letter paths before embedding them in Git workspace and
+  sandbox asset-provision shell commands, exposed the canonical provision-path
+  quoting helpers for adapter extensions, and isolated Git workspace fixtures
+  from host-global Git configuration (#63, #70).
+
 - Replaced the unsupported fork Dependency Review call in the trusted PR-review
   workflow with a fail-closed fork policy: dependency manifests, lockfiles, and
   package patches now require the maintainer-only `dependency-review-approved`

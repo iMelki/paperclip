@@ -63,10 +63,12 @@ export interface SandboxRemoteExecutionSpec {
 }
 
 /**
- * Remote paths handed to an asset's `provision.postUploadCommand`. All are POSIX
- * paths inside the sandbox: `assetTarPath` is the uploaded asset tarball,
- * `assetDir` is where the asset should be materialized, and `runtimeRootDir`
- * is the directory any `stageFiles` were written into.
+ * Remote paths handed to an asset's `provision.postUploadCommand`.
+ * `assetTarPath` is the uploaded asset tarball, `assetDir` is where the asset
+ * should be materialized, and `runtimeRootDir` is the directory any
+ * `stageFiles` were written into. Production sandboxes normally provide POSIX
+ * paths, but host-native test/runtime providers may supply Windows paths; use
+ * {@link quoteSandboxProvisionPath} for every path embedded in a command.
  */
 export interface SandboxManagedRuntimeAssetProvisionContext {
   assetTarPath: string;
@@ -99,7 +101,8 @@ export interface SandboxManagedRuntimeAssetProvision {
    * uploaded asset tar into `assetDir`, run as the operation's ordered
    * post-upload command after every mapping has landed. Defaults to a plain
    * destroy-then-replace `tar -xf` extraction when omitted. Any path embedded in
-   * the command MUST be built from already-confined paths and shell-quoted (C3).
+   * the command MUST be built from already-confined paths and shell-quoted with
+   * {@link quoteSandboxProvisionPath} (C3).
    */
   postUploadCommand?: (ctx: SandboxManagedRuntimeAssetProvisionContext) => string;
 }
@@ -348,14 +351,20 @@ function shellQuote(value: string) {
   return shellQuotePath(value);
 }
 
-function buildDefaultExtractRuntimeAssetCommand(input: {
-  remoteAssetDir: string;
-  remoteAssetTar: string;
+export function quoteSandboxProvisionPath(value: string): string {
+  return shellQuotePath(value);
+}
+
+export function buildSandboxRuntimeAssetExtractCommand(input: {
+  assetDir: string;
+  assetTarPath: string;
 }): string {
-  return `rm -rf ${shellQuote(input.remoteAssetDir)} && ` +
-    `mkdir -p ${shellQuote(input.remoteAssetDir)} && ` +
-    `tar -xf ${shellQuote(input.remoteAssetTar)} -C ${shellQuote(input.remoteAssetDir)} && ` +
-    `rm -f ${shellQuote(input.remoteAssetTar)}`;
+  const assetDir = quoteSandboxProvisionPath(input.assetDir);
+  const assetTarPath = quoteSandboxProvisionPath(input.assetTarPath);
+  return `rm -rf ${assetDir} && ` +
+    `mkdir -p ${assetDir} && ` +
+    `tar -xf ${assetTarPath} -C ${assetDir} && ` +
+    `rm -f ${assetTarPath}`;
 }
 
 // Named builder (Security Condition C3): extract an uploaded workspace tarball
@@ -1011,7 +1020,10 @@ export async function prepareSandboxManagedRuntime(input: {
         assetTarPath: remoteAssetTar,
         assetDir: remoteAssetDir,
         runtimeRootDir,
-      }) ?? buildDefaultExtractRuntimeAssetCommand({ remoteAssetDir, remoteAssetTar });
+      }) ?? buildSandboxRuntimeAssetExtractCommand({
+        assetDir: remoteAssetDir,
+        assetTarPath: remoteAssetTar,
+      });
       const assetTarSize = (await fs.stat(assetTarPath)).size;
       await stageConfinedSyncIn({
         files,

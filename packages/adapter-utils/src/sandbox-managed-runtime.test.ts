@@ -11,9 +11,12 @@ import { resolveTestShellCommand } from "./test-shell.js";
 
 import {
   assertSyncOperationsConfined,
+  buildSandboxRuntimeAssetExtractCommand,
   mirrorDirectory,
   prepareSandboxManagedRuntime,
+  quoteSandboxProvisionPath,
   resolveHostTarCommand,
+  type SandboxManagedRuntimeAssetProvision,
   type SandboxManagedRuntimeClient,
   type SandboxSyncOperation,
   type SandboxSyncResult,
@@ -36,6 +39,35 @@ import type { RunProcessResult } from "./server-utils.js";
 function toArrayBuffer(bytes: Buffer): ArrayBuffer {
   return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
 }
+
+describe("sandbox asset provision shell helpers", () => {
+  it("quotes drive-letter and spaced paths for custom provision commands", () => {
+    const provision: SandboxManagedRuntimeAssetProvision = {
+      postUploadCommand: ({ assetTarPath, assetDir }) =>
+        `install ${quoteSandboxProvisionPath(assetTarPath)} ${quoteSandboxProvisionPath(assetDir)}`,
+    };
+    const command = provision.postUploadCommand?.({
+      assetTarPath: "C:\\Program Files\\Paperclip\\asset.tar",
+      assetDir: "C:\\Program Files\\Paperclip\\asset",
+      runtimeRootDir: "C:\\Program Files\\Paperclip",
+    });
+
+    expect(command).toBe(
+      "install '/c/Program Files/Paperclip/asset.tar' '/c/Program Files/Paperclip/asset'",
+    );
+  });
+
+  it("builds a path-safe default extract command", () => {
+    const command = buildSandboxRuntimeAssetExtractCommand({
+      assetDir: "C:\\Paperclip Runtime\\asset",
+      assetTarPath: "C:\\Paperclip Runtime\\asset upload.tar",
+    });
+
+    expect(command).toContain("rm -rf '/c/Paperclip Runtime/asset'");
+    expect(command).toContain("tar -xf '/c/Paperclip Runtime/asset upload.tar'");
+    expect(command).not.toContain("C:\\");
+  });
+});
 
 // Give a bare fake client a `syncIn` that reproduces the non-native base64-tar
 // FALLBACK (place each file mapping via `writeFile`, then run the operation's
