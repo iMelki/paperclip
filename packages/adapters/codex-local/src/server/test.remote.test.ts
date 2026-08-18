@@ -1,5 +1,6 @@
 import fs from "node:fs/promises";
 import os from "node:os";
+import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AdapterExecutionTarget } from "@paperclipai/adapter-utils/execution-target";
 
@@ -64,7 +65,7 @@ const {
     prepareManagedCodexHome: vi.fn(async () => {
       // Return a real managed home seeded with credentials so the probe's
       // minimal-home copy step (auth.json/config.toml) has something to read.
-      const dir = await fs.mkdtemp(`${os.tmpdir()}/paperclip-managed-codex-home-`);
+      const dir = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-managed-codex-home-"));
       await fs.writeFile(`${dir}/auth.json`, JSON.stringify({ OPENAI_API_KEY: "sk-managed" }));
       await fs.writeFile(`${dir}/config.toml`, "model = \"gpt-5\"\n");
       return dir;
@@ -149,9 +150,9 @@ describe("codex remote environment diagnostics", () => {
     // The probe must upload only a minimal credentials-only home, never the
     // full managed CODEX_HOME (which can be hundreds of MB of session history).
     const homeAsset = runtimeInput?.assets?.find((asset) => asset.key === "home");
-    expect(homeAsset?.localDir).toContain(`${os.tmpdir()}/paperclip-codex-probe-home-`);
+    expect(homeAsset?.localDir).toContain(path.join(os.tmpdir(), "paperclip-codex-probe-home-"));
     expect(capturedHomeAssetFiles.value).toEqual(["auth.json", "config.toml"]);
-    expect(runtimeInput?.workspaceLocalDir).toContain(`${os.tmpdir()}/paperclip-codex-envtest-`);
+    expect(runtimeInput?.workspaceLocalDir).toContain(path.join(os.tmpdir(), "paperclip-codex-envtest-"));
     expect(runtimeInput?.workspaceLocalDir).not.toBe("/remote/workspace");
     expect(await fs.stat(runtimeInput!.workspaceLocalDir).catch(() => null)).toBeNull();
     expect(runtimeInput?.target?.remoteCwd).toBe("/remote/workspace");
@@ -224,7 +225,7 @@ describe("codex remote environment diagnostics", () => {
     // host has no Codex auth.json. The probe must not upload an empty home or
     // set CODEX_HOME, so Codex falls back to the sandbox's baked-in login.
     prepareManagedCodexHome.mockImplementationOnce(async () => {
-      const dir = await fs.mkdtemp(`${os.tmpdir()}/paperclip-managed-codex-home-noauth-`);
+      const dir = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-managed-codex-home-noauth-"));
       // No auth.json — only a config file.
       await fs.writeFile(`${dir}/config.toml`, "model = \"gpt-5\"\n");
       return dir;

@@ -1,6 +1,6 @@
 # Paperclip Open Tasks
 
-Last updated: 2026-08-16
+Last updated: 2026-08-18
 
 This file is the durable local index for active `paperclip` issues.
 
@@ -27,6 +27,38 @@ This file is the durable local index for active `paperclip` issues.
 
 ## Active Issues
 
+- [#22 - Make complete validation and package builds Windows-portable](https://github.com/iMelki/paperclip/issues/22)
+  - The real PR #66 commit hook exposed one additional baseline cluster: Codex
+    credential tests required POSIX `0600`/`0700` bits from Windows `stat`,
+    which reports non-POSIX permission metadata, one fixture invoked bare
+    `sh`, and one diagnostic test built temp prefixes with a literal `/`. The
+    portable repair keeps credential/rotation behavior on every platform,
+    reserves permission-only checks for POSIX, uses the reviewed Git-for-Windows
+    shell resolver, and joins host temp paths natively. The broader issue
+    remains open for its complete Windows validation acceptance criteria and
+    Windows ACL proof.
+
+- [#73 - Push lockout: the exhaustive pre-push gate rejects every push](https://github.com/iMelki/paperclip/issues/73) — **reopened after a real existing-topic push**
+  - PR #78 replaced the uncapped related sweep and merged as `9983a44a`, but a
+    PR #66 push after merging that `dev` tip exposed one uncovered existing-ref
+    path: the planner diffed the old remote topic tip to `HEAD`, re-selected five
+    already-published `dev` files, and rejected them for missing siblings.
+  - Commit `43011d50` resolves advertised `dev` for every content update,
+    requires it as an ancestor, and tests the final `dev..HEAD` tree while the
+    secret scanner keeps the exact outgoing topic range. Deliberate old-baseline
+    proof failed for A versus C, focused planner/secret tests passed 22/22, and
+    the real hook passed 31-project typecheck plus 35 Node and ten isolated
+    Vitest suites. The first exact-head hosted matrix then exposed a latent
+    streamed-proxy `ERR_STREAM_WRITE_AFTER_END` race; the socket-state guard,
+    owning suite, and adapter-utils typecheck are green locally. A hosted matrix
+    for the repaired head confirmed that fix and exposed one stale OpenCode
+    startup-error assertion; its focused repair is green. The next hosted matrix
+    passed, and genuine exact-head CodeRabbit review found one bounded
+    test-helper child-custody gap. Its first repair was green on Windows but the
+    hosted matrix caught a POSIX-only direct `.mjs` fixture `EACCES`; the fixture
+    now uses the current Node executable explicitly. One final real-hook push,
+    hosted matrix, and exact-head review remain the closing gates.
+
 - [#77 - check-no-git-push extension allowlist is fail-open by omission](https://github.com/iMelki/paperclip/issues/77) — **local repair and proof complete**
   - The scanner now rejects every undeclared file type under its required roots.
     Only explicit declaration/document exclusions remain outside content scanning,
@@ -42,20 +74,6 @@ This file is the durable local index for active `paperclip` issues.
     quality gate remains explicitly disabled until React Doctor is declared in
     the manifest/lockfile and receives license, dependency-closure,
     offline/Windows/Linux, and authenticated-consumer qualification evidence.
-
-- [#73 - Push lockout: the exhaustive pre-push gate rejects every push](https://github.com/iMelki/paperclip/issues/73)
-  - Repair prepared: retain the full typecheck but replace uncapped import-graph
-    selection with exact changed/sibling suites routed to Node or Vitest. Uncovered
-    live production, malformed Git updates, and child failures reject; non-runnable
-    deletions and other hosted-only changes must travel through a topic PR. The plan is bound to one
-    pristine checked-out HEAD with repository-wide normal index state and the
-    exact configured push destination. Both real platform callers passed their
-    broken/restored proofs. The first real `HEAD:topic` push exposed and then
-    proved the valid literal-`HEAD` protocol form without weakening object
-    binding. Both first repaired heads completed the full hosted matrix green;
-    the final review hardening has 121/121 focused tests, real platform-caller
-    proof, and a real exact-Vitest include-glob reject/restore receipt. The next
-    exact-head hosted review remains pending.
 
 - [#67 - CI never validates dev: pr.yml is scoped to PRs into master](https://github.com/iMelki/paperclip/issues/67)
   - Bootstrap prepared: PR CI covers `master` and `dev`, never `push: dev`, and a
@@ -82,6 +100,12 @@ This file is the durable local index for active `paperclip` issues.
     affected-package typecheck buys less than assumed (`pnpm -r` already parallelizes, so
     the 32-package sweep costs ~the slowest package), and the previously cited "~13 min
     `pnpm -r typecheck`" baseline did not reproduce (184.3 s warm).
+  - 2026-08-18: related selections now launch every capped or uncapped suite in
+    a separate Vitest process. The real PR #66 commit hook resolved 322
+    candidates, ran the 12 closest suites, and passed 335 tests with 21 declared
+    platform skips. This fixes cross-suite state leakage but not the budget:
+    the largest suite alone took 189.3 s on the recovered host, so #71 remains
+    open.
 
 - [Day-0 branch/worktree consolidation plan](doc/plans/2026-08-02-day0-branch-consolidation.md)
   - Preserve concurrent dirty branches and locked worktrees. Consolidate only

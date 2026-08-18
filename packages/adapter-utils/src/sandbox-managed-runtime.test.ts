@@ -13,6 +13,7 @@ import {
   assertSyncOperationsConfined,
   mirrorDirectory,
   prepareSandboxManagedRuntime,
+  resolveHostTarCommand,
   type SandboxManagedRuntimeClient,
   type SandboxSyncOperation,
   type SandboxSyncResult,
@@ -163,7 +164,9 @@ async function git(cwd: string, args: string[]): Promise<string> {
 async function listTarMembers(rootDir: string, name: string, bytes: Buffer): Promise<string[]> {
   const tarPath = path.join(rootDir, name);
   await writeFile(tarPath, bytes);
-  const { stdout } = await execFile("tar", ["-tf", tarPath], { maxBuffer: 32 * 1024 * 1024 });
+  const { stdout } = await execFile(resolveHostTarCommand(), ["-tf", tarPath], {
+    maxBuffer: 32 * 1024 * 1024,
+  });
   return stdout.split("\n").map((line) => line.trim()).filter(Boolean);
 }
 
@@ -249,6 +252,16 @@ function createRecordingTraceContext(): {
 }
 
 describe("sandbox managed runtime", () => {
+  it("uses the host-native tar on Windows instead of Git's PATH-shadowing GNU tar", () => {
+    expect(resolveHostTarCommand({ platform: "win32", systemRoot: "D:\\HostWindows" })).toBe(
+      "D:\\HostWindows\\System32\\tar.exe",
+    );
+    expect(resolveHostTarCommand({ platform: "linux", systemRoot: "ignored" })).toBe("tar");
+    expect(() => resolveHostTarCommand({ platform: "win32", systemRoot: "relative" })).toThrow(
+      /SystemRoot must be absolute/,
+    );
+  });
+
   const cleanupDirs: string[] = [];
 
   afterEach(async () => {
@@ -863,7 +876,9 @@ describe("sandbox managed runtime", () => {
     for (const { remotePath, bytes } of uploadedTars) {
       const listPath = path.join(rootDir, `list-${path.basename(remotePath)}`);
       await writeFile(listPath, bytes);
-      const { stdout } = await execFile("tar", ["-tf", listPath], { maxBuffer: 32 * 1024 * 1024 });
+      const { stdout } = await execFile(resolveHostTarCommand(), ["-tf", listPath], {
+        maxBuffer: 32 * 1024 * 1024,
+      });
       const members = stdout.split("\n").map((line) => line.trim()).filter(Boolean);
       // The archive must NOT contain a self-entry for the root directory; that is
       // what makes tar try to mutate the (possibly unowned) extraction target.

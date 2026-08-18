@@ -51,8 +51,8 @@ visible. `new` means the file is introduced by this repair.
 | `scripts/check-no-git-push.test.mjs` | 416 | 700 | Filesystem and tracked-manifest integration matrix; helper-level assertions moved to their selector-required sibling suite. |
 | `scripts/pre-push-check.ps1` | 248 | 235 | Thin Git-private logging/orchestration caller with native-stderr-safe streaming, exact status capture, and temporary-update cleanup. |
 | `scripts/pre-push-check.sh` | 145 | 159 | POSIX mirror with isolated-log override, portable HUP/INT/TERM cleanup, and exact temporary update/step cleanup. |
-| `scripts/run-vitest-stable.mjs` | 695 | 753 | Existing runner plus fail-closed per-file exact mode; reviewed exception required. |
-| `scripts/__tests__/run-vitest-stable-shard.test.mjs` | 180 | 194 | Exact/related shard incompatibility and stable-runner partition proofs. |
+| `scripts/run-vitest-stable.mjs` | 695 | 741 | Existing runner plus fail-closed per-file exact and related modes; reviewed exception recorded. |
+| `scripts/__tests__/run-vitest-stable-shard.test.mjs` | 180 | 233 | Exact/related shard incompatibility, independent related dispatch, and stable-runner partition proofs. |
 | `scripts/run-vitest-direct.mjs` | new | 57 | Shell-free canonical Vitest launcher with manifest-bin containment validation and independent exact-file dispatch. |
 | `scripts/run-vitest-direct.test.mjs` | new | 71 | Manifest-bin, containment, hostile-literal-argv, and unmatched-exact-file fixtures. |
 | `scripts/verify-gitleaks.mjs` | 88 | 106 | Strict full-object-id range mode. |
@@ -63,11 +63,11 @@ visible. `new` means the file is introduced by this repair.
 | `scripts/is-main-module.test.mjs` | new | 43 | Alias, invalid-path, falsy-entry, and exact-cause fixtures. |
 | `scripts/pre-push-test-selection.mjs` | new | 311 | Import-only canonical selector with pushed-HEAD membership, typed inputs, exhaustive path ownership, and deletion routing; the nonfunctional standalone CLI was removed. |
 | `scripts/pre-push-test-selection.test.mjs` | new | 260 | Runner, pushed-HEAD tracking, typed input, runtime-asset ownership, deletion, and path-integrity fixtures. |
-| `scripts/run-pre-push-tests.mjs` | new | 472 | Bounded Git-protocol/HEAD/remote planner and runner dispatcher with typed ancestry failures and repository-wide normal-index binding; Git's literal `HEAD` local-ref form is accepted only with the same object binding. |
-| `scripts/run-pre-push-tests.test.mjs` | new | 464 | Protocol, real rename, literal-HEAD compatibility, advertised-dev ancestry, CLI value, authority, timeout/buffer, cleanliness, hidden-index, and exit fixtures. |
+| `scripts/run-pre-push-tests.mjs` | new | 444 | Bounded Git-protocol/HEAD/remote planner and runner dispatcher with typed ancestry failures, repository-wide normal-index binding, and one authoritative advertised-dev test baseline for new and existing content updates; Git's literal `HEAD` local-ref form is accepted only with the same object binding. |
+| `scripts/run-pre-push-tests.test.mjs` | new | 476 | Protocol, real rename, literal-HEAD compatibility, existing-topic advertised-dev baseline, ancestry, CLI value, authority, timeout/buffer, cleanliness, hidden-index, and exit fixtures. |
 | `scripts/pre-push-callers.test.mjs` | new | 267 | Static wiring plus real native-stderr, signal, exit, argument, log-isolation, and cleanup fixtures on both platform callers. |
 | `scripts/scan-pre-push-secrets.mjs` | new | 145 | Exact outgoing-range orchestrator reusing canonical remote and ancestry validation with attributable child signal/error handling. |
-| `scripts/scan-pre-push-secrets.test.mjs` | new | 189 | Remote type/authority/ancestry, CLI value, deletion, spawn, signal, and child-exit fixtures. |
+| `scripts/scan-pre-push-secrets.test.mjs` | new | 190 | Remote type/authority/ancestry, distinct existing-topic/new-branch ranges, CLI value, deletion, spawn, signal, and child-exit fixtures. |
 
 Largest-function and complexity proxy review:
 
@@ -95,21 +95,26 @@ Largest-function and complexity proxy review:
   extracted, nesting is at most four levels, and splitting the shared coverage
   sets from result construction would increase state drift. The exception was
   independently reviewed on the repaired snapshot.
-- `resolveOutgoingChangedFiles` is about 65 physical lines, above the 50-line
-  target but below the independent-review threshold; existing/new-branch range
-  resolution stays together so both paths share remote validation and rename
-  handling. Other planner functions remain at or below 50 physical lines. The
-  CLI tail is linear and has no nested process graph.
+- `resolveOutgoingChangedFiles` is 37 physical lines. New and existing content
+  updates deliberately share one configured-destination readback, advertised
+  `dev` ancestry proof, rename-visible `dev..HEAD` range, and result set.
+  Gitleaks remains separately bound to exact outgoing commits. Independent
+  security and whole-diff reviews approved this division. Other planner
+  functions remain at or below 50 physical lines; the CLI tail is linear.
 - no complexity analyzer has been run in this resource-constrained edit phase;
   the preceding function length and nesting review is the explicit proxy.
 
-The 753-line `run-vitest-stable.mjs` exception is deliberate but must be
-independently reviewed before merge. Its existing roughly 179-line
+The 741-line `run-vitest-stable.mjs` exception is deliberate and was
+independently reviewed. Its existing roughly 179-line
 `parseCliOptions` state machine keeps mutually exclusive modes and their shared
 defaults together; splitting option state would increase drift. Exact-file
 parsing reuses the established isolated Vitest process contract, while process
 launch and independent exact-file iteration were extracted into the 57-line
-shell-free `run-vitest-direct.mjs`.
+shell-free `run-vitest-direct.mjs`. The 47-line `runRelatedSuites` dispatcher
+keeps candidate resolution, cap selection, and operator diagnostics together;
+its 9-line `runRelatedFilesIndependently` child launches one selected file per
+process. This removes cross-suite mock/environment contamination without adding
+a second execution primitive.
 Duplicating isolation in a second runner would increase drift and rollback risk.
 The scanner filesystem test is
 700 lines after lexer and manifest-helper fixtures moved to their 340- and
@@ -127,6 +132,10 @@ PowerShell review: all changed lines in `scripts/pre-push-check.ps1` are at most
 Every proof asserts the break was applied, captures the failing exit and
 specific reason, restores the fixture, and captures the pass. The 2026-08-16
 focused receipts and exact outcomes are recorded in `.gate-evidence.json`;
+the 2026-08-18 incremental related-suite receipt is portable at
+`doc/evidence/precommit-related-isolation/2026-08-18-pr66-receipt.json`;
+the 2026-08-18 existing-topic baseline receipt is portable at
+`doc/evidence/prepush-authoritative-dev-baseline/2026-08-18-pr66-receipt.json`;
 hosted exact-head proof remains a separate post-push requirement.
 
 | Gate | Broken input and required failure | Restored proof |

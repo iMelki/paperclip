@@ -860,9 +860,13 @@ describe("codex_local ACP lane", () => {
     const hostAuth = JSON.parse(await fs.readFile(path.join(sharedHostHome, "auth.json"), "utf8"));
     expect(hostAuth.last_refresh).toBe(NEWER_REFRESH);
     expect(hostAuth.tokens.refresh_token).toBe("ref-sandbox-newer");
-    // Mode preserved at 0600 by the atomic same-directory rename.
-    const mode = (await fs.stat(path.join(sharedHostHome, "auth.json"))).mode & 0o777;
-    expect(mode).toBe(0o600);
+    // POSIX hosts expose the 0600 guard through stat. Windows does not model
+    // those permission bits, so the credential/content assertions above remain
+    // the portable copy-back contract there.
+    if (process.platform !== "win32") {
+      const mode = (await fs.stat(path.join(sharedHostHome, "auth.json"))).mode & 0o777;
+      expect(mode).toBe(0o600);
+    }
   });
 
   it("keeps the shared host Codex auth when the sandbox copy is not strictly newer", async () => {

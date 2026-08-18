@@ -62,6 +62,7 @@ interface SpawnTarget {
   args: string[];
   cwd?: string;
   env?: Record<string, string | undefined>;
+  windowsVerbatimArguments?: boolean;
   cleanup?: () => Promise<void>;
 }
 
@@ -2296,12 +2297,16 @@ async function resolveCommandPath(command: string, cwd: string, env: NodeJS.Proc
   const hasExtension = process.platform === "win32" && path.extname(command).length > 0;
 
   for (const dir of dirs) {
+    const resolvedDir = path.isAbsolute(dir) ? dir : path.resolve(cwd, dir);
+    // Windows command lookup prefers PATHEXT-native launchers. npm installs
+    // both a POSIX shim and a .cmd shim, and selecting the extensionless file
+    // first incorrectly makes Git-for-Windows sh a runtime dependency.
     const candidates =
       process.platform === "win32"
         ? hasExtension
-          ? [path.join(dir, command)]
-          : [path.join(dir, command), ...exts.map((ext) => path.join(dir, `${command}${ext}`))]
-        : [path.join(dir, command)];
+          ? [path.join(resolvedDir, command)]
+          : [...exts.map((ext) => path.join(resolvedDir, `${command}${ext}`)), path.join(resolvedDir, command)]
+        : [path.join(resolvedDir, command)];
     for (const candidate of candidates) {
       if (await pathExists(candidate)) return candidate;
     }
@@ -2338,8 +2343,10 @@ export function sanitizeSshRemoteEnv(
   return sanitizeRemoteExecutionEnv(env, inheritedEnv);
 }
 
-function resolveWindowsCmdShell(env: NodeJS.ProcessEnv): string {
-  const fallbackRoot = env.SystemRoot || process.env.SystemRoot || "C:\\Windows";
+function resolveWindowsCmdShell(): string {
+  // Child env is adapter-controlled. Resolve cmd.exe only from the host so a
+  // configured SystemRoot/ComSpec cannot redirect batch execution.
+  const fallbackRoot = process.env.SystemRoot || process.env.WINDIR || "C:\\Windows";
   return path.join(fallbackRoot, "System32", "cmd.exe");
 }
 
@@ -2438,12 +2445,16 @@ async function resolveSpawnTarget(
   }
 
   const resolved = await resolveCommandPath(command, cwd, env);
-  const executable = resolved ?? command;
+  if (!resolved) {
+    if (command.includes("/") || command.includes("\\")) {
+      const absolute = path.isAbsolute(command) ? command : path.resolve(cwd, command);
+      throw new Error(`Command is not executable: "${command}" (resolved: "${absolute}")`);
+    }
+    throw new Error(`Command not found in PATH: "${command}"`);
+  }
+  const executable = resolved;
 
   if (options.localProcessSandbox) {
-    if (!resolved) {
-      throw new Error(`Command not found in PATH: "${command}"`);
-    }
     const requestedSandboxCommand = options.localProcessSandbox.command?.trim() || "bwrap";
     const sandboxCommand = await resolveCommandPath(requestedSandboxCommand, cwd, env);
     if (!sandboxCommand) {
@@ -2467,11 +2478,12 @@ async function resolveSpawnTarget(
   if (/\.(cmd|bat)$/i.test(executable)) {
     // Always use cmd.exe for .cmd/.bat wrappers. Some environments override
     // ComSpec to PowerShell, which breaks cmd-specific flags like /d /s /c.
-    const shell = resolveWindowsCmdShell(env);
+    const shell = resolveWindowsCmdShell();
     const commandLine = [quoteForCmd(executable), ...args.map(quoteForCmd)].join(" ");
     return {
       command: shell,
-      args: ["/d", "/s", "/c", commandLine],
+      args: ["/d", "/s", "/c", `"${commandLine}"`],
+      windowsVerbatimArguments: true,
     };
   }
 
@@ -3340,6 +3352,7 @@ export async function runChildProcess(
           env: childEnv,
           detached: process.platform !== "win32",
           shell: false,
+          windowsVerbatimArguments: target.windowsVerbatimArguments,
           stdio: [opts.stdin != null ? "pipe" : "ignore", "pipe", "pipe"],
         }) as ChildProcessWithEvents;
         const startedAt = new Date().toISOString();

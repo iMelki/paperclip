@@ -125,6 +125,17 @@ function createLocalSandboxRunner(
   };
 }
 
+function decodeProcessSessionLaunchPayload(input: {
+  env?: Record<string, string>;
+}, previous: Record<string, unknown> | null = null): Record<string, unknown> | null {
+  const encodedPayload = input.env?.PAPERCLIP_PROCESS_SESSION_COMMAND_B64;
+  if (!encodedPayload) return previous;
+  return JSON.parse(Buffer.from(encodedPayload, "base64").toString("utf8")) as Record<
+    string,
+    unknown
+  >;
+}
+
 function buildRuntime(
   onSetConfigOption?: (input: { key: string; value: string }) => void,
   onEnsureSession?: (input: Record<string, unknown>) => void,
@@ -1292,11 +1303,7 @@ describe("shared ACPX engine runtime behavior", () => {
     const runner = createLocalSandboxRunner(
       (input: { args?: string[]; env?: Record<string, string> }) => {
         if (input.env?.PAPERCLIP_SANDBOX_EXEC_CHANNEL === "bridge") {
-          const script = input.args?.[1] ?? "";
-          const match = script.match(/PAPERCLIP_PROCESS_SESSION_COMMAND_B64='([^']+)'/);
-          if (match) {
-            sessionPayload = JSON.parse(Buffer.from(match[1]!, "base64").toString("utf8")) as Record<string, unknown>;
-          }
+          sessionPayload = decodeProcessSessionLaunchPayload(input, sessionPayload);
         }
       },
     );
@@ -1825,8 +1832,14 @@ describe("gemini ACP flag selection", () => {
 
   async function writeFakeGemini(binDir: string, version: string) {
     await fs.mkdir(binDir, { recursive: true });
-    const binPath = path.join(binDir, "gemini");
-    await fs.writeFile(binPath, `#!/bin/sh\necho "${version}"\n`, { mode: 0o755 });
+    const binPath = path.join(binDir, process.platform === "win32" ? "gemini.cmd" : "gemini");
+    const contents = process.platform === "win32"
+      ? `@echo off\r\necho ${version}\r\n`
+      : `#!/bin/sh\necho "${version}"\n`;
+    await fs.writeFile(binPath, contents, { mode: 0o755 });
+    if (process.platform === "win32") {
+      await fs.writeFile(path.join(binDir, "gemini"), "#!/bin/sh\necho \"9.9.9\"\n", { mode: 0o755 });
+    }
   }
 
   function pathWithFakeBin(binDir: string): string {
@@ -1835,18 +1848,63 @@ describe("gemini ACP flag selection", () => {
 
   it("registers the gemini multi-word command directly", async () => {
     const root = await makeTempRoot();
-    const binDir = path.join(root, "bin");
+    const binDir = path.join(root, "Gemini Tools", "bin");
     await writeFakeGemini(binDir, "0.33.0");
-    const { runtimeOptions } = await runExecutor({ agent: "gemini", stateDir: path.join(root, "state"), env: { HOME: path.join(root, "home"), PATH: pathWithFakeBin(binDir) } });
+    const { logs, runtimeOptions } = await runExecutor({ agent: "gemini", stateDir: path.join(root, "state"), env: { HOME: path.join(root, "home"), PATH: pathWithFakeBin(binDir) } });
     expect((runtimeOptions[0]!.agentRegistry as { resolve(name: string): string }).resolve("gemini")).toBe("gemini --acp");
+    expect(
+      logs.some(({ text }) => text.includes("Gemini CLI version probe failed")),
+      JSON.stringify(logs),
+    ).toBe(false);
   });
 
   it("downgrades the registered gemini command when the local CLI predates --acp", async () => {
     const root = await makeTempRoot();
     const binDir = path.join(root, "bin");
     await writeFakeGemini(binDir, "0.30.0");
-    const { runtimeOptions } = await runExecutor({ agent: "gemini", stateDir: path.join(root, "state"), env: { HOME: path.join(root, "home"), PATH: pathWithFakeBin(binDir) } });
+    const { runtimeOptions } = await runExecutor({
+      agent: "gemini",
+      stateDir: path.join(root, "state"),
+      env: {
+        HOME: path.join(root, "home"),
+        PATH: pathWithFakeBin(binDir),
+        SystemRoot: path.join(root, "attacker-controlled-system-root"),
+      },
+    });
     expect((runtimeOptions[0]!.agentRegistry as { resolve(name: string): string }).resolve("gemini")).toBe("gemini --experimental-acp");
+  });
+
+  it("keeps --acp and logs an attributed warning when the gemini version probe fails", async () => {
+    const root = await makeTempRoot();
+    const { logs, runtimeOptions } = await runExecutor({
+      agent: "gemini",
+      stateDir: path.join(root, "state"),
+      env: { HOME: path.join(root, "home"), PATH: path.join(root, "missing-gemini-bin") },
+    });
+
+    expect((runtimeOptions[0]!.agentRegistry as { resolve(name: string): string }).resolve("gemini")).toBe("gemini --acp");
+    expect(logs).toContainEqual({
+      stream: "stderr",
+      text: expect.stringContaining("Gemini CLI version probe failed; keeping --acp"),
+    });
+    expect(logs.some(({ text }) => text.includes('Command not found in PATH: "gemini"'))).toBe(true);
+  });
+
+  it("keeps --acp and logs when the gemini version output is unrecognized", async () => {
+    const root = await makeTempRoot();
+    const binDir = path.join(root, "bin");
+    await writeFakeGemini(binDir, "unknown-version");
+    const { logs, runtimeOptions } = await runExecutor({
+      agent: "gemini",
+      stateDir: path.join(root, "state"),
+      env: { HOME: path.join(root, "home"), PATH: pathWithFakeBin(binDir) },
+    });
+
+    expect((runtimeOptions[0]!.agentRegistry as { resolve(name: string): string }).resolve("gemini")).toBe("gemini --acp");
+    expect(logs).toContainEqual({
+      stream: "stderr",
+      text: "[paperclip] Gemini CLI version probe returned an unrecognized version; keeping --acp.\n",
+    });
   });
 
   it("applies the 4h sandbox backstop when timeoutSec is unset on a sandbox execution target", async () => {
@@ -2209,19 +2267,12 @@ describe("ACPX engine remote sandbox staging seam (PR 1: workspace + cwd)", () =
 
   it("hands the merged paperclip env to the process-session launch when the setups overlap", async () => {
     const { stateDir, localCwd, remoteCwd, executionTarget } = await setupRemoteSandbox();
-    // Decode the process-session LAUNCH payload (the base64 command blob) — the
-    // in-sandbox process env is carried there, NOT in the exec's own `env`.
+    // Decode the process-session LAUNCH payload (the base64 command blob) from
+    // the exec env. The in-sandbox process env is nested inside that payload.
     let launchPayload: Record<string, unknown> | null = null;
     (executionTarget as { runner: unknown }).runner = createLocalSandboxRunner((input) => {
       if (input.env?.PAPERCLIP_SANDBOX_EXEC_CHANNEL === "bridge") {
-        const script = input.args?.[1] ?? "";
-        const match = script.match(/PAPERCLIP_PROCESS_SESSION_COMMAND_B64='([^']+)'/);
-        if (match) {
-          launchPayload = JSON.parse(Buffer.from(match[1]!, "base64").toString("utf8")) as Record<
-            string,
-            unknown
-          >;
-        }
+        launchPayload = decodeProcessSessionLaunchPayload(input, launchPayload);
       }
     });
 
@@ -2258,18 +2309,12 @@ describe("ACPX engine remote sandbox staging seam (PR 1: workspace + cwd)", () =
     await fs.mkdir(referencedProjectDir, { recursive: true });
     await fs.writeFile(path.join(referencedProjectDir, "note.txt"), "referenced", "utf8");
 
-    // Decode the process-session LAUNCH payload — the in-sandbox process env is carried there.
+    // Decode the process-session LAUNCH payload from the exec env; the
+    // in-sandbox process env is carried inside the payload.
     let launchPayload: Record<string, unknown> | null = null;
     (executionTarget as { runner: unknown }).runner = createLocalSandboxRunner((input) => {
       if (input.env?.PAPERCLIP_SANDBOX_EXEC_CHANNEL === "bridge") {
-        const script = input.args?.[1] ?? "";
-        const match = script.match(/PAPERCLIP_PROCESS_SESSION_COMMAND_B64='([^']+)'/);
-        if (match) {
-          launchPayload = JSON.parse(Buffer.from(match[1]!, "base64").toString("utf8")) as Record<
-            string,
-            unknown
-          >;
-        }
+        launchPayload = decodeProcessSessionLaunchPayload(input, launchPayload);
       }
     });
 
@@ -3274,8 +3319,8 @@ describe("ACPX engine sandbox-start spans (opt-in root + child parenting)", () =
     // Each boundary span parents to the sandbox bring-up span, not to the run
     // root or the turn span. The `stage.sync` step also opens one host `pack`
     // span around the workspace tarball build, so it nests one level deeper.
-    const childNames = spans
-      .filter((span) => span !== runRootSpan && span !== startupSpan && span !== turnSpan)
+    const boundarySpans = spans.filter((span) => span.parent === startupSpan);
+    const childNames = boundarySpans
       .map((span) => span.name)
       .sort();
     expect(childNames).toEqual(
@@ -3284,7 +3329,6 @@ describe("ACPX engine sandbox-start spans (opt-in root + child parenting)", () =
         "bridge.paperclip",
         "bridge.process-session",
         "codex-home.seed",
-        "pack",
         "skills.reconcile",
         "stage.sync",
         "workspace.resolve",
@@ -3301,12 +3345,10 @@ describe("ACPX engine sandbox-start spans (opt-in root + child parenting)", () =
     expect(packSpan!.parent).toBe(stageSyncSpan);
     expect(packSpan!.ended).toBe(true);
 
-    // Every boundary step span parents to the sandbox bring-up span and ends.
-    // The `pack` span is the one exception: it parents to `stage.sync` above.
-    for (const span of spans) {
-      if (span === runRootSpan || span === startupSpan || span === turnSpan) continue;
-      if (span === packSpan) continue;
-      expect(span.parent, `span "${span.name}" must parent to the startup span`).toBe(startupSpan);
+    // Every direct boundary step span parents to the sandbox bring-up span and
+    // ends. Run-time poll spans parent to the live run/turn instead and are not
+    // startup boundaries; `pack` is checked as the nested exception above.
+    for (const span of boundarySpans) {
       expect(span.ended, `span "${span.name}" must end`).toBe(true);
     }
   });

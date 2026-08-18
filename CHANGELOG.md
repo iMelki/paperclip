@@ -2,6 +2,41 @@
 
 ## Unreleased
 
+- Prevented the local ACP process-session proxy from forwarding late stdin
+  events after a remote terminal frame has already ended its socket (#59).
+  The exact PR #66 hosted shard exposed the race as
+  `ERR_STREAM_WRITE_AFTER_END`; the proxy now ignores writes once it is
+  exiting, destroyed, or writable-ended. The owning streamed-order test now
+  holds stdin open through terminal output and proves a late EOF exits cleanly;
+  buffered data is also drained before a runner rejection without accepting a
+  buffered terminal frame as proof, and the terminal error uses a flush-safe
+  socket close so backpressure cannot discard queued data. Remote termination
+  probes use bounded deadline-clamped backoff, and proven wrappers receive a
+  separate bounded cleanup window. The same real hook
+  also exposed a cluster of POSIX-only `0600`/`0700` assertions, a bare `sh`
+  fixture, and literal `/` temp-path prefixes in the Codex credential tests;
+  Windows now retains the functional credential/rotation assertions, POSIX
+  continues to verify permission bits, shell-backed fixtures use the reviewed
+  Git-for-Windows resolver, and temp paths use native joins (#22). The next
+  hosted shard exposed a stale OpenCode missing-command assertion; it now checks
+  the earlier, attributable PATH-resolution error introduced by this branch.
+  The final exact-head review also hardened the late-EOF test helper so a
+  missing output marker closes stdin, reaps its child, and consumes the pending
+  exit result before returning the timeout. The fixture launches its idle child
+  through `process.execPath -e` so the same custody proof is executable on both
+  Windows and POSIX hosts.
+
+- Corrected the deterministic pre-push baseline for existing topic branches
+  after they merge current `dev` (#73). The old path diffed the remote topic tip
+  to `HEAD`, so a real PR #66 push re-selected five already-published `dev`
+  files and failed on their missing local siblings. Every content update now
+  validates the configured destination, resolves its advertised `dev`, requires
+  that object to be an ancestor, and tests the final `dev..HEAD` tree. The
+  Gitleaks caller deliberately retains the exact outgoing
+  `remote-topic..HEAD` commit range. A deliberate old-baseline regression failed
+  for the exact A-versus-C range mismatch; the restored planner/secret suites
+  passed 22/22 and the real hook passed all exact suites without a bypass.
+
 - Extended the adapter/runtime `git push` gate repair after adversarial review (#76, #77).
   `scripts/check-no-git-push.mjs` swallowed three filesystem errors
   (`statSync` on a scan root, `readdirSync` mid-walk, `readFileSync` on a
@@ -58,6 +93,20 @@ All notable changes to this repository should be recorded here.
 
 ## Unreleased
 
+- Fixed native-Windows adapter-utils execution by moving the process-session
+  payload out of the Git-for-Windows `sh -c` argument, using Node-native file
+  copying, resolving script wrappers through Node, and making shell discovery
+  support PATH-derived, per-user, and Scoop Git installs with a clear failure
+  when no complete Git shell is available. Process-session stdin and EOF writes
+  are now ordered, and cleanup waits for proven wrapper termination before
+  removing the remote session or workspace. Gemini version detection now uses
+  the shared trusted Windows shim launcher, supports install paths with spaces,
+  downgrades pre-0.33 CLIs to `--experimental-acp`, and reports probe failures
+  before retaining `--acp`. Adapter-utils managed-runtime host archives now
+  bind to System32 `tar.exe` on Windows so Git Bash cannot reinterpret
+  drive-letter paths as remote archives. The environment transport remains
+  bounded; #64 tracks reducing or replacing the oversized ambient-env payload.
+
 - Replaced the unsupported fork Dependency Review call in the trusted PR-review
   workflow with a fail-closed fork policy: dependency manifests, lockfiles, and
   package patches now require the maintainer-only `dependency-review-approved`
@@ -79,6 +128,11 @@ All notable changes to this repository should be recorded here.
   supports isolated caller-test logging, and the PowerShell caller streams long
   step output as it arrives. Exact Vitest paths now run independently so an
   included suite cannot mask a second path excluded by its project config;
+  capped and uncapped pre-commit related selections also run every selected
+  suite in a separate Vitest process so coordinator-owned environment and mock
+  state cannot leak across otherwise independent suites. Linux-only Bubblewrap
+  characterization cases now skip unsupported hosts while portable parsers
+  continue to run on every platform;
   option-shaped missing values and non-array selector inputs reject before work,
   and only a real non-ancestor Git result is translated into the advertised-dev
   ancestry message while infrastructure failures retain their cause.

@@ -391,6 +391,35 @@ describe("adapter skill snapshots", () => {
 });
 
 describe("runChildProcess", () => {
+  it.runIf(process.platform === "win32")(
+    "uses the host SystemRoot for cmd shims even when child env overrides it",
+    async () => {
+      const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-cmd-shim-"));
+      try {
+        const binDir = path.join(root, "Command Tools", "bin");
+        await fs.mkdir(binDir, { recursive: true });
+        await fs.writeFile(path.join(binDir, "paperclip-probe.bat"), "@echo off\r\necho trusted-host-cmd\r\n", "utf8");
+
+        const result = await runChildProcess(randomUUID(), "paperclip-probe", [], {
+          cwd: root,
+          env: {
+            PATH: binDir,
+            PATHEXT: ".BAT",
+            SystemRoot: path.join(root, "attacker-controlled-system-root"),
+          },
+          timeoutSec: 2,
+          graceSec: 1,
+          onLog: async () => {},
+        });
+
+        expect(result.exitCode, JSON.stringify(result)).toBe(0);
+        expect(result.stdout.trim()).toBe("trusted-host-cmd");
+      } finally {
+        await fs.rm(root, { recursive: true, force: true });
+      }
+    },
+  );
+
   it("does not arm a timeout when timeoutSec is 0", async () => {
     const result = await runChildProcess(
       randomUUID(),

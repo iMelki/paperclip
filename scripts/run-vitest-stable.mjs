@@ -439,16 +439,17 @@ function runGeneralGroup(routeTests, groupName, shardIndex = null, shardCount = 
  * lanes get — running bare `vitest related` would leak the developer's real paperclip home
  * into the suites.
  *
- * `--passWithNoTests` is required: most commits touch files no suite imports, and vitest
- * otherwise exits non-zero on an empty selection, which would reject every such commit.
+ * Related-set resolution uses `passWithNoTests`: most commits touch files no suite imports,
+ * and Vitest must return an empty set rather than reject every such commit. Execution starts
+ * only after the resolver returns one or more concrete suite paths.
  *
  * The selection is run under the same isolation the serialized lane hand-rolls
  * (`runSerializedSuites` spawns one vitest per route/authz suite). A related selection can pull
  * route/authz suites and general suites into one invocation, and those suites are not safe to
- * share a process — batching them produced failures that vanished when the same suites ran
- * apart. `--pool=forks --isolate` gives every selected file its own fresh child process and
- * `--no-file-parallelism`/`--maxWorkers=1` keeps them sequential, so related mode inherits the
- * lane contract instead of quietly violating it.
+ * share a Vitest process — batching them produced environment and mock leakage that vanished
+ * when the same suites ran apart. Every selected file therefore gets a separate Vitest process;
+ * worker isolation flags alone are insufficient because the coordinator process also owns
+ * mutable test-environment state.
  */
 /**
  * Default ceiling on how many suites a single pre-commit related run may execute.
@@ -565,24 +566,6 @@ async function runRelatedSuites(files) {
   }
 
   const cap = resolveRelatedSuiteCap();
-  if (cap === 0) {
-    // Escape hatch: uncapped behaviour. `related` is a vitest subcommand, not a flag on `run`;
-    // it defaults to watch mode, so --run is what makes it terminate.
-    runVitest(
-      [
-        "--run",
-        "--passWithNoTests",
-        "--pool=forks",
-        "--isolate",
-        ...serializedServerVitestArgs,
-        ...files,
-      ],
-      `related to ${files.length} changed file(s) (uncapped)`,
-      { subcommand: "related" },
-    );
-    return;
-  }
-
   console.log(`\n[test:run] resolving suites related to ${files.length} changed file(s)...`);
   const selected = await resolveRelatedSpecFiles(files);
   if (selected.length === 0) {
@@ -590,15 +573,17 @@ async function runRelatedSuites(files) {
     return;
   }
 
+  if (cap === 0) {
+    runRelatedFilesIndependently(
+      selected,
+      `uncapped related selection for ${files.length} changed file(s)`,
+    );
+    return;
+  }
+
   if (selected.length <= cap) {
-    runVitest(
-      [
-        "--passWithNoTests",
-        "--pool=forks",
-        "--isolate",
-        ...serializedServerVitestArgs,
-        ...selected,
-      ],
+    runRelatedFilesIndependently(
+      selected,
       `related to ${files.length} changed file(s): ${selected.length} suite(s)`,
     );
     return;
@@ -615,16 +600,19 @@ async function runRelatedSuites(files) {
       `[test:run] For a full local sweep before pushing: PAPERCLIP_PRECOMMIT_ALL=1 git commit ...` +
       ` (or PAPERCLIP_PRECOMMIT_RELATED_CAP=0 to run all ${selected.length}).`,
   );
-  runVitest(
-    [
-      "--passWithNoTests",
-      "--pool=forks",
-      "--isolate",
-      ...serializedServerVitestArgs,
-      ...subset,
-    ],
+  runRelatedFilesIndependently(
+    subset,
     `related subset: ${subset.length} of ${selected.length} suite(s)`,
   );
+}
+
+function runRelatedFilesIndependently(files, label) {
+  forEachExactVitestFile(files, (file) => {
+    runVitest(
+      ["--pool=forks", "--isolate", ...serializedServerVitestArgs, file],
+      `${label}: ${file}`,
+    );
+  });
 }
 
 function runExactSuites(files) {

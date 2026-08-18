@@ -81,11 +81,13 @@ test("parses the real four-field pre-push protocol and rejects empty or malforme
   );
 });
 
-test("uses the exact remote-to-local range for an existing remote ref", () => {
+test("an existing topic ref uses authoritative dev as its exact test baseline", () => {
   const calls = [];
   const git = (_repoRoot, args) => {
     calls.push(args);
     if (args[0] === "remote") return "git@example.test:paperclip.git\n";
+    if (args[0] === "ls-remote") return `${C}\trefs/heads/dev\n`;
+    if (args[0] === "merge-base") return "";
     return Buffer.from("server/src/a.ts\0server/src/a.test.ts\0");
   };
   const changed = resolveOutgoingChangedFiles({
@@ -98,7 +100,12 @@ test("uses the exact remote-to-local range for an existing remote ref", () => {
   assert.deepEqual(changed, ["server/src/a.test.ts", "server/src/a.ts"]);
   assert.deepEqual(calls, [
     ["remote", "get-url", "--push", "--all", "origin"],
-    ["diff", "--name-only", "-z", "--no-renames", "--diff-filter=ACDMRTUXB", A, B, "--"],
+    [
+      "ls-remote", "--refs", "--heads", "--exit-code", "--",
+      "git@example.test:paperclip.git", "refs/heads/dev",
+    ],
+    ["merge-base", "--is-ancestor", C, B],
+    ["diff", "--name-only", "-z", "--no-renames", "--diff-filter=ACDMRTUXB", C, B, "--"],
   ]);
 });
 
@@ -130,6 +137,9 @@ test("a real Git rename reports both deleted and added paths", () => {
       updates: parsePushUpdates(
         `refs/heads/topic ${headOid} refs/heads/topic ${baseOid}\n`,
       ),
+      git: (root, args, options) => args[0] === "ls-remote"
+        ? `${baseOid}\trefs/heads/dev\n`
+        : runGit(root, args, options),
     });
     assert.deepEqual(changed, ["server/src/new.ts", "server/src/old.ts"]);
   } finally {
@@ -166,7 +176,7 @@ test("a new branch uses the authoritative remote dev object as its exact base", 
   ]);
 });
 
-test("new-branch ancestry distinguishes divergence from Git execution failure", () => {
+test("pushed-ref ancestry distinguishes divergence from Git execution failure", () => {
   assert.throws(
     () => assertAdvertisedDevAncestor({
       repoRoot: "C:/repo",
@@ -175,7 +185,7 @@ test("new-branch ancestry distinguishes divergence from Git execution failure", 
       remoteRef: "refs/heads/new",
       git: () => { throw new PrePushIntegrityError("git merge-base failed with exit 1", { exitCode: 1 }); },
     }),
-    /new branch refs\/heads\/new must contain advertised refs\/heads\/dev object/,
+    /pushed ref refs\/heads\/new must contain advertised refs\/heads\/dev object/,
   );
   const original = new PrePushIntegrityError("git merge-base failed with exit 128", { exitCode: 128 });
   assert.throws(
@@ -306,9 +316,11 @@ test("rejects unsafe remote identity and permits an update with no tree changes"
       remoteName: "origin",
       remoteLocation: "git@example.test:paperclip.git",
       updates,
-      git: (_root, args) => args[0] === "remote"
-        ? "git@example.test:paperclip.git\n"
-        : Buffer.alloc(0),
+      git: (_root, args) => {
+        if (args[0] === "remote") return "git@example.test:paperclip.git\n";
+        if (args[0] === "ls-remote") return `${A}\trefs/heads/dev\n`;
+        return Buffer.alloc(0);
+      },
     }),
     [],
   );
