@@ -20,6 +20,9 @@
   Git-for-Windows resolver, and temp paths use native joins (#22). The next
   hosted shard exposed a stale OpenCode missing-command assertion; it now checks
   the earlier, attributable PATH-resolution error introduced by this branch.
+  The final exact-head review also hardened the late-EOF test helper so a
+  missing output marker closes stdin, reaps its child, and consumes the pending
+  exit result before returning the timeout.
 
 - Corrected the deterministic pre-push baseline for existing topic branches
   after they merge current `dev` (#73). The old path diffed the remote topic tip

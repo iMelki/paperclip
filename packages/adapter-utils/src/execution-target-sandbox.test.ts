@@ -1,6 +1,6 @@
 import { createServer } from "node:http";
 import net from "node:net";
-import { execFile, spawn } from "node:child_process";
+import { execFile, spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -110,10 +110,15 @@ describe("sandbox adapter execution targets", () => {
   async function runProxyWithInput(
     command: string,
     input: string,
-    options: { endAfterStdout?: string } = {},
+    options: {
+      endAfterStdout?: string;
+      markerTimeoutMs?: number;
+      onSpawn?: (child: ChildProcessWithoutNullStreams) => void;
+    } = {},
   ): Promise<{ stdout: string; stderr: string; code: number | null }> {
     const target = resolveTestScriptSpawn(command);
     const child = spawn(target.command, target.args, { stdio: ["pipe", "pipe", "pipe"] });
+    options.onSpawn?.(child);
     let stdout = "";
     let stderr = "";
     child.stdout.setEncoding("utf8");
@@ -142,23 +147,30 @@ describe("sandbox adapter execution targets", () => {
         setTimeout(() => resolve(exitCode), process.platform === "win32" ? 1_000 : 0);
       });
     });
-    if (options.endAfterStdout) {
-      child.stdin.write(input);
-      await waitForCondition(
-        () => stdout.includes(options.endAfterStdout!),
-        "Timed out waiting for proxy output before closing stdin.",
-        3_000,
-      );
-      await new Promise((resolve) => setTimeout(resolve, 100));
-      expect(child.exitCode).toBeNull();
-      child.stdin.end();
-    } else {
-      // Deliberately coalesce data and EOF into one turn. The bridge must retain
-      // that receipt order even when each remote queue write is asynchronous.
-      child.stdin.end(input);
+    try {
+      if (options.endAfterStdout) {
+        child.stdin.write(input);
+        await waitForCondition(
+          () => stdout.includes(options.endAfterStdout!),
+          "Timed out waiting for proxy output before closing stdin.",
+          options.markerTimeoutMs ?? 3_000,
+        );
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        expect(child.exitCode).toBeNull();
+        child.stdin.end();
+      } else {
+        // Deliberately coalesce data and EOF into one turn. The bridge must retain
+        // that receipt order even when each remote queue write is asynchronous.
+        child.stdin.end(input);
+      }
+      const code = await exitPromise;
+      return { stdout, stderr, code };
+    } catch (error) {
+      if (!child.stdin.destroyed && !child.stdin.writableEnded) child.stdin.end();
+      if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+      await exitPromise.catch(() => undefined);
+      throw error;
     }
-    const code = await exitPromise;
-    return { stdout, stderr, code };
   }
 
   function combinedStream(
@@ -1140,6 +1152,39 @@ describe("sandbox adapter execution targets", () => {
         await bridge?.stop();
       }
     }, 15_000);
+
+    it("reaps the proxy child when the late-EOF output marker never arrives", async () => {
+      const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-process-session-marker-timeout-"));
+      cleanupDirs.push(rootDir);
+      const scriptPath = path.join(rootDir, "idle-proxy.mjs");
+      await writeFile(scriptPath, "process.stdin.resume(); setInterval(() => {}, 1_000);\n", "utf8");
+      let child: ChildProcessWithoutNullStreams | null = null;
+
+      try {
+        await expect(
+          runProxyWithInput(scriptPath, "", {
+            endAfterStdout: "never-emitted-marker",
+            markerTimeoutMs: 50,
+            onSpawn: (spawnedChild) => {
+              child = spawnedChild;
+            },
+          }),
+        ).rejects.toThrow("Timed out waiting for proxy output before closing stdin.");
+        expect(child).not.toBeNull();
+        expect(child!.stdin.destroyed || child!.stdin.writableEnded).toBe(true);
+        expect(child!.exitCode !== null || child!.signalCode !== null).toBe(true);
+      } finally {
+        const spawnedChild = child as ChildProcessWithoutNullStreams | null;
+        if (spawnedChild && spawnedChild.exitCode === null && spawnedChild.signalCode === null) {
+          spawnedChild.kill("SIGKILL");
+          await waitForCondition(
+            () => spawnedChild.exitCode !== null || spawnedChild.signalCode !== null,
+            "Timed out cleaning up the marker-timeout test child.",
+            1_000,
+          ).catch(() => undefined);
+        }
+      }
+    });
 
     it("delivers buffered stream data before a runner rejection", async () => {
       const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-process-session-stream-reject-"));
