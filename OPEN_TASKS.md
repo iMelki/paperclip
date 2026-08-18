@@ -27,6 +27,17 @@ This file is the durable local index for active `paperclip` issues.
 
 ## Active Issues
 
+- [#22 - Make complete validation and package builds Windows-portable](https://github.com/iMelki/paperclip/issues/22)
+  - The real PR #66 commit hook exposed one additional baseline cluster: Codex
+    credential tests required POSIX `0600`/`0700` bits from Windows `stat`,
+    which reports non-POSIX permission metadata, one fixture invoked bare
+    `sh`, and one diagnostic test built temp prefixes with a literal `/`. The
+    portable repair keeps credential/rotation behavior on every platform,
+    reserves permission-only checks for POSIX, uses the reviewed Git-for-Windows
+    shell resolver, and joins host temp paths natively. The broader issue
+    remains open for its complete Windows validation acceptance criteria and
+    Windows ACL proof.
+
 - [#73 - Push lockout: the exhaustive pre-push gate rejects every push](https://github.com/iMelki/paperclip/issues/73) — **reopened after a real existing-topic push**
   - PR #78 replaced the uncapped related sweep and merged as `9983a44a`, but a
     PR #66 push after merging that `dev` tip exposed one uncovered existing-ref
@@ -37,7 +48,11 @@ This file is the durable local index for active `paperclip` issues.
     secret scanner keeps the exact outgoing topic range. Deliberate old-baseline
     proof failed for A versus C, focused planner/secret tests passed 22/22, and
     the real hook passed 31-project typecheck plus 35 Node and ten isolated
-    Vitest suites. Exact-head hosted review remains the closing gate.
+    Vitest suites. The first exact-head hosted matrix then exposed a latent
+    streamed-proxy `ERR_STREAM_WRITE_AFTER_END` race; the socket-state guard,
+    owning 41-test suite, and adapter-utils typecheck are green locally. A
+    repaired-head hosted matrix and genuine CodeRabbit review remain the
+    closing gates.
 
 - [#77 - check-no-git-push extension allowlist is fail-open by omission](https://github.com/iMelki/paperclip/issues/77) — **local repair and proof complete**
   - The scanner now rejects every undeclared file type under its required roots.

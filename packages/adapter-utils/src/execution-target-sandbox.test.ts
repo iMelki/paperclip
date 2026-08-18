@@ -1104,6 +1104,9 @@ describe("sandbox adapter execution targets", () => {
       expect(bridge).not.toBeNull();
 
       try {
+        const proxyTarget = resolveTestScriptSpawn(bridge!.agentCommand);
+        const proxySource = await readFile(proxyTarget.args[0] ?? proxyTarget.command, "utf8");
+        expect(proxySource).toContain("if (exiting || socket.destroyed || socket.writableEnded) return;");
         const result = await runProxyWithInput(bridge!.agentCommand, "hello\n");
         expect(result).toEqual({ stdout: "out:hello\n", stderr: "err:hello\n", code: 0 });
       } finally {

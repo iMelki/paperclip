@@ -1971,6 +1971,7 @@ let buffer = "";
 let exiting = false;
 
 function send(message) {
+  if (exiting || socket.destroyed || socket.writableEnded) return;
   socket.write(JSON.stringify({ token, ...message }) + "\\n");
 }
 

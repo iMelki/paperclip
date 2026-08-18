@@ -117,6 +117,10 @@ describe("codex execute — outbound auth copy-back restore contribution", () =>
     );
   }
 
+  function expectPrivatePosixModeWhereSupported(mode: number, label?: string): void {
+    if (process.platform !== "win32") expect(mode, label).toBe(0o600);
+  }
+
   async function runTeardown(input: {
     sandboxAuth: string;
     hostAuth: string;
@@ -193,7 +197,7 @@ describe("codex execute — outbound auth copy-back restore contribution", () =>
     expect(typeof homeAsset?.restore).toBe("function");
   });
 
-  it("round-trips a strictly-newer same-identity sandbox auth.json to the shared host at 0600 on teardown", async () => {
+  it("round-trips a strictly-newer same-identity sandbox auth.json to the shared host on teardown", async () => {
     const sandboxAuth = subscriptionAuth({
       accountId: "acct-same",
       lastRefresh: "2026-07-09T02:00:00Z",
@@ -208,7 +212,7 @@ describe("codex execute — outbound auth copy-back restore contribution", () =>
     const result = await runTeardown({ sandboxAuth, hostAuth });
 
     expect(result.finalHostAuth).toBe(sandboxAuth);
-    expect(result.finalHostMode).toBe(0o600);
+    expectPrivatePosixModeWhereSupported(result.finalHostMode);
   });
 
   it("keeps the host auth.json when the sandbox copy is a tie or older on teardown", async () => {
@@ -228,7 +232,7 @@ describe("codex execute — outbound auth copy-back restore contribution", () =>
     for (const entry of cases) {
       const result = await runTeardown({ sandboxAuth: entry.sandboxAuth, hostAuth: entry.hostAuth });
       expect(result.finalHostAuth, entry.name).toBe(entry.hostAuth);
-      expect(result.finalHostMode, entry.name).toBe(0o600);
+      expectPrivatePosixModeWhereSupported(result.finalHostMode, entry.name);
     }
   });
 });

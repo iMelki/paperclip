@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- Prevented the local ACP process-session proxy from forwarding late stdin
+  events after a remote terminal frame has already ended its socket (#59).
+  The exact PR #66 hosted shard exposed the race as
+  `ERR_STREAM_WRITE_AFTER_END`; the proxy now ignores writes once it is
+  exiting, destroyed, or writable-ended, and the owning streamed-order test
+  mechanically verifies that guard in the generated proxy. The same real hook
+  also exposed a cluster of POSIX-only `0600`/`0700` assertions, a bare `sh`
+  fixture, and literal `/` temp-path prefixes in the Codex credential tests;
+  Windows now retains the functional credential/rotation assertions, POSIX
+  continues to verify permission bits, shell-backed fixtures use the reviewed
+  Git-for-Windows resolver, and temp paths use native joins (#22).
+
 - Corrected the deterministic pre-push baseline for existing topic branches
   after they merge current `dev` (#73). The old path diffed the remote topic tip
   to `HEAD`, so a real PR #66 push re-selected five already-published `dev`
