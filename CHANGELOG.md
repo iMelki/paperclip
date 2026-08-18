@@ -1,5 +1,7 @@
 # Changelog
 
+All notable changes to this repository should be recorded here.
+
 ## Unreleased
 
 - Prevented the local ACP process-session proxy from forwarding late stdin
@@ -88,10 +90,6 @@
   reviewed dependency pin and lock update is approved. Until then the hook
   reports an explicit disabled state (exit 2); analyzer failures still block
   commits. No fallback or network bootstrap is permitted.
-
-All notable changes to this repository should be recorded here.
-
-## Unreleased
 
 - Fixed native-Windows adapter-utils execution by moving the process-session
   payload out of the Git-for-Windows `sh -c` argument, using Node-native file

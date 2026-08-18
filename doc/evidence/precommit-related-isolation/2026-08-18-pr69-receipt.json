@@ -1,0 +1,32 @@
+{
+  "schemaVersion": "paperclip.precommit-related-isolation-receipt.v1",
+  "recordedAtUtc": "2026-08-18T07:50:00Z",
+  "scope": "PR #69 review-repair commit: the pre-commit related expansion selected a pre-existing failing suite; the documented cap knob was used with full attribution instead of any bypass.",
+  "commit": "670447a38c5a8fe4bfda9cd79431cbe6419c773e",
+  "uncappedRelatedRun": {
+    "candidates": 327,
+    "cap": 12,
+    "executed": {
+      "packages/adapter-utils/src/git-workspace-sync.test.ts": "18/18 pass",
+      "packages/adapter-utils/src/command-managed-runtime.test.ts": "23/23 pass",
+      "packages/adapter-utils/src/execution-target-sandbox.test.ts": "43/43 pass",
+      "packages/adapter-utils/src/execution-target.test.ts": "11/11 pass",
+      "packages/adapter-utils/src/local-process-sandbox.test.ts": "4 pass / 11 skipped",
+      "packages/adapter-utils/src/remote-managed-runtime.test.ts": "1 pass / 2 FAIL (pre-existing)"
+    },
+    "outcome": "PRE-COMMIT CHECK FAILED on the pre-existing suite only"
+  },
+  "attribution": {
+    "failingSuite": "packages/adapter-utils/src/remote-managed-runtime.test.ts",
+    "rootCause": "remote-managed-runtime.ts:184 validates additional-source localPath with path.posix.isAbsolute only, so every absolute Windows C:\\ path is rejected and all additional projects are skipped; the sandbox sibling (sandbox-managed-runtime.ts:1052) already accepts both families.",
+    "preExistingProof": "The line is byte-identical on origin/dev @ 90bd179dd; the failure reproduces on the untouched dev baseline on a Windows host and is not introduced by the PR #69 change.",
+    "tracked": "iMelki/paperclip#63 comment 2026-08-18 (SSH-lane residual); phenomenon class of #47 (dev-tip Windows failures blocking local commits).",
+    "why-not-fixed-here": "PR #69's dev-relative delta is contractually limited to five files, and #63 explicitly instructs not to batch SSH-lane changes without a caller trace."
+  },
+  "resolution": {
+    "knob": "PAPERCLIP_PRECOMMIT_RELATED_CAP=1 (the hook's own documented override)",
+    "effect": "The related phase ran the exact changed suite (git-workspace-sync.test.ts 18/18); lockfile, affected-package typecheck (15 projects), forbidden tokens, Gitleaks staged scan, and the React Doctor receipt path all ran unmodified.",
+    "not-a-bypass": "No --no-verify, no hook edit, no skipped gate; the narrowing is disclosed in the commit message body and here.",
+    "authoritativeGates": "The pre-push exact changed/sibling gate passed in full (3.7 min), and the exhaustive hosted lanes passed at the exact head."
+  }
+}
