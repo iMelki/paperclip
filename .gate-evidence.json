@@ -34,6 +34,7 @@
     "server/src/services/change-consent-gate.ts"
   ],
   "finalRepairedSnapshot": {
+    "_status": "Intentional frozen historical snapshot of the 2026-08-17 gate-bootstrap repair bundle. PR #66 merged into dev as 90bd179dd and PR #69 as 987700f91 without re-recording this baseline; the PR #69 delivery evidence lives in doc/evidence/*/2026-08-18-pr69-receipt.json.",
     "date": "2026-08-17",
     "recordedAtUtc": "2026-08-16T22:02:24.9919430Z",
     "baseHead": "b6e8ae0794bd8ca2f1e2625daadfd095f461955c",
@@ -149,7 +150,7 @@
         "date": "2026-08-18",
         "command": "git push origin fix/59-60-windows-spawn-argv; node --test scripts/run-pre-push-tests.test.mjs scripts/scan-pre-push-secrets.test.mjs",
         "reason": "The real pre-push caller at b00dacc1 first passed policy, Gitleaks, and the 31-project typecheck, then rejected five files whose blobs were already identical on advertised dev because the existing-topic path diffed the old remote topic tip instead of dev. Deliberately restoring that old A..B baseline after adding the owning fixture made the fixture fail with actual A where authoritative advertised dev C was required. Existing fail-closed proofs still reject malformed/empty protocol, dirty/non-HEAD/multi-ref state, unsafe destination identity, missing CLI values, bounded Git failures, hidden index state, divergent advertised dev, and selected-child failures for their exact reasons.",
-        "restoredPass": "Restoring source SHA-256 de71aab4a3e09db903beeb28b1493abcdff5d7643a8b0aff32070904ba935f1c made the planner and secret suites pass 22/22. The planner now reads the configured push URL, advertises dev C, proves C is an ancestor of B, and diffs C..B for both new and existing topic updates; deletion-only updates still issue no Git child. The distinct secret fixture retains the existing remote-topic A..B scan while a new branch scans advertised-dev D..C. The exact normal push caller at 43011d50 then passed all gates: 31-project typecheck, 35/35 Node gate tests, and ten isolated Vitest files with 313 passed, 21 declared skips, and zero failures. Portable receipt: doc/evidence/prepush-authoritative-dev-baseline/2026-08-18-pr66-receipt.json."
+        "restoredPass": "Restoring source SHA-256 de71aab4a3e09db903beeb28b1493abcdff5d7643a8b0aff32070904ba935f1c made the planner and secret suites pass 22/22. The planner now reads the configured push URL, advertises dev C, proves C is an ancestor of B, and diffs C..B for both new and existing topic updates; deletion-only updates still issue no Git child. The distinct secret fixture retains the existing remote-topic A..B scan while a new branch scans advertised-dev D..C. The exact normal push caller at 43011d50 then passed all gates: 31-project typecheck, 35/35 Node gate tests, and ten isolated Vitest files with 313 passed, 21 declared skips, and zero failures. Portable receipt: doc/evidence/prepush-authoritative-dev-baseline/2026-08-18-pr66-receipt.json. Two subsequent real existing-topic pushes for PR #69 (ebc5f66c5..bbb37f640 in 4.9 minutes and bbb37f640..670447a38 in 3.7 minutes) passed the advertised-dev baseline planner normally end to end; portable receipt: doc/evidence/prepush-authoritative-dev-baseline/2026-08-18-pr69-receipt.json."
       }
     },
     {
@@ -197,7 +198,7 @@
         "date": "2026-08-16",
         "command": "node scripts/check-pr-workflow-trigger.mjs (from a preserved scratch copy with exactly one dev branch entry removed)",
         "reason": "One real scratch CLI exited 1 and named 'pull_request.branches is missing dev'. A second changed a required step opener to '- if: false'; the real CLI exited 1 naming the missing active validation. The broader fixture also rejected push keys and every nested conditional, custom-shell, continue-on-error, compact-operator, or removed-command masking form.",
-        "restoredPass": "The workflow was restored and the real CLI exited 0; the repaired policy matrix passed 12/12. PR #78 heads 5cf55ae1 and b6e8ae07 each launched the complete PR matrix: policy, secret scan, typecheck/registry, build, five general-server shards, two workspace shards, five serialized-suite shards, three e2e shards plus aggregate, canary, and verify all succeeded. The next repaired head still requires exact hosted readback."
+        "restoredPass": "The workflow was restored and the real CLI exited 0; the repaired policy matrix passed 12/12. PR #78 heads 5cf55ae1 and b6e8ae07 each launched the complete PR matrix: policy, secret scan, typecheck/registry, build, five general-server shards, two workspace shards, five serialized-suite shards, three e2e shards plus aggregate, canary, and verify all succeeded. The merged gate content then completed exact-head hosted readback: the PR #66 head aeea981d2 passed 24 checks plus the expected security-review neutral before merging as 90bd179dd, and the PR #69 heads bbb37f640 and 670447a38 each completed the full matrix green before merging as 987700f91; receipt doc/evidence/prepush-authoritative-dev-baseline/2026-08-18-pr69-receipt.json."
       }
     },
     {

@@ -1,0 +1,78 @@
+{
+  "schemaVersion": "paperclip.prepush-authoritative-dev-baseline-receipt.v1",
+  "recordedAtUtc": "2026-08-18T07:50:00Z",
+  "scope": "PR #69 delivery: two real existing-topic pushes through the authoritative advertised-dev baseline, exact-head hosted matrices, review repair, and squash merge.",
+  "lineage": {
+    "baseDevCommit": "90bd179dd8a9442005b74a7d3ccc903b18d13804",
+    "remoteTopicCommitBeforeDelivery": "ebc5f66c58ca6f610bd7f8d5f1deb8ac26fb86e4",
+    "preservedExactRef": "cf9d3358701dbbeb30cc0af9eb32981e6bdcc584",
+    "integrationMergeCommit": "bbb37f640309553cab06dcfec4556a7d57309f9f",
+    "reviewRepairCommit": "670447a38c5a8fe4bfda9cd79431cbe6419c773e",
+    "squashMergeOnDev": "987700f91c48726683741452d6d3dde2282c6122",
+    "mergedAtUtc": "2026-08-18T07:34:22Z"
+  },
+  "devRelativeDelta": {
+    "contract": "exactly five files",
+    "files": [
+      "CHANGELOG.md",
+      "packages/adapter-utils/src/git-workspace-sync.test.ts",
+      "packages/adapter-utils/src/git-workspace-sync.ts",
+      "packages/adapter-utils/src/sandbox-managed-runtime.test.ts",
+      "packages/adapter-utils/src/sandbox-managed-runtime.ts"
+    ],
+    "verified": "git diff --name-only 90bd179dd..987700f91 matches the contract exactly"
+  },
+  "realPushes": [
+    {
+      "command": "git push origin fix/63-shell-safety-siblings",
+      "range": "ebc5f66c5..bbb37f640",
+      "hookOutcome": "pass",
+      "durationMinutes": 4.9,
+      "notes": "Existing-topic advertised-dev baseline path exercised for real: full workspace typecheck plus the deterministic exact test plan (48.8 s), fast-forward transport."
+    },
+    {
+      "command": "git push origin fix/63-shell-safety-siblings",
+      "range": "bbb37f640..670447a38",
+      "hookOutcome": "pass",
+      "durationMinutes": 3.7,
+      "notes": "Review-repair push through the same gates; fast-forward transport."
+    }
+  ],
+  "hostedMatrices": [
+    {
+      "head": "bbb37f640309553cab06dcfec4556a7d57309f9f",
+      "run": "https://github.com/iMelki/paperclip/actions/runs/32106633166",
+      "outcome": "24 pass + 1 expected security-review neutral"
+    },
+    {
+      "head": "670447a38c5a8fe4bfda9cd79431cbe6419c773e",
+      "outcome": "23 success + expected security-review neutral on the exact head per the commit check-runs API (Build, Canary Dry Run, 5 general-server shards, 2 workspace shards, Typecheck+Registry, 5 serialized shards, 3 e2e shards + aggregate, policy, review, secret-scan, verify), plus the CodeRabbit check passing"
+    }
+  ],
+  "review": {
+    "tool": "CodeRabbit",
+    "reviewedHead": "bbb37f640309553cab06dcfec4556a7d57309f9f",
+    "actionableFindings": 1,
+    "finding": "buildRemoteGitDeltaBundleScript derived its mkdir parent with path.posix.dirname on the raw bundlePath; a backslash-form Windows path degenerates to mkdir -p '.' (issue #36 defect class).",
+    "repair": "670447a38: dirnamePortablePath before quoting plus a string-level regression test; thread replied and resolved.",
+    "incrementalPass": "The re-review trigger at 670447a38 completed as 'Review finished' with zero new actionable comments.",
+    "disclosure": "CodeRabbit auto-review is label-excluded on this repository; both reviews were triggered by explicit @coderabbitai review comments. The 670447a38 incremental pass finished in ~17 seconds and posted no new review node, consistent with its incremental no-re-review model."
+  },
+  "focusedVerificationAtFinalHead": {
+    "git-workspace-sync.test.ts": "18/18",
+    "sandbox-managed-runtime.test.ts": "29/29",
+    "test-shell.test.ts": "5/5",
+    "typecheck": "@paperclipai/adapter-utils tsc --noEmit exit 0"
+  },
+  "maintainability": {
+    "git-workspace-sync.ts": "508 -> 520 physical lines (path-aware quoter alias + portable dirname + guard comments); no threshold crossed",
+    "sandbox-managed-runtime.ts": "1272 -> 1284 (exported quoteSandboxProvisionPath and buildSandboxRuntimeAssetExtractCommand; docs); largest function unchanged",
+    "git-workspace-sync.test.ts": "442 -> 550 (hermetic fixtures + drive-letter and portable-dirname regressions)",
+    "sandbox-managed-runtime.test.ts": "2145 -> 2177 (provision shell-helper fixtures)",
+    "CHANGELOG.md": "single 5-line Unreleased bullet"
+  },
+  "issueDisposition": {
+    "closed": ["#70 (manually, dev is not the default branch so Fixes #70 could not auto-close)"],
+    "open": ["#63 (SSH-lane residuals: ssh.ts:150, ssh.ts:342, remote-managed-runtime.ts:184 posix-only localPath validation, no-new-bare-tool enforcement)", "#36 (command-managed-runtime.ts:263 site of the mkdir-dot class)", "#22", "#47", "#62", "#64"]
+  }
+}

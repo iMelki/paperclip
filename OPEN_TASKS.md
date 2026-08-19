@@ -6,6 +6,15 @@ This file is the durable local index for active `paperclip` issues.
 
 ## Recently Closed Issues
 
+- [#70 - Test fixtures are not hermetic against host git config (insteadOf + autocrlf)](https://github.com/iMelki/paperclip/issues/70) — **closed 2026-08-18 by PR #69**
+  - PR #69 squash-merged into `dev` at `987700f91` (PR head `670447a38`) with
+    the full hosted matrix green and the exact-head CodeRabbit finding
+    repaired. Fixture Git configuration is isolated (hostile `autocrlf` +
+    `insteadOf` system config, empty global, `NOSYSTEM` guards) with positive
+    and negative-control proofs, so the three former false failures pass
+    hermetically: 18/18 on Windows. Closed manually because `dev` is not the
+    default branch, so the PR's `Fixes #70` link could not auto-close.
+
 - [#76 - Security gate fails open: incomplete tree coverage in check-no-git-push.mjs](https://github.com/iMelki/paperclip/issues/76) — **closed after the reopened fix; stronger adversarial hardening prepared**
   - The first repair closed unreadable-file/directory and zero-file failures.
     Reopened proof in `bf81b90e` then reproduced three live bypasses: renaming
@@ -22,21 +31,44 @@ This file is the durable local index for active `paperclip` issues.
     for PowerShell here-strings, shell heredocs, and remote-mutating Git forms.
     Focused broken/restored receipts and the issue-state update are complete;
     #76 is closed. PR #78 completed its first repaired hosted matrix green;
-    second-review hardening and portable evidence are complete locally, with
-    the next exact-head hosted readback still pending.
+    second-review hardening and portable evidence are complete, and the
+    exact-head hosted readback completed via the PR #66 head `aeea981d2`
+    (24 checks + expected neutral, merged as `90bd179dd`) and the PR #69
+    matrices at `bbb37f640`/`670447a38` (merged as `987700f91`).
 
 ## Active Issues
 
-- [#22 - Make complete validation and package builds Windows-portable](https://github.com/iMelki/paperclip/issues/22)
-  - The real PR #66 commit hook exposed one additional baseline cluster: Codex
-    credential tests required POSIX `0600`/`0700` bits from Windows `stat`,
-    which reports non-POSIX permission metadata, one fixture invoked bare
-    `sh`, and one diagnostic test built temp prefixes with a literal `/`. The
-    portable repair keeps credential/rotation behavior on every platform,
-    reserves permission-only checks for POSIX, uses the reviewed Git-for-Windows
-    shell resolver, and joins host temp paths natively. The broader issue
-    remains open for its complete Windows validation acceptance criteria and
-    Windows ACL proof.
+- [#63 - Shell-safety siblings: git-workspace-sync legacy quoter, bare-sh spawns, unguarded postUploadCommand](https://github.com/iMelki/paperclip/issues/63) — **three named clusters closed by PR #69; SSH-lane residuals remain**
+  - PR #69 (squash `987700f91`, 2026-08-18) aliased `git-workspace-sync` to
+    `shellQuotePath`, routed the six bare-`sh` test spawns through
+    `resolveTestShellCommand`, and exported `quoteSandboxProvisionPath` /
+    `buildSandboxRuntimeAssetExtractCommand` as the provision contract. The
+    exact-head CodeRabbit review also fixed the `mkdir` parent derivation with
+    `dirnamePortablePath` — the #36 defect class at the git-workspace-sync
+    site. Remaining residuals keep this issue open: `ssh.ts:150` legacy quoter
+    and `ssh.ts:342` bare-`sh` spawn (trace SSH callers first; do not batch),
+    `remote-managed-runtime.ts:184` posix-only `localPath` validation (fails
+    2 Windows-host tests at the `dev` tip and blocks pre-commit
+    `related`-suite expansions that select that suite — the #47 phenomenon
+    class), and
+    enforcement that prevents new bare-shell/bare-tool spawns.
+
+- [#47 - dev tip fails 2 Windows path tests — hook rejects all commits](https://github.com/iMelki/paperclip/issues/47)
+  - Open. The same phenomenon recurred 2026-08-18 during the PR #69 repair
+    commit: the pre-commit `related`-suite expansion selected
+    `remote-managed-runtime.test.ts`, which fails 2 Windows-host tests at the
+    `dev` tip (tracked as a #63 residual). The commit used the hook's
+    documented `PAPERCLIP_PRECOMMIT_RELATED_CAP` knob with full attribution;
+    receipt: `doc/evidence/precommit-related-isolation/2026-08-18-pr69-receipt.json`.
+
+- [#62 - Windows: symlinks do not survive the tar create/extract round-trip in runtime asset sync](https://github.com/iMelki/paperclip/issues/62)
+  - Open remote tar-transport follow-up. Not addressed by PR #66/#69; keep with
+    the #47 remote-tar cluster.
+
+- [#64 - Security: the ACP bridge payload forwards the whole host env to the sandbox provider](https://github.com/iMelki/paperclip/issues/64)
+  - Open. The environment transport remains bounded per the PR #66 changelog
+    entry; reducing or replacing the oversized ambient-env payload (and its
+    unrelated-secret exposure) remains this issue's scope.
 
 - [#73 - Push lockout: the exhaustive pre-push gate rejects every push](https://github.com/iMelki/paperclip/issues/73) — **reopened after a real existing-topic push**
   - PR #78 replaced the uncapped related sweep and merged as `9983a44a`, but a
@@ -56,8 +88,13 @@ This file is the durable local index for active `paperclip` issues.
     passed, and genuine exact-head CodeRabbit review found one bounded
     test-helper child-custody gap. Its first repair was green on Windows but the
     hosted matrix caught a POSIX-only direct `.mjs` fixture `EACCES`; the fixture
-    now uses the current Node executable explicitly. One final real-hook push,
-    hosted matrix, and exact-head review remain the closing gates.
+    now uses the current Node executable explicitly. Those closing gates have
+    since completed for real: the PR #66 head `aeea981d2` passed the 24-check
+    hosted matrix plus expected neutral and merged as `90bd179dd`
+    (2026-08-18T02:51Z), and the PR #69 pushes `ebc5f66c5..bbb37f640` (4.9 min)
+    and `bbb37f640..670447a38` (3.7 min) passed the full hook end to end before
+    merging as `987700f91`. Read this issue's own acceptance criteria back
+    before closing it.
 
 - [#77 - check-no-git-push extension allowlist is fail-open by omission](https://github.com/iMelki/paperclip/issues/77) — **local repair and proof complete**
   - The scanner now rejects every undeclared file type under its required roots.
@@ -172,6 +209,15 @@ This file is the durable local index for active `paperclip` issues.
     POSIX separator form and added a cross-host regression; this removes the
     deterministic Windows `release-package-map list/check` mismatch. The
     remaining lifecycle, pack, full-matrix, and process-cleanup gates stay open.
+  - 2026-08-18: the real PR #66 commit hook exposed one additional baseline
+    cluster: Codex credential tests required POSIX `0600`/`0700` bits from
+    Windows `stat`, one fixture invoked bare `sh`, and one diagnostic test
+    built temp prefixes with a literal `/`. The portable repair keeps
+    credential/rotation behavior on every platform, reserves permission-only
+    checks for POSIX, uses the reviewed Git-for-Windows shell resolver, and
+    joins host temp paths natively. The broader issue remains open for its
+    complete Windows validation acceptance criteria and Windows ACL proof.
+    (This consolidates the former duplicate #22 entry.)
 
 - [#19 - Make headless onboarding and doctor failures automation-safe](https://github.com/iMelki/paperclip/issues/19)
   - Implemented explicit config-only `onboard --yes --no-run` behavior and

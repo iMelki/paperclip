@@ -1101,6 +1101,12 @@ async function statPath(targetPath: string) {
   return fs.stat(targetPath).catch(() => null);
 }
 
+async function hasSkillDefinitionAtPath(dirPath: string) {
+  const entries = await fs.readdir(dirPath, { withFileTypes: true }).catch(() => null);
+  if (!entries) return false;
+  return entries.some((entry) => entry.isFile() && entry.name === "SKILL.md");
+}
+
 function pathIsContained(rootPath: string, candidatePath: string) {
   const relativePath = path.relative(rootPath, candidatePath);
   return relativePath === ""
@@ -4852,7 +4858,7 @@ export function companySkillService(db: Db) {
         path: entryPath,
         kind: entry.isDirectory() ? "directory" : "file",
         isSkill: entry.isDirectory()
-          ? Boolean((await statPath(path.join(targetPath, entry.name, "SKILL.md")))?.isFile())
+          ? await hasSkillDefinitionAtPath(path.join(targetPath, entry.name))
           : entry.name === "SKILL.md",
       });
     }
