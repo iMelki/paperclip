@@ -320,6 +320,19 @@
         "reason": "The temporary exact 0.7.8 analyzer emits valid JSON and exits 23; the runner receipt is outcome=failed, error=analyzer-reported-failure, exitCode=23. The hook allows only exit 2 for missing configuration and exits for any other nonzero status.",
         "restoredPass": "The paired local-analyzer test exits 0 with outcome=passed, while the missing-package case remains the explicit disabled receipt path rather than a false quality pass."
       }
+    },
+    {
+      "id": "coordination-company-scope",
+      "path": "server/src/services/coordination.ts",
+      "description": "Requires the authorized root company predicate on every coordination-detail query so a permitted caller cannot receive another company's children, participants, leases, control intents, agent instances, or hosts.",
+      "negativeFixture": "server/src/__tests__/coordination-service-isolation.test.ts",
+      "observedFailure": {
+        "date": "2026-08-20",
+        "command": "node scripts/run-vitest-stable.mjs --files server/src/__tests__/coordination-service-isolation.test.ts",
+        "reason": "With final fixture SHA-256 1e8a6cac74e9326dc5e69adbd588b3a49729a6c73f3a4eead336a2fd08c884cf, removal of only the child-issue company predicate produced production SHA-256 0065371ba2ec9b9100832a687dbe780d568878941d06cc5ee114e589b0a5c545. The exact caller exited 1: exactly the direct-service and real-HTTP company-isolation assertions failed because the foreign child ID appeared in both returned arrays, while the foreign-root denial control passed.",
+        "restoredPass": "The production file was restored byte-for-byte to SHA-256 e52fc4346936d5a35324d5652fe2d0a70367b8a7905c7d5b0268b068fd7aa061. The identical exact caller exited 0 with 1/1 file and 3/3 tests passing; the combined route/isolation caller then passed 10/10. Final process readback found zero checkout-owned PostgreSQL workers remaining.",
+        "artifactPath": "https://github.com/iMelki/paperclip/issues/52#issuecomment-5359087390"
+      }
     }
   ]
 }

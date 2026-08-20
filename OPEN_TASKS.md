@@ -38,6 +38,27 @@ This file is the durable local index for active `paperclip` issues.
 
 ## Active Issues
 
+- [#52 - Require authenticated company scope before coordination reads](https://github.com/iMelki/paperclip/issues/52) — **local proof complete; hosted delivery pending**
+  - The route authenticates before resolving the root company, gives missing
+    and foreign roots the same not-found response, and calls the detailed
+    reader only after company authorization. The service retains the authorized
+    company predicate across every downstream read. Focused route and
+    embedded-PostgreSQL isolation fixtures own the anonymous, foreign-company,
+    intentionally inconsistent-row, and real HTTP-to-database cases. The
+    cohesive `getIssueCoordination` view assembler grows from 165 to 181
+    nonblank source lines (declared span: 180 to 196 physical lines): root-scope
+    authorization was extracted, while the remaining read chain intentionally
+    stays together because each typed projection depends on the same authorized
+    company and issue set. Exact caller-shaped
+    negative proof failed for the intended foreign-child leak and restored to
+    3/3 isolation tests; the strengthened combined focused suite passed 10/10
+    and server typecheck passed. Independent security and maintainability
+    reviews approved the final local snapshot. The maintainability exception
+    expires before any further `getIssueCoordination` growth or on 2026-09-20;
+    its next review should consider separating the company-scoped loader from
+    the pure view projector. Normal commit/push hooks and exact-head hosted CI
+    remain the closing delivery gates.
+
 - [#63 - Shell-safety siblings: git-workspace-sync legacy quoter, bare-sh spawns, unguarded postUploadCommand](https://github.com/iMelki/paperclip/issues/63) — **three named clusters closed by PR #69; SSH-lane residuals remain**
   - PR #69 (squash `987700f91`, 2026-08-18) aliased `git-workspace-sync` to
     `shellQuotePath`, routed the six bare-`sh` test spawns through

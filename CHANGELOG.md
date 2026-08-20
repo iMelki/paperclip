@@ -4,6 +4,16 @@ All notable changes to this repository should be recorded here.
 
 ## Unreleased
 
+- Scoped coordination-detail reads to the authenticated root company (#52).
+  The route now rejects anonymous callers before the root-scope lookup and
+  returns the same not-found response for missing and foreign-company roots.
+  The detailed service requires the authorized company identifier and retains
+  that predicate across child issues, participations, leases, control intents,
+  agent instances, and hosts. Focused route and embedded-PostgreSQL isolation
+  fixtures cover anonymous, foreign-board, foreign-agent, inconsistent-row,
+  and real HTTP-to-database boundary cases. Caller-shaped negative proof and
+  restored validation passed, including 10/10 focused tests and server typecheck.
+
 - Prevented the local ACP process-session proxy from forwarding late stdin
   events after a remote terminal frame has already ended its socket (#59).
   The exact PR #66 hosted shard exposed the race as
