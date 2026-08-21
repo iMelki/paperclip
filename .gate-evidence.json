@@ -334,6 +334,19 @@
         "artifactPath": "doc/evidence/coordination-loader-projector/2026-08-21-issue82-receipt.json",
         "previousProofArtifact": "https://github.com/iMelki/paperclip/issues/52#issuecomment-5359087390"
       }
+    },
+    {
+      "id": "coordination-heartbeat-max-selection",
+      "path": "server/src/services/coordination-projection.ts",
+      "description": "Selects the maximum participant lastSeenAt independently of row order, falling back to the root timestamp only when no newer participant heartbeat exists.",
+      "negativeFixture": "server/src/services/coordination-projection.test.ts",
+      "observedFailure": {
+        "date": "2026-08-21",
+        "command": "node scripts/run-vitest-stable.mjs --files server/src/services/coordination-projection.test.ts",
+        "reason": "With final fixture SHA-256 000420c85851f0af77f33813ee3d159f94878fa12c9633533cfa48e35228a611, a deliberate last-participant implementation produced source SHA-256 8c9f8e5635b9bd1fc80196e1fb0210c60533b623fe4b4b4214c60e8277a643ac. The exact caller exited 1 with 30 passed and only the maximum-heartbeat regression failed, reporting 40 seconds instead of 5.",
+        "restoredPass": "The projector was restored byte-for-byte to SHA-256 b33d74d8a4a9a351db6c304bc00f9f0bd66eff2cef310128d85bc64038885130. The identical exact caller exited 0 with 31/31 tests.",
+        "artifactPath": "doc/evidence/coordination-loader-projector/2026-08-21-issue82-receipt.json"
+      }
     }
   ]
 }

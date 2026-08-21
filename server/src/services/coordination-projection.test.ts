@@ -249,11 +249,11 @@ describe("projectTaskCoordinationView", () => {
 
   it("uses the most recent participant heartbeat", () => {
     const snapshot = makeSnapshot();
-    snapshot.participations[0]!.lastSeenAt = new Date("2026-08-21T00:09:20.000Z");
+    snapshot.participations[0]!.lastSeenAt = new Date("2026-08-21T00:09:55.000Z");
     snapshot.participations.push({
       ...snapshot.participations[0]!,
       id: "participation-2",
-      lastSeenAt: new Date("2026-08-21T00:09:55.000Z"),
+      lastSeenAt: new Date("2026-08-21T00:09:20.000Z"),
     });
 
     const health = projectTaskCoordinationView(snapshot).health;

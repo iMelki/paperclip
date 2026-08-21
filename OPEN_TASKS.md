@@ -39,18 +39,22 @@ This file is the durable local index for active `paperclip` issues.
 ## Active Issues
 
 - [#82 - Review `getIssueCoordination` loader/projector split before further growth](https://github.com/iMelki/paperclip/issues/82) —
-  **in progress; local implementation and proof complete, hosted review pending**
+  **in progress in PR #83; review hardening and fresh exact-head CI pending**
   - PR #81 delivered the #52 company-scoped coordination repair as squash
     `7239123cf`. The current #82 slice keeps every company predicate inside
     private loader helpers and reduces `getIssueCoordination` from 181 to 8
     nonblank lines. Pure projection now receives an explicit clock and performs
     no database access, authorization, or filtering. A deliberate child-query
     scope break failed exactly the direct-service and real-HTTP controls; the
-    exact restore passed 4/4, the final projector/route/isolation run passed 42/42,
-    and server typecheck passed. Receipt:
+    exact restore passed 4/4, the final projector/route/isolation run passed
+    42/42, and server plus real pre-push workspace typechecks passed. A second
+    deliberate break proves newest-heartbeat selection is independent of row
+    order. Receipt:
     `doc/evidence/coordination-loader-projector/2026-08-21-issue82-receipt.json`.
     No #53/v2 truthfulness behavior is included. Current coordination use is
-    not blocked; exact-head hosted CI and review remain the delivery gates.
+    not blocked. PR #83 is the exact review surface; fresh exact-head hosted CI,
+    genuine CodeRabbit review, thread reconciliation, and human review remain
+    the delivery gates.
 
 - [#63 - Shell-safety siblings: git-workspace-sync legacy quoter, bare-sh spawns, unguarded postUploadCommand](https://github.com/iMelki/paperclip/issues/63) — **three named clusters closed by PR #69; SSH-lane residuals remain**
   - PR #69 (squash `987700f91`, 2026-08-18) aliased `git-workspace-sync` to

@@ -12,9 +12,11 @@ All notable changes to this repository should be recorded here.
   heartbeat, placement, lease, participant, and control mapping deterministic
   to test before #53 adds truthful v2 semantics. Root reassignment after scope
   authorization now has an explicit fail-closed regression. Caller-shaped
-  negative proof, 42/42 focused tests, server typecheck, and independent static
-  review passed. This slice does not adopt `task-coordination.v2` or change
-  current evidence claims.
+  negative proof, 42/42 focused tests, server typecheck, the real pre-push
+  workspace typecheck, and independent static review passed. Review hardening
+  also proves newest-heartbeat selection is independent of participation row
+  order. This slice does not adopt `task-coordination.v2` or change current
+  evidence claims.
 
 - Scoped coordination-detail reads to the authenticated root company (#52).
   The route now rejects anonymous callers before the root-scope lookup and

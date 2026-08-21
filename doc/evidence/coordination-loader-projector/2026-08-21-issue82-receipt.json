@@ -1,12 +1,14 @@
 {
   "schemaVersion": 1,
   "issue": "https://github.com/iMelki/paperclip/issues/82",
-  "recordedAtUtc": "2026-08-21T00:21:18.0060568+00:00",
-  "recordedAtLocal": "2026-08-21T03:21:18.0060568+03:00",
+  "recordedAtUtc": "2026-08-21T00:55:52.2273892+00:00",
+  "recordedAtLocal": "2026-08-21T03:55:52.2273892+03:00",
   "dateBasis": "The UTC and Asia/Jerusalem values represent the same instant.",
   "baseCommit": "2fa52596b7781e58ee80e021a1cea557a015a2a2",
   "branch": "agent/codex/82-coordination-loader-projector",
+  "firstPushedImplementationCommit": "f0568d5646b59178e32dcd09ad0352384144d493",
   "intent": "Behavior-preserving separation of the mandatory company-scoped database loader from pure task-coordination view projection.",
+  "manifestScope": "Final production and test bytes after review hardening. Exact file SHA-256 and Git blob IDs provide the binding without a self-referential commit hash.",
   "contractPrerequisite": {
     "projectsOpsPullRequest": "https://github.com/iMelki/projects-ops/pull/145",
     "mergeCommit": "24d554bb4d27a62512d184a220ed094635a19dd3",
@@ -33,8 +35,8 @@
     },
     {
       "path": "server/src/services/coordination-projection.test.ts",
-      "sha256": "92622bfd32a1ce17674fa73a2074c7324b1d5baf305b2fab75f1fa36f6b719c9",
-      "gitBlob": "f3453e6c21d98d2d6adc5ba12b182f775c476e86"
+      "sha256": "000420c85851f0af77f33813ee3d159f94878fa12c9633533cfa48e35228a611",
+      "gitBlob": "5806bee34304167b3bcb8965c63f0b6e65bb0d2f"
     },
     {
       "path": "server/src/__tests__/coordination-service-isolation.test.ts",
@@ -63,6 +65,27 @@
       "testsFailed": 0
     }
   },
+  "heartbeatMaxSelectionNegativeProof": {
+    "gate": "coordination-heartbeat-max-selection",
+    "fixture": "server/src/services/coordination-projection.test.ts",
+    "fixtureSha256": "000420c85851f0af77f33813ee3d159f94878fa12c9633533cfa48e35228a611",
+    "command": "node scripts/run-vitest-stable.mjs --files server/src/services/coordination-projection.test.ts",
+    "break": "Replaced the maximum lastSeenAt reduction with selection of only the last participant after placing the newest heartbeat first and an older heartbeat last.",
+    "brokenSourceSha256": "8c9f8e5635b9bd1fc80196e1fb0210c60533b623fe4b4b4214c60e8277a643ac",
+    "observedFailure": {
+      "exitCode": 1,
+      "testsPassed": 30,
+      "testsFailed": 1,
+      "reason": "Only the most-recent-heartbeat regression failed: the deliberate last-element implementation reported age 40 seconds instead of the expected maximum-heartbeat age of 5 seconds."
+    },
+    "restore": {
+      "exactSourceSha256": "b33d74d8a4a9a351db6c304bc00f9f0bd66eff2cef310128d85bc64038885130",
+      "hashMatchedBaseline": true,
+      "exitCode": 0,
+      "testsPassed": 31,
+      "testsFailed": 0
+    }
+  },
   "validation": {
     "focused": {
       "command": "node scripts/run-vitest-stable.mjs --files server/src/services/coordination-projection.test.ts server/src/__tests__/coordination-routes.test.ts server/src/__tests__/coordination-service-isolation.test.ts",
@@ -70,12 +93,28 @@
       "filesPassed": 3,
       "testsPassed": 42,
       "testsFailed": 0,
-      "durationSeconds": 20.23
+      "durationSeconds": 19.04
     },
     "serverTypecheck": {
       "command": "pnpm --filter @paperclipai/server typecheck",
       "exitCode": 0,
       "durationSeconds": 27.24
+    },
+    "implementationPrePush": {
+      "testedCommit": "f0568d5646b59178e32dcd09ad0352384144d493",
+      "command": "git push -u origin agent/codex/82-coordination-loader-projector",
+      "exitCode": 0,
+      "durationMinutes": 2.8,
+      "workspaceTypecheck": {
+        "command": "pnpm -r typecheck",
+        "exitCode": 0,
+        "durationSeconds": 136.1
+      },
+      "exactTests": {
+        "filesPassed": 3,
+        "testsPassed": 42,
+        "testsFailed": 0
+      }
     },
     "repoHealth": {
       "command": "pwsh -File Invoke-RepoHealthAudit.ps1 -RepoPath . -ShowPassing",
@@ -83,7 +122,7 @@
       "checksPassed": 29,
       "knownWarnings": 2,
       "checksFailed": 0,
-      "negativeProofGatesReconciled": 23,
+      "negativeProofGatesReconciled": 24,
       "warnings": [
         "Existing process-tree teardown sites have not yet adopted one canonical primitive.",
         "Existing temporary-directory sites have not yet adopted the shared ephemeral-scratch helper."
@@ -133,9 +172,12 @@
     "retention": "Raw transcripts remain operator-local under the checkout's Git metadata and are intentionally not referenced by machine-local path in this public receipt.",
     "negativeLogSha256": "aca24afe48fd4f26fe61ca6261937b880b3a48e81d337e36c24f7ecf8ede3dd3",
     "restoredLogSha256": "f57aa98cf382d2d2c24292393db95f2ecf544cc32de59b1182c7583fa7f4d7a7",
-    "finalFocusedLogSha256": "415baf775fc2d4515b99cfc9deed97fa397e348b5d242a397efc4589849c559b",
+    "finalFocusedLogSha256": "ffeed8e9eea7f73a8e40d6b14ded92a969b8437a531d0e88d64ac1b641051ef8",
     "finalTypecheckLogSha256": "5ee52f64c8923603274ca6adb7099d8499b56223fc49b56ba3170eadd28773eb",
-    "repoHealthLogSha256": "9a8d70bc7968b1d65f9b9edb271ddaa35a94a582d791edc82bb2b01ccb2dadd2"
+    "repoHealthLogSha256": "1b406db09ebe4d49adbb1767bff7470d12056749c58077983ce0b894ae9ab44c",
+    "implementationPrePushLogSha256": "202f848bc6ca1231ac7f82bd2dba9a3fb477302a4f90951cbb975429d174ad07",
+    "heartbeatMaxNegativeLogSha256": "4e665acde716cba158d93a7ba27fbec847f3538d6cdbcebde66cc10023c5156e",
+    "heartbeatMaxRestoredLogSha256": "0e6291d133354ab89560fe08bf14cf0e46bec5376b9562227342f49f1bb6dbd2"
   },
   "research": [
     "https://cheatsheetseries.owasp.org/cheatsheets/Multi_Tenant_Security_Cheat_Sheet.html",
