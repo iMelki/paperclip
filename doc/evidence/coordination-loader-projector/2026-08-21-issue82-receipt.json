@@ -1,0 +1,191 @@
+{
+  "schemaVersion": 1,
+  "issue": "https://github.com/iMelki/paperclip/issues/82",
+  "recordedAtUtc": "2026-08-21T00:55:52.2273892+00:00",
+  "recordedAtLocal": "2026-08-21T03:55:52.2273892+03:00",
+  "dateBasis": "The UTC and Asia/Jerusalem values represent the same instant.",
+  "baseCommit": "2fa52596b7781e58ee80e021a1cea557a015a2a2",
+  "branch": "agent/codex/82-coordination-loader-projector",
+  "firstPushedImplementationCommit": "f0568d5646b59178e32dcd09ad0352384144d493",
+  "intent": "Behavior-preserving separation of the mandatory company-scoped database loader from pure task-coordination view projection.",
+  "manifestScope": "Final production and test bytes after review hardening. Exact file SHA-256 and Git blob IDs provide the binding without a self-referential commit hash.",
+  "contractPrerequisite": {
+    "projectsOpsPullRequest": "https://github.com/iMelki/projects-ops/pull/145",
+    "mergeCommit": "24d554bb4d27a62512d184a220ed094635a19dd3",
+    "taskCoordinationV2Sha256": "3f47037b1f7b5e1705e719e4b087be88223abac19590521024d2f8960823b258",
+    "scopeBoundary": "This issue does not adopt task-coordination.v2 or change #53 evidence semantics."
+  },
+  "designDecision": {
+    "publicFacade": "getIssueCoordination(db, rootIssueId, companyId) remains the production detail entry point.",
+    "privateLoader": "loadIssueCoordinationSnapshot and its helper queries remain module-private and require companyId.",
+    "pureProjector": "projectTaskCoordinationView performs no database access, authorization, or filtering and receives an explicit observedAt clock.",
+    "securityInvariant": "Root, child, participation, lease, control-intent, agent-instance, host, and company-list reads retain their company predicate. A root moved after scope authorization returns null.",
+    "deferred": "Repeatable-read snapshot isolation, v2 truthfulness semantics, list-query optimization, and write controls remain outside #82."
+  },
+  "implementationManifest": [
+    {
+      "path": "server/src/services/coordination.ts",
+      "sha256": "164bfbd19b693d0d91cab6b53b646a0655c8ac95de03e24d7610d7642a540159",
+      "gitBlob": "0a32c89a70cf6c86ff98f7aae7e111261245d369"
+    },
+    {
+      "path": "server/src/services/coordination-projection.ts",
+      "sha256": "b33d74d8a4a9a351db6c304bc00f9f0bd66eff2cef310128d85bc64038885130",
+      "gitBlob": "20a00ad2d81552b437f3715281bd99f2f148817f"
+    },
+    {
+      "path": "server/src/services/coordination-projection.test.ts",
+      "sha256": "000420c85851f0af77f33813ee3d159f94878fa12c9633533cfa48e35228a611",
+      "gitBlob": "5806bee34304167b3bcb8965c63f0b6e65bb0d2f"
+    },
+    {
+      "path": "server/src/__tests__/coordination-service-isolation.test.ts",
+      "sha256": "bf1589604ae56e79f134b086509f842d7fe67613cb028ac8e1a96e23158ffe88",
+      "gitBlob": "751efdca98fd073a353be7dde5ca28107857e5bb"
+    }
+  ],
+  "negativeProof": {
+    "gate": "coordination-company-scope",
+    "fixture": "server/src/__tests__/coordination-service-isolation.test.ts",
+    "fixtureSha256": "bf1589604ae56e79f134b086509f842d7fe67613cb028ac8e1a96e23158ffe88",
+    "command": "node scripts/run-vitest-stable.mjs --files server/src/__tests__/coordination-service-isolation.test.ts",
+    "break": "Removed only eq(issues.companyId, companyId) from the child-issue query after asserting the safe predicate was present.",
+    "brokenSourceSha256": "5ba3699def681cf314b2781b6f5747a89b21d51b4efc43e90b7585cbd7847557",
+    "observedFailure": {
+      "exitCode": 1,
+      "testsPassed": 2,
+      "testsFailed": 2,
+      "reason": "Both the direct-service and real HTTP assertions received the deliberately crossed-company child ID. The foreign-root denial and root-reassignment controls still passed."
+    },
+    "restore": {
+      "exactSourceSha256": "164bfbd19b693d0d91cab6b53b646a0655c8ac95de03e24d7610d7642a540159",
+      "hashMatchedBaseline": true,
+      "exitCode": 0,
+      "testsPassed": 4,
+      "testsFailed": 0
+    }
+  },
+  "heartbeatMaxSelectionNegativeProof": {
+    "gate": "coordination-heartbeat-max-selection",
+    "fixture": "server/src/services/coordination-projection.test.ts",
+    "fixtureSha256": "000420c85851f0af77f33813ee3d159f94878fa12c9633533cfa48e35228a611",
+    "command": "node scripts/run-vitest-stable.mjs --files server/src/services/coordination-projection.test.ts",
+    "break": "Replaced the maximum lastSeenAt reduction with selection of only the last participant after placing the newest heartbeat first and an older heartbeat last.",
+    "brokenSourceSha256": "8c9f8e5635b9bd1fc80196e1fb0210c60533b623fe4b4b4214c60e8277a643ac",
+    "observedFailure": {
+      "exitCode": 1,
+      "testsPassed": 30,
+      "testsFailed": 1,
+      "reason": "Only the most-recent-heartbeat regression failed: the deliberate last-element implementation reported age 40 seconds instead of the expected maximum-heartbeat age of 5 seconds."
+    },
+    "restore": {
+      "exactSourceSha256": "b33d74d8a4a9a351db6c304bc00f9f0bd66eff2cef310128d85bc64038885130",
+      "hashMatchedBaseline": true,
+      "exitCode": 0,
+      "testsPassed": 31,
+      "testsFailed": 0
+    }
+  },
+  "validation": {
+    "focused": {
+      "command": "node scripts/run-vitest-stable.mjs --files server/src/services/coordination-projection.test.ts server/src/__tests__/coordination-routes.test.ts server/src/__tests__/coordination-service-isolation.test.ts",
+      "exitCode": 0,
+      "filesPassed": 3,
+      "testsPassed": 42,
+      "testsFailed": 0,
+      "durationSeconds": 19.04
+    },
+    "serverTypecheck": {
+      "command": "pnpm --filter @paperclipai/server typecheck",
+      "exitCode": 0,
+      "durationSeconds": 27.24
+    },
+    "implementationPrePush": {
+      "testedCommit": "f0568d5646b59178e32dcd09ad0352384144d493",
+      "command": "git push -u origin agent/codex/82-coordination-loader-projector",
+      "exitCode": 0,
+      "durationMinutes": 2.8,
+      "workspaceTypecheck": {
+        "command": "pnpm -r typecheck",
+        "exitCode": 0,
+        "durationSeconds": 136.1
+      },
+      "exactTests": {
+        "filesPassed": 3,
+        "testsPassed": 42,
+        "testsFailed": 0
+      }
+    },
+    "repoHealth": {
+      "command": "pwsh -File Invoke-RepoHealthAudit.ps1 -RepoPath . -ShowPassing",
+      "exitCode": 0,
+      "checksPassed": 29,
+      "knownWarnings": 2,
+      "checksFailed": 0,
+      "negativeProofGatesReconciled": 24,
+      "warnings": [
+        "Existing process-tree teardown sites have not yet adopted one canonical primitive.",
+        "Existing temporary-directory sites have not yet adopted the shared ephemeral-scratch helper."
+      ]
+    },
+    "staticReview": {
+      "outcome": "approved",
+      "reviewScope": "Behavior equivalence, TypeScript structural compatibility, mandatory company predicates, fail-closed root reassignment, and maintainability.",
+      "reviewedImplementationHashes": 4
+    }
+  },
+  "maintainability": {
+    "coordinationTs": {
+      "beforePhysicalLines": 396,
+      "afterPhysicalLines": 159,
+      "beforeNonblankLines": 373,
+      "afterNonblankLines": 149
+    },
+    "getIssueCoordination": {
+      "beforePhysicalLines": 196,
+      "afterPhysicalLines": 8,
+      "beforeNonblankLines": 181,
+      "afterNonblankLines": 8,
+      "beforeExplicitDecisions": 9,
+      "afterExplicitDecisions": 1
+    },
+    "newProjectorPhysicalLines": 370,
+    "newProjectorNonblankLines": 356,
+    "largestNewProductionFunctionPhysicalLines": 32,
+    "maximumLineLength": 117,
+    "duplicationDecision": "The two status maps remain separate because blocked, cancelled, and closed have different task and work-unit meanings.",
+    "testException": "The 92-line makeSnapshot fixture and full expected-view block are declarative test data with no control complexity; independent static review accepted keeping each cohesive."
+  },
+  "hostAdmission": {
+    "blockedSample": {
+      "usedMemoryPercent": 83.6,
+      "freeGiB": 10.46,
+      "decision": "held heavy tests"
+    },
+    "admittedSample": {
+      "usedMemoryPercent": 81.7,
+      "freeGiB": 11.65,
+      "decision": "ran exact focused tests"
+    }
+  },
+  "rawEvidence": {
+    "retention": "Raw transcripts remain operator-local under the checkout's Git metadata and are intentionally not referenced by machine-local path in this public receipt.",
+    "negativeLogSha256": "aca24afe48fd4f26fe61ca6261937b880b3a48e81d337e36c24f7ecf8ede3dd3",
+    "restoredLogSha256": "f57aa98cf382d2d2c24292393db95f2ecf544cc32de59b1182c7583fa7f4d7a7",
+    "finalFocusedLogSha256": "ffeed8e9eea7f73a8e40d6b14ded92a969b8437a531d0e88d64ac1b641051ef8",
+    "finalTypecheckLogSha256": "5ee52f64c8923603274ca6adb7099d8499b56223fc49b56ba3170eadd28773eb",
+    "repoHealthLogSha256": "1b406db09ebe4d49adbb1767bff7470d12056749c58077983ce0b894ae9ab44c",
+    "implementationPrePushLogSha256": "202f848bc6ca1231ac7f82bd2dba9a3fb477302a4f90951cbb975429d174ad07",
+    "heartbeatMaxNegativeLogSha256": "4e665acde716cba158d93a7ba27fbec847f3538d6cdbcebde66cc10023c5156e",
+    "heartbeatMaxRestoredLogSha256": "0e6291d133354ab89560fe08bf14cf0e46bec5376b9562227342f49f1bb6dbd2"
+  },
+  "research": [
+    "https://cheatsheetseries.owasp.org/cheatsheets/Multi_Tenant_Security_Cheat_Sheet.html",
+    "https://cheatsheetseries.owasp.org/cheatsheets/Insecure_Direct_Object_Reference_Prevention_Cheat_Sheet.html",
+    "https://cwe.mitre.org/data/definitions/367.html",
+    "https://www.postgresql.org/docs/current/transaction-iso.html",
+    "https://orm.drizzle.team/docs/transactions",
+    "https://martinfowler.com/eaaCatalog/dataMapper.html",
+    "https://www.destroyallsoftware.com/screencasts/catalog/functional-core-imperative-shell"
+  ]
+}
