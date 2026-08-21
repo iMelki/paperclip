@@ -324,14 +324,15 @@
     {
       "id": "coordination-company-scope",
       "path": "server/src/services/coordination.ts",
-      "description": "Requires the authorized root company predicate on every coordination-detail query so a permitted caller cannot receive another company's children, participants, leases, control intents, agent instances, or hosts.",
+      "description": "Keeps the company-scoped loader private and requires the authorized root company predicate on every coordination-detail query so a permitted caller cannot receive another company's children, participants, leases, control intents, agent instances, or hosts before pure view projection.",
       "negativeFixture": "server/src/__tests__/coordination-service-isolation.test.ts",
       "observedFailure": {
-        "date": "2026-08-20",
+        "date": "2026-08-21",
         "command": "node scripts/run-vitest-stable.mjs --files server/src/__tests__/coordination-service-isolation.test.ts",
-        "reason": "With final fixture SHA-256 1e8a6cac74e9326dc5e69adbd588b3a49729a6c73f3a4eead336a2fd08c884cf, removal of only the child-issue company predicate produced production SHA-256 0065371ba2ec9b9100832a687dbe780d568878941d06cc5ee114e589b0a5c545. The exact caller exited 1: exactly the direct-service and real-HTTP company-isolation assertions failed because the foreign child ID appeared in both returned arrays, while the foreign-root denial control passed.",
-        "restoredPass": "The production file was restored byte-for-byte to SHA-256 e52fc4346936d5a35324d5652fe2d0a70367b8a7905c7d5b0268b068fd7aa061. The identical exact caller exited 0 with 1/1 file and 3/3 tests passing; the combined route/isolation caller then passed 10/10. Final process readback found zero checkout-owned PostgreSQL workers remaining.",
-        "artifactPath": "https://github.com/iMelki/paperclip/issues/52#issuecomment-5359087390"
+        "reason": "With final isolation fixture SHA-256 bf1589604ae56e79f134b086509f842d7fe67613cb028ac8e1a96e23158ffe88, removal of only the child-issue company predicate produced source SHA-256 5ba3699def681cf314b2781b6f5747a89b21d51b4efc43e90b7585cbd7847557. The exact caller exited 1 with 2 passed and exactly 2 failed: both the direct-service and real-HTTP assertions received the deliberately crossed-company child ID, while the foreign-root denial and new root-reassignment controls passed.",
+        "restoredPass": "The source was restored byte-for-byte to SHA-256 164bfbd19b693d0d91cab6b53b646a0655c8ac95de03e24d7610d7642a540159 and the identical caller exited 0 with 4/4 tests. The final projector, route, and isolation caller passed 42/42, and server typecheck exited 0.",
+        "artifactPath": "doc/evidence/coordination-loader-projector/2026-08-21-issue82-receipt.json",
+        "previousProofArtifact": "https://github.com/iMelki/paperclip/issues/52#issuecomment-5359087390"
       }
     }
   ]

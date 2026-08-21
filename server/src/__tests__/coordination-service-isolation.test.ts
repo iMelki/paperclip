@@ -14,7 +14,10 @@ import {
 } from "@paperclipai/db";
 import { expect, it } from "vitest";
 import { coordinationRoutes } from "../routes/coordination.js";
-import { getIssueCoordination } from "../services/coordination.js";
+import {
+  getIssueCoordination,
+  getIssueCoordinationRootScope,
+} from "../services/coordination.js";
 import {
   describeEmbeddedPostgres,
   routeApp,
@@ -243,6 +246,21 @@ describeEmbeddedPostgres("coordination service company isolation", () => {
       .from(issues)
       .where(and(eq(issues.parentId, seeded.rootId), eq(issues.companyId, seeded.companyB.companyId)));
     expect(foreignChildren).toEqual([{ id: seeded.childBId }]);
+  });
+
+  it("fails closed if the root changes company after scope authorization", async () => {
+    const seeded = await seed();
+    const authorizedScope = await getIssueCoordinationRootScope(ctx.db, seeded.rootId);
+    expect(authorizedScope).toEqual({ companyId: seeded.companyA.companyId });
+
+    await ctx.db
+      .update(issues)
+      .set({ companyId: seeded.companyB.companyId })
+      .where(eq(issues.id, seeded.rootId));
+
+    await expect(
+      getIssueCoordination(ctx.db, seeded.rootId, authorizedScope!.companyId),
+    ).resolves.toBeNull();
   });
 
   it("enforces company isolation through the real HTTP route and service boundary", async () => {

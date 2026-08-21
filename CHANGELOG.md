@@ -4,6 +4,18 @@ All notable changes to this repository should be recorded here.
 
 ## Unreleased
 
+- Separated coordination loading from view projection without changing the
+  public response or weakening company isolation (#82). The production facade
+  still requires the authorized `companyId`; private loader helpers retain it
+  on root, child, participation, lease, intent, instance, and host reads. A new
+  pure projector receives a fixed observation time, which makes status,
+  heartbeat, placement, lease, participant, and control mapping deterministic
+  to test before #53 adds truthful v2 semantics. Root reassignment after scope
+  authorization now has an explicit fail-closed regression. Caller-shaped
+  negative proof, 42/42 focused tests, server typecheck, and independent static
+  review passed. This slice does not adopt `task-coordination.v2` or change
+  current evidence claims.
+
 - Scoped coordination-detail reads to the authenticated root company (#52).
   The route now rejects anonymous callers before the root-scope lookup and
   returns the same not-found response for missing and foreign-company roots.
