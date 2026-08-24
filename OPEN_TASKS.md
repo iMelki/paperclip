@@ -567,6 +567,13 @@ This file is the durable local index for active `paperclip` issues.
     POSIX separator form and added a cross-host regression; this removes the
     deterministic Windows `release-package-map list/check` mismatch. The
     remaining lifecycle, pack, full-matrix, and process-cleanup gates stay open.
+  - 2026-08-12: replaced the nine published-package `rm`/`cp`/`mv` lifecycle
+    fragments with shared Node prepare/restore helpers. Collision, generator
+    failure, byte-preserving restore, and manifest wiring tests pass. Server
+    `bash`/cleanup scripts and the remaining full pack matrix are separate gates.
+  - 2026-08-12: fixed host-native Codex sandbox home separators found by the
+    normal hook (the sibling exact-case `SKILL.md` directory-detection fix
+    landed on `dev` separately). Existing focused suites cover the path.
   - 2026-08-18: the real PR #66 commit hook exposed one additional baseline
     cluster: Codex credential tests required POSIX `0600`/`0700` bits from
     Windows `stat`, one fixture invoked bare `sh`, and one diagnostic test
