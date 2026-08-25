@@ -4,6 +4,18 @@ All notable changes to this repository should be recorded here.
 
 ## Unreleased
 
+- Enrolled the fork in Repo Doctor plan resolution for Projects Ops #117 with
+  one `on_demand`, repository-scoped, observe-only genome. Four explicit
+  authored-runtime source sets select 3,246 server/CLI, package, UI, and script
+  files and exclude the two declared generated files. `node.typecheck` is
+  required; `node.lint` and `architecture.boundaries` remain optional, and no
+  commit/push gate, exception, analyzer execution, authority, or quality
+  decision was added. A deliberately undeclared source-set reference made the
+  exact resolver return `invalid`/exit 2 for that reason; restoring it made the
+  resolver and shared adapter return `resolved`/exit 0. The new genome and
+  ledger entry are declarative governance surfaces; no production or test
+  source file changed.
+
 - Separated coordination loading from view projection without changing the
   public response or weakening company isolation (#82). The production facade
   still requires the authorized `companyId`; private loader helpers retain it

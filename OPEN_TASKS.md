@@ -38,6 +38,15 @@ This file is the durable local index for active `paperclip` issues.
 
 ## Active Issues
 
+- [x] [Projects Ops #117 - Enroll Paperclip in Repo Doctor](https://github.com/iMelki/projects-ops/issues/117)
+  - The governed checkout now has an observe-only `on_demand` genome with four
+    bounded authored-source sets, 3,246 selected files, two explicit generated
+    exclusions, and no analyzer execution or quality authority. The direct
+    invalid-reference proof failed closed and the restored direct/shared plan
+    resolution passed. The separate shared-adapter invalid-status
+    classification defect remains tracked in Agent Settings and does not turn
+    an invalid genome green.
+
 - [#87 - Bug: onboarding shows Codex but persists Claude adapter](https://github.com/iMelki/paperclip/issues/87)
   - Current state: the onboarding UI can show a successful Codex selection and
     environment check while the persisted team lead remains on `claude_local`.

@@ -347,6 +347,19 @@
         "restoredPass": "The projector was restored byte-for-byte to SHA-256 b33d74d8a4a9a351db6c304bc00f9f0bd66eff2cef310128d85bc64038885130. The identical exact caller exited 0 with 31/31 tests.",
         "artifactPath": "doc/evidence/coordination-loader-projector/2026-08-21-issue82-receipt.json"
       }
+    },
+    {
+      "id": "repo-doctor-genome-source-set-references",
+      "path": "doctor.genome.json",
+      "description": "Requires the observe-only on_demand gate to reference only declared bounded source sets before Repo Doctor can resolve a plan.",
+      "negativeFixture": "doctor.genome.json",
+      "observedFailure": {
+        "date": "2026-08-25",
+        "command": "pwsh -NoLogo -NoProfile -File S:/source/CCAI/Assistants/tools/git-toolkit/hooks/Resolve-RepoDoctorGenome.ps1 -RepoPath S:/source/CCAI/Assistants/tools/paperclip-factory-dev -Gate on_demand -Json after adding missing-source-set to the gate",
+        "breakApplied": "Readback confirmed the on_demand sourceSets array contained missing-source-set while no source-set declaration used that ID.",
+        "reason": "The exact resolver exited 2 with status=invalid, plan=null, and named only that gate on_demand selected missing-source-set without an exact declaration.",
+        "restoredPass": "After removing the undeclared ID, the exact resolver exited 0 with status=resolved and the shared adapter exited 0 with diagnosticCode=plan-resolved. Both selected 3,246 authored files, excluded the two declared generated files, retained profile=observe and mutationIntent=none, and ran no analyzer."
+      }
     }
   ]
 }
