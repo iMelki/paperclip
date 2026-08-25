@@ -2,6 +2,11 @@
 
 Last updated: 2026-08-25
 
+2026-08-25: [paperclip#95](https://github.com/iMelki/paperclip/issues/95) —
+Windows factory start failed migrate (`42P07` / later `42703`) because the
+Drizzle journal lagged the existing schema. Ledger repaired in `client.ts`
+without wiping the factory DB. Start remains gated on a clean `dev` tree.
+
 This file is the durable local index for active `paperclip` issues.
 
 ## Recently Closed Issues

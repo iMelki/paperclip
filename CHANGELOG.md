@@ -4,6 +4,12 @@ All notable changes to this repository should be recorded here.
 
 ## Unreleased
 
+- **[#95]** `db:migrate` now skips DDL that is already true on the live schema
+  (existing tables/columns/indexes/constraints, dropped columns, indexes on
+  removed columns, SQL-comment prefixes). That repairs a drifted
+  `__drizzle_migrations` ledger without wiping embedded-postgres data. Factory
+  start still requires a clean checkout after this lands.
+
 - Enrolled the fork in Repo Doctor plan resolution for Projects Ops #117 with
   one `on_demand`, repository-scoped, observe-only genome. Four explicit
   authored-runtime source sets select 3,246 server/CLI, package, UI, and script

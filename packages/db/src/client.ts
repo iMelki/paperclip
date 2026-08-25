@@ -325,6 +325,9 @@ async function applyPendingMigrationsManually(
 
       await runInTransaction(sql, async () => {
         for (const statement of splitMigrationStatements(migrationContent)) {
+          if (await migrationStatementAlreadyApplied(sql, statement)) {
+            continue;
+          }
           await sql.unsafe(statement);
         }
 
@@ -441,7 +444,10 @@ async function migrationStatementAlreadyApplied(
   sql: ReturnType<typeof postgres>,
   statement: string,
 ): Promise<boolean> {
-  const normalized = statement.replace(/\s+/g, " ").trim();
+  const normalized = statement
+    .replace(/--[^\n]*/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
 
   const createTableMatch = normalized.match(/^CREATE TABLE(?: IF NOT EXISTS)? "([^"]+)"/i);
   if (createTableMatch) {
@@ -455,14 +461,65 @@ async function migrationStatementAlreadyApplied(
     return columnExists(sql, addColumnMatch[1], addColumnMatch[2]);
   }
 
-  const createIndexMatch = normalized.match(/^CREATE (?:UNIQUE )?INDEX(?: IF NOT EXISTS)? "([^"]+)"/i);
+  const createIndexMatch = normalized.match(
+    /^CREATE (?:UNIQUE )?INDEX(?: IF NOT EXISTS)? "([^"]+)" ON "([^"]+)"/i,
+  );
   if (createIndexMatch) {
-    return indexExists(sql, createIndexMatch[1]);
+    if (await indexExists(sql, createIndexMatch[1])) {
+      return true;
+    }
+    const tableName = createIndexMatch[2];
+    const onIndex = normalized.toUpperCase().indexOf(" ON ");
+    const afterOn = onIndex >= 0 ? normalized.slice(onIndex) : "";
+    const columnNames = [...afterOn.matchAll(/"([^"]+)"/g)]
+      .map((match) => match[1])
+      .filter((name) => name !== tableName);
+    for (const columnName of columnNames) {
+      if (!(await columnExists(sql, tableName, columnName))) {
+        return true;
+      }
+    }
+    return false;
   }
 
   const addConstraintMatch = normalized.match(/^ALTER TABLE "([^"]+)" ADD CONSTRAINT "([^"]+)"/i);
   if (addConstraintMatch) {
-    return constraintExists(sql, addConstraintMatch[2]);
+    if (await constraintExists(sql, addConstraintMatch[2])) {
+      return true;
+    }
+    const fkColumnMatch = normalized.match(/FOREIGN KEY \("([^"]+)"\)/i);
+    if (fkColumnMatch && !(await columnExists(sql, addConstraintMatch[1], fkColumnMatch[1]))) {
+      return true;
+    }
+    return false;
+  }
+
+  const dropColumnMatch = normalized.match(
+    /^ALTER TABLE "([^"]+)" DROP COLUMN(?: IF EXISTS)? "([^"]+)"/i,
+  );
+  if (dropColumnMatch) {
+    const present = await columnExists(sql, dropColumnMatch[1], dropColumnMatch[2]);
+    return !present;
+  }
+
+  const dropConstraintMatch = normalized.match(
+    /^ALTER TABLE "([^"]+)" DROP CONSTRAINT(?: IF EXISTS)? "([^"]+)"/i,
+  );
+  if (dropConstraintMatch) {
+    const present = await constraintExists(sql, dropConstraintMatch[2]);
+    return !present;
+  }
+
+  const dropTableMatch = normalized.match(/^DROP TABLE(?: IF EXISTS)? "([^"]+)"/i);
+  if (dropTableMatch) {
+    const present = await tableExists(sql, dropTableMatch[1]);
+    return !present;
+  }
+
+  const dropIndexMatch = normalized.match(/^DROP (?:UNIQUE )?INDEX(?: IF EXISTS)? "([^"]+)"/i);
+  if (dropIndexMatch) {
+    const present = await indexExists(sql, dropIndexMatch[1]);
+    return !present;
   }
 
   // If we cannot reason about a statement safely, require manual migration.
