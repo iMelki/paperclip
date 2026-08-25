@@ -49,7 +49,7 @@ refutation.
 | Visual craft | 8 *(provisional)* | **7.5** | −0.5 | Body family `InterVariable` on 80/80 surfaces. Type scale coherent (7–8 distinct rendered sizes on 59/80). **But `h1` renders at five different computed sizes — 14px on 32 surfaces, 18px on 13, 20px on 6, 24px on 14, 24.5px on 2 — and 13 of 80 surfaces have no `h1` at all.** A 14px `h1` on 40% of the app is not a hierarchy a user feels. |
 | Motion & interaction | 8 *(provisional)* | **7.5** | −0.5 | 75 animated elements, 34 infinite. Under `prefers-reduced-motion: reduce` the media query is active on every sampled surface and animation collapses on 5 of 6 — **but `animate-spin` keeps running (2 infinite SVG spinners), and 72–113 elements per surface still carry a non-zero `transition-duration`.** `DESIGN.md` claims the token-layer collapse cascades everywhere; measured, it does not reach Tailwind utility timings. |
 | IA & user flows | 8 *(provisional)* | **7.5** | −0.5 | Route separation is real and now proven: 74 distinct rendered views across 86 attempts, 0 inconclusive. **But 6 surfaces redirect onto a view another route already renders**, and `/projects/:id`, `/projects/:id/issues` and `/projects/:id/workspaces` all land on the same issues view — three declared routes, one screen. |
-| Design-system consistency | 8.5 *(provisional)* | **8.0** | −0.5 | The mechanical guards are real and unchanged (`check:token-gates`, 510-image visual baseline, decision ledger, component inventory). Browser proof supports uniform token application: one body family, one radius language, zero overflow. Held back by the measured `h1` scale inconsistency above — a token *applied* inconsistently — and the unchanged 22-file bespoke-table debt with no `table.tsx` primitive. |
+| Design-system consistency | 8.5 *(provisional)* | **8.0** | −0.5 | The mechanical guards are real and unchanged (`check:token-gates`, 510-image visual baseline, decision ledger, component inventory). Browser proof supports uniform token application: one body family, one radius language, zero overflow at 1440 (the fine-pointer 390 sweep found viewport escapes on three product surfaces — §3.1 — so "zero overflow" holds only at desktop width). Held back by the measured `h1` scale inconsistency above — a token *applied* inconsistently — and the unchanged 22-file bespoke-table debt with no `table.tsx` primitive. |
 | Accessibility | 8 *(provisional)* | **6.5** | **−1.5** | See §3. The single largest move, in both directions. |
 | Perceived performance | 6 | **5.5** | −0.5 | Measured cold load of the board dashboard over loopback (`loadcost-dashboard.json`): **41 requests, 7,628,622 B (7.28 MiB) transferred**, of which **one JS file is 6,779,424 B (6.46 MiB)** — so the monolithic chunk is what the client actually pulls, not just what sits in `dist`. Plus 456,116 B CSS, 352,240 B font, and **37 separate JSON calls on a single dashboard load**. First text at 1,036 ms; median time to *settled* text 2,313 ms, p90 3,257 ms, **3 surfaces never quiesced inside a 20 s ceiling**. The chunk is also *worse* than the 6,403 KB the code audit measured. |
 | Content & microcopy | 7.5 | **7.5 (carried, NOT measured)** | 0.0 | Redaction reduces every string in the output to `{len, sha8}`, so this harness cannot read copy. Carried unchanged and explicitly **not** claimed as measured. |
@@ -145,9 +145,20 @@ measures the weaker theme by accident and reports it as *the* contrast figure.
 Both are reported here; the accessibility score reflects the light theme,
 because it ships.
 
-**The only horizontal overflow found anywhere in the app** is 38px on
-`/ux-lab/cross-issue-collaboration` at 390px — a dev lab route, not a product
-surface. 0 of 80 board surfaces overflow at 1440.
+**Horizontal overflow, scoped to what was actually measured.** Under
+`pointer: coarse` emulation at 390px, **across 24 of 86 surfaces**, the only
+overflow observed was 38px on `/ux-lab/cross-issue-collaboration`, a dev-lab
+route — **this is not a whole-app claim**. A full 86-surface **fine-pointer**
+sweep at the same 390px viewport
+(`capture-390-finepointer-router-derived.json`) measured real viewport escapes
+on product surfaces: `/:companyPrefix/dashboard` esc=7 (worst **284px** past
+the right edge, `span.text-muted-foreground`),
+`/company/settings/members` esc=8 (99px, `.text-right` cells),
+`/apps/advanced/profiles/new` esc=3 (9px). **WCAG 1.4.10 is viewport-based,
+not pointer-based**, so the fine-pointer condition is the conforming one and
+these are real 1.4.10 failures: the mobile (coarse-pointer) layout is healthy,
+and the desktop layout does not reflow below its breakpoint. 0 of 80 board
+surfaces overflow at 1440 — that part stands.
 
 ---
 

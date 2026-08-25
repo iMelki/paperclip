@@ -9,12 +9,12 @@
  * document.body.innerText exceeds 20 characters, polled at 100ms, so it is a
  * ceiling accurate to ~100ms, not a Web Vitals LCP.
  *
- *   BASE=http://127.0.0.1:3197 node loadcost.mjs /ASI/dashboard out.json
+ *   BASE=http://127.0.0.1:3197 node loadcost.mjs /NOR/dashboard out.json
  */
 import fs from 'node:fs';
 
-const PW = 'S:/source/CCAI/Assistants/tools/paperclip/node_modules/.pnpm/playwright@1.62.1/node_modules/playwright/index.mjs';
-const { chromium } = await import(`file://${PW}`);
+const PW = new URL('../../../node_modules/.pnpm/playwright@1.62.1/node_modules/playwright/index.mjs', import.meta.url);
+const { chromium } = await import(PW.href);
 // SAFETY GATE (cross-session data-safety warning, 2026-08-25):
 // 127.0.0.1:3199 is the operator's REAL onboarded paperclip instance (real companies,
 // real issue data, including a private trading project). Capturing it writes real

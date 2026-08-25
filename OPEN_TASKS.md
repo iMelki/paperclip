@@ -38,6 +38,15 @@ This file is the durable local index for active `paperclip` issues.
 
 ## Active Issues
 
+- [ ] Focused per-dimension issues from the same capture (umbrella: #94):
+  [#89 - fine-pointer 390 reflow/viewport escapes (11 surfaces, worst 284px)](https://github.com/iMelki/paperclip/issues/89) -
+  [#90 - ~1,346 targets under the 24px AA floor at 1440](https://github.com/iMelki/paperclip/issues/90) -
+  [#91 - contrast: 433 genuine 1.4.3 failures, micro-label token 1.96:1](https://github.com/iMelki/paperclip/issues/91) -
+  [#92 - h1 at 14px on 32 surfaces / 13 without h1 / clipped placeholders](https://github.com/iMelki/paperclip/issues/92) -
+  [#93 - single 6.78MB JS chunk on cold load](https://github.com/iMelki/paperclip/issues/93).
+  Component-level detail and fix directions live in these five; a second full
+  390 sweep (`capture-390-finepointer-router-derived.json`, fine-pointer,
+  86 surfaces, 0 INCONCLUSIVE, DUPLICATE-REDIRECT outcome active) grounds #89.
 - [ ] [#94 - Six UI defects found by the first browser capture](https://github.com/iMelki/paperclip/issues/94)
   - The first browser-measured evidence for this UI landed on `dev` at
     `docs/uiux/browser-evidence-2026-08-25/` (86 surfaces attempted, 80
