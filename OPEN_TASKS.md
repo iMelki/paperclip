@@ -62,10 +62,11 @@ This file is the durable local index for active `paperclip` issues.
   - The governed checkout now has an observe-only `on_demand` genome with four
     bounded authored-source sets, 3,246 selected files, two explicit generated
     exclusions, and no analyzer execution or quality authority. The direct
-    invalid-reference proof failed closed and the restored direct/shared plan
-    resolution passed. The separate shared-adapter invalid-status
-    classification defect remains tracked in Agent Settings and does not turn
-    an invalid genome green.
+    invalid-reference proof failed closed as direct `invalid`/2 and shared
+    `invalid_genome`/2, with private issue text withheld. The restored
+    direct/shared plan resolution passed at 3,246 selected files and two
+    exclusions. Agent Settings fixed the classification contract in
+    `c91e70cc`; an invalid genome remains non-green and no analyzer ran.
 
 - [#87 - Bug: onboarding shows Codex but persists Claude adapter](https://github.com/iMelki/paperclip/issues/87)
   - Current state: the onboarding UI can show a successful Codex selection and

@@ -11,10 +11,12 @@ All notable changes to this repository should be recorded here.
   required; `node.lint` and `architecture.boundaries` remain optional, and no
   commit/push gate, exception, analyzer execution, authority, or quality
   decision was added. A deliberately undeclared source-set reference made the
-  exact resolver return `invalid`/exit 2 for that reason; restoring it made the
-  resolver and shared adapter return `resolved`/exit 0. The new genome and
-  ledger entry are declarative governance surfaces; no production or test
-  source file changed.
+  exact resolver return `invalid`/exit 2 for that reason. Agent Settings
+  `c91e70cc` repaired the shared current-report contract, after which the same
+  broken input returned `invalid_genome`/exit 2 without exposing private issue
+  text. Restoring it made the resolver and shared adapter return
+  `resolved`/exit 0. The new genome and ledger entry are declarative governance
+  surfaces; no production or test source file changed.
 
 - Separated coordination loading from view projection without changing the
   public response or weakening company isolation (#82). The production facade
