@@ -179,11 +179,17 @@ export function sanitizeGitRemoteUrl(url: string): string | null {
  */
 export async function readSanitizedOriginRemoteUrl(localDir: string): Promise<string | null> {
   try {
-    const result = await runLocalGit(localDir, ["config", "--get", "remote.origin.url"], {
+    const result = await runLocalGit(localDir, ["config", "--get-all", "remote.origin.url"], {
       timeout: 10_000,
       maxBuffer: 16 * 1024,
     });
-    return sanitizeGitRemoteUrl(result.stdout.trim());
+    for (const url of result.stdout.split(/\r?\n/)) {
+      const sanitizedUrl = sanitizeGitRemoteUrl(url);
+      if (sanitizedUrl) {
+        return sanitizedUrl;
+      }
+    }
+    return null;
   } catch {
     return null;
   }

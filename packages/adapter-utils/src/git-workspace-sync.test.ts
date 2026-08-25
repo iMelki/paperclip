@@ -121,6 +121,18 @@ describe("git workspace sync", () => {
     expect(await readSanitizedOriginRemoteUrl(repo)).toBe(remoteUrl);
   });
 
+  it("uses the first usable origin URL when Git stores multiple fetch URLs", async () => {
+    const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-git-config-multiple-origin-"));
+    cleanupDirs.push(rootDir);
+    const repo = await createRepo(rootDir);
+    const primaryRemoteUrl = "https://github.com/example/primary.git";
+    const secondaryRemoteUrl = "https://github.com/example/secondary.git";
+    await git(repo, ["remote", "add", "origin", primaryRemoteUrl]);
+    await git(repo, ["remote", "set-url", "--add", "origin", secondaryRemoteUrl]);
+
+    expect(await readSanitizedOriginRemoteUrl(repo)).toBe(primaryRemoteUrl);
+  });
+
   it("derives the bundle parent directory portably for a backslash Windows bundle path", () => {
     // A missing backslash-form parent is the regression shape: posix.dirname
     // on `C:\work\missing\bundle.bundle` returns ".", so the script would
