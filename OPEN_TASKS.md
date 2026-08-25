@@ -1,6 +1,6 @@
 # Paperclip Open Tasks
 
-Last updated: 2026-08-21
+Last updated: 2026-08-25
 
 This file is the durable local index for active `paperclip` issues.
 
@@ -37,6 +37,12 @@ This file is the durable local index for active `paperclip` issues.
     matrices at `bbb37f640`/`670447a38` (merged as `987700f91`).
 
 ## Active Issues
+
+- [#87 - Bug: onboarding shows Codex but persists Claude adapter](https://github.com/iMelki/paperclip/issues/87)
+  - Current state: the onboarding UI can show a successful Codex selection and
+    environment check while the persisted team lead remains on `claude_local`.
+    The lead is not started. Fix the saved adapter update and show the persisted
+    adapter on the review step before using this flow for provider switching.
 
 - [#82 - Review `getIssueCoordination` loader/projector split before further growth](https://github.com/iMelki/paperclip/issues/82) —
   **in progress in PR #83; review hardening and fresh exact-head CI pending**
