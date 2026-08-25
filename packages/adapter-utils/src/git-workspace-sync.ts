@@ -30,6 +30,16 @@ export const GIT_ARCHIVE_EXCLUDES = [".git", ".git/*"] as const;
 // sandbox-managed-runtime.ts, which both alias the same helper. (#63)
 const shellQuote = shellQuotePath;
 
+function isolatedGitEnv(): NodeJS.ProcessEnv {
+  const nullConfigPath = process.platform === "win32" ? "NUL" : "/dev/null";
+  return {
+    ...process.env,
+    GIT_CONFIG_NOSYSTEM: "1",
+    GIT_CONFIG_GLOBAL: nullConfigPath,
+    GIT_CONFIG_SYSTEM: nullConfigPath,
+  };
+}
+
 export async function runLocalGit(
   localDir: string,
   args: string[],
@@ -43,6 +53,7 @@ export async function runLocalGit(
       "git",
       ["-C", localDir, ...args],
       {
+        env: isolatedGitEnv(),
         timeout: options.timeout ?? 15_000,
         maxBuffer: options.maxBuffer ?? 1024 * 128,
       },
@@ -168,7 +179,7 @@ export function sanitizeGitRemoteUrl(url: string): string | null {
  */
 export async function readSanitizedOriginRemoteUrl(localDir: string): Promise<string | null> {
   try {
-    const result = await runLocalGit(localDir, ["remote", "get-url", "origin"], {
+    const result = await runLocalGit(localDir, ["config", "--get", "remote.origin.url"], {
       timeout: 10_000,
       maxBuffer: 16 * 1024,
     });

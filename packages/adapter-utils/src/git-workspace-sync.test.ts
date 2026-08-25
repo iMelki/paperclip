@@ -13,6 +13,7 @@ import {
   fetchGitBundleIntoLocalRef,
   isMissingGitPrerequisiteError,
   readGitWorkspaceSnapshot,
+  readSanitizedOriginRemoteUrl,
   runLocalGit,
   sanitizeGitRemoteUrl,
   withShallowGitWorkspaceClone,
@@ -56,7 +57,6 @@ describe("git workspace sync", () => {
 
     process.env.GIT_CONFIG_GLOBAL = emptyGlobalConfig;
     process.env.GIT_CONFIG_SYSTEM = hostileSystemConfig;
-    process.env.GIT_CONFIG_NOSYSTEM = "1";
     process.env.GIT_ATTR_NOSYSTEM = "1";
     delete process.env.GIT_CONFIG_COUNT;
     delete process.env.GIT_CONFIG_PARAMETERS;
@@ -107,21 +107,18 @@ describe("git workspace sync", () => {
   });
 
   it("proves the isolation guard blocks hostile system Git configuration", async () => {
-    const noSystem = process.env.GIT_CONFIG_NOSYSTEM;
-    delete process.env.GIT_CONFIG_NOSYSTEM;
-    try {
-      const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-git-config-negative-"));
-      cleanupDirs.push(rootDir);
-      const repo = await createRepo(rootDir);
-      const remoteUrl = "https://github.com/example/repo.git";
-      await git(repo, ["remote", "add", "origin", remoteUrl]);
+    const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-git-config-negative-"));
+    cleanupDirs.push(rootDir);
+    const repo = await createRepo(rootDir);
+    const remoteUrl = "https://github.com/example/repo.git";
+    await git(repo, ["remote", "add", "origin", remoteUrl]);
 
-      expect(await git(repo, ["config", "--get", "core.autocrlf"])).toBe("true");
-      expect(await git(repo, ["remote", "get-url", "origin"])).toBe("git@github.com:example/repo.git");
-    } finally {
-      if (noSystem === undefined) delete process.env.GIT_CONFIG_NOSYSTEM;
-      else process.env.GIT_CONFIG_NOSYSTEM = noSystem;
-    }
+    const rawGit = (await execFile("git", ["-C", repo, "config", "--get", "core.autocrlf"])).stdout.trim();
+    expect(rawGit).toBe("true");
+    const rawRemote = (await execFile("git", ["-C", repo, "remote", "get-url", "origin"])).stdout.trim();
+    expect(rawRemote).toBe("git@github.com:example/repo.git");
+    await expect(git(repo, ["config", "--get", "core.autocrlf"])).rejects.toThrow();
+    expect(await readSanitizedOriginRemoteUrl(repo)).toBe(remoteUrl);
   });
 
   it("derives the bundle parent directory portably for a backslash Windows bundle path", () => {
