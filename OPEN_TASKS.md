@@ -38,6 +38,26 @@ This file is the durable local index for active `paperclip` issues.
 
 ## Active Issues
 
+- [ ] [#94 - Six UI defects found by the first browser capture](https://github.com/iMelki/paperclip/issues/94)
+  - The first browser-measured evidence for this UI landed on `dev` at
+    `docs/uiux/browser-evidence-2026-08-25/` (86 surfaces attempted, 80
+    MEASURED, 6 NO-CONTENT, **0 INCONCLUSIVE**, exit 0). It re-scores the app
+    **7.7 -> 7.2** against the fleet rubric; `SCORECARD.md` carries the reading
+    and its own limits, `README.md` the method.
+  - Six defects filed: `prefers-reduced-motion` not cascading past Tailwind
+    utility timings; `h1` rendering at five computed sizes and absent on 13 of
+    80 surfaces; 13.4% of light-theme text nodes below their contrast ratio
+    (10px/500 uppercase labels at 2.3:1), against 5.1% in dark; 20.6% of targets
+    under the WCAG 2.5.8 **AA** floor even with the coarse-pointer 44px floor
+    active; no `<main>` landmark on `/onboarding` and the ux-lab routes; three
+    project routes rendering one screen.
+  - Improvement 9 of #48 is **done** and verified at this commit: all 16 native
+    `window.confirm()` sites now use `useConfirmDialog` on the repo's
+    `AlertDialog`.
+  - Route-level code splitting remains the highest-value change and is now
+    measured client-side: a cold dashboard load pulls 41 requests / 7,628,622 B,
+    one JS file of 6,779,424 B, plus 37 JSON calls. Tracked in #48.
+
 - [x] [Projects Ops #117 - Enroll Paperclip in Repo Doctor](https://github.com/iMelki/projects-ops/issues/117)
   - The governed checkout now has an observe-only `on_demand` genome with four
     bounded authored-source sets, 3,246 selected files, two explicit generated
