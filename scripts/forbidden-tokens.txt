@@ -1,0 +1,45 @@
+# Forbidden tokens - tracked, non-secret structural patterns.
+#
+# One literal token per line. Blank lines and lines starting with "#" are ignored.
+# Tokens are matched as FIXED STRINGS (git grep -inF), case-insensitively, against
+# every tracked file except pnpm-lock.yaml and this file itself.
+#
+# WHICH LIST DO I ADD TO?
+#   * A real person's name, a host name, an account name, or anything else whose
+#     value is itself the secret  ->  NOT here. Put it in the private, untracked
+#     per-machine list at <git-common-dir>/hooks/forbidden-tokens.txt. Writing such a
+#     value into this tracked file would publish the exact string the check exists to
+#     keep out of the repository.
+#   * A non-secret structural pattern every checkout should share  ->  here.
+#
+# THIS LIST IS INTENTIONALLY EMPTY OF ACTIVE PATTERNS.
+# The delivery mechanism is live and covered by tests; the policy question of which
+# structural patterns to adopt is deliberately left open, because every candidate
+# proposed so far was measured against the tracked tree and would block commits today:
+#
+#   candidate                        measured matches   verdict
+#   -------------------------------  ----------------   ------------------------------
+#   the AppData directory name       5                  REJECT - legitimate Windows
+#                                                       support code in
+#                                                       packages/adapter-utils/src/
+#                                                       test-shell.ts and its test; the
+#                                                       LOCALAPPDATA env var name also
+#                                                       contains it, so a case-
+#                                                       insensitive match hits real code.
+#   the USERPROFILE env var name     285                REJECT - pervasive, and it also
+#                                                       matches unrelated product
+#                                                       identifiers such as the user
+#                                                       profile UI component.
+#   a Windows user-profile path      1                  DEFER - one placeholder in
+#   prefix (drive, Users, slash)                        ui/src/components/
+#                                                       agent-config-primitives.tsx.
+#                                                       Viable only once that
+#                                                       placeholder is reworded; note
+#                                                       this candidate ends in a
+#                                                       backslash and was a repo-wide
+#                                                       commit lockout before the -inF
+#                                                       fixed-string fix.
+#
+# Counts measured 2026-08-24 against tools/paperclip at dev 5efbc058. Re-measure with
+# `git grep -inFc -- '<token>'` before adding anything: a pattern that matches existing
+# tracked content blocks every commit until that content changes.
