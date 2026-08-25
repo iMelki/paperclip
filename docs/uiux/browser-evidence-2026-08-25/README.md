@@ -61,7 +61,7 @@ Run it standalone: `node react-router-adapter.mjs` (add `LIST=1` to list paths).
 | `seed.mjs` | Seeds the fictional Northwind Robotics fixture into an ISOLATED instance; refuses instances holding companies it did not create. |
 | `shots.mjs` | Curated, content-gated screenshot pass (both widths) for the committed sample. |
 | `SCORECARD.md` | What the numbers mean, and the re-score against the fleet rubric. |
-| `GATE-DEFECTS-VERIFIED.md` | Independently verified measurement-validity caveats for reading the capture JSONs (redirect hole, clip overcount, sr-only targets, 8.3% contrast coverage). Read it before citing aggregates. |
+| `GATE-DEFECTS-VERIFIED.md` | Independently verified measurement-validity caveats for reading the capture JSONs (redirect hole, clip overcount, sr-only targets, contrast coverage). Read it before citing aggregates. NOTE: the 8.3% contrast-coverage defect applied to the first-generation harness only — the committed v2 captures resolve oklch and reach 100% node coverage; `summarize.mjs` also computes distinct-rendered-views to neutralize the redirect hole at reporting level. The clip overcount and sr-only-target caveats still apply to raw `clippedCount` / under-24 aggregates. |
 | `derive-routes.mjs`, `discover.mjs`, `discovery.json`, `runner.mjs`, `surfaces.mjs` | The predecessor discovery-based harness (expect-string assertions per surface), kept for the record; superseded by `capture.mjs` + the router adapter. |
 | `shots/` | The curated screenshot sample (content-gated; never a skeleton). |
 
@@ -74,6 +74,10 @@ Run it standalone: `node react-router-adapter.mjs` (add `LIST=1` to list paths).
 # 2. then:
 node react-router-adapter.mjs                       # the denominator
 BASE=http://127.0.0.1:3197 node capture.mjs out.json # the capture
+# Git Bash on Windows rewrites a leading-slash argument into a filesystem path
+# ("/NOR/dashboard" -> "C:/Program Files/Git/NOR/dashboard"), which reaches
+# Playwright as an unnavigable URL. Prefix route arguments with MSYS_NO_PATHCONV=1:
+MSYS_NO_PATHCONV=1 BASE=http://127.0.0.1:3197 node loadcost.mjs /NOR/dashboard cost.json
 node summarize.mjs out.json                          # the tables
 ```
 

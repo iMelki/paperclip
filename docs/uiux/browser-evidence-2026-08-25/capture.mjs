@@ -39,8 +39,8 @@ if (/:3199(?![0-9])/.test(__base) && process.env.ALLOW_REAL_INSTANCE !== "i-unde
   process.exit(2);
 }
 const BASE = __base;
-const PW = 'S:/source/CCAI/Assistants/tools/paperclip/node_modules/.pnpm/playwright@1.62.1/node_modules/playwright/index.mjs';
-const { chromium } = await import(`file://${PW}`);
+const PW = new URL('../../../node_modules/.pnpm/playwright@1.62.1/node_modules/playwright/index.mjs', import.meta.url);
+const { chromium } = await import(PW.href);
 
 
 const WIDTH = Number(process.env.WIDTH || 1440);
@@ -252,9 +252,23 @@ const browser = await chromium.launch();
 // explicit parameter and is recorded in the output rather than inherited.
 const COLOR_SCHEME = process.env.COLOR_SCHEME || 'light';
 
+// TOUCH EMULATION IS NOT COSMETIC HERE.
+// paperclip's 44px target floor is declared entirely inside
+// `@media (pointer: coarse)` (ui/src/index.css:388), with documented
+// exceptions for dense-row widgets. A narrow viewport WITHOUT touch emulation
+// still reports `pointer: fine`, so that rule never applies and the capture
+// measures desktop sizes at a phone width - then reports the app as failing a
+// floor it never claimed to apply there. Narrow captures emulate touch so the
+// rule under test is the one the app actually ships.
+const HAS_TOUCH = process.env.HAS_TOUCH ? process.env.HAS_TOUCH === '1' : WIDTH < 768;
+
 async function open(url, opts = {}) {
   const ctx = await browser.newContext({
-    viewport: { width: WIDTH, height: HEIGHT }, colorScheme: COLOR_SCHEME, ...opts
+    viewport: { width: WIDTH, height: HEIGHT },
+    colorScheme: COLOR_SCHEME,
+    hasTouch: HAS_TOUCH,
+    isMobile: HAS_TOUCH,
+    ...opts
   });
   const page = await ctx.newPage();
   return { ctx, page };
@@ -485,6 +499,8 @@ const payload = {
   base: BASE,
   viewport: { width: WIDTH, height: HEIGHT },
   colorScheme: COLOR_SCHEME,
+  hasTouch: HAS_TOUCH,
+  pointerUnderTest: HAS_TOUCH ? 'coarse' : 'fine',
   capturedAt: new Date().toISOString(),
   buildCommit: process.env.BUILD_COMMIT || null,
   companyPrefixRedacted: redact(PREFIX),
