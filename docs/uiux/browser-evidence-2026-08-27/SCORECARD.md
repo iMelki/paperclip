@@ -116,3 +116,24 @@ Instance: Assistants Software Factory (`ASS`), commit **`pending push`** (loadin
 
 Receipt: `thinking-icon-reduced-motion-proof.json`; screenshot: `gauntlet-shots/14-thinking-icon-reduced-motion-1440.png`.
 Capture: `capture-thinking-icon-rm.mjs`.
+
+## Remaining browser step (code-only; not a re-score)
+
+The run-5 **Technical quality 2** 404 was the design-guide primary output
+requesting a fake `/api/attachments/.../content` video. Code on `dev` now
+points that showcase at the existing public `/paperclip-thinking.svg`
+(`ui/public/paperclip-thinking.svg`). Factory `http://127.0.0.1:5113` still
+serves that SVG (`200 image/svg+xml`) and still `404`s the fake attachment
+path. **This is not 21/21.** `paperclip-factory-dev` is 6 commits behind
+`origin/dev` and does not yet include this showcase change.
+
+To convert Technical quality 2→3:
+
+1. Pull paperclip `dev` into `paperclip-factory-dev` and restart the factory
+   so `:5113` serves this commit.
+2. Re-run `node gauntlet.mjs` from `docs/uiux/browser-evidence-2026-08-27/`
+   with `BASE=http://127.0.0.1:5113`.
+3. Require `consoleErrors` / `pageErrors` empty on `/ASS/design-guide`,
+   then rewrite this scorecard from that receipt.
+
+Do not raise the table above **20/21** until that receipt exists.

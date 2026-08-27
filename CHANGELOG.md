@@ -4,6 +4,13 @@ All notable changes to this repository should be recorded here.
 
 ## Unreleased
 
+- Design-guide Issue Output showcase now uses the existing public
+  `/paperclip-thinking.svg` instead of a fake `/api/attachments/.../content`
+  video. That was the remaining gauntlet Technical quality 404 on
+  `/ASS/design-guide`. Score stays **20/21** until `paperclip-factory-dev`
+  pulls `dev` and `node gauntlet.mjs` shows a clean design-guide console.
+  Tracks #48.
+
 - **[#95]** `db:migrate` now skips DDL that is already true on the live schema
   (existing tables/columns/indexes/constraints, dropped columns, indexes on
   removed columns, SQL-comment prefixes). That repairs a drifted

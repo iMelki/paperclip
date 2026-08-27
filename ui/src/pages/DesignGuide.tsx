@@ -170,9 +170,9 @@ function sampleOutput(
   attachmentId: string,
   contentType: string,
   filename: string,
-  opts: { byteSize: number; isPrimary?: boolean; createdAt: string },
+  opts: { byteSize: number; isPrimary?: boolean; createdAt: string; contentPath?: string },
 ): IssueWorkProduct {
-  const contentPath = `/api/attachments/${attachmentId}/content`;
+  const contentPath = opts.contentPath ?? `/api/attachments/${attachmentId}/content`;
   return {
     id,
     companyId: "demo-company",
@@ -206,10 +206,11 @@ function sampleOutput(
 }
 
 const DESIGN_GUIDE_OUTPUTS: IssueWorkProduct[] = [
-  sampleOutput("wp-vid", "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "video/mp4", "q3-summary.mp4", {
-    byteSize: 19_293_798,
+  sampleOutput("wp-art", "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "image/svg+xml", "thinking-icon.svg", {
+    byteSize: 4_096,
     isPrimary: true,
     createdAt: "2026-05-30T12:00:00Z",
+    contentPath: "/paperclip-thinking.svg",
   }),
   sampleOutput("wp-pdf", "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", "application/pdf", "talking-points.pdf", {
     byteSize: 421_888,
@@ -1890,7 +1891,7 @@ export function DesignGuide() {
       </Section>
 
       <Section title="Issue Output Surface">
-        <SubSection title="Multiple outputs (primary video + 'Also produced')">
+        <SubSection title="Multiple outputs (primary public SVG + 'Also produced')">
           <IssueOutputSection workProducts={DESIGN_GUIDE_OUTPUTS} />
         </SubSection>
         <SubSection title="Degraded output (invalid / failed attachment metadata)">
