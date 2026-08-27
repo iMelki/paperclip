@@ -1,0 +1,20 @@
+{
+  "capturedAt": "2026-08-27T11:21:36.700Z",
+  "surface": "ux-lab loading chrome (PaperclipLoading fixture)",
+  "base": "http://127.0.0.1:5173",
+  "route": "/ux-lab/loading-chrome",
+  "component": "PaperclipLoading / AnimatedPaperclipIcon",
+  "counts": {
+    "thinkingIcon": 1,
+    "thinkingPath": 1
+  },
+  "animation": {
+    "animationName": "paperclip-thinking-draw",
+    "animationDuration": "1s"
+  },
+  "screenshot": "12-thinking-icon-loading-1440.png",
+  "notes": [
+    "Same component as auth/company bootstrap loading — not issue chat",
+    "Captured on vite dev :5173; factory :5113 serves after UI rebuild"
+  ]
+}

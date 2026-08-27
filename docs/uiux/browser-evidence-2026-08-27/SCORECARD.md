@@ -1,4 +1,4 @@
-# Paperclip UI — frontend-sota-gauntlet (rubric 1.8), 2026-08-27 (run 2 + shimmer run 3 + live run 4)
+# Paperclip UI — frontend-sota-gauntlet (rubric 1.8), 2026-08-27 (runs 2–5)
 
 **Verdict: gauntlet total 20/21 — band `strong-internal-benchmark`.**
 
@@ -9,7 +9,9 @@ markers + scroll to Agent Capsule gallery). **Run 3 (same day)** routed
 `shimmer-text-slide` **2.5s** (see `shimmer-proof.json` + shots 07–08).
 **Run 4 (same day)** browser-proved **1× `.shimmer-text`** on **live issue chat**
 during Factory Builder `running` on **ASS-28** (see `live-agent-shimmer-proof.json`
-+ shot 11).
++ shot 11). **Run 5 (same day)** routed `/ux-lab/loading-chrome` and browser-proved
+**1× `.paperclip-thinking-icon`** with `paperclip-thinking-draw` **1s** (see
+`thinking-icon-proof.json` + shot 12).
 
 ## Scorecard (0–3 per area)
 
@@ -61,10 +63,24 @@ on one-shot issue **ASS-28** (`3d051d3a-…`). Not a UX-lab fixture — real boa
 during an active agent heartbeat. Receipt: `live-agent-shimmer-proof.json`; screenshot:
 `gauntlet-shots/11-live-ASS-28-shimmer-working.png`.
 
+## Thinking-icon evidence (run 5 — loading chrome UX lab)
+
+| Motif | Count on `/ux-lab/loading-chrome` |
+| --- | ---: |
+| `.paperclip-thinking-icon` | 1 |
+| `.paperclip-thinking-icon-path` | 1 |
+| `.shimmer-text` | 0 |
+| Animation | `paperclip-thinking-draw` **1s** |
+
+Captured on vite dev `:5173` via `LoadingChromeUxLab` — renders the same `PaperclipLoading`
+component used on auth/company bootstrap redirects. **Not** issue-chat chrome (live chat uses
+`.shimmer-text` + Brain/Loader2 icons). Receipt: `thinking-icon-proof.json`; screenshot:
+`gauntlet-shots/12-thinking-icon-loading-1440.png`.
+
 ## Limits (stated)
 
-1. **Thinking-icon** still **0** on captured surfaces (shimmer **proven** on UX lab **and**
-   live issue chat; thinking-icon not yet browser-proven on any surface).
+1. **Thinking-icon** browser-proven on **loading chrome** (run 5); **live issue chat** still
+   uses shimmer/Brain, not `.paperclip-thinking-icon` (by design).
 2. Design-guide settle flag false only because skeleton heuristic saw loading chrome briefly; content and capsules were present (`mainTextLen` 17627) in run 2.
 3. Coordination API: **`GET /api/companies/{id}/coordination/tasks`** returns **200** on `:5113` (prior “500” was wrong path / observer config).
 
@@ -75,14 +91,16 @@ during an active agent heartbeat. Receipt: `live-agent-shimmer-proof.json`; scre
 | `gauntlet.json` | Machine receipt |
 | `gauntlet.mjs` | Runner (`BASE=http://127.0.0.1:5113`) |
 | `gauntlet-shots/` | design-guide, dashboard, agents, reduced-motion, mobile, live ASS-28 |
+| `thinking-icon-proof.json` | Run 5 loading-chrome receipt |
 | `live-agent-shimmer-proof.json` | Run 4 live issue-chat receipt |
 | `shimmer-proof.json` | Run 3 UX-lab receipt |
 
-Instance: Assistants Software Factory (`ASS`), commit **`07a522e6e`** (factory pin).
+Instance: Assistants Software Factory (`ASS`), commit **`pending push`** (loading-chrome UX lab).
 
 ## Delight (rubric 1.8) recommendation
 
 | Before | After (honest) |
 | --- | --- |
 | **7.0** (gauntlet not run) | **7.5** — gauntlet **20/21** + capsule gallery (run 2) |
-| **7.5** (post run 2) | **7.8** — run 3 UX-lab shimmer + run 4 **live** issue-chat shimmer; hold below **8.0** until **thinking-icon** browser-proven on product chrome |
+| **7.5** (post run 2) | **7.8** — run 3 UX-lab shimmer + run 4 **live** issue-chat shimmer |
+| **7.8** (post run 4) | **8.0** — run 5 browser-proves **`.paperclip-thinking-icon`** on loading chrome (product component); live chat shimmer already proven (run 4) |
