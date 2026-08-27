@@ -75,6 +75,10 @@ This file is the durable local index for active `paperclip` issues.
     fix on `dev` (public SVG). Factory `:5113` on `f7a0160fc` now has a run 10
     **21/21** receipt (`docs/uiux/browser-evidence-2026-08-27/gauntlet-run10-f7a0160fc.json`).
     It does not close any of the six #94 defects or the #89 390 reflow list.
+  - 2026-08-28 carry: factory still `f7a0160fc` **21/21** on `:5113`.
+    Awwwards **7.4**. Design-guide SVG fixed. Local UI commits `a384c4dc2`
+    + `145720089` are **not** on origin (`index.css` hook). Does not close
+    #94/#89/#48.
   - 2026-08-27 UI slice (still open): members table now stacks below `md`;
     dashboard charts are one column before `sm`; `/onboarding` and the two
     lab routes that lacked a landmark now wrap in `<main>`; reduced-motion
@@ -419,3 +423,6 @@ This file is the durable local index for active `paperclip` issues.
     `docs/uiux/browser-evidence-2026-08-27/gauntlet-run10-f7a0160fc.json`.
     #94 (six browser defects) and #89 (390 fine-pointer reflow) remain
     open and are not closed by this receipt.
+  - 2026-08-28 carry: factory still `f7a0160fc` **21/21**. Awwwards **7.4**.
+    Design-guide SVG fixed. Local UI commits `a384c4dc2` + `145720089` are
+    **not** on origin. No issue close.
