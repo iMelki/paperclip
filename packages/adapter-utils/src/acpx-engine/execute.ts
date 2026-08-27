@@ -2,6 +2,8 @@ import fs from "node:fs/promises";
 import fsSync from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { createHash, randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import type {
@@ -48,7 +50,6 @@ import {
   renderPaperclipWakePrompt,
   renderTemplate,
   resolvePaperclipInstanceRootForAdapter,
-  runChildProcess,
   selectPaperclipTaskMarkdown,
   resolvePaperclipDesiredSkillNames,
   removeMaintainerOnlySkillSymlinks,
@@ -584,11 +585,12 @@ async function resolveBuiltInAgentCommand(input: {
   return { command: resolved, shellCommand: shellQuote(resolved) };
 }
 
+const execFileAsync = promisify(execFile);
 // Gemini CLI renamed --experimental-acp to --acp in 0.33.0. acpx normally
 // rewrites the flag itself, but the agent wrapper script hides the gemini
 // command from acpx's detection, so the engine must downgrade it here.
 const GEMINI_NATIVE_ACP_FLAG_MIN_VERSION = [0, 33, 0] as const;
-const GEMINI_VERSION_PROBE_TIMEOUT_SEC = 2;
+const GEMINI_VERSION_PROBE_TIMEOUT_MS = 2000;
 
 export function parseGeminiVersionParts(output: string | null | undefined): number[] | null {
   const match = output?.match(/(\d+)\.(\d+)\.(\d+)/);
@@ -623,59 +625,48 @@ function geminiAcpCommandTokens(commandShell: string): string[] | null {
   return tokens;
 }
 
-async function normalizeGeminiAcpCommandShell(
-  commandShell: string,
-  env: NodeJS.ProcessEnv,
-  input: {
-    runId: string;
-    onLog: AdapterExecutionContext["onLog"];
-    cwd: string;
-  },
-): Promise<string> {
+async function resolveGeminiCommandExecutable(commandToken: string, env: NodeJS.ProcessEnv): Promise<string> {
+  if (process.platform !== "win32") return commandToken;
+  const hasPathSeparator = commandToken.includes("/") || commandToken.includes("\\");
+  if (hasPathSeparator) return commandToken;
+  const pathValue = env.PATH ?? env.Path ?? "";
+  const delimiter = ";";
+  const exts = (env.PATHEXT ?? ".EXE;.CMD;.BAT;.COM").split(";").filter(Boolean);
+  for (const dir of pathValue.split(delimiter).filter(Boolean)) {
+    for (const ext of ["", ...exts]) {
+      const candidate = path.join(dir, `${commandToken}${ext}`);
+      if (await pathExists(candidate)) return candidate;
+    }
+  }
+  return commandToken;
+}
+
+async function probeGeminiVersionOutput(commandToken: string, env: NodeJS.ProcessEnv): Promise<string> {
+  const geminiBin = await resolveGeminiCommandExecutable(commandToken, env);
+  if (process.platform === "win32" && /\.(?:cmd|bat)$/i.test(geminiBin)) {
+    const { stdout } = await execFileAsync("cmd.exe", ["/d", "/s", "/c", `${geminiBin} --version`], {
+      timeout: GEMINI_VERSION_PROBE_TIMEOUT_MS,
+      encoding: "utf8",
+      env,
+    });
+    return stdout;
+  }
+  const { stdout } = await execFileAsync(geminiBin, ["--version"], {
+    timeout: GEMINI_VERSION_PROBE_TIMEOUT_MS,
+    encoding: "utf8",
+    env,
+  });
+  return stdout;
+}
+
+async function normalizeGeminiAcpCommandShell(commandShell: string, env: NodeJS.ProcessEnv): Promise<string> {
   const tokens = geminiAcpCommandTokens(commandShell);
   if (!tokens) return commandShell;
   let versionParts: number[] | null = null;
   try {
-    // Use the shared local-process resolver so Windows npm .cmd/.bat shims are
-    // first resolved to an absolute PATH entry and then invoked through the
-    // trusted System32 cmd.exe path with a fixed `--version` argument. The
-    // resolver keeps the POSIX lane shell-free and safely quotes paths with
-    // spaces on Windows.
-    const probeEnv = Object.fromEntries(
-      Object.entries(env).filter((entry): entry is [string, string] => typeof entry[1] === "string"),
-    );
-    for (const key of Object.keys(probeEnv)) {
-      if (/^(comspec|systemroot)$/i.test(key)) delete probeEnv[key];
-    }
-    const probeResult = await runChildProcess(`${input.runId}:gemini-version-probe`, tokens[0], ["--version"], {
-      cwd: input.cwd,
-      env: probeEnv,
-      timeoutSec: GEMINI_VERSION_PROBE_TIMEOUT_SEC,
-      graceSec: 1,
-      onLog: async () => {},
-    });
-    if (probeResult.timedOut) {
-      throw new Error(`timed out after ${GEMINI_VERSION_PROBE_TIMEOUT_SEC}s`);
-    }
-    if (probeResult.exitCode !== 0) {
-      throw new Error(
-        probeResult.signal
-          ? `terminated by ${probeResult.signal}`
-          : `exited with code ${probeResult.exitCode ?? "unknown"}`,
-      );
-    }
-    versionParts = parseGeminiVersionParts(probeResult.stdout);
-    if (!versionParts) {
-      await input.onLog(
-        "stderr",
-        "[paperclip] Gemini CLI version probe returned an unrecognized version; keeping --acp.\n",
-      );
-    }
-  } catch (error) {
-    await input.onLog(
-      "stderr",
-      `[paperclip] Gemini CLI version probe failed; keeping --acp: ${error instanceof Error ? error.message : String(error)}\n`,
-    );
+    const stdout = await probeGeminiVersionOutput(tokens[0]!, env);
+    versionParts = parseGeminiVersionParts(stdout);
+  } catch {
     return commandShell;
   }
   return rewriteGeminiAcpFlagForVersion(commandShell, versionParts);
@@ -1727,7 +1718,6 @@ async function buildRuntime(input: {
     const normalized = await normalizeGeminiAcpCommandShell(
       agentCommandShell,
       ensurePathInEnv({ ...process.env, ...env }),
-      { runId: input.ctx.runId, onLog: input.ctx.onLog, cwd },
     );
     if (normalized !== agentCommandShell) {
       agentCommandShell = normalized;
