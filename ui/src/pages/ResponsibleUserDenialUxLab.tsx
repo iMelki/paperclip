@@ -108,7 +108,7 @@ function RunDetailHeader({ onBehalfOf, denial }: { onBehalfOf?: string | null; d
 
 export function ResponsibleUserDenialUxLab() {
   return (
-    <div className="min-h-screen bg-muted/20 p-6">
+    <div className="min-h-[100dvh] bg-muted/20 p-6">
       <div className="mx-auto max-w-5xl space-y-6">
         <header>
           <div className="text-(length:--text-micro) font-semibold uppercase tracking-(--tracking-caps) text-muted-foreground">

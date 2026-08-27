@@ -1,3 +1,4 @@
+import type { ReactNode } from "react";
 import { Navigate, Outlet, Route, Routes, useActiveCompanyPrefix, useLocation, useParams } from "@/lib/router";
 import { Button } from "@/components/ui/button";
 import { useTranslation } from "@/i18n";
@@ -410,6 +411,14 @@ function legacyToolsRedirectTarget(tab?: string) {
   return `/apps/advanced/${tab}`;
 }
 
+function StandaloneMain({ children }: { children: ReactNode }) {
+  return (
+    <main id="main-content" className="min-h-[100dvh]">
+      {children}
+    </main>
+  );
+}
+
 function OnboardingRoutePage() {
   const { companies } = useCompany();
   const { openOnboarding } = useDialogActions();
@@ -553,14 +562,14 @@ export function App() {
         <Route path="invite/:token" element={<InviteLandingPage />} />
         <Route path="tests/perf/long-thread" element={<IssueChatLongThreadPerf />} />
         <Route path="ux-lab/bootstrap-setup" element={<BootstrapSetupUxLab />} />
-        <Route path="ux-lab/responsible-user-denial" element={<ResponsibleUserDenialUxLab />} />
-        <Route path="ux-lab/cross-issue-collaboration" element={<CrossIssueCollaborationUxLab />} />
+        <Route path="ux-lab/responsible-user-denial" element={<StandaloneMain><ResponsibleUserDenialUxLab /></StandaloneMain>} />
+        <Route path="ux-lab/cross-issue-collaboration" element={<StandaloneMain><CrossIssueCollaborationUxLab /></StandaloneMain>} />
         <Route path="ux-lab/issue-chat" element={<IssueChatUxLab />} />
         <Route path="ux-lab/loading-chrome" element={<LoadingChromeUxLab />} />
+        <Route path="onboarding" element={<StandaloneMain><OnboardingRoutePage /></StandaloneMain>} />
 
         <Route element={<CloudAccessGate />}>
           <Route index element={<CompanyRootRedirect />} />
-          <Route path="onboarding" element={<OnboardingRoutePage />} />
           <Route path="instance" element={<LegacySettingsRedirect />} />
           <Route path="instance/settings" element={<LegacySettingsRedirect />} />
           <Route path="instance/settings/*" element={<LegacySettingsRedirect />} />

@@ -243,6 +243,23 @@ describe("Skill Studio routes", () => {
   });
 });
 
+describe("Standalone landmarks", () => {
+  it("wraps /onboarding and the two lab routes that had no main", () => {
+    expect(appSource).toContain("function StandaloneMain");
+    expect(appSource).toContain('<Route path="onboarding" element={<StandaloneMain><OnboardingRoutePage /></StandaloneMain>} />');
+    expect(appSource.indexOf('<Route path="onboarding" element={<StandaloneMain>')).toBeLessThan(
+      appSource.indexOf("<Route element={<CloudAccessGate />}>"),
+    );
+    expect(appSource).toContain(
+      '<Route path="ux-lab/responsible-user-denial" element={<StandaloneMain><ResponsibleUserDenialUxLab /></StandaloneMain>} />',
+    );
+    expect(appSource).toContain(
+      '<Route path="ux-lab/cross-issue-collaboration" element={<StandaloneMain><CrossIssueCollaborationUxLab /></StandaloneMain>} />',
+    );
+    expect(appSource).toContain('<Route path="onboarding" element={<OnboardingRoutePage />} />');
+  });
+});
+
 describe("Apps routes", () => {
   it("uses browse as the Apps landing page and gives connections a canonical URL", () => {
     expect(appSource).toContain('<Route path="apps" element={<Browse />} />');

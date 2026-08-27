@@ -4,6 +4,14 @@ All notable changes to this repository should be recorded here.
 
 ## Unreleased
 
+- Narrow-viewport follow-up for #89/#94: members table stacks below `md`
+  (the `--gtc-24` 420px floor was the 99px members overflow), dashboard
+  charts collapse to one column before `sm`, mobile `<main>` clips
+  horizontal overflow, `/onboarding` and two ux-lab routes now have a
+  `<main>` landmark, and `prefers-reduced-motion` zeros Tailwind
+  `transition-duration`. Does not close #89 or #94. Does not claim
+  Awwwards 8+. Gauntlet 21/21 remains the run 10 receipt only.
+
 - Factory gauntlet run 10 on `:5113` @ `f7a0160fc` is **21/21**. First-pass
   `/ASS/design-guide` rendered 16 capsules, `mainTextLen` 17664, empty
   `consoleErrors`. Receipt:

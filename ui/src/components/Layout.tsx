@@ -643,7 +643,7 @@ export function Layout() {
                 // changes (e.g. switching skill-detail tabs) don't widen/shift
                 // when the vertical scrollbar appears or disappears (PAP-10907).
                 isMobile
-                  ? "overflow-visible pb-(--sz-calc-14)"
+                  ? "min-w-0 overflow-x-clip pb-(--sz-calc-14)"
                   : "overflow-auto [scrollbar-gutter:stable]",
               )}
             >

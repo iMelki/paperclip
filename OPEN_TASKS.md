@@ -75,6 +75,13 @@ This file is the durable local index for active `paperclip` issues.
     fix on `dev` (public SVG). Factory `:5113` on `f7a0160fc` now has a run 10
     **21/21** receipt (`docs/uiux/browser-evidence-2026-08-27/gauntlet-run10-f7a0160fc.json`).
     It does not close any of the six #94 defects or the #89 390 reflow list.
+  - 2026-08-27 UI slice (still open): members table now stacks below `md`;
+    dashboard charts are one column before `sm`; `/onboarding` and the two
+    lab routes that lacked a landmark now wrap in `<main>`; reduced-motion
+    zeros Tailwind transition timings. Remaining on #94: h1 scale, light
+    contrast, target sizes, project-route duplication. Remaining on #89:
+    skill studio, design-guide, instance plugin/adapter tables, costs, and
+    other escaped surfaces after a new 390 fine-pointer sweep.
 
 - [x] [Projects Ops #117 - Enroll Paperclip in Repo Doctor](https://github.com/iMelki/projects-ops/issues/117)
   - The governed checkout now has an observe-only `on_demand` genome with four
