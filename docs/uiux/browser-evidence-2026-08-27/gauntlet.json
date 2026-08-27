@@ -1,0 +1,212 @@
+{
+  "capturedAt": "2026-08-27T04:06:27.349Z",
+  "base": "http://127.0.0.1:5113",
+  "commit": "c7981d6afb0876143e7b1764a5cd0c207c243490",
+  "companyPrefix": "ASS",
+  "surfaces": [
+    {
+      "reducedMotion": false,
+      "counts": {
+        "shimmerText": 0,
+        "shimmerMuted": 0,
+        "thinkingIcon": 0,
+        "thinkingPath": 0,
+        "hbPulse": 0,
+        "hbBlink": 0,
+        "agentCapSlot": 1,
+        "agentCapOnline": 16,
+        "agentCapLiquid": 16,
+        "agentCapAny": 70,
+        "cotEntry": 0
+      },
+      "sample": {
+        "shimmer": null,
+        "thinking": null,
+        "hbPulse": null,
+        "agentCap": {
+          "animationName": "agent-cap-slot-pulse",
+          "animationDuration": "1.6s"
+        }
+      },
+      "bodyFont": "InterVariable, Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif",
+      "mainTextLen": 17627,
+      "consoleErrors": [
+        "Failed to load resource: the server responded with a status of 404 (Not Found)"
+      ],
+      "route": "/ASS/design-guide",
+      "name": "design-guide",
+      "settled": false,
+      "settleMeta": {
+        "settled": false,
+        "textLen": 17627,
+        "title": "Assistants Software Factory • Paperclip"
+      },
+      "pageErrors": [
+        "Failed to load resource: the server responded with a status of 404 (Not Found)"
+      ],
+      "screenshot": "01-design-guide-1440.png"
+    },
+    {
+      "reducedMotion": false,
+      "counts": {
+        "shimmerText": 0,
+        "shimmerMuted": 0,
+        "thinkingIcon": 0,
+        "thinkingPath": 0,
+        "hbPulse": 0,
+        "hbBlink": 0,
+        "agentCapSlot": 0,
+        "agentCapOnline": 0,
+        "agentCapLiquid": 0,
+        "agentCapAny": 0,
+        "cotEntry": 0
+      },
+      "sample": {
+        "shimmer": null,
+        "thinking": null,
+        "hbPulse": null,
+        "agentCap": null
+      },
+      "bodyFont": "InterVariable, Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif",
+      "mainTextLen": 2850,
+      "consoleErrors": [],
+      "route": "/ASS/dashboard",
+      "name": "dashboard",
+      "settled": true,
+      "settleMeta": {
+        "settled": true,
+        "textLen": 247,
+        "sig": 0,
+        "skel": 0,
+        "title": "Dashboard • Paperclip",
+        "h2": "Command Palette"
+      },
+      "pageErrors": [],
+      "screenshot": "02-dashboard-1440.png"
+    },
+    {
+      "reducedMotion": false,
+      "counts": {
+        "shimmerText": 0,
+        "shimmerMuted": 0,
+        "thinkingIcon": 0,
+        "thinkingPath": 0,
+        "hbPulse": 0,
+        "hbBlink": 2,
+        "agentCapSlot": 0,
+        "agentCapOnline": 0,
+        "agentCapLiquid": 0,
+        "agentCapAny": 0,
+        "cotEntry": 0
+      },
+      "sample": {
+        "shimmer": null,
+        "thinking": null,
+        "hbPulse": null,
+        "agentCap": null
+      },
+      "bodyFont": "InterVariable, Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif",
+      "mainTextLen": 1160,
+      "consoleErrors": [],
+      "route": "/ASS/agents/all",
+      "name": "agents-all",
+      "settled": true,
+      "settleMeta": {
+        "settled": true,
+        "textLen": 244,
+        "sig": 0,
+        "skel": 0,
+        "title": "Agents • Paperclip",
+        "h2": "Command Palette"
+      },
+      "pageErrors": [],
+      "screenshot": "03-agents-all-1440.png"
+    },
+    {
+      "reducedMotion": false,
+      "counts": {
+        "shimmerText": 0,
+        "shimmerMuted": 0,
+        "thinkingIcon": 0,
+        "thinkingPath": 0,
+        "hbPulse": 0,
+        "hbBlink": 0,
+        "agentCapSlot": 0,
+        "agentCapOnline": 0,
+        "agentCapLiquid": 0,
+        "agentCapAny": 0,
+        "cotEntry": 0
+      },
+      "sample": {
+        "shimmer": null,
+        "thinking": null,
+        "hbPulse": null,
+        "agentCap": null
+      },
+      "bodyFont": "InterVariable, Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif",
+      "mainTextLen": 1374,
+      "consoleErrors": [],
+      "route": "/ASS/agents/0e5fb2b8-3dd0-4b95-89e7-143b9375af26",
+      "name": "agent-detail",
+      "settled": true,
+      "settleMeta": {
+        "settled": true,
+        "textLen": 342,
+        "sig": 0,
+        "skel": 0,
+        "title": "reflection-coach • Agents • Assistants Software Factory • Paperclip",
+        "h2": "Command Palette"
+      },
+      "pageErrors": [],
+      "screenshot": "04-agent-detail-1440.png"
+    }
+  ],
+  "designGuideCounts": {
+    "shimmerText": 0,
+    "shimmerMuted": 0,
+    "thinkingIcon": 0,
+    "thinkingPath": 0,
+    "hbPulse": 0,
+    "hbBlink": 0,
+    "agentCapSlot": 1,
+    "agentCapOnline": 16,
+    "agentCapLiquid": 16,
+    "agentCapAny": 70,
+    "cotEntry": 0
+  },
+  "signatureTotals": {
+    "shimmerText": 0,
+    "shimmerMuted": 0,
+    "thinkingIcon": 0,
+    "thinkingPath": 0,
+    "hbPulse": 0,
+    "hbBlink": 2,
+    "agentCapSlot": 1,
+    "agentCapOnline": 16,
+    "agentCapLiquid": 16,
+    "agentCapAny": 70,
+    "cotEntry": 0
+  },
+  "reducedMotion": {
+    "reducedMotion": true,
+    "agentCapOnline": 16,
+    "shimmer": null,
+    "thinking": null,
+    "agentCap": {
+      "animationName": "none",
+      "animationDuration": "0s"
+    },
+    "screenshot": "05-design-guide-reduced-motion.png"
+  },
+  "scores": {
+    "visualDirection": 3,
+    "uxClarity": 3,
+    "motionInteractivity": 3,
+    "technicalQuality": 2,
+    "responsiveness": 3,
+    "verification": 3,
+    "complexityFit": 3
+  },
+  "total": 20,
+  "band": "strong-internal-benchmark"
+}
