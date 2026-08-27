@@ -1,0 +1,13 @@
+{
+  "capturedAt": "2026-08-27T13:09:35.358Z",
+  "surface": "factory :5113 ux-lab loading-chrome",
+  "base": "http://127.0.0.1:5113",
+  "route": "/ux-lab/loading-chrome",
+  "counts": {
+    "thinkingIcon": 1
+  },
+  "animation": {
+    "animationName": "paperclip-thinking-draw"
+  },
+  "screenshot": "13-thinking-icon-factory-5113-1440.png"
+}
