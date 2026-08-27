@@ -1,4 +1,4 @@
-# Paperclip UI — frontend-sota-gauntlet (rubric 1.8), 2026-08-27 (run 2 + shimmer run 3)
+# Paperclip UI — frontend-sota-gauntlet (rubric 1.8), 2026-08-27 (run 2 + shimmer run 3 + live run 4)
 
 **Verdict: gauntlet total 20/21 — band `strong-internal-benchmark`.**
 
@@ -7,6 +7,9 @@ Playwright `load`/`domcontentloaded`. Run 2 fixed settle logic (`commit` + conte
 markers + scroll to Agent Capsule gallery). **Run 3 (same day)** routed
 `/ux-lab/issue-chat` and browser-proved **2× `.shimmer-text`** with
 `shimmer-text-slide` **2.5s** (see `shimmer-proof.json` + shots 07–08).
+**Run 4 (same day)** browser-proved **1× `.shimmer-text`** on **live issue chat**
+during Factory Builder `running` on **ASS-28** (see `live-agent-shimmer-proof.json`
++ shot 11).
 
 ## Scorecard (0–3 per area)
 
@@ -31,7 +34,7 @@ markers + scroll to Agent Capsule gallery). **Run 3 (same day)** routed
 | `.agent-cap*` (any) | 70 |
 | `.shimmer-text` / thinking icon | **2 / 0** on `/ux-lab/issue-chat` (run 3); **0 / 0** on design-guide (run 2) |
 
-## Shimmer evidence (run 3)
+## Shimmer evidence (run 3 — UX lab fixture)
 
 | Motif | Count on `/ux-lab/issue-chat` |
 | --- | ---: |
@@ -43,9 +46,25 @@ markers + scroll to Agent Capsule gallery). **Run 3 (same day)** routed
 Captured on vite preview `:5173` after routing `IssueChatUxLab` in `App.tsx`. Factory `:5113`
 serves the prior bundle until restart; fixtures do not require a live agent run.
 
+## Live shimmer evidence (run 4 — real issue chat)
+
+| Motif | Count on `/ASS/issues/ASS-28` (live chat) |
+| --- | ---: |
+| `.shimmer-text` | 1 |
+| `.shimmer-text-muted` | 0 |
+| `.paperclip-thinking-icon` | 0 |
+| Animation | `shimmer-text-slide` **2.5s** |
+| Visible label | **Working** |
+
+Captured on factory `:5113` while **Factory Builder** (`codex_local`) was **running**
+on one-shot issue **ASS-28** (`3d051d3a-…`). Not a UX-lab fixture — real board issue chat
+during an active agent heartbeat. Receipt: `live-agent-shimmer-proof.json`; screenshot:
+`gauntlet-shots/11-live-ASS-28-shimmer-working.png`.
+
 ## Limits (stated)
 
-1. **Thinking-icon** still **0** on captured surfaces (shimmer **proven** on UX lab).
+1. **Thinking-icon** still **0** on captured surfaces (shimmer **proven** on UX lab **and**
+   live issue chat; thinking-icon not yet browser-proven on any surface).
 2. Design-guide settle flag false only because skeleton heuristic saw loading chrome briefly; content and capsules were present (`mainTextLen` 17627) in run 2.
 3. Coordination API: **`GET /api/companies/{id}/coordination/tasks`** returns **200** on `:5113` (prior “500” was wrong path / observer config).
 
@@ -55,13 +74,15 @@ serves the prior bundle until restart; fixtures do not require a live agent run.
 | --- | --- |
 | `gauntlet.json` | Machine receipt |
 | `gauntlet.mjs` | Runner (`BASE=http://127.0.0.1:5113`) |
-| `gauntlet-shots/` | design-guide, dashboard, agents, reduced-motion, mobile |
+| `gauntlet-shots/` | design-guide, dashboard, agents, reduced-motion, mobile, live ASS-28 |
+| `live-agent-shimmer-proof.json` | Run 4 live issue-chat receipt |
+| `shimmer-proof.json` | Run 3 UX-lab receipt |
 
-Instance: Assistants Software Factory (`ASS`), commit **`c7981d6a`**.
+Instance: Assistants Software Factory (`ASS`), commit **`07a522e6e`** (factory pin).
 
 ## Delight (rubric 1.8) recommendation
 
 | Before | After (honest) |
 | --- | --- |
 | **7.0** (gauntlet not run) | **7.5** — gauntlet **20/21** + capsule gallery (run 2) |
-| **7.5** (post run 2) | **7.8** — run 3 adds browser-proven **shimmer-text** on issue-chat UX lab; hold below **8.0** until thinking-icon on product chrome or live (non-fixture) chat |
+| **7.5** (post run 2) | **7.8** — run 3 UX-lab shimmer + run 4 **live** issue-chat shimmer; hold below **8.0** until **thinking-icon** browser-proven on product chrome |
