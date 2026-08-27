@@ -120,6 +120,13 @@ const SURFACES = [
   },
   { name: 'dashboard', route: `/${P}/dashboard`, minText: 40 },
   { name: 'agents-all', route: `/${P}/agents/all`, minText: 40 },
+  {
+    name: 'issue-chat-ux-lab',
+    route: '/ux-lab/issue-chat',
+    minText: 200,
+    selectors: ['.shimmer-text'],
+    scrollTo: 'text=Working / Worked',
+  },
 ];
 if (agentId) {
   SURFACES.push({ name: 'agent-detail', route: `/${P}/agents/${agentId}`, minText: 40 });

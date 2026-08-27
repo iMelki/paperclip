@@ -52,6 +52,7 @@ import { CompanyEnvironments } from "./pages/CompanyEnvironments";
 import { BootstrapSetupUxLab } from "./pages/BootstrapSetupUxLab";
 import { ResponsibleUserDenialUxLab } from "./pages/ResponsibleUserDenialUxLab";
 import { CrossIssueCollaborationUxLab } from "./pages/CrossIssueCollaborationUxLab";
+import { IssueChatUxLab } from "./pages/IssueChatUxLab";
 import { CompanySettingsPluginPage } from "./pages/CompanySettingsPluginPage";
 import { CompanyAccess, CompanyAccessLegacyRoute } from "./pages/CompanyAccess";
 import { AdvancedToolsRoute } from "./pages/tools/AdvancedToolsRoute";
@@ -553,6 +554,7 @@ export function App() {
         <Route path="ux-lab/bootstrap-setup" element={<BootstrapSetupUxLab />} />
         <Route path="ux-lab/responsible-user-denial" element={<ResponsibleUserDenialUxLab />} />
         <Route path="ux-lab/cross-issue-collaboration" element={<CrossIssueCollaborationUxLab />} />
+        <Route path="ux-lab/issue-chat" element={<IssueChatUxLab />} />
 
         <Route element={<CloudAccessGate />}>
           <Route index element={<CompanyRootRedirect />} />

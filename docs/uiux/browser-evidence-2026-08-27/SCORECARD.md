@@ -1,11 +1,12 @@
-# Paperclip UI — frontend-sota-gauntlet (rubric 1.8), 2026-08-27 (run 2)
+# Paperclip UI — frontend-sota-gauntlet (rubric 1.8), 2026-08-27 (run 2 + shimmer run 3)
 
 **Verdict: gauntlet total 20/21 — band `strong-internal-benchmark`.**
 
 Run 1 (earlier same day) scored **18/21** because `/ASS/design-guide` timed out under
 Playwright `load`/`domcontentloaded`. Run 2 fixed settle logic (`commit` + content
-markers + scroll to Agent Capsule gallery). Delight may move from measured **7.0**
-to **7.5** on this evidence; not anchor-9 without live shimmer/thinking on product chrome.
+markers + scroll to Agent Capsule gallery). **Run 3 (same day)** routed
+`/ux-lab/issue-chat` and browser-proved **2× `.shimmer-text`** with
+`shimmer-text-slide` **2.5s** (see `shimmer-proof.json` + shots 07–08).
 
 ## Scorecard (0–3 per area)
 
@@ -28,12 +29,24 @@ to **7.5** on this evidence; not anchor-9 without live shimmer/thinking on produ
 | `.agent-cap-liquid` | 16 |
 | `.agent-cap-slot` | 1 |
 | `.agent-cap*` (any) | 70 |
-| `.shimmer-text` / thinking icon | 0 (not on this surface; live chat routes only) |
+| `.shimmer-text` / thinking icon | **2 / 0** on `/ux-lab/issue-chat` (run 3); **0 / 0** on design-guide (run 2) |
+
+## Shimmer evidence (run 3)
+
+| Motif | Count on `/ux-lab/issue-chat` |
+| --- | ---: |
+| `.shimmer-text` | 2 |
+| `.shimmer-text-muted` | 0 |
+| `.paperclip-thinking-icon` | 0 |
+| Animation | `shimmer-text-slide` **2.5s** |
+
+Captured on vite preview `:5173` after routing `IssueChatUxLab` in `App.tsx`. Factory `:5113`
+serves the prior bundle until restart; fixtures do not require a live agent run.
 
 ## Limits (stated)
 
-1. **Shimmer / thinking-icon** still **not** measured on factory live chrome (agents paused; motifs live on chat surfaces, not design-guide).
-2. Design-guide settle flag false only because skeleton heuristic saw loading chrome briefly; content and capsules were present (`mainTextLen` 17627).
+1. **Thinking-icon** still **0** on captured surfaces (shimmer **proven** on UX lab).
+2. Design-guide settle flag false only because skeleton heuristic saw loading chrome briefly; content and capsules were present (`mainTextLen` 17627) in run 2.
 3. Coordination API: **`GET /api/companies/{id}/coordination/tasks`** returns **200** on `:5113` (prior “500” was wrong path / observer config).
 
 ## Artifacts
@@ -50,4 +63,5 @@ Instance: Assistants Software Factory (`ASS`), commit **`c7981d6a`**.
 
 | Before | After (honest) |
 | --- | --- |
-| **7.0** (gauntlet not run) | **7.5** — gauntlet **20/21** with browser evidence on capsule gallery; hold below **8.0** until shimmer/thinking proven on a live working-state surface |
+| **7.0** (gauntlet not run) | **7.5** — gauntlet **20/21** + capsule gallery (run 2) |
+| **7.5** (post run 2) | **7.8** — run 3 adds browser-proven **shimmer-text** on issue-chat UX lab; hold below **8.0** until thinking-icon on product chrome or live (non-fixture) chat |
