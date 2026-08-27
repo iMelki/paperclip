@@ -72,9 +72,9 @@ This file is the durable local index for active `paperclip` issues.
     measured client-side: a cold dashboard load pulls 41 requests / 7,628,622 B,
     one JS file of 6,779,424 B, plus 37 JSON calls. Tracked in #48.
   - 2026-08-27: the gauntlet design-guide 404 is a separate showcase-fixture
-    fix on `dev` (public SVG). It does not close any of the six #94 defects
-    or the #89 390 reflow list. Next proof is a factory pull + gauntlet
-    re-run, not a new issue.
+    fix on `dev` (public SVG). Factory `:5113` on `f7a0160fc` now has a run 10
+    **21/21** receipt (`docs/uiux/browser-evidence-2026-08-27/gauntlet-run10-f7a0160fc.json`).
+    It does not close any of the six #94 defects or the #89 390 reflow list.
 
 - [x] [Projects Ops #117 - Enroll Paperclip in Repo Doctor](https://github.com/iMelki/projects-ops/issues/117)
   - The governed checkout now has an observe-only `on_demand` genome with four
@@ -406,10 +406,9 @@ This file is the durable local index for active `paperclip` issues.
     Awwwards rubric. Full report: `docs/uiux-awwwards-report-2026-08-09.md`.
     Scores are code-inspection estimates pending a Frontend Proof Bundle.
     Fleet rollup: iMelki/agent-settings#586.
-  - Gauntlet 20/21 (run 5) is still **20/21** until a browser re-score.
-    The design-guide Technical quality 404 is a code fix on `dev`: primary
-    showcase uses `/paperclip-thinking.svg` instead of a fake attachment
-    video. `paperclip-factory-dev` is 6 commits behind and must pull `dev`
-    before `node gauntlet.mjs` can prove Technical quality 2→3. Do not
-    claim 21/21 without that receipt. #94 (six browser defects) and #89
-    (390 fine-pointer reflow) remain open and are not closed by this slice.
+  - Gauntlet **21/21** (run 10, `f7a0160fc`, 2026-08-27): first-pass
+    `/ASS/design-guide` rendered 16 capsules, `mainTextLen` 17664, empty
+    `consoleErrors`. Receipt:
+    `docs/uiux/browser-evidence-2026-08-27/gauntlet-run10-f7a0160fc.json`.
+    #94 (six browser defects) and #89 (390 fine-pointer reflow) remain
+    open and are not closed by this receipt.

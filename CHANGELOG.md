@@ -4,12 +4,17 @@ All notable changes to this repository should be recorded here.
 
 ## Unreleased
 
+- Factory gauntlet run 10 on `:5113` @ `f7a0160fc` is **21/21**. First-pass
+  `/ASS/design-guide` rendered 16 capsules, `mainTextLen` 17664, empty
+  `consoleErrors`. Receipt:
+  `docs/uiux/browser-evidence-2026-08-27/gauntlet-run10-f7a0160fc.json`.
+  Tracks #48; does not close #94 or #89.
+
 - Design-guide Issue Output showcase now uses the existing public
   `/paperclip-thinking.svg` instead of a fake `/api/attachments/.../content`
   video. That was the remaining gauntlet Technical quality 404 on
-  `/ASS/design-guide`. Score stays **20/21** until `paperclip-factory-dev`
-  pulls `dev` and `node gauntlet.mjs` shows a clean design-guide console.
-  Tracks #48.
+  `/ASS/design-guide`. Run 10 later proved Technical quality 3 on factory
+  `:5113`. Tracks #48.
 
 - **[#95]** `db:migrate` now skips DDL that is already true on the live schema
   (existing tables/columns/indexes/constraints, dropped columns, indexes on
