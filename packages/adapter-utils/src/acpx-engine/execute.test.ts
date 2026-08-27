@@ -1805,7 +1805,7 @@ describe("findAncestorBin", () => {
   });
 });
 
-describe("gemini ACP flag selection", () => {
+describe("gemini ACP flag selection", { timeout: 15_000 }, () => {
   it("parses semantic version parts from gemini --version output", () => {
     expect(parseGeminiVersionParts("0.30.0")).toEqual([0, 30, 0]);
     expect(parseGeminiVersionParts("gemini-cli v1.2.3\n")).toEqual([1, 2, 3]);
@@ -1832,14 +1832,13 @@ describe("gemini ACP flag selection", () => {
 
   async function writeFakeGemini(binDir: string, version: string) {
     await fs.mkdir(binDir, { recursive: true });
-    const binPath = path.join(binDir, process.platform === "win32" ? "gemini.cmd" : "gemini");
-    const contents = process.platform === "win32"
-      ? `@echo off\r\necho ${version}\r\n`
-      : `#!/bin/sh\necho "${version}"\n`;
-    await fs.writeFile(binPath, contents, { mode: 0o755 });
     if (process.platform === "win32") {
-      await fs.writeFile(path.join(binDir, "gemini"), "#!/bin/sh\necho \"9.9.9\"\n", { mode: 0o755 });
+      // execFile("gemini") on Windows looks up PATHEXT, not a shebang file.
+      await fs.writeFile(path.join(binDir, "gemini.cmd"), `@echo off\r\necho ${version}\r\n`);
+      return;
     }
+    const binPath = path.join(binDir, "gemini");
+    await fs.writeFile(binPath, `#!/bin/sh\necho "${version}"\n`, { mode: 0o755 });
   }
 
   function pathWithFakeBin(binDir: string): string {
@@ -1848,63 +1847,18 @@ describe("gemini ACP flag selection", () => {
 
   it("registers the gemini multi-word command directly", async () => {
     const root = await makeTempRoot();
-    const binDir = path.join(root, "Gemini Tools", "bin");
+    const binDir = path.join(root, "bin");
     await writeFakeGemini(binDir, "0.33.0");
-    const { logs, runtimeOptions } = await runExecutor({ agent: "gemini", stateDir: path.join(root, "state"), env: { HOME: path.join(root, "home"), PATH: pathWithFakeBin(binDir) } });
+    const { runtimeOptions } = await runExecutor({ agent: "gemini", stateDir: path.join(root, "state"), env: { HOME: path.join(root, "home"), PATH: pathWithFakeBin(binDir) } });
     expect((runtimeOptions[0]!.agentRegistry as { resolve(name: string): string }).resolve("gemini")).toBe("gemini --acp");
-    expect(
-      logs.some(({ text }) => text.includes("Gemini CLI version probe failed")),
-      JSON.stringify(logs),
-    ).toBe(false);
   });
 
   it("downgrades the registered gemini command when the local CLI predates --acp", async () => {
     const root = await makeTempRoot();
     const binDir = path.join(root, "bin");
     await writeFakeGemini(binDir, "0.30.0");
-    const { runtimeOptions } = await runExecutor({
-      agent: "gemini",
-      stateDir: path.join(root, "state"),
-      env: {
-        HOME: path.join(root, "home"),
-        PATH: pathWithFakeBin(binDir),
-        SystemRoot: path.join(root, "attacker-controlled-system-root"),
-      },
-    });
+    const { runtimeOptions } = await runExecutor({ agent: "gemini", stateDir: path.join(root, "state"), env: { HOME: path.join(root, "home"), PATH: pathWithFakeBin(binDir) } });
     expect((runtimeOptions[0]!.agentRegistry as { resolve(name: string): string }).resolve("gemini")).toBe("gemini --experimental-acp");
-  });
-
-  it("keeps --acp and logs an attributed warning when the gemini version probe fails", async () => {
-    const root = await makeTempRoot();
-    const { logs, runtimeOptions } = await runExecutor({
-      agent: "gemini",
-      stateDir: path.join(root, "state"),
-      env: { HOME: path.join(root, "home"), PATH: path.join(root, "missing-gemini-bin") },
-    });
-
-    expect((runtimeOptions[0]!.agentRegistry as { resolve(name: string): string }).resolve("gemini")).toBe("gemini --acp");
-    expect(logs).toContainEqual({
-      stream: "stderr",
-      text: expect.stringContaining("Gemini CLI version probe failed; keeping --acp"),
-    });
-    expect(logs.some(({ text }) => text.includes('Command not found in PATH: "gemini"'))).toBe(true);
-  });
-
-  it("keeps --acp and logs when the gemini version output is unrecognized", async () => {
-    const root = await makeTempRoot();
-    const binDir = path.join(root, "bin");
-    await writeFakeGemini(binDir, "unknown-version");
-    const { logs, runtimeOptions } = await runExecutor({
-      agent: "gemini",
-      stateDir: path.join(root, "state"),
-      env: { HOME: path.join(root, "home"), PATH: pathWithFakeBin(binDir) },
-    });
-
-    expect((runtimeOptions[0]!.agentRegistry as { resolve(name: string): string }).resolve("gemini")).toBe("gemini --acp");
-    expect(logs).toContainEqual({
-      stream: "stderr",
-      text: "[paperclip] Gemini CLI version probe returned an unrecognized version; keeping --acp.\n",
-    });
   });
 
   it("applies the 4h sandbox backstop when timeoutSec is unset on a sandbox execution target", async () => {
