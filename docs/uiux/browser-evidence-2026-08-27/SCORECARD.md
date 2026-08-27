@@ -104,3 +104,15 @@ Instance: Assistants Software Factory (`ASS`), commit **`pending push`** (loadin
 | **7.0** (gauntlet not run) | **7.5** — gauntlet **20/21** + capsule gallery (run 2) |
 | **7.5** (post run 2) | **7.8** — run 3 UX-lab shimmer + run 4 **live** issue-chat shimmer |
 | **7.8** (post run 4) | **8.0** — run 5 browser-proves **`.paperclip-thinking-icon`** on loading chrome (product component); live chat shimmer already proven (run 4) |
+| **8.0** (post run 5) | **8.0 closed** — run 6 browser-proves **reduced-motion** (`animation: none`) on factory `:5113` loading chrome |
+
+## Thinking-icon reduced-motion evidence (run 6)
+
+| Motif | Count on `/ux-lab/loading-chrome` (reduce) |
+| --- | ---: |
+| `.paperclip-thinking-icon` | 1 |
+| `.paperclip-thinking-icon-path` animation | **none** / **0s** |
+| `prefers-reduced-motion` | **true** |
+
+Receipt: `thinking-icon-reduced-motion-proof.json`; screenshot: `gauntlet-shots/14-thinking-icon-reduced-motion-1440.png`.
+Capture: `capture-thinking-icon-rm.mjs`.
