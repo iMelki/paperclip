@@ -1,0 +1,26 @@
+{
+  "total": 21,
+  "band": "strong-internal-benchmark",
+  "scores": {
+    "visualDirection": 3,
+    "uxClarity": 3,
+    "motionInteractivity": 3,
+    "technicalQuality": 3,
+    "responsiveness": 3,
+    "verification": 3,
+    "complexityFit": 3
+  },
+  "designGuide": {
+    "shimmerText": 0,
+    "shimmerMuted": 0,
+    "thinkingIcon": 0,
+    "thinkingPath": 0,
+    "hbPulse": 0,
+    "hbBlink": 0,
+    "agentCapSlot": 1,
+    "agentCapOnline": 16,
+    "agentCapLiquid": 16,
+    "agentCapAny": 70,
+    "cotEntry": 0
+  }
+}

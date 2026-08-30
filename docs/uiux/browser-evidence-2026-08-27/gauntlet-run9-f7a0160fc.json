@@ -1,0 +1,246 @@
+{
+  "capturedAt": "2026-08-27T17:08:08.699Z",
+  "base": "http://127.0.0.1:5113",
+  "commit": "f7a0160fc62933fe6d9608b03f29c6b161495de0",
+  "companyPrefix": "ASS",
+  "surfaces": [
+    {
+      "reducedMotion": false,
+      "counts": {
+        "shimmerText": 0,
+        "shimmerMuted": 0,
+        "thinkingIcon": 0,
+        "thinkingPath": 0,
+        "hbPulse": 0,
+        "hbBlink": 0,
+        "agentCapSlot": 0,
+        "agentCapOnline": 0,
+        "agentCapLiquid": 0,
+        "agentCapAny": 0,
+        "cotEntry": 0
+      },
+      "sample": {
+        "shimmer": null,
+        "thinking": null,
+        "hbPulse": null,
+        "agentCap": null
+      },
+      "bodyFont": "\"Times New Roman\"",
+      "mainTextLen": 0,
+      "consoleErrors": [],
+      "route": "/ASS/design-guide",
+      "name": "design-guide",
+      "settled": false,
+      "settleMeta": {
+        "settled": false,
+        "textLen": 0,
+        "title": "Paperclip"
+      },
+      "pageErrors": [],
+      "screenshot": null
+    },
+    {
+      "reducedMotion": false,
+      "counts": {
+        "shimmerText": 0,
+        "shimmerMuted": 0,
+        "thinkingIcon": 0,
+        "thinkingPath": 0,
+        "hbPulse": 0,
+        "hbBlink": 0,
+        "agentCapSlot": 0,
+        "agentCapOnline": 0,
+        "agentCapLiquid": 0,
+        "agentCapAny": 0,
+        "cotEntry": 0
+      },
+      "sample": {
+        "shimmer": null,
+        "thinking": null,
+        "hbPulse": null,
+        "agentCap": null
+      },
+      "bodyFont": "InterVariable, Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif",
+      "mainTextLen": 1675,
+      "consoleErrors": [],
+      "route": "/ASS/dashboard",
+      "name": "dashboard",
+      "settled": true,
+      "settleMeta": {
+        "settled": true,
+        "textLen": 320,
+        "sig": 0,
+        "skel": 0,
+        "title": "Dashboard • Paperclip",
+        "h2": "Command Palette"
+      },
+      "pageErrors": [],
+      "screenshot": "02-dashboard-1440.png"
+    },
+    {
+      "reducedMotion": false,
+      "counts": {
+        "shimmerText": 0,
+        "shimmerMuted": 0,
+        "thinkingIcon": 0,
+        "thinkingPath": 0,
+        "hbPulse": 0,
+        "hbBlink": 2,
+        "agentCapSlot": 0,
+        "agentCapOnline": 0,
+        "agentCapLiquid": 0,
+        "agentCapAny": 0,
+        "cotEntry": 0
+      },
+      "sample": {
+        "shimmer": null,
+        "thinking": null,
+        "hbPulse": null,
+        "agentCap": null
+      },
+      "bodyFont": "InterVariable, Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif",
+      "mainTextLen": 1162,
+      "consoleErrors": [],
+      "route": "/ASS/agents/all",
+      "name": "agents-all",
+      "settled": true,
+      "settleMeta": {
+        "settled": true,
+        "textLen": 264,
+        "sig": 0,
+        "skel": 0,
+        "title": "Agents • Paperclip",
+        "h2": "Command Palette"
+      },
+      "pageErrors": [],
+      "screenshot": "03-agents-all-1440.png"
+    },
+    {
+      "reducedMotion": false,
+      "counts": {
+        "shimmerText": 2,
+        "shimmerMuted": 0,
+        "thinkingIcon": 0,
+        "thinkingPath": 0,
+        "hbPulse": 0,
+        "hbBlink": 0,
+        "agentCapSlot": 0,
+        "agentCapOnline": 0,
+        "agentCapLiquid": 0,
+        "agentCapAny": 0,
+        "cotEntry": 2
+      },
+      "sample": {
+        "shimmer": {
+          "animationName": "shimmer-text-slide",
+          "animationDuration": "2.5s"
+        },
+        "thinking": null,
+        "hbPulse": null,
+        "agentCap": null
+      },
+      "bodyFont": "InterVariable, Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif",
+      "mainTextLen": 4514,
+      "consoleErrors": [],
+      "route": "/ux-lab/issue-chat",
+      "name": "issue-chat-ux-lab",
+      "settled": true,
+      "settleMeta": {
+        "settled": true,
+        "textLen": 4471,
+        "sig": 2,
+        "skel": 0,
+        "title": "Paperclip",
+        "h2": "Rotating reasoning text"
+      },
+      "pageErrors": [],
+      "screenshot": "04-issue-chat-ux-lab-1440.png"
+    },
+    {
+      "reducedMotion": false,
+      "counts": {
+        "shimmerText": 0,
+        "shimmerMuted": 0,
+        "thinkingIcon": 0,
+        "thinkingPath": 0,
+        "hbPulse": 0,
+        "hbBlink": 0,
+        "agentCapSlot": 0,
+        "agentCapOnline": 0,
+        "agentCapLiquid": 0,
+        "agentCapAny": 0,
+        "cotEntry": 0
+      },
+      "sample": {
+        "shimmer": null,
+        "thinking": null,
+        "hbPulse": null,
+        "agentCap": null
+      },
+      "bodyFont": "InterVariable, Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif",
+      "mainTextLen": 410,
+      "consoleErrors": [],
+      "route": "/ASS/agents/0e5fb2b8-3dd0-4b95-89e7-143b9375af26",
+      "name": "agent-detail",
+      "settled": true,
+      "settleMeta": {
+        "settled": true,
+        "textLen": 266,
+        "sig": 0,
+        "skel": 0,
+        "title": "0e5fb2b8-3dd0-4b95-89e7-143b9375af26 • Agents • Paperclip",
+        "h2": "Command Palette"
+      },
+      "pageErrors": [],
+      "screenshot": "05-agent-detail-1440.png"
+    }
+  ],
+  "designGuideCounts": {
+    "shimmerText": 0,
+    "shimmerMuted": 0,
+    "thinkingIcon": 0,
+    "thinkingPath": 0,
+    "hbPulse": 0,
+    "hbBlink": 0,
+    "agentCapSlot": 0,
+    "agentCapOnline": 0,
+    "agentCapLiquid": 0,
+    "agentCapAny": 0,
+    "cotEntry": 0
+  },
+  "signatureTotals": {
+    "shimmerText": 2,
+    "shimmerMuted": 0,
+    "thinkingIcon": 0,
+    "thinkingPath": 0,
+    "hbPulse": 0,
+    "hbBlink": 2,
+    "agentCapSlot": 0,
+    "agentCapOnline": 0,
+    "agentCapLiquid": 0,
+    "agentCapAny": 0,
+    "cotEntry": 2
+  },
+  "reducedMotion": {
+    "reducedMotion": true,
+    "agentCapOnline": 16,
+    "shimmer": null,
+    "thinking": null,
+    "agentCap": {
+      "animationName": "none",
+      "animationDuration": "0s"
+    },
+    "screenshot": "06-design-guide-reduced-motion.png"
+  },
+  "scores": {
+    "visualDirection": 2,
+    "uxClarity": 2,
+    "motionInteractivity": 2,
+    "technicalQuality": 3,
+    "responsiveness": 3,
+    "verification": 3,
+    "complexityFit": 3
+  },
+  "total": 18,
+  "band": "usable"
+}

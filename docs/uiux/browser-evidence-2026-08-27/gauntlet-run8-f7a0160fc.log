@@ -1,0 +1,26 @@
+{
+  "total": 18,
+  "band": "usable",
+  "scores": {
+    "visualDirection": 2,
+    "uxClarity": 2,
+    "motionInteractivity": 2,
+    "technicalQuality": 3,
+    "responsiveness": 3,
+    "verification": 3,
+    "complexityFit": 3
+  },
+  "designGuide": {
+    "shimmerText": 0,
+    "shimmerMuted": 0,
+    "thinkingIcon": 0,
+    "thinkingPath": 0,
+    "hbPulse": 0,
+    "hbBlink": 0,
+    "agentCapSlot": 0,
+    "agentCapOnline": 0,
+    "agentCapLiquid": 0,
+    "agentCapAny": 0,
+    "cotEntry": 0
+  }
+}
