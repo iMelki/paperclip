@@ -546,6 +546,17 @@
     --motion-scroll-pill-exit: 0ms;
     --motion-pane-glide: 0ms;
   }
+
+  /* Token collapse above only covers CSS variables. Tailwind utilities such
+     as transition-colors still paint a non-zero transition-duration. Zero
+     those computed timings so the DESIGN.md cascade reaches them. Leave
+     animation-* alone — progress spinners stay essential feedback. */
+  *,
+  *::before,
+  *::after {
+    transition-duration: 0.01ms !important;
+    transition-delay: 0ms !important;
+  }
 }
 
 /* ────────────────────────────────────────────────────────────────────────
