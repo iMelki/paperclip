@@ -564,8 +564,8 @@ export function App() {
         <Route path="ux-lab/bootstrap-setup" element={<BootstrapSetupUxLab />} />
         <Route path="ux-lab/responsible-user-denial" element={<StandaloneMain><ResponsibleUserDenialUxLab /></StandaloneMain>} />
         <Route path="ux-lab/cross-issue-collaboration" element={<StandaloneMain><CrossIssueCollaborationUxLab /></StandaloneMain>} />
-        <Route path="ux-lab/issue-chat" element={<IssueChatUxLab />} />
-        <Route path="ux-lab/loading-chrome" element={<LoadingChromeUxLab />} />
+        <Route path="ux-lab/issue-chat" element={<StandaloneMain><IssueChatUxLab /></StandaloneMain>} />
+        <Route path="ux-lab/loading-chrome" element={<StandaloneMain><LoadingChromeUxLab /></StandaloneMain>} />
         <Route element={<CloudAccessGate />}>
           <Route path="onboarding" element={<StandaloneMain><OnboardingRoutePage /></StandaloneMain>} />
           <Route index element={<CompanyRootRedirect />} />

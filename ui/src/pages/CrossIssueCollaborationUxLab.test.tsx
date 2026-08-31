@@ -10,7 +10,7 @@ const source = readFileSync(
 
 describe("CrossIssueCollaborationUxLab narrow reflow", () => {
   it("keeps lab frames from overflowing a 390 viewport", () => {
-    expect(source).toContain("min-h-[100dvh] min-w-0 bg-muted/20 p-6");
+    expect(source).toContain("min-h-dvh min-w-0 bg-muted/20 p-6");
     expect(source).toContain("min-w-0 space-y-2");
     expect(source).toContain("flex min-w-0 flex-wrap items-center gap-1.5 px-1");
   });

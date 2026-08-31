@@ -10,7 +10,7 @@ const source = readFileSync(
 
 describe("ResponsibleUserDenialUxLab landmark shell", () => {
   it("uses a dvh-safe root instead of h-screen", () => {
-    expect(source).toContain("min-h-[100dvh] bg-muted/20 p-6");
+    expect(source).toContain("min-h-dvh bg-muted/20 p-6");
     expect(source).not.toContain("min-h-screen");
   });
 });

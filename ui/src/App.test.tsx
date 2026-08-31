@@ -244,7 +244,7 @@ describe("Skill Studio routes", () => {
 });
 
 describe("Standalone landmarks", () => {
-  it("wraps /onboarding while keeping it behind the access gate, and wraps the two lab routes that had no main", () => {
+  it("wraps standalone routes while keeping the unprefixed onboarding route behind the access gate", () => {
     expect(appSource).toContain("function StandaloneMain");
     expect(appSource).toContain('<Route path="onboarding" element={<StandaloneMain><OnboardingRoutePage /></StandaloneMain>} />');
     expect(appSource.indexOf('<Route path="onboarding" element={<StandaloneMain>')).toBeGreaterThan(
@@ -256,7 +256,12 @@ describe("Standalone landmarks", () => {
     expect(appSource).toContain(
       '<Route path="ux-lab/cross-issue-collaboration" element={<StandaloneMain><CrossIssueCollaborationUxLab /></StandaloneMain>} />',
     );
-    expect(appSource).toContain('<Route path="onboarding" element={<OnboardingRoutePage />} />');
+    expect(appSource).toContain(
+      '<Route path="ux-lab/issue-chat" element={<StandaloneMain><IssueChatUxLab /></StandaloneMain>} />',
+    );
+    expect(appSource).toContain(
+      '<Route path="ux-lab/loading-chrome" element={<StandaloneMain><LoadingChromeUxLab /></StandaloneMain>} />',
+    );
   });
 });
 

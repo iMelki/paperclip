@@ -119,7 +119,7 @@ export function CrossIssueCollaborationUxLab() {
   const resolveUserLabel = (id: string) => (id === "user-dotta" ? "Dotta" : null);
 
   return (
-    <div className="min-h-[100dvh] min-w-0 bg-muted/20 p-6">
+    <div className="min-h-dvh min-w-0 bg-muted/20 p-6">
       <div className="mx-auto max-w-5xl space-y-6">
         <header>
           <div className="text-(length:--text-micro) font-semibold uppercase tracking-(--tracking-caps) text-muted-foreground">

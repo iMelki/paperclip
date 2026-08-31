@@ -48,4 +48,15 @@ describe("narrow viewport reflow", () => {
     expect(gate).toBeGreaterThan(-1);
     expect(standaloneOnboarding).toBeGreaterThan(gate);
   });
+
+  it("gives every standalone UX-lab route a main landmark", () => {
+    const source = readUi("App.tsx");
+
+    expect(source).toContain(
+      '<Route path="ux-lab/issue-chat" element={<StandaloneMain><IssueChatUxLab /></StandaloneMain>} />',
+    );
+    expect(source).toContain(
+      '<Route path="ux-lab/loading-chrome" element={<StandaloneMain><LoadingChromeUxLab /></StandaloneMain>} />',
+    );
+  });
 });
