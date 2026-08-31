@@ -104,7 +104,7 @@ This file is the durable local index for active `paperclip` issues.
     adapter on the review step before using this flow for provider switching.
 
 - [#82 - Review `getIssueCoordination` loader/projector split before further growth](https://github.com/iMelki/paperclip/issues/82) —
-  **in progress in PR #83; review hardening and fresh exact-head CI pending**
+  **completed through merged PR #83**
   - PR #81 delivered the #52 company-scoped coordination repair as squash
     `7239123cf`. The current #82 slice keeps every company predicate inside
     private loader helpers and reduces `getIssueCoordination` from 181 to 8
@@ -117,9 +117,11 @@ This file is the durable local index for active `paperclip` issues.
     order. Receipt:
     `doc/evidence/coordination-loader-projector/2026-08-21-issue82-receipt.json`.
     No #53/v2 truthfulness behavior is included. Current coordination use is
-    not blocked. PR #83 is the exact review surface; fresh exact-head hosted CI,
-    genuine CodeRabbit review, thread reconciliation, and human review remain
-    the delivery gates.
+    not blocked. PR #83 merged into `dev` at `5efbc05824656b00d474fd47a2e55be17029a167`
+    on 2026-08-21 after exact-head hosted CI, CodeRabbit, independent security
+    review, and human merge. The issue is closed. #53 remains the separate
+    evidence-truthfulness follow-up; it must not be represented as shipped by
+    this behavior-preserving loader/projector refactor.
 
 - [#63 - Shell-safety siblings: git-workspace-sync legacy quoter, bare-sh spawns, unguarded postUploadCommand](https://github.com/iMelki/paperclip/issues/63) — **three named clusters closed by PR #69; SSH-lane residuals remain**
   - PR #69 (squash `987700f91`, 2026-08-18) aliased `git-workspace-sync` to
