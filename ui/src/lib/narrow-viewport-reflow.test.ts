@@ -44,9 +44,11 @@ describe("narrow viewport reflow", () => {
       '<Route path="onboarding" element={<StandaloneMain><OnboardingRoutePage /></StandaloneMain>} />',
     );
     const gate = source.indexOf("<Route element={<CloudAccessGate />}>");
+    const gateEnd = source.indexOf("\n          </Route>", gate);
     expect(standaloneOnboarding).toBeGreaterThan(-1);
     expect(gate).toBeGreaterThan(-1);
     expect(standaloneOnboarding).toBeGreaterThan(gate);
+    expect(standaloneOnboarding).toBeLessThan(gateEnd);
   });
 
   it("gives every standalone UX-lab route a main landmark", () => {

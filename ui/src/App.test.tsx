@@ -247,9 +247,12 @@ describe("Standalone landmarks", () => {
   it("wraps standalone routes while keeping the unprefixed onboarding route behind the access gate", () => {
     expect(appSource).toContain("function StandaloneMain");
     expect(appSource).toContain('<Route path="onboarding" element={<StandaloneMain><OnboardingRoutePage /></StandaloneMain>} />');
-    expect(appSource.indexOf('<Route path="onboarding" element={<StandaloneMain>')).toBeGreaterThan(
-      appSource.indexOf("<Route element={<CloudAccessGate />}>"),
-    );
+    const onboardingRoute = appSource.indexOf('<Route path="onboarding" element={<StandaloneMain>');
+    const accessGate = appSource.indexOf("<Route element={<CloudAccessGate />}>");
+    const accessGateEnd = appSource.indexOf("\n          </Route>", accessGate);
+
+    expect(onboardingRoute).toBeGreaterThan(accessGate);
+    expect(onboardingRoute).toBeLessThan(accessGateEnd);
     expect(appSource).toContain(
       '<Route path="ux-lab/responsible-user-denial" element={<StandaloneMain><ResponsibleUserDenialUxLab /></StandaloneMain>} />',
     );
