@@ -244,10 +244,10 @@ describe("Skill Studio routes", () => {
 });
 
 describe("Standalone landmarks", () => {
-  it("wraps /onboarding and the two lab routes that had no main", () => {
+  it("wraps /onboarding while keeping it behind the access gate, and wraps the two lab routes that had no main", () => {
     expect(appSource).toContain("function StandaloneMain");
     expect(appSource).toContain('<Route path="onboarding" element={<StandaloneMain><OnboardingRoutePage /></StandaloneMain>} />');
-    expect(appSource.indexOf('<Route path="onboarding" element={<StandaloneMain>')).toBeLessThan(
+    expect(appSource.indexOf('<Route path="onboarding" element={<StandaloneMain>')).toBeGreaterThan(
       appSource.indexOf("<Route element={<CloudAccessGate />}>"),
     );
     expect(appSource).toContain(

@@ -566,9 +566,8 @@ export function App() {
         <Route path="ux-lab/cross-issue-collaboration" element={<StandaloneMain><CrossIssueCollaborationUxLab /></StandaloneMain>} />
         <Route path="ux-lab/issue-chat" element={<IssueChatUxLab />} />
         <Route path="ux-lab/loading-chrome" element={<LoadingChromeUxLab />} />
-        <Route path="onboarding" element={<StandaloneMain><OnboardingRoutePage /></StandaloneMain>} />
-
         <Route element={<CloudAccessGate />}>
+          <Route path="onboarding" element={<StandaloneMain><OnboardingRoutePage /></StandaloneMain>} />
           <Route index element={<CompanyRootRedirect />} />
           <Route path="instance" element={<LegacySettingsRedirect />} />
           <Route path="instance/settings" element={<LegacySettingsRedirect />} />

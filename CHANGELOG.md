@@ -9,7 +9,9 @@ All notable changes to this repository should be recorded here.
   charts collapse to one column before `sm`, mobile `<main>` clips
   horizontal overflow, `/onboarding` and two ux-lab routes now have a
   `<main>` landmark, and `prefers-reduced-motion` zeros Tailwind
-  `transition-duration`. Does not close #89 or #94. Does not claim
+  `transition-duration`. `/onboarding` remains inside `CloudAccessGate`, so
+  the landmark change does not bypass the authenticated access/claim flow.
+  Does not close #89 or #94. Does not claim
   Awwwards 8+. Gauntlet 21/21 remains the run 10 receipt only.
 
 - Factory gauntlet run 10 on `:5113` @ `f7a0160fc` is **21/21**. First-pass
