@@ -38,7 +38,7 @@ describe("narrow viewport reflow", () => {
     expect(source).toContain("animation-* alone");
   });
 
-  it("registers unprefixed onboarding outside the access gate so the landmark always mounts", () => {
+  it("keeps unprefixed onboarding inside the access gate while preserving its landmark", () => {
     const source = readUi("App.tsx");
     const standaloneOnboarding = source.indexOf(
       '<Route path="onboarding" element={<StandaloneMain><OnboardingRoutePage /></StandaloneMain>} />',
@@ -46,6 +46,6 @@ describe("narrow viewport reflow", () => {
     const gate = source.indexOf("<Route element={<CloudAccessGate />}>");
     expect(standaloneOnboarding).toBeGreaterThan(-1);
     expect(gate).toBeGreaterThan(-1);
-    expect(standaloneOnboarding).toBeLessThan(gate);
+    expect(standaloneOnboarding).toBeGreaterThan(gate);
   });
 });
