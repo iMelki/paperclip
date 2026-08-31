@@ -103,6 +103,6 @@ Notes:
 - Prompts are piped to Cursor via stdin.
 - Sessions are resumed with --resume when stored session cwd matches current cwd.
 - Paperclip auto-injects local skills into "~/.cursor/skills" when missing, so Cursor can discover "$paperclip" and related skills on local runs.
-- Paperclip auto-adds --yolo unless one of --trust/--yolo/-f is already present in extraArgs.
+- Paperclip auto-adds --trust unless one of --trust/--yolo/-f is already present in extraArgs. It never auto-adds --yolo or -f. --trust only accepts workspace trust; it does not bypass command or MCP approvals.
 - Remote sandbox runs prepend "~/.cursor/bin" and "~/.local/bin" to PATH and prefer the installed absolute entrypoint from one of those directories when the default Cursor command is requested, so installer-managed sandbox leases do not need hardcoded command paths.
 `;

@@ -517,7 +517,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   const commandNotes = (() => {
     const notes: string[] = [];
     if (autoTrustEnabled) {
-      notes.push("Auto-added --yolo to bypass interactive prompts.");
+      notes.push("Auto-added --trust to accept workspace trust non-interactively.");
     }
     notes.push("Prompt is piped to Cursor via stdin.");
     const sandboxCommand = finalSandboxCommand ?? initialSandboxCommand;
@@ -587,7 +587,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     if (resumeSessionId) args.push("--resume", resumeSessionId);
     if (model) args.push("--model", model);
     if (mode) args.push("--mode", mode);
-    if (autoTrustEnabled) args.push("--yolo");
+    if (autoTrustEnabled) args.push("--trust");
     if (extraArgs.length > 0) args.push(...extraArgs);
     return args;
   };
