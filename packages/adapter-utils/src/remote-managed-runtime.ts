@@ -7,6 +7,7 @@ import {
   restoreWorkspaceFromSshExecution,
   syncDirectoryToSsh,
 } from "./ssh.js";
+import { isWindowsAbsolutePath } from "./shell-path.js";
 import type {
   SandboxAdditionalSource,
   SandboxManagedRuntimeAssetRestoreContext,
@@ -181,7 +182,7 @@ export async function prepareRemoteManagedRuntime(input: {
   for (const source of input.additionalSources ?? []) {
     const { localPath, projectId } = source;
     try {
-      if (!path.posix.isAbsolute(localPath)) {
+      if (!path.posix.isAbsolute(localPath) && !isWindowsAbsolutePath(localPath)) {
         throw new Error(`additional source localPath is not an absolute path: ${localPath}`);
       }
       if (

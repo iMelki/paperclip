@@ -183,4 +183,39 @@ describe("remote managed runtime", () => {
       localDir: "relative/referenced",
     }));
   });
+
+  it("stages a Windows-absolute additional project path", async () => {
+    const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-remote-runtime-windows-path-"));
+    cleanupDirs.push(rootDir);
+    const workspaceDir = path.join(rootDir, "workspace");
+    await mkdir(workspaceDir, { recursive: true });
+    const windowsPath = "C:\\workspace\\referenced-project";
+
+    const prepared = await prepareRemoteManagedRuntime({
+      spec: {
+        host: "127.0.0.1",
+        port: 2222,
+        username: "fixture",
+        remoteWorkspacePath: "/app",
+        remoteCwd: "/app",
+        privateKey: "PRIVATE KEY",
+        knownHosts: "KNOWN HOSTS",
+        strictHostKeyChecking: true,
+      },
+      runId: "run-windows-path",
+      adapterKey: "codex",
+      workspaceLocalDir: workspaceDir,
+      workspaceRemoteDir: "/app",
+      syncWorkspace: false,
+      additionalSources: [{ localPath: windowsPath, projectId: "windows-project" }],
+    });
+
+    expect(prepared.additionalSourceDirs).toEqual({
+      "windows-project": "/app/.paperclip-runtime/codex/project-windows-project",
+    });
+    expect(syncDirectoryToSsh).toHaveBeenCalledWith(expect.objectContaining({
+      localDir: windowsPath,
+      remoteDir: "/app/.paperclip-runtime/codex/project-windows-project",
+    }));
+  });
 });

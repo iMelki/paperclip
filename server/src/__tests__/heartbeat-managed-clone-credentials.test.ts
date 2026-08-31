@@ -4,7 +4,10 @@ import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
-import { ensureManagedProjectWorkspace } from "../services/heartbeat.ts";
+import {
+  deriveRepoNameFromRepoUrl,
+  ensureManagedProjectWorkspace,
+} from "../services/heartbeat.ts";
 import { buildGitAuthInvocation, GIT_CREDENTIAL_TOKEN_ENV_KEY } from "../services/git-credentials.ts";
 import { sanitizeRuntimeServiceBaseEnv } from "../services/workspace-runtime.ts";
 import { resolveManagedProjectWorkspaceDir } from "../home-paths.ts";
@@ -38,6 +41,14 @@ async function createLocalSourceRepo() {
 }
 
 describe("ensureManagedProjectWorkspace clone credentials", () => {
+  it.each([
+    ["C:\\Users\\operator\\workspace", null],
+    ["C:/Users/operator/workspace", null],
+    ["https://github.com/iMelki/paperclip.git", "paperclip"],
+  ])("derives a repo name only from a real repository URL: %s", (repoUrl, expected) => {
+    expect(deriveRepoNameFromRepoUrl(repoUrl)).toBe(expected);
+  });
+
   it("clones exactly as before when no auth provider is configured", async () => {
     const sourceRepo = await createLocalSourceRepo();
     try {
