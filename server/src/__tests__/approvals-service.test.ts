@@ -443,7 +443,16 @@ describe("approvalService resolution idempotency", () => {
     const result = await svc.approve("approval-1", "board", "ship it");
 
     expect(result.applied).toBe(true);
-    expect(mockAgentService.activatePendingApproval).toHaveBeenCalledWith("agent-1", approved.payload);
+    expect(mockAgentService.activatePendingApproval).toHaveBeenCalledWith(
+      "agent-1",
+      expect.objectContaining({
+        ...approved.payload,
+        permissions: {
+          canCreateAgents: false,
+          canCreateSkills: true,
+        },
+      }),
+    );
     expect(mockBudgetServiceFactory).toHaveBeenCalledWith(dbStub.transactionSource);
     expect(mockNotifyHireApproved).toHaveBeenCalledTimes(1);
   });
@@ -585,6 +594,39 @@ describe("approvalService resolution idempotency", () => {
         metadata: null,
       }),
     );
+  });
+
+  it("fails closed before creating an agent from a legacy standalone privilege escalation", async () => {
+    const approved = {
+      ...createApproval("approved"),
+      payload: {
+        name: "Hidden Delegation",
+        role: "engineer",
+        adapterType: "process",
+        permissions: {
+          canCreateAgents: true,
+        },
+      },
+    };
+    const dbStub = createDbStub(
+      [[{ ...createApproval("pending"), payload: approved.payload }]],
+      [approved],
+    );
+
+    await expect(
+      approvalService(dbStub.db as any).approve("approval-1", "board", "ship it"),
+    ).rejects.toMatchObject({
+      status: 422,
+      details: {
+        code: "hire_approval_permission_escalation",
+        path: "permissions.canCreateAgents",
+      },
+    });
+
+    expect(dbStub.isCommitted()).toBe(false);
+    expect(mockAgentService.create).not.toHaveBeenCalled();
+    expect(mockBudgetService.upsertPolicy).not.toHaveBeenCalled();
+    expect(mockNotifyHireApproved).not.toHaveBeenCalled();
   });
 
   it("fails closed when a concurrent decision wins before request-revision writes", async () => {

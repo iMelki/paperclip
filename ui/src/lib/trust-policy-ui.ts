@@ -27,7 +27,12 @@ export const TRUST_PRESET_DESCRIPTIONS: Record<TrustPreset, string> = {
 };
 
 export function getTrustPreset(permissions: Partial<AgentPermissions> | null | undefined): TrustPreset {
-  return permissions?.trustPreset === LOW_TRUST_REVIEW_PRESET ? LOW_TRUST_REVIEW_PRESET : DEFAULT_TRUST_PRESET;
+  const policy = permissions?.authorizationPolicy;
+  const lowTrust = permissions?.trustPreset === LOW_TRUST_REVIEW_PRESET
+    || policy?.trustPreset === LOW_TRUST_REVIEW_PRESET
+    || policy?.reviewPreset?.id === LOW_TRUST_REVIEW_PRESET
+    || policy?.trustBoundary?.mode === LOW_TRUST_REVIEW_PRESET;
+  return lowTrust ? LOW_TRUST_REVIEW_PRESET : DEFAULT_TRUST_PRESET;
 }
 
 export function buildLowTrustReviewPolicy(

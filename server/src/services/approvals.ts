@@ -6,6 +6,7 @@ import { redactCurrentUserText } from "../log-redaction.js";
 import { agentService } from "./agents.js";
 import { budgetService } from "./budgets.js";
 import {
+  enforceHireApprovalPermissionBoundary,
   prepareNormalizedHireApprovalPayloadForPersistence,
   restoreHireApprovalPayloadFromPendingAgent,
 } from "./hire-approval-payload.js";
@@ -130,8 +131,12 @@ export function approvalService(db: Db) {
       materializedPayload,
       options,
     );
-    return prepareNormalizedHireApprovalPayloadForPersistence(
+    const persistedPayload = prepareNormalizedHireApprovalPayloadForPersistence(
       normalizedPayload,
+      pendingAgent as unknown as Record<string, unknown> | null,
+    );
+    return enforceHireApprovalPermissionBoundary(
+      persistedPayload,
       pendingAgent as unknown as Record<string, unknown> | null,
     );
   }
@@ -159,7 +164,11 @@ export function approvalService(db: Db) {
       payload,
       pendingAgent as unknown as Record<string, unknown>,
     );
-    const activation = await scopedAgents.activatePendingApproval(agentId, restoredPayload);
+    const guardedPayload = enforceHireApprovalPermissionBoundary(
+      restoredPayload,
+      pendingAgent as unknown as Record<string, unknown>,
+    );
+    const activation = await scopedAgents.activatePendingApproval(agentId, guardedPayload);
     if (activation?.activated) return activation.agent.id;
     throw unprocessable("Hire approval could not activate the pending agent", {
       code: "hire_approval_activation_not_applied",
@@ -173,41 +182,46 @@ export function approvalService(db: Db) {
     approval: ApprovalRecord,
     payload: Record<string, unknown>,
   ) {
+    const guardedPayload = enforceHireApprovalPermissionBoundary(payload);
     const created = await agentService(source).create(approval.companyId, {
-      name: String(payload.name ?? "New Agent"),
-      role: String(payload.role ?? "general"),
-      title: typeof payload.title === "string" ? payload.title : null,
-      icon: typeof payload.icon === "string" ? payload.icon : null,
-      reportsTo: typeof payload.reportsTo === "string" ? payload.reportsTo : null,
-      capabilities: typeof payload.capabilities === "string" ? payload.capabilities : null,
-      adapterType: String(payload.adapterType ?? "process"),
+      name: String(guardedPayload.name ?? "New Agent"),
+      role: String(guardedPayload.role ?? "general"),
+      title: typeof guardedPayload.title === "string" ? guardedPayload.title : null,
+      icon: typeof guardedPayload.icon === "string" ? guardedPayload.icon : null,
+      reportsTo: typeof guardedPayload.reportsTo === "string" ? guardedPayload.reportsTo : null,
+      capabilities: typeof guardedPayload.capabilities === "string" ? guardedPayload.capabilities : null,
+      adapterType: String(guardedPayload.adapterType ?? "process"),
       adapterConfig:
-        typeof payload.adapterConfig === "object" && payload.adapterConfig !== null
-          ? (payload.adapterConfig as Record<string, unknown>)
+        typeof guardedPayload.adapterConfig === "object" && guardedPayload.adapterConfig !== null
+          ? (guardedPayload.adapterConfig as Record<string, unknown>)
           : {},
       runtimeConfig:
-        typeof payload.runtimeConfig === "object"
-          && payload.runtimeConfig !== null
-          && !Array.isArray(payload.runtimeConfig)
-          ? (payload.runtimeConfig as Record<string, unknown>)
+        typeof guardedPayload.runtimeConfig === "object"
+          && guardedPayload.runtimeConfig !== null
+          && !Array.isArray(guardedPayload.runtimeConfig)
+          ? (guardedPayload.runtimeConfig as Record<string, unknown>)
           : {},
       defaultEnvironmentId:
-        typeof payload.defaultEnvironmentId === "string" ? payload.defaultEnvironmentId : null,
+        typeof guardedPayload.defaultEnvironmentId === "string"
+          ? guardedPayload.defaultEnvironmentId
+          : null,
       budgetMonthlyCents:
-        typeof payload.budgetMonthlyCents === "number" ? payload.budgetMonthlyCents : 0,
+        typeof guardedPayload.budgetMonthlyCents === "number"
+          ? guardedPayload.budgetMonthlyCents
+          : 0,
       metadata:
-        typeof payload.metadata === "object"
-          && payload.metadata !== null
-          && !Array.isArray(payload.metadata)
-          ? (payload.metadata as Record<string, unknown>)
+        typeof guardedPayload.metadata === "object"
+          && guardedPayload.metadata !== null
+          && !Array.isArray(guardedPayload.metadata)
+          ? (guardedPayload.metadata as Record<string, unknown>)
           : null,
       status: "idle",
       spentMonthlyCents: 0,
       permissions:
-        typeof payload.permissions === "object"
-          && payload.permissions !== null
-          && !Array.isArray(payload.permissions)
-          ? (payload.permissions as Record<string, unknown>)
+        typeof guardedPayload.permissions === "object"
+          && guardedPayload.permissions !== null
+          && !Array.isArray(guardedPayload.permissions)
+          ? (guardedPayload.permissions as Record<string, unknown>)
           : undefined,
       lastHeartbeatAt: null,
     });

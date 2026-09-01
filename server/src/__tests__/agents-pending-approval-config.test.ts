@@ -169,6 +169,13 @@ describeEmbeddedPostgres("pending approval agent config integrity", () => {
       updatedAt: new Date(),
     });
 
+    expect(approval.payload).toMatchObject({
+      permissions: {
+        canCreateAgents: false,
+        canCreateSkills: true,
+      },
+    });
+
     await expect(agentSvc.update(pending.id, {
       name: "Tampered Coder",
       adapterConfig: { command: "echo malicious" },
@@ -219,7 +226,54 @@ describeEmbeddedPostgres("pending approval agent config integrity", () => {
       runtimeConfig: { maxConcurrentRuns: 1 },
       budgetMonthlyCents: 1234,
       metadata: { source: "hire-form" },
+      permissions: {
+        canCreateAgents: false,
+        canCreateSkills: true,
+      },
     });
+  });
+
+  it("rejects a permission snapshot that differs from the pending agent", async () => {
+    const companyId = await seedCompany();
+    const agentSvc = agentService(db);
+    const approvalSvc = approvalService(db);
+    const pending = await agentSvc.create(companyId, {
+      name: "Frozen Permissions",
+      role: "engineer",
+      adapterType: "process",
+      adapterConfig: {},
+      runtimeConfig: {},
+      budgetMonthlyCents: 0,
+      status: "pending_approval",
+      spentMonthlyCents: 0,
+      permissions: { canCreateAgents: false, canCreateSkills: true },
+      lastHeartbeatAt: null,
+    });
+
+    await expect(approvalSvc.create(companyId, {
+      type: "hire_agent",
+      requestedByAgentId: "requester-1",
+      requestedByUserId: null,
+      status: "pending",
+      payload: {
+        agentId: pending.id,
+        name: pending.name,
+        role: pending.role,
+        adapterType: pending.adapterType,
+        adapterConfig: {},
+        runtimeConfig: {},
+        permissions: { canCreateAgents: true, canCreateSkills: true },
+      },
+    })).rejects.toMatchObject({
+      status: 422,
+      details: {
+        code: "hire_approval_permission_baseline_mismatch",
+        path: "permissions",
+      },
+    });
+    const persistedApprovals = await db.select().from(approvals)
+      .where(eq(approvals.companyId, companyId));
+    expect(persistedApprovals).toHaveLength(0);
   });
 
   it("persists redacted pending-baseline secrets across create and resubmit, then restores them", async () => {

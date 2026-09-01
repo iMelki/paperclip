@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { REDACTED_EVENT_VALUE, redactEventPayload } from "../redaction.js";
 import {
+  enforceHireApprovalPermissionBoundary,
   prepareNormalizedHireApprovalPayloadForPersistence,
   redactHireApprovalConfigForPersistence,
   restoreHireApprovalPayloadFromPendingAgent,
@@ -8,6 +9,88 @@ import {
 import { secretService } from "../services/secrets.js";
 
 describe("hire approval payload custody", () => {
+  it("preserves a restrictive standalone CEO permission snapshot", () => {
+    const permissions = {
+      canCreateAgents: false,
+      canCreateSkills: false,
+      canAssignTasks: false,
+    };
+
+    const guarded = enforceHireApprovalPermissionBoundary({
+      name: "Restricted CEO",
+      role: "ceo",
+      permissions,
+    });
+
+    expect(guarded.permissions).toEqual(permissions);
+  });
+
+  it.each([
+    ["non-CEO agent creation", "engineer", { canCreateAgents: true }, "permissions.canCreateAgents"],
+    ["task assignment", "engineer", { canAssignTasks: true }, "permissions.canAssignTasks"],
+    ["future permission", "engineer", { futureAdmin: true }, "permissions.futureAdmin"],
+    [
+      "complex authorization policy",
+      "engineer",
+      { authorizationPolicy: { custom: true } },
+      "permissions.authorizationPolicy",
+    ],
+  ])("rejects standalone %s privilege input", (_case, role, permissions, path) => {
+    expect(() => enforceHireApprovalPermissionBoundary({ role, permissions })).toThrowError(
+      expect.objectContaining({
+        status: 422,
+        details: {
+          code: "hire_approval_permission_escalation",
+          path,
+          reason: expect.any(String),
+        },
+      }),
+    );
+  });
+
+  it("accepts an absent standalone permission snapshot", () => {
+    const payload = { name: "Default Agent", role: "engineer" };
+    expect(enforceHireApprovalPermissionBoundary(payload)).toEqual({
+      ...payload,
+      permissions: {
+        canCreateAgents: false,
+        canCreateSkills: true,
+      },
+    });
+  });
+
+  it("injects the normalized pending-agent permission baseline for board review", () => {
+    const guarded = enforceHireApprovalPermissionBoundary(
+      { agentId: "agent-1", name: "Pending Agent" },
+      { role: "engineer", permissions: { trustPreset: "low_trust_review" } },
+    );
+
+    expect(guarded.permissions).toEqual({
+      canCreateAgents: false,
+      canCreateSkills: true,
+      trustPreset: "low_trust_review",
+    });
+  });
+
+  it("rejects permission changes that differ from the frozen pending-agent baseline", () => {
+    expect(() => enforceHireApprovalPermissionBoundary(
+      {
+        agentId: "agent-1",
+        permissions: { canCreateAgents: true, canCreateSkills: true },
+      },
+      {
+        role: "engineer",
+        permissions: { canCreateAgents: false, canCreateSkills: true },
+      },
+    )).toThrowError(expect.objectContaining({
+      status: 422,
+      details: {
+        code: "hire_approval_permission_baseline_mismatch",
+        path: "permissions",
+      },
+    }));
+  });
+
   it("preserves only an exactly empty plain binding while redacting secret values", () => {
     const result = redactHireApprovalConfigForPersistence({
       env: {

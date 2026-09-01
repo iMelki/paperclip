@@ -3,6 +3,10 @@ import {
   REDACTED_EVENT_VALUE,
   redactEventPayload,
 } from "../redaction.js";
+import {
+  defaultPermissionsForRole,
+  normalizeAgentPermissions,
+} from "./agent-permissions.js";
 
 const APPROVED_AGENT_PATCH_FIELDS = [
   "name",
@@ -95,6 +99,129 @@ function jsonEquivalent(left: unknown, right: unknown): boolean {
     && leftKeys.every((key, index) => (
       key === rightKeys[index] && jsonEquivalent(left[key], right[key])
     ));
+}
+
+const STANDALONE_HIRE_PERMISSION_KEYS = new Set([
+  "canCreateAgents",
+  "canCreateSkills",
+  "canAssignTasks",
+  "trustPreset",
+]);
+
+function rejectHireApprovalPermission(path: string, reason: string): never {
+  throw unprocessable("Hire approval permissions exceed the standalone approval boundary", {
+    code: "hire_approval_permission_escalation",
+    path,
+    reason,
+  });
+}
+
+function validateStandaloneHirePermissions(
+  payload: Record<string, unknown>,
+): Record<string, unknown> {
+  const role = typeof payload.role === "string" ? payload.role : "general";
+  if (!Object.prototype.hasOwnProperty.call(payload, "permissions")) {
+    return defaultPermissionsForRole(role);
+  }
+  if (!isPlainRecord(payload.permissions)) {
+    rejectHireApprovalPermission("permissions", "permissions must be an object record");
+  }
+
+  const permissions = payload.permissions;
+  for (const key of Object.keys(permissions)) {
+    if (!STANDALONE_HIRE_PERMISSION_KEYS.has(key)) {
+      rejectHireApprovalPermission(
+        `permissions.${key}`,
+        "standalone approvals may contain only explicitly reviewed permission fields",
+      );
+    }
+  }
+
+  const defaults = defaultPermissionsForRole(role);
+  const canCreateAgents = permissions.canCreateAgents;
+  if (canCreateAgents !== undefined && typeof canCreateAgents !== "boolean") {
+    rejectHireApprovalPermission(
+      "permissions.canCreateAgents",
+      "canCreateAgents must be a boolean",
+    );
+  }
+  if (canCreateAgents === true && defaults.canCreateAgents !== true) {
+    rejectHireApprovalPermission(
+      "permissions.canCreateAgents",
+      "standalone approvals cannot grant agent-creation authority beyond the target role default",
+    );
+  }
+
+  const canCreateSkills = permissions.canCreateSkills;
+  if (canCreateSkills !== undefined && typeof canCreateSkills !== "boolean") {
+    rejectHireApprovalPermission(
+      "permissions.canCreateSkills",
+      "canCreateSkills must be a boolean",
+    );
+  }
+  if (canCreateSkills === true && defaults.canCreateSkills !== true) {
+    rejectHireApprovalPermission(
+      "permissions.canCreateSkills",
+      "standalone approvals cannot grant skill-creation authority beyond the target role default",
+    );
+  }
+
+  const canAssignTasks = permissions.canAssignTasks;
+  if (canAssignTasks !== undefined && canAssignTasks !== false) {
+    rejectHireApprovalPermission(
+      "permissions.canAssignTasks",
+      "standalone approvals cannot grant task-assignment authority",
+    );
+  }
+
+  const trustPreset = permissions.trustPreset;
+  if (
+    trustPreset !== undefined
+    && trustPreset !== "standard"
+    && trustPreset !== "low_trust_review"
+  ) {
+    rejectHireApprovalPermission(
+      "permissions.trustPreset",
+      "trustPreset must be standard or low_trust_review",
+    );
+  }
+
+  return normalizeAgentPermissions(permissions, role);
+}
+
+/**
+ * Keep permission changes inside the board-visible hire snapshot. Standalone
+ * approvals may only narrow role defaults. Pending-agent approvals must use
+ * the exact normalized permissions already frozen on the same-company agent.
+ */
+export function enforceHireApprovalPermissionBoundary(
+  payload: Record<string, unknown>,
+  pendingAgent?: Record<string, unknown> | null,
+): Record<string, unknown> {
+  if (!pendingAgent) {
+    return {
+      ...payload,
+      permissions: validateStandaloneHirePermissions(payload),
+    };
+  }
+
+  const role = typeof pendingAgent.role === "string"
+    ? pendingAgent.role
+    : typeof payload.role === "string"
+      ? payload.role
+      : "general";
+  const baseline = normalizeAgentPermissions(pendingAgent.permissions, role);
+  if (
+    Object.prototype.hasOwnProperty.call(payload, "permissions")
+    && !jsonEquivalent(payload.permissions, baseline)
+  ) {
+    throw unprocessable("Hire approval permissions differ from the pending-agent baseline", {
+      code: "hire_approval_permission_baseline_mismatch",
+      path: "permissions",
+    });
+  }
+
+  return { ...payload, permissions: baseline };
 }
 
 function assertRedactedValuesMatchPendingBaseline(

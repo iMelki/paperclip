@@ -32,10 +32,14 @@ const mockLogActivity = vi.hoisted(() => vi.fn());
 const mockAccessService = vi.hoisted(() => ({
   decide: vi.fn(),
 }));
+const mockAgentService = vi.hoisted(() => ({
+  getById: vi.fn(),
+}));
 
 function registerModuleMocks() {
   vi.doMock("../services/index.js", () => ({
     accessService: () => mockAccessService,
+    agentService: () => mockAgentService,
     approvalService: () => mockApprovalService,
     heartbeatService: () => mockHeartbeatService,
     issueApprovalService: () => mockIssueApprovalService,
@@ -135,6 +139,7 @@ describe("approval routes idempotent retries", () => {
     mockSecretService.normalizeHireApprovalPayloadForPersistence.mockReset();
     mockLogActivity.mockReset();
     mockAccessService.decide.mockReset();
+    mockAgentService.getById.mockReset();
     mockAccessService.decide.mockResolvedValue({
       allowed: true,
       action: "company_scope:read",
@@ -142,6 +147,7 @@ describe("approval routes idempotent retries", () => {
       explanation: "Allowed by test mock.",
     });
     mockHeartbeatService.wakeup.mockResolvedValue({ id: "wake-1" });
+    mockAgentService.getById.mockResolvedValue({ id: "agent-1", companyId: "company-1" });
     mockIssueApprovalService.listIssuesForApproval.mockResolvedValue([{ id: "issue-1" }]);
     mockApprovalService.prepareHirePayloadForPersistence.mockImplementation(
       async (_companyId: string, payload: Record<string, unknown>) => payload,
@@ -347,6 +353,7 @@ describe("approval routes idempotent retries", () => {
       .post("/api/companies/company-1/approvals")
       .send({
         type: "request_board_approval",
+        requestedByAgentId: "00000000-0000-4000-8000-000000000099",
         issueIds: ["00000000-0000-0000-0000-000000000001"],
         payload: { title: "Approve hosting spend" },
       });
@@ -361,6 +368,11 @@ describe("approval routes idempotent retries", () => {
     });
     expect(mockSecretService.normalizeHireApprovalPayloadForPersistence).not.toHaveBeenCalled();
     expect(mockApprovalService.prepareHirePayloadForPersistence).not.toHaveBeenCalled();
+    expect(mockApprovalService.create).toHaveBeenCalledWith(
+      "company-1",
+      expect.objectContaining({ requestedByAgentId: "agent-1" }),
+      { strictMode: false },
+    );
     expect(mockIssueApprovalService.linkManyForApproval).toHaveBeenCalledWith(
       "approval-1",
       ["00000000-0000-0000-0000-000000000001"],
@@ -375,6 +387,30 @@ describe("approval routes idempotent retries", () => {
         action: "approval.created",
       }),
     );
+  });
+
+  it("rejects a board-nominated requester from another company", async () => {
+    const requestedByAgentId = "00000000-0000-4000-8000-000000000099";
+    mockAgentService.getById.mockResolvedValue({
+      id: requestedByAgentId,
+      companyId: "company-2",
+    });
+
+    const res = await request(await createApp())
+      .post("/api/companies/company-1/approvals")
+      .send({
+        type: "request_board_approval",
+        requestedByAgentId,
+        payload: { title: "Cross-company requester" },
+      });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(422);
+    expect(res.body.details).toMatchObject({
+      code: "approval_requester_company_mismatch",
+      companyId: "company-1",
+      requestedByAgentId,
+    });
+    expect(mockApprovalService.create).not.toHaveBeenCalled();
   });
 
   it("routes generic hire creation through the centralized persistence guard", async () => {

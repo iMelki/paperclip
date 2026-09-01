@@ -13,10 +13,12 @@ import { logger } from "../middleware/logger.js";
 import {
   approvalService,
   accessService,
+  agentService,
   heartbeatService,
   issueApprovalService,
   logActivity,
 } from "../services/index.js";
+import { unprocessable } from "../errors.js";
 import { assertBoard, assertCompanyAccess, getAccessibleResource, getActorInfo, hasCompanyAccess } from "./authz.js";
 import { redactEventPayload } from "../redaction.js";
 import type { PluginWorkerManager } from "../services/plugin-worker-manager.js";
@@ -47,6 +49,7 @@ export function approvalRoutes(
   const router = Router();
   const svc = approvalService(db);
   const access = accessService(db);
+  const agentsSvc = agentService(db);
   const heartbeat = heartbeatService(db, {
     pluginWorkerManager: options.pluginWorkerManager,
   });
@@ -202,6 +205,26 @@ export function approvalRoutes(
     return false;
   }
 
+  async function resolveRequestedByAgentId(
+    req: Request,
+    companyId: string,
+    candidate: unknown,
+  ): Promise<string | null> {
+    const actor = getActorInfo(req);
+    if (actor.actorType === "agent") return actor.actorId;
+    if (typeof candidate !== "string") return null;
+
+    const requester = await agentsSvc.getById(candidate);
+    if (!requester || requester.companyId !== companyId) {
+      throw unprocessable("Approval requester must be an agent in the same company", {
+        code: "approval_requester_company_mismatch",
+        companyId,
+        requestedByAgentId: candidate,
+      });
+    }
+    return requester.id;
+  }
+
   router.get("/companies/:companyId/approvals", async (req, res) => {
     const companyId = req.params.companyId as string;
     assertCompanyAccess(req, companyId);
@@ -240,14 +263,18 @@ export function approvalRoutes(
         : approvalInput.payload;
 
     const actor = getActorInfo(req);
+    const requestedByAgentId = await resolveRequestedByAgentId(
+      req,
+      companyId,
+      approvalInput.requestedByAgentId,
+    );
     const approval = await svc.create(
       companyId,
       {
         ...approvalInput,
         payload: normalizedPayload,
         requestedByUserId: actor.actorType === "user" ? actor.actorId : null,
-        requestedByAgentId:
-          approvalInput.requestedByAgentId ?? (actor.actorType === "agent" ? actor.actorId : null),
+        requestedByAgentId,
         status: "pending",
         decisionNote: null,
         decidedByUserId: null,

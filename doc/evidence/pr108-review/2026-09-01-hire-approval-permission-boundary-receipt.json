@@ -1,0 +1,33 @@
+{
+  "schema": "paperclip-pr-review-receipt/v1",
+  "date": "2026-09-01",
+  "pullRequest": 108,
+  "baseBranch": "dev",
+  "reviewedBranchHeadBeforeFixes": "35313f1e97dc76ad528016982fff48ae43cb1e58",
+  "mutationIntent": "source-tests-docs-only",
+  "finalBaselines": {
+    "server/src/routes/approvals.ts": "291190f864cf45e1ea1023a7e025daee08316315",
+    "server/src/services/approvals.ts": "50282115f5d6f4325a722e0e02c5fbeed56be6c1",
+    "server/src/services/hire-approval-payload.ts": "9fd7ed70fc30a47ebbebfcf6bf4b335606d091b1",
+    "ui/src/components/ApprovalPayload.tsx": "9e7e9b30552b75f850ceef5ad4c2a41d929be6df",
+    "ui/src/components/HirePermissionSummary.tsx": "85750d4f3b7931c4f420e6f21ba99d25166b8d4e",
+    "ui/src/lib/trust-policy-ui.ts": "b391e2c32cf97b198c6168cebdf74ad136fa5bdf"
+  },
+  "summary": {
+    "finding": "enforce-hire-approval-permission-boundary-and-requester-company",
+    "focusedNegativeProofs": 1,
+    "focusedRestoredPasses": 68,
+    "serverTestsPassed": 68,
+    "uiTestsPassed": 15,
+    "typechecks": "clean",
+    "tokenGates": "clean"
+  },
+  "gateEvidence": [
+    {
+      "gate": "hire-approval-privilege-escalation-guard",
+      "logFile": "doc/evidence/pr108-review/2026-09-01-hire-permission-negative.log",
+      "expectedExitCode": 1,
+      "observedReason": "Without the boundary check, approvalService.approve resolved creating an agent with canCreateAgents=true on an engineer role instead of rejecting with 422 hire_approval_permission_escalation."
+    }
+  ]
+}
