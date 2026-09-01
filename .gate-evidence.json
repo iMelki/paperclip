@@ -132,13 +132,13 @@
     {
       "id": "deterministic-pre-push-selector",
       "path": "scripts/pre-push-test-selection.mjs",
-      "description": "Selects exact changed and deterministic sibling suites, routes them by real runner, assigns non-runnable deletions to hosted CI, and fails closed on uncovered live production, invalid paths, or symlink traversal.",
+      "description": "Selects exact changed, deterministic sibling, and narrowly declared contract suites; routes them by real runner; assigns non-runnable deletions to hosted CI; and fails closed on uncovered live production, missing declared tests, invalid paths, or symlink traversal.",
       "negativeFixture": "scripts/pre-push-test-selection.test.mjs",
       "observedFailure": {
-        "date": "2026-08-16",
-        "command": "node --test scripts/pre-push-test-selection.test.mjs",
-        "reason": "The committed fixture supplied uncovered live production, an untracked sibling, non-array changed-path inputs, and empty/escaping/symlink paths; each result named its exact coverage or integrity error instead of returning an empty passing plan. The unused standalone selector CLI was removed so pushed-HEAD membership cannot be caller-supplied.",
-        "restoredPass": "Restored tracked Node/Vitest sibling fixtures selected only their named suites; direct changed-file dry runs loaded the exact HEAD tree, and 15/15 selector proofs passed with no skips."
+        "date": "2026-09-01",
+        "command": "git push --set-upstream origin agent/codex/47-windows-path-hooks-and-review-governance-20260831; node --test scripts/pre-push-test-selection.test.mjs; node scripts/run-pre-push-tests.mjs --repo-root . --dry-run --changed-file <each of the five non-sibling production paths> --target-ref refs/heads/topic",
+        "reason": "The real pre-push caller rejected five changed production files because their higher-level contract suites were not same-stem siblings. The new committed fixture then omitted the declared http-logger contract test and produced the exact 'declared deterministic test is not a regular file' selection error. Existing fixtures still reject uncovered production, untracked tests, malformed inputs, and escaping or linked paths.",
+        "restoredPass": "With exact source-to-test declarations restored, the selector chose only the existing generator, HTTP redaction, and onboarding persistence contract suites; its caller-shaped dry run reported zero uncovered files and zero selection errors. The selector suite passed 17/17 with no skips."
       }
     },
     {

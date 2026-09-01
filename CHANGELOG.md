@@ -4,6 +4,13 @@ All notable changes to this repository should be recorded here.
 
 ## Unreleased
 
+- Hardened deterministic pre-push coverage for production code exercised by
+  intentionally higher-level contract suites. Five exact source-to-test
+  declarations now reuse the PR #45 generator, HTTP-log redaction, and
+  onboarding persistence suites without restoring an unbounded import-graph
+  scan. A missing declared test fails closed by exact source and test path; the
+  selector proofs pass 17/17 and the selected contract suites pass 13/13.
+
 - **[#80]** Turned the four preserved PR #45 WIP commits into a reproducible
   no-loss disposition manifest: 162 commit/path rows, 131 unique historical
   paths, and 3,032 unified-zero hunks with zero unowned or unknown rows. Exact

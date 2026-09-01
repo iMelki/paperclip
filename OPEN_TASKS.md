@@ -32,6 +32,13 @@ This file is the durable local index for active `paperclip` issues.
     workflow. The merge is an ancestor of `origin/dev`, so #67 is no longer an
     active bootstrap task.
 
+- [#73 - Push lockout: the exhaustive pre-push gate rejected every push](https://github.com/iMelki/paperclip/issues/73) — **closed 2026-08-20 after PR #66 exact caller proof**
+  - Commit `43011d50` changed the planner from the stale remote-topic baseline
+    to the push destination's advertised `dev` object. PR #78 merged as
+    `9983a44a`; the repaired PR #66 head then passed workflow `32092799583`
+    and merged as `90bd179dd`. Current GitHub state is closed, so this is not
+    an active task.
+
 - [#70 - Test fixtures are not hermetic against host git config (insteadOf + autocrlf)](https://github.com/iMelki/paperclip/issues/70) — **closed 2026-08-18 by PR #69**
   - PR #69 squash-merged into `dev` at `987700f91` (PR head `670447a38`) with
     the full hosted matrix green and the exact-head CodeRabbit finding
@@ -267,21 +274,19 @@ This file is the durable local index for active `paperclip` issues.
     forwarding syntax to `--source` (an extra `--` is forwarded literally and
     produces the CLI's usage error). Package typecheck passed inside the
     reviewed task-owned runner; earlier first-pass typecheck evidence stays
-    superseded. Remaining
-    residuals keep this issue open: `remote-managed-runtime.ts:184` posix-only `localPath` validation (fails
-    2 Windows-host tests at the `dev` tip and blocks pre-commit
-    `related`-suite expansions that select that suite — the #47 phenomenon
-    class), and broader enforcement that prevents new bare-shell/bare-tool
-    spawns. ACPX/Gemini interpolation remains separately tracked in #100 and is
-    intentionally outside this change.
+    superseded. The `remote-managed-runtime.ts` host-local `localPath` check now
+    accepts both POSIX and Windows absolute paths, and its focused Windows tests
+    pass. The SSH-specific AST ratchet prevents new shell-backed `command -v`
+    or `which` lookups across the supported local shell/argv forms. ACPX/Gemini
+    interpolation remains separately tracked in #100 and is intentionally
+    outside this SSH-specific change. Exact-head hosted proof remains pending.
 
 - [#47 - dev tip fails 2 Windows path tests — hook rejects all commits](https://github.com/iMelki/paperclip/issues/47)
-  - Open. The same phenomenon recurred 2026-08-18 during the PR #69 repair
-    commit: the pre-commit `related`-suite expansion selected
-    `remote-managed-runtime.test.ts`, which fails 2 Windows-host tests at the
-    `dev` tip (tracked as a #63 residual). The commit used the hook's
-    documented `PAPERCLIP_PRECOMMIT_RELATED_CAP` knob with full attribution;
-    receipt: `doc/evidence/precommit-related-isolation/2026-08-18-pr69-receipt.json`.
+  - Local repair complete. `remote-managed-runtime.ts` now treats its
+    `localPath` as a host path and accepts either POSIX or Windows absolute
+    forms while retaining POSIX remote sandbox paths. The two formerly failing
+    Windows cases pass, the full related commit hook passed, and the next
+    remaining gate is a fresh exact-head pre-push/hosted-CI run.
 
 - [#62 - Windows: symlinks do not survive the tar create/extract round-trip in runtime asset sync](https://github.com/iMelki/paperclip/issues/62)
   - Open remote tar-transport follow-up. Not addressed by PR #66/#69; keep with
@@ -291,32 +296,6 @@ This file is the durable local index for active `paperclip` issues.
   - Open. The environment transport remains bounded per the PR #66 changelog
     entry; reducing or replacing the oversized ambient-env payload (and its
     unrelated-secret exposure) remains this issue's scope.
-
-- [#73 - Push lockout: the exhaustive pre-push gate rejects every push](https://github.com/iMelki/paperclip/issues/73) — **reopened after a real existing-topic push**
-  - PR #78 replaced the uncapped related sweep and merged as `9983a44a`, but a
-    PR #66 push after merging that `dev` tip exposed one uncovered existing-ref
-    path: the planner diffed the old remote topic tip to `HEAD`, re-selected five
-    already-published `dev` files, and rejected them for missing siblings.
-  - Commit `43011d50` resolves advertised `dev` for every content update,
-    requires it as an ancestor, and tests the final `dev..HEAD` tree while the
-    secret scanner keeps the exact outgoing topic range. Deliberate old-baseline
-    proof failed for A versus C, focused planner/secret tests passed 22/22, and
-    the real hook passed 31-project typecheck plus 35 Node and ten isolated
-    Vitest suites. The first exact-head hosted matrix then exposed a latent
-    streamed-proxy `ERR_STREAM_WRITE_AFTER_END` race; the socket-state guard,
-    owning suite, and adapter-utils typecheck are green locally. A hosted matrix
-    for the repaired head confirmed that fix and exposed one stale OpenCode
-    startup-error assertion; its focused repair is green. The next hosted matrix
-    passed, and genuine exact-head CodeRabbit review found one bounded
-    test-helper child-custody gap. Its first repair was green on Windows but the
-    hosted matrix caught a POSIX-only direct `.mjs` fixture `EACCES`; the fixture
-    now uses the current Node executable explicitly. Those closing gates have
-    since completed for real: the PR #66 head `aeea981d2` passed the 24-check
-    hosted matrix plus expected neutral and merged as `90bd179dd`
-    (2026-08-18T02:51Z), and the PR #69 pushes `ebc5f66c5..bbb37f640` (4.9 min)
-    and `bbb37f640..670447a38` (3.7 min) passed the full hook end to end before
-    merging as `987700f91`. Read this issue's own acceptance criteria back
-    before closing it.
 
 - [#77 - check-no-git-push extension allowlist is fail-open by omission](https://github.com/iMelki/paperclip/issues/77) — **local repair and proof complete**
   - The scanner now rejects every undeclared file type under its required roots.

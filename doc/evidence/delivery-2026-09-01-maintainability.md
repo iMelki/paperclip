@@ -34,6 +34,8 @@ This receipt records the final working-tree bytes before the real commit hook.
 | `scripts/generate-pr45-disposition-manifest.test.mjs` | 0/0 | 82/76 |
 | `scripts/lib/pr45-disposition-policy.mjs` | 0/0 | 131/126 |
 | `scripts/lib/unified-zero-patch.mjs` | 0/0 | 70/65 |
+| `scripts/pre-push-test-selection.mjs` | 311/286 | 368/335 |
+| `scripts/pre-push-test-selection.test.mjs` | 260/241 | 298/277 |
 | `server/src/__tests__/agents-pending-approval-config.test.ts` | 159/146 | 639/601 |
 | `server/src/__tests__/approval-routes-idempotency.test.ts` | 449/407 | 561/513 |
 | `server/src/__tests__/approvals-service.test.ts` | 169/140 | 640/573 |
@@ -72,6 +74,7 @@ This receipt records the final working-tree bytes before the real commit hook.
 | Approval service | Factory 279 to 423 source lines; `createAgentFromApprovedHire` 47, proxy 20, depth 3. | The outer factory remains a service container. Secret custody, field mapping, transaction phases, reconciliation, and post-commit notification helpers are separated enough to preserve one atomic Drizzle transaction. #106 owns a later workflow extraction. |
 | Shell-free command resolver | New `resolveCommandPath` 43 source lines, proxy 18, depth 3. | Cohesive platform lookup primitive using Node built-ins only. `server-utils.ts` shrinks 44 physical lines and `ssh.ts` shrinks 13. This corrects the earlier #63 receipt's decision-proxy undercount. |
 | PR #45 disposition generator | 513 physical but 488 source lines; `exactResultEvidence` 55/proxy 22/depth 4, `buildCommitRecord` 64, `buildManifest` 69, `validateManifest` 68/proxy 24/depth 4. | No >500-source file exception is required. Patch parsing and disposition policy are already extracted; keeping the orchestration together makes the 3,032-hunk custody result reproducible and conservative. |
+| Deterministic pre-push selector | 368 physical/335 source lines; declared mappings are data-only and the new helper is 18 source lines with depth 2. | The selector remains below the 500-line production target. Five exact source-to-test declarations reuse existing contract suites and avoid restoring the unbounded import-graph scan. Missing declared tests fail closed by path and reason. |
 | Error handler | `errorHandler` 64 to 65 source lines, proxy 27 to 28, depth 5. | Independent complexity review accepted the one call to the extracted structured-log sanitizer; DB-param and recursive redaction logic are outside the handler. |
 | Pending-approval DB tests | File 601 source lines; largest real `it` bodies 99 and 86. | Below the 700-line test target. Describe callbacks are declarative test registration. Repeated setup stays local because each transaction/race fixture deliberately changes connection or failure boundaries; extracting one generic builder would obscure the negative control. |
 
@@ -103,6 +106,12 @@ retirement.
   for the intended reason.
 - #80 disposition generator: 3/3 pass plus reproducible `--check`; stale output
   failed for the intended reason.
+- Deterministic pre-push selector: the real push first failed closed on five
+  production paths whose existing contract tests were not same-stem siblings.
+  The committed missing-declaration fixture names the absent mapped test; after
+  restoration, 17/17 selector proofs and the five-path caller-shaped dry run
+  passed with zero uncovered files or selection errors. The three selected
+  contract files then passed 13/13 through their real Node/Vitest runners.
 - #87 final focused set: 21/21 pass. Deliberately testing the Wizard draft
   instead of the effective preserved config failed 2/7 for the exact hidden
   command/cwd/env mismatch before byte restoration. The final task-owned UI
