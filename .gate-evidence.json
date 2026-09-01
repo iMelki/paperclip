@@ -379,10 +379,10 @@
       "id": "ssh-command-lookup-shell-free-ratchet",
       "path": "packages/adapter-utils/scripts/ssh-command-lookup-gate.mjs",
       "description": "Rejects shell-executed command-v/which executable discovery in the SSH adapter while preserving shell-free PATH/PATHEXT resolution and passive text.",
-      "negativeFixture": "packages/adapter-utils/test-fixtures/unsafe-ssh-command-lookup.ts.txt",
+      "negativeFixture": "tests/fixtures/ssh-command-lookup/unsafe-ssh-command-lookup.ts.txt",
       "observedFailure": {
         "date": "2026-09-01",
-        "command": "pnpm --filter @paperclipai/adapter-utils check:ssh-command-lookup --source test-fixtures/unsafe-ssh-command-lookup.ts.txt; repeat with unsafe-import-aliased-ssh-command-lookup.ts.txt; then run the package caller with no --source",
+        "command": "pnpm --filter @paperclipai/adapter-utils check:ssh-command-lookup --source ../../tests/fixtures/ssh-command-lookup/unsafe-ssh-command-lookup.ts.txt; repeat with unsafe-import-aliased-ssh-command-lookup.ts.txt; then run the package caller with no --source",
         "breakApplied": "Readback asserted the production default src/ssh.ts contained a deliberate call through its existing spawn import to /bin/sh with interpolated command-v argv. Its baseline SHA-256 was 8a45668251f70ffdb9d51586877ed6cb894f3e2b7686d5491c3e205acd08ac69. Separate fixtures asserted the aliased-argv and named-import `spawn as run` forms plus zsh -ec around an interpolated which lookup.",
         "reason": "The exact no-argument package typecheck caller exited 1 before tsc and named the production ssh.ts /bin/sh interpolation at line 23. Fixture callers independently exited 1 for /bin/sh, /usr/bin/bash alias, and /usr/bin/zsh composite-flag/which forms. An attempted pnpm form with an extra literal `--` failed at usage exit 2, so the receipt records the verified `--source` forwarding contract instead of mislabeling a CLI error as a safety finding.",
         "restoredPass": "Removing only the deliberate production break restored ssh.ts exactly to SHA-256 8a45668251f70ffdb9d51586877ed6cb894f3e2b7686d5491c3e205acd08ac69; the no-argument default gate then exited 0 with SSH_COMMAND_LOOKUP_SAFE. The passive fixture also passed and the broadened command-path/ratchet suites passed 17/17. The identical full typecheck pass, real pre-push, hosted CI, and exact-head review remain pending."

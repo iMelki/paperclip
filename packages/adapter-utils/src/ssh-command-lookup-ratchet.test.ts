@@ -6,16 +6,28 @@ const gatePath = fileURLToPath(
   new URL("../scripts/ssh-command-lookup-gate.mjs", import.meta.url),
 );
 const unsafeFixturePath = fileURLToPath(
-  new URL("../test-fixtures/unsafe-ssh-command-lookup.ts.txt", import.meta.url),
+  new URL(
+    "../../../tests/fixtures/ssh-command-lookup/unsafe-ssh-command-lookup.ts.txt",
+    import.meta.url,
+  ),
 );
 const passiveFixturePath = fileURLToPath(
-  new URL("../test-fixtures/passive-ssh-command-description.ts.txt", import.meta.url),
+  new URL(
+    "../../../tests/fixtures/ssh-command-lookup/passive-ssh-command-description.ts.txt",
+    import.meta.url,
+  ),
 );
 const importAliasedFixturePath = fileURLToPath(
-  new URL("../test-fixtures/unsafe-import-aliased-ssh-command-lookup.ts.txt", import.meta.url),
+  new URL(
+    "../../../tests/fixtures/ssh-command-lookup/unsafe-import-aliased-ssh-command-lookup.ts.txt",
+    import.meta.url,
+  ),
 );
 const zshWhichFixturePath = fileURLToPath(
-  new URL("../test-fixtures/unsafe-zsh-which-command-lookup.ts.txt", import.meta.url),
+  new URL(
+    "../../../tests/fixtures/ssh-command-lookup/unsafe-zsh-which-command-lookup.ts.txt",
+    import.meta.url,
+  ),
 );
 
 function invokeExactGate(sourcePath?: string) {

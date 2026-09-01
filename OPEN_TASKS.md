@@ -11,6 +11,27 @@ This file is the durable local index for active `paperclip` issues.
 
 ## Recently Closed Issues
 
+- [#57 - Mixed-separator Windows paths broke tar sandbox commands](https://github.com/iMelki/paperclip/issues/57) — **closed 2026-09-01 after exact ancestry and current-tree audit**
+  - The original diagnosis was too broad: the `ce906e60f` baseline already
+    handled mixed separators in `shellQuotePath`. The observed failure was
+    resolved by PR #66's removal of raw callback interpolation and PR #69's
+    exported, hermetically tested Windows path helpers. Both merge commits are
+    ancestors of `origin/dev`; the current delivery branch does not change the
+    relevant files.
+
+- [#58 - Windows command-managed-runtime tests hardcoded `/bin/sh`](https://github.com/iMelki/paperclip/issues/58) — **closed 2026-09-01 by PR #66/#69 evidence**
+  - PR #66 repaired the two exact `/bin/sh` call sites. PR #69's final receipt
+    records the command-managed-runtime suite at 23/23 with the exported shell
+    resolver. Both fixes are ancestors of `origin/dev`; no remaining #58
+    source delta exists on the current delivery branch.
+
+- [#67 - PR CI did not validate the `dev` target](https://github.com/iMelki/paperclip/issues/67) — **closed 2026-09-01 after PR #78 and repeated hosted proof**
+  - PR #78 made `.github/workflows/pr.yml` cover pull requests into both
+    `master` and `dev`, prohibited `push`, and added a negative-proof policy
+    gate. PRs #78, #79, #81, #83, and #99 each completed the 22-check PR
+    workflow. The merge is an ancestor of `origin/dev`, so #67 is no longer an
+    active bootstrap task.
+
 - [#70 - Test fixtures are not hermetic against host git config (insteadOf + autocrlf)](https://github.com/iMelki/paperclip/issues/70) — **closed 2026-08-18 by PR #69**
   - PR #69 squash-merged into `dev` at `987700f91` (PR head `670447a38`) with
     the full hosted matrix green and the exact-head CodeRabbit finding
@@ -312,13 +333,6 @@ This file is the durable local index for active `paperclip` issues.
     quality gate remains explicitly disabled until React Doctor is declared in
     the manifest/lockfile and receives license, dependency-closure,
     offline/Windows/Linux, and authenticated-consumer qualification evidence.
-
-- [#67 - CI never validates dev: pr.yml is scoped to PRs into master](https://github.com/iMelki/paperclip/issues/67)
-  - Bootstrap prepared: PR CI covers `master` and `dev`, never `push: dev`, and a
-    static gate fails if either branch disappears or a push event is added. The
-    bootstrap PR launched and completed the full hosted matrix on two repaired
-    heads. The policy now mechanically requires the stable-runner regression;
-    read back the final repaired head before closing this issue.
 
 - [#68 - Deep gitleaks history scan fails; no pushed-range mode](https://github.com/iMelki/paperclip/issues/68)
   - `verify-gitleaks.mjs --history` exits 2 with 24 pre-existing findings across 7837

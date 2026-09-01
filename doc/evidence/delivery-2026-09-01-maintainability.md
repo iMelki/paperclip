@@ -24,12 +24,12 @@ This receipt records the final working-tree bytes before the real commit hook.
 | `packages/adapter-utils/src/command-path.test.ts` | 0/0 | 241/212 |
 | `packages/adapter-utils/src/command-path.ts` | 0/0 | 109/98 |
 | `packages/adapter-utils/src/server-utils.ts` | 3,533/3,265 | 3,489/3,227 |
-| `packages/adapter-utils/src/ssh-command-lookup-ratchet.test.ts` | 0/0 | 78/66 |
+| `packages/adapter-utils/src/ssh-command-lookup-ratchet.test.ts` | 0/0 | 90/78 |
 | `packages/adapter-utils/src/ssh.ts` | 1,873/1,731 | 1,860/1,719 |
-| `packages/adapter-utils/test-fixtures/passive-ssh-command-description.ts.txt` | 0/0 | 6/5 |
-| `packages/adapter-utils/test-fixtures/unsafe-import-aliased-ssh-command-lookup.ts.txt` | 0/0 | 5/4 |
-| `packages/adapter-utils/test-fixtures/unsafe-ssh-command-lookup.ts.txt` | 0/0 | 7/6 |
-| `packages/adapter-utils/test-fixtures/unsafe-zsh-which-command-lookup.ts.txt` | 0/0 | 7/5 |
+| `tests/fixtures/ssh-command-lookup/passive-ssh-command-description.ts.txt` | 0/0 | 6/5 |
+| `tests/fixtures/ssh-command-lookup/unsafe-import-aliased-ssh-command-lookup.ts.txt` | 0/0 | 5/4 |
+| `tests/fixtures/ssh-command-lookup/unsafe-ssh-command-lookup.ts.txt` | 0/0 | 7/6 |
+| `tests/fixtures/ssh-command-lookup/unsafe-zsh-which-command-lookup.ts.txt` | 0/0 | 7/5 |
 | `scripts/generate-pr45-disposition-manifest.mjs` | 0/0 | 513/488 |
 | `scripts/generate-pr45-disposition-manifest.test.mjs` | 0/0 | 82/76 |
 | `scripts/lib/pr45-disposition-policy.mjs` | 0/0 | 131/126 |

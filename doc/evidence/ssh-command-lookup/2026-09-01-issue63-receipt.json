@@ -65,8 +65,8 @@
       {
         "path": "packages/adapter-utils/src/ssh-command-lookup-ratchet.test.ts",
         "before": 0,
-        "after": 78,
-        "delta": 78,
+        "after": 90,
+        "delta": 90,
         "decision": "Invokes the real CLI gate for both the canonical source and the unsafe repository fixture."
       },
       {
@@ -77,27 +77,27 @@
         "largestFunction": "findUnsafeSshCommandLookups, 44 physical lines including its signature"
       },
       {
-        "path": "packages/adapter-utils/test-fixtures/unsafe-ssh-command-lookup.ts.txt",
+        "path": "tests/fixtures/ssh-command-lookup/unsafe-ssh-command-lookup.ts.txt",
         "before": 0,
         "after": 7,
         "delta": 7
       },
       {
-        "path": "packages/adapter-utils/test-fixtures/passive-ssh-command-description.ts.txt",
+        "path": "tests/fixtures/ssh-command-lookup/passive-ssh-command-description.ts.txt",
         "before": 0,
         "after": 6,
         "delta": 6,
         "decision": "Proves the ratchet does not treat a passive description call as process execution."
       },
       {
-        "path": "packages/adapter-utils/test-fixtures/unsafe-import-aliased-ssh-command-lookup.ts.txt",
+        "path": "tests/fixtures/ssh-command-lookup/unsafe-import-aliased-ssh-command-lookup.ts.txt",
         "before": 0,
         "after": 5,
         "delta": 5,
         "decision": "Proves a trusted named import such as spawn as run cannot bypass the launcher check."
       },
       {
-        "path": "packages/adapter-utils/test-fixtures/unsafe-zsh-which-command-lookup.ts.txt",
+        "path": "tests/fixtures/ssh-command-lookup/unsafe-zsh-which-command-lookup.ts.txt",
         "before": 0,
         "after": 7,
         "delta": 7,
@@ -137,22 +137,22 @@
         "exitCode": 1
       },
       {
-        "command": "pnpm --filter @paperclipai/adapter-utils check:ssh-command-lookup --source test-fixtures/unsafe-ssh-command-lookup.ts.txt",
+        "command": "pnpm --filter @paperclipai/adapter-utils check:ssh-command-lookup --source ../../tests/fixtures/ssh-command-lookup/unsafe-ssh-command-lookup.ts.txt",
         "result": "exit 1; SSH_COMMAND_LOOKUP_UNSAFE named the /bin/sh interpolation at line 7",
         "exitCode": 1
       },
       {
-        "command": "pnpm --filter @paperclipai/adapter-utils check:ssh-command-lookup --source test-fixtures/passive-ssh-command-description.ts.txt",
+        "command": "pnpm --filter @paperclipai/adapter-utils check:ssh-command-lookup --source ../../tests/fixtures/ssh-command-lookup/passive-ssh-command-description.ts.txt",
         "result": "exit 0; SSH_COMMAND_LOOKUP_SAFE",
         "exitCode": 0
       },
       {
-        "command": "pnpm --filter @paperclipai/adapter-utils check:ssh-command-lookup --source test-fixtures/unsafe-import-aliased-ssh-command-lookup.ts.txt",
+        "command": "pnpm --filter @paperclipai/adapter-utils check:ssh-command-lookup --source ../../tests/fixtures/ssh-command-lookup/unsafe-import-aliased-ssh-command-lookup.ts.txt",
         "result": "exit 1; SSH_COMMAND_LOOKUP_UNSAFE named the /usr/bin/bash interpolation at line 5",
         "exitCode": 1
       },
       {
-        "command": "node packages/adapter-utils/scripts/ssh-command-lookup-gate.mjs --source packages/adapter-utils/test-fixtures/unsafe-zsh-which-command-lookup.ts.txt",
+        "command": "node packages/adapter-utils/scripts/ssh-command-lookup-gate.mjs --source tests/fixtures/ssh-command-lookup/unsafe-zsh-which-command-lookup.ts.txt",
         "result": "exit 1; SSH_COMMAND_LOOKUP_UNSAFE named the /usr/bin/zsh interpolation at line 7",
         "exitCode": 1
       },
@@ -184,10 +184,10 @@
     ],
     "required": [
       "pnpm --filter @paperclipai/adapter-utils check:ssh-command-lookup",
-      "pnpm --filter @paperclipai/adapter-utils check:ssh-command-lookup --source test-fixtures/unsafe-ssh-command-lookup.ts.txt (must exit 1 for SSH_COMMAND_LOOKUP_UNSAFE)",
-      "pnpm --filter @paperclipai/adapter-utils check:ssh-command-lookup --source test-fixtures/passive-ssh-command-description.ts.txt (must exit 0)",
-      "pnpm --filter @paperclipai/adapter-utils check:ssh-command-lookup --source test-fixtures/unsafe-import-aliased-ssh-command-lookup.ts.txt (must exit 1 for the /usr/bin/bash interpolation finding)",
-      "pnpm --filter @paperclipai/adapter-utils check:ssh-command-lookup --source test-fixtures/unsafe-zsh-which-command-lookup.ts.txt (must exit 1 for the /usr/bin/zsh which interpolation finding)",
+      "pnpm --filter @paperclipai/adapter-utils check:ssh-command-lookup --source ../../tests/fixtures/ssh-command-lookup/unsafe-ssh-command-lookup.ts.txt (must exit 1 for SSH_COMMAND_LOOKUP_UNSAFE)",
+      "pnpm --filter @paperclipai/adapter-utils check:ssh-command-lookup --source ../../tests/fixtures/ssh-command-lookup/passive-ssh-command-description.ts.txt (must exit 0)",
+      "pnpm --filter @paperclipai/adapter-utils check:ssh-command-lookup --source ../../tests/fixtures/ssh-command-lookup/unsafe-import-aliased-ssh-command-lookup.ts.txt (must exit 1 for the /usr/bin/bash interpolation finding)",
+      "pnpm --filter @paperclipai/adapter-utils check:ssh-command-lookup --source ../../tests/fixtures/ssh-command-lookup/unsafe-zsh-which-command-lookup.ts.txt (must exit 1 for the /usr/bin/zsh which interpolation finding)",
       "node scripts/run-vitest-stable.mjs --files packages/adapter-utils/src/command-path.test.ts packages/adapter-utils/src/ssh-command-lookup-ratchet.test.ts",
       "pnpm --filter @paperclipai/adapter-utils typecheck"
     ]
@@ -200,18 +200,43 @@
       "tracked-file git diff --check reported no whitespace errors",
       "new command-path, test, and gate files contain no lines over 120 characters"
     ],
-    "warning": "Focused executable validation is current. Package typecheck, real pre-push, hosted CI, and exact-head review remain pending."
+    "warning": "Focused executable validation and the staged runtime-source scan are current. Hosted CI and exact-head automated review remain pending."
   },
   "admission": {
     "sDriveFreeBytesBeforeFinalValidation": 9889394688,
     "requiredMinimumBytes": 8579197174,
     "latestSourceStaticObservationFreeBytes": 10677055488,
     "historicalResult": "admitted for the superseded first pass",
-    "currentResult": "open for bounded focused tests with C:-resident scratch; builds, hooks, pushes, and services remain held"
+    "currentResult": "bounded correction validation passed in the identity-bound runner with C:-resident private receipts and S:-volume cancellation enabled"
+  },
+  "prePushScanIntegration": {
+    "failedAttempt": {
+      "log": ".git/paperclip-gate-logs/pre-push/20260901T070615Z-72372.log",
+      "result": "exit 2; the fail-closed runtime-source scanner rejected an undeclared .txt fixture inside packages/adapter-utils before any network push",
+      "reason": "The fixture intentionally contains unsafe shell-launch source, so adding .txt to a skip list or scanning it as production source would weaken or misclassify the gate."
+    },
+    "correction": "Moved all four test-only source fixtures to tests/fixtures/ssh-command-lookup, outside the declared runtime scan roots, while keeping the exact unsafe/passive fixture callers and their negative assertions.",
+    "stagedScannerPass": {
+      "receiptId": "b07e0970bb17420ab03d98a39fc56bd5",
+      "exitCode": 0,
+      "result": "1,309 files scanned across all four required roots; 117 directories and 1,474 entries inspected; zero unapproved git-push invocations; zero surviving Job members",
+      "durationMs": 3093,
+      "peakJobMemoryBytes": 167800832,
+      "sDriveMaximumDropBytes": 32768
+    },
+    "focusedTestPass": {
+      "receiptId": "204bbefaed604058ad01e880f59b12ca",
+      "exitCode": 0,
+      "result": "command-path and SSH lookup ratchet suites passed 17/17 with the relocated fixtures; zero surviving Job members",
+      "durationMs": 5061,
+      "peakJobMemoryBytes": 532369408,
+      "sDriveMaximumDropBytes": 311296
+    }
   },
   "delivery": {
-    "committed": false,
+    "committed": true,
+    "baseCommit": "ed273d038",
     "pushed": false,
-    "reason": "Commit and push remain held until the independently reviewed identity-bound disk-pressure runner is ready."
+    "reason": "The base delivery commit passed the real commit hook. A narrow fixture-placement correction still requires its own real hook before the branch can be pushed."
   }
 }
