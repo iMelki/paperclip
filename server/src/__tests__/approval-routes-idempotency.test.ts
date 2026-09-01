@@ -10,6 +10,7 @@ const mockApprovalService = vi.hoisted(() => ({
   reject: vi.fn(),
   requestRevision: vi.fn(),
   resubmit: vi.fn(),
+  prepareHirePayloadForPersistence: vi.fn(),
   listComments: vi.fn(),
   addComment: vi.fn(),
 }));
@@ -125,6 +126,7 @@ describe("approval routes idempotent retries", () => {
     mockApprovalService.reject.mockReset();
     mockApprovalService.requestRevision.mockReset();
     mockApprovalService.resubmit.mockReset();
+    mockApprovalService.prepareHirePayloadForPersistence.mockReset();
     mockApprovalService.listComments.mockReset();
     mockApprovalService.addComment.mockReset();
     mockHeartbeatService.wakeup.mockReset();
@@ -141,6 +143,9 @@ describe("approval routes idempotent retries", () => {
     });
     mockHeartbeatService.wakeup.mockResolvedValue({ id: "wake-1" });
     mockIssueApprovalService.listIssuesForApproval.mockResolvedValue([{ id: "issue-1" }]);
+    mockApprovalService.prepareHirePayloadForPersistence.mockImplementation(
+      async (_companyId: string, payload: Record<string, unknown>) => payload,
+    );
     mockLogActivity.mockResolvedValue(undefined);
   });
 
@@ -355,6 +360,7 @@ describe("approval routes idempotent retries", () => {
       status: "pending",
     });
     expect(mockSecretService.normalizeHireApprovalPayloadForPersistence).not.toHaveBeenCalled();
+    expect(mockApprovalService.prepareHirePayloadForPersistence).not.toHaveBeenCalled();
     expect(mockIssueApprovalService.linkManyForApproval).toHaveBeenCalledWith(
       "approval-1",
       ["00000000-0000-0000-0000-000000000001"],
@@ -369,6 +375,112 @@ describe("approval routes idempotent retries", () => {
         action: "approval.created",
       }),
     );
+  });
+
+  it("routes generic hire creation through the centralized persistence guard", async () => {
+    const guardedPayload = {
+      name: "Safe hire",
+      adapterConfig: {
+        env: {
+          OPENAI_API_KEY: { type: "plain", value: "***REDACTED***" },
+        },
+      },
+      agentId: "00000000-0000-0000-0000-000000000011",
+    };
+    mockApprovalService.prepareHirePayloadForPersistence.mockResolvedValue(guardedPayload);
+    mockApprovalService.create.mockResolvedValue({
+      id: "approval-hire",
+      companyId: "company-1",
+      type: "hire_agent",
+      requestedByAgentId: null,
+      requestedByUserId: "user-1",
+      status: "pending",
+      payload: guardedPayload,
+      decisionNote: null,
+      decidedByUserId: null,
+      decidedAt: null,
+      createdAt: new Date("2026-09-01T00:00:00.000Z"),
+      updatedAt: new Date("2026-09-01T00:00:00.000Z"),
+    });
+
+    const rawPayload = {
+      name: "Safe hire",
+      adapterConfig: {
+        env: {
+          OPENAI_API_KEY: { type: "plain", value: "sk-live" },
+        },
+      },
+      agentId: "00000000-0000-0000-0000-000000000011",
+    };
+    const res = await request(await createApp())
+      .post("/api/companies/company-1/approvals")
+      .send({ type: "hire_agent", payload: rawPayload });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(201);
+    expect(mockApprovalService.prepareHirePayloadForPersistence).toHaveBeenCalledWith(
+      "company-1",
+      rawPayload,
+      { strictMode: false },
+    );
+    expect(mockApprovalService.create).toHaveBeenCalledWith(
+      "company-1",
+      expect.objectContaining({ payload: guardedPayload }),
+      { strictMode: false },
+    );
+    expect(mockSecretService.normalizeHireApprovalPayloadForPersistence).not.toHaveBeenCalled();
+  });
+
+  it("routes hire resubmission through the same persistence guard", async () => {
+    const rawPayload = {
+      agentId: "00000000-0000-0000-0000-000000000011",
+      adapterConfig: {
+        env: {
+          OPENAI_API_KEY: { type: "plain", value: "***REDACTED***" },
+        },
+      },
+    };
+    const guardedPayload = {
+      ...rawPayload,
+      adapterConfig: {
+        env: {
+          OPENAI_API_KEY: { type: "plain", value: "***REDACTED***" },
+        },
+      },
+    };
+    mockApprovalService.getById.mockResolvedValue({
+      id: "approval-hire",
+      companyId: "company-1",
+      type: "hire_agent",
+      status: "revision_requested",
+      payload: {},
+      requestedByAgentId: null,
+    });
+    mockApprovalService.prepareHirePayloadForPersistence.mockResolvedValue(guardedPayload);
+    mockApprovalService.resubmit.mockResolvedValue({
+      id: "approval-hire",
+      companyId: "company-1",
+      type: "hire_agent",
+      status: "pending",
+      payload: guardedPayload,
+      requestedByAgentId: null,
+    });
+
+    const res = await request(await createApp())
+      .post("/api/approvals/approval-hire/resubmit")
+      .send({ payload: rawPayload });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(mockApprovalService.prepareHirePayloadForPersistence).toHaveBeenCalledWith(
+      "company-1",
+      rawPayload,
+      { strictMode: false },
+    );
+    expect(mockApprovalService.resubmit).toHaveBeenCalledWith(
+      "approval-hire",
+      guardedPayload,
+      { strictMode: false },
+    );
+    expect(mockSecretService.normalizeHireApprovalPayloadForPersistence).not.toHaveBeenCalled();
   });
 
   it("blocks status-only recovery runs from creating approvals", async () => {

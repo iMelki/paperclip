@@ -86,6 +86,7 @@ import {
   requireServerAdapter,
 } from "../adapters/index.js";
 import { redactEventPayload } from "../redaction.js";
+import { prepareNormalizedHireApprovalPayloadForPersistence } from "../services/hire-approval-payload.js";
 import { redactCurrentUserValue } from "../log-redaction.js";
 import { renderOrgChartSvg, renderOrgChartPng, type OrgNode, type OrgChartStyle, ORG_CHART_STYLES } from "./org-chart-svg.js";
 import {
@@ -2595,24 +2596,17 @@ export function agentRoutes(
 
     if (requiresApproval) {
       const requestedAdapterType = normalizedHireInput.adapterType ?? agent.adapterType;
-      const requestedAdapterConfig =
-        redactEventPayload(
-          (agent.adapterConfig ?? normalizedHireInput.adapterConfig) as Record<string, unknown>,
-        ) ?? {};
-      const requestedRuntimeConfig =
-        redactEventPayload(
-          (normalizedHireInput.runtimeConfig ?? agent.runtimeConfig) as Record<string, unknown>,
-        ) ?? {};
-      const requestedMetadata =
-        redactEventPayload(
-          ((normalizedHireInput.metadata ?? agent.metadata ?? {}) as Record<string, unknown>),
-        ) ?? {};
-      approval = await approvalsSvc.create(companyId, {
-        type: "hire_agent",
-        requestedByAgentId: actor.actorType === "agent" ? actor.actorId : null,
-        requestedByUserId: actor.actorType === "user" ? actor.actorId : null,
-        status: "pending",
-        payload: {
+      const requestedAdapterConfig = (
+        agent.adapterConfig ?? normalizedHireInput.adapterConfig
+      ) as Record<string, unknown>;
+      const requestedRuntimeConfig = (
+        normalizedHireInput.runtimeConfig ?? agent.runtimeConfig
+      ) as Record<string, unknown>;
+      const requestedMetadata = (
+        normalizedHireInput.metadata ?? agent.metadata ?? {}
+      ) as Record<string, unknown>;
+      const approvalPayload = prepareNormalizedHireApprovalPayloadForPersistence(
+        {
           name: normalizedHireInput.name,
           role: normalizedHireInput.role,
           title: normalizedHireInput.title ?? null,
@@ -2637,6 +2631,14 @@ export function agentRoutes(
             desiredSkills: desiredSkillAssignment.desiredSkills,
           },
         },
+        agent as unknown as Record<string, unknown>,
+      );
+      approval = await approvalsSvc.create(companyId, {
+        type: "hire_agent",
+        requestedByAgentId: actor.actorType === "agent" ? actor.actorId : null,
+        requestedByUserId: actor.actorType === "user" ? actor.actorId : null,
+        status: "pending",
+        payload: approvalPayload,
         decisionNote: null,
         decidedByUserId: null,
         decidedAt: null,

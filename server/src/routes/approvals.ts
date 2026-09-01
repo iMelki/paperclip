@@ -16,7 +16,6 @@ import {
   heartbeatService,
   issueApprovalService,
   logActivity,
-  secretService,
 } from "../services/index.js";
 import { assertBoard, assertCompanyAccess, getAccessibleResource, getActorInfo, hasCompanyAccess } from "./authz.js";
 import { redactEventPayload } from "../redaction.js";
@@ -53,7 +52,6 @@ export function approvalRoutes(
   });
   const issueApprovalsSvc = issueApprovalService(db);
   const issuesSvc = issueService(db);
-  const secretsSvc = secretService(db);
   const strictSecretsMode = process.env.PAPERCLIP_SECRETS_STRICT_MODE === "true";
 
   async function lostReviewPathIssueIds(
@@ -234,7 +232,7 @@ export function approvalRoutes(
     const { issueIds: _issueIds, ...approvalInput } = req.body;
     const normalizedPayload =
       approvalInput.type === "hire_agent"
-        ? await secretsSvc.normalizeHireApprovalPayloadForPersistence(
+        ? await svc.prepareHirePayloadForPersistence(
             companyId,
             approvalInput.payload,
             { strictMode: strictSecretsMode },
@@ -242,18 +240,22 @@ export function approvalRoutes(
         : approvalInput.payload;
 
     const actor = getActorInfo(req);
-    const approval = await svc.create(companyId, {
-      ...approvalInput,
-      payload: normalizedPayload,
-      requestedByUserId: actor.actorType === "user" ? actor.actorId : null,
-      requestedByAgentId:
-        approvalInput.requestedByAgentId ?? (actor.actorType === "agent" ? actor.actorId : null),
-      status: "pending",
-      decisionNote: null,
-      decidedByUserId: null,
-      decidedAt: null,
-      updatedAt: new Date(),
-    });
+    const approval = await svc.create(
+      companyId,
+      {
+        ...approvalInput,
+        payload: normalizedPayload,
+        requestedByUserId: actor.actorType === "user" ? actor.actorId : null,
+        requestedByAgentId:
+          approvalInput.requestedByAgentId ?? (actor.actorType === "agent" ? actor.actorId : null),
+        status: "pending",
+        decisionNote: null,
+        decidedByUserId: null,
+        decidedAt: null,
+        updatedAt: new Date(),
+      },
+      { strictMode: strictSecretsMode },
+    );
 
     if (uniqueIssueIds.length > 0) {
       await issueApprovalsSvc.linkManyForApproval(approval.id, uniqueIssueIds, {
@@ -476,14 +478,18 @@ export function approvalRoutes(
 
     const normalizedPayload = req.body.payload
       ? existing.type === "hire_agent"
-        ? await secretsSvc.normalizeHireApprovalPayloadForPersistence(
+        ? await svc.prepareHirePayloadForPersistence(
             existing.companyId,
             req.body.payload,
             { strictMode: strictSecretsMode },
           )
         : req.body.payload
       : undefined;
-    const approval = await svc.resubmit(id, normalizedPayload);
+    const approval = await svc.resubmit(
+      id,
+      normalizedPayload,
+      { strictMode: strictSecretsMode },
+    );
     const actor = getActorInfo(req);
     await logActivity(db, {
       companyId: approval.companyId,

@@ -3,6 +3,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { constants as fsConstants, existsSync, promises as fs, type Dirent } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { resolveCommandPath } from "./command-path.js";
 import { sanitizeRemoteExecutionEnv } from "./remote-execution-env.js";
 import {
   buildLocalProcessSandboxSpawnTarget,
@@ -2262,57 +2263,12 @@ export function defaultPathForPlatform() {
   return "/usr/local/bin:/opt/homebrew/bin:/usr/local/sbin:/usr/bin:/bin:/usr/sbin:/sbin";
 }
 
-function windowsPathExts(env: NodeJS.ProcessEnv): string[] {
-  return (env.PATHEXT ?? ".EXE;.CMD;.BAT;.COM").split(";").filter(Boolean);
-}
-
 function windowsPosixToolDirs(): string[] {
   if (process.platform !== "win32") return [];
   return [
     "C:\\Program Files\\Git\\usr\\bin",
     "C:\\Program Files (x86)\\Git\\usr\\bin",
   ].filter((candidate) => existsSync(candidate));
-}
-
-async function pathExists(candidate: string) {
-  try {
-    await fs.access(candidate, process.platform === "win32" ? fsConstants.F_OK : fsConstants.X_OK);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-async function resolveCommandPath(command: string, cwd: string, env: NodeJS.ProcessEnv): Promise<string | null> {
-  const hasPathSeparator = command.includes("/") || command.includes("\\");
-  if (hasPathSeparator) {
-    const absolute = path.isAbsolute(command) ? command : path.resolve(cwd, command);
-    return (await pathExists(absolute)) ? absolute : null;
-  }
-
-  const pathValue = env.PATH ?? env.Path ?? "";
-  const delimiter = process.platform === "win32" ? ";" : ":";
-  const dirs = pathValue.split(delimiter).filter(Boolean);
-  const exts = process.platform === "win32" ? windowsPathExts(env) : [""];
-  const hasExtension = process.platform === "win32" && path.extname(command).length > 0;
-
-  for (const dir of dirs) {
-    const resolvedDir = path.isAbsolute(dir) ? dir : path.resolve(cwd, dir);
-    // Windows command lookup prefers PATHEXT-native launchers. npm installs
-    // both a POSIX shim and a .cmd shim, and selecting the extensionless file
-    // first incorrectly makes Git-for-Windows sh a runtime dependency.
-    const candidates =
-      process.platform === "win32"
-        ? hasExtension
-          ? [path.join(resolvedDir, command)]
-          : [...exts.map((ext) => path.join(resolvedDir, `${command}${ext}`)), path.join(resolvedDir, command)]
-        : [path.join(resolvedDir, command)];
-    for (const candidate of candidates) {
-      if (await pathExists(candidate)) return candidate;
-    }
-  }
-
-  return null;
 }
 
 export async function resolveCommandForLogs(

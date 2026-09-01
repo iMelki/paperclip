@@ -349,6 +349,73 @@
       }
     },
     {
+      "id": "automated-review-provider-governance",
+      "path": ".github/scripts/tests/run-quality-gates.test.mjs",
+      "description": "Keeps CodeRabbit as the primary automated review lane, permits exact-head Cursor review only as its explicit fallback, and prevents an unavailable Greptile integration from being represented as a mandatory or satisfied 5/5 gate.",
+      "negativeFixture": "CONTRIBUTING.md",
+      "observedFailure": {
+        "date": "2026-09-01",
+        "command": "node --test .github/scripts/tests/run-quality-gates.test.mjs",
+        "breakApplied": "Readback confirmed CONTRIBUTING.md contained the deliberately restored legacy sentence 'Greptile is 5/5 with no open P2s, recommendations, or follow-ups.' while the surrounding policy still declared Greptile optional.",
+        "reason": "The exact Node test caller exited 1 with 3 passed and only the provider-governance test failed, naming /Greptile(?: score)? is 5\\/5/i and the deliberately broken sentence.",
+        "restoredPass": "After removing only the legacy sentence, the identical caller exited 0 with 4/4 tests. The generated review comment names CodeRabbit, the exact-head Cursor fallback, maintainer approval, and no Greptile claim."
+      }
+    },
+    {
+      "id": "onboarding-persisted-adapter-readback",
+      "path": "ui/src/components/OnboardingWizard.tsx",
+      "description": "Persists an existing onboarding agent without replacing hidden same-adapter settings, tests the effective merged configuration before PATCH, drops stale adapter-specific state only on adapter changes, and keeps dashboard launch disabled until an authoritative saved-agent readback matches the server-normalized configuration.",
+      "negativeFixture": "ui/src/components/OnboardingWizard.config-persistence.test.tsx",
+      "observedFailure": {
+        "date": "2026-09-01",
+        "command": "pnpm exec vitest run ui/src/lib/onboarding-agent-config.test.ts ui/src/components/OnboardingWizard.config-persistence.test.tsx ui/src/components/OnboardingConfigurationReview.test.tsx",
+        "breakApplied": "Separate source controls bypassed the launch/readback gate, restored destructive same-adapter replacement, and passed the Wizard draft rather than the effective preserved configuration to the environment probe. Final baselines are onboarding-agent-config.ts SHA-256 c6ae1558948f7303332da7f87d6aa1cfac6a3412ee48f0bd767f56f7eff825aa and usePersistOnboardingAgentConfig.ts SHA-256 5d76a0a6c5e022d51d740a93e6c6c746eed44776bc15d90c424f87d2ebffac87.",
+        "reason": "The launch bypass failed the mismatch and readback-error controls. Destructive replacement failed exact cwd/command/args/url custody. Testing the draft failed 2/7 Wizard tests because hidden command/cwd/env fields did not reach the environment probe and a failing effective configuration could proceed toward PATCH.",
+        "restoredPass": "Exact byte restoration passed 3 files and 21/21 tests, including server-normalized private-field readback without localStorage or rendered exposure, fail-closed reload, effective preserved-config testing before PATCH, and a failing environment result that prevents PATCH. Task-owned UI typecheck receipt 78a91dd920ab43468e29d0d6db65ca35 exited 0 in 58,047 ms with zero surviving Job members. Independent full-diff review reports no P0/P1; real hooks, hosted CI, and exact-head automated review remain separate pending gates."
+      },
+      "maintainabilityReceipt": "doc/evidence/delivery-2026-09-01-maintainability.md"
+    },
+    {
+      "id": "ssh-command-lookup-shell-free-ratchet",
+      "path": "packages/adapter-utils/scripts/ssh-command-lookup-gate.mjs",
+      "description": "Rejects shell-executed command-v/which executable discovery in the SSH adapter while preserving shell-free PATH/PATHEXT resolution and passive text.",
+      "negativeFixture": "packages/adapter-utils/test-fixtures/unsafe-ssh-command-lookup.ts.txt",
+      "observedFailure": {
+        "date": "2026-09-01",
+        "command": "pnpm --filter @paperclipai/adapter-utils check:ssh-command-lookup --source test-fixtures/unsafe-ssh-command-lookup.ts.txt; repeat with unsafe-import-aliased-ssh-command-lookup.ts.txt; then run the package caller with no --source",
+        "breakApplied": "Readback asserted the production default src/ssh.ts contained a deliberate call through its existing spawn import to /bin/sh with interpolated command-v argv. Its baseline SHA-256 was 8a45668251f70ffdb9d51586877ed6cb894f3e2b7686d5491c3e205acd08ac69. Separate fixtures asserted the aliased-argv and named-import `spawn as run` forms plus zsh -ec around an interpolated which lookup.",
+        "reason": "The exact no-argument package typecheck caller exited 1 before tsc and named the production ssh.ts /bin/sh interpolation at line 23. Fixture callers independently exited 1 for /bin/sh, /usr/bin/bash alias, and /usr/bin/zsh composite-flag/which forms. An attempted pnpm form with an extra literal `--` failed at usage exit 2, so the receipt records the verified `--source` forwarding contract instead of mislabeling a CLI error as a safety finding.",
+        "restoredPass": "Removing only the deliberate production break restored ssh.ts exactly to SHA-256 8a45668251f70ffdb9d51586877ed6cb894f3e2b7686d5491c3e205acd08ac69; the no-argument default gate then exited 0 with SSH_COMMAND_LOOKUP_SAFE. The passive fixture also passed and the broadened command-path/ratchet suites passed 17/17. The identical full typecheck pass, real pre-push, hosted CI, and exact-head review remain pending."
+      }
+    },
+    {
+      "id": "hire-approval-secret-custody-and-atomic-resolution",
+      "path": "server/src/services/hire-approval-payload.ts",
+      "description": "Preserves only exact-empty plain adapter bindings, fails closed on unrecoverable redactions, applies every approved standalone-agent field without permission broadening, status-guards revision transitions, redacts ambiguous and camelCase credential keys from HTTP logs, and resolves approval, activation, reconciliation, and budget writes in one transaction before notification.",
+      "negativeFixture": "server/src/__tests__/hire-approval-payload.test.ts",
+      "observedFailure": {
+        "date": "2026-09-01",
+        "command": "node scripts/run-vitest-stable.mjs --files server/src/__tests__/hire-approval-payload.test.ts server/src/__tests__/approvals-service.test.ts server/src/__tests__/agents-pending-approval-config.test.ts server/src/__tests__/approval-routes-idempotency.test.ts server/src/__tests__/error-handler.test.ts server/src/__tests__/redact-sensitive.test.ts server/src/__tests__/http-log-redaction.test.ts",
+        "breakApplied": "The custody fixture passes the same exact-empty Codex binding through the legacy generic redactor and asserts that the resulting sentinel is rejected by persistence normalization. A database fixture deliberately raises `forced hire budget failure`. Additional controls removed standalone permission forwarding, the resubmit status predicate, bare-token redaction, and camelCase boundary normalization. Final redact-sensitive.ts baseline SHA-256 is 07d4050a1d0b98f1bd0ddc93398982144790edda78f32009c40144feab079fd8.",
+        "reason": "The legacy-redacted value rejects instead of becoming usable configuration, and the forced final-write failure rolls back approval plus activation plus budget state. Permission and stale-writer controls failed for their exact privilege/race reasons. Removing camelCase normalization failed 2/12 unit assertions and 1/3 production-pino assertions while emitting the devicePrivateKeyPem/githubToken canaries.",
+        "restoredPass": "Exact restoration passed the final two-file redaction set 15/15 with actual pino canary absence. The prior four-file custody/database/logging set passed 47/47, earlier custody/transaction/logging files passed 68/68, and built-in, route, and plugin ingress regressions passed 54/54. Task-owned server typecheck receipt 5dd4547beac74d72a719d5d6bccb47ca exited 0 in 40,621 ms. Independent full-diff review reports no P0/P1; real hooks, hosted CI, and exact-head automated review remain separate pending gates."
+      },
+      "maintainabilityReceipt": "doc/evidence/delivery-2026-09-01-maintainability.md"
+    },
+    {
+      "id": "pr45-no-loss-disposition-evidence",
+      "path": "scripts/generate-pr45-disposition-manifest.mjs",
+      "description": "Pins the four preserved PR #45 commits, merge base, and both preservation refs; owns every historical path and hunk; requires identical landed/current blobs plus an exact named-commit hunk before calling work landed; conservatively routes all remerge material to semantic review; and rejects stale or missing generated custody evidence.",
+      "negativeFixture": "doc/evidence/pr45-disposition/2026-09-01-pr45-no-loss-disposition.md",
+      "observedFailure": {
+        "date": "2026-09-01",
+        "command": "node scripts/generate-pr45-disposition-manifest.mjs --check",
+        "breakApplied": "Readback confirmed the generated summary contained the deliberate marker `DELIBERATELY STALE NEGATIVE-PROOF INPUT.` while its post-review baseline SHA-256 was preserved as 43623b2bdc16d2aa8b4e183c0f98517d57841b9c6782f7e33c7ec57b9e6fc90d.",
+        "reason": "The real check exited 1 and named the exact stale generated summary instead of accepting evidence that no longer matched the pinned manifest renderer.",
+        "restoredPass": "After removing only the deliberate marker, SHA-256 returned exactly to 43623b2bdc16d2aa8b4e183c0f98517d57841b9c6782f7e33c7ec57b9e6fc90d and the identical check exited 0 with derived net PR path count 130, 131 historical paths, 3,032 hunks, zero unowned rows, and zero unknown dispositions. The owning Node suite also passed 3/3, including the conservative 2,000-hunk remerge rule and identical landed/current blob invariant."
+      }
+    },
+    {
       "id": "repo-doctor-genome-source-set-references",
       "path": "doctor.genome.json",
       "description": "Requires the observe-only on_demand gate to reference only declared bounded source sets before Repo Doctor can resolve a plan.",

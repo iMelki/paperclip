@@ -5,6 +5,7 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { Transform } from "node:stream";
+import { resolveCommandPath } from "./command-path.js";
 import type { CommandManagedRuntimeRunner } from "./command-managed-runtime.js";
 import { readSanitizedOriginRemoteUrl } from "./git-workspace-sync.js";
 import type { RunProcessResult } from "./server-utils.js";
@@ -16,6 +17,7 @@ import {
   type RuntimeProgressPhase,
   type RuntimeProgressSink,
 } from "./runtime-progress.js";
+import { shellQuote } from "./shell-path.js";
 
 export interface SshConnectionConfig {
   host: string;
@@ -147,9 +149,7 @@ interface LocalGitWorkspaceSnapshot {
   deletedPaths: string[];
 }
 
-export function shellQuote(value: string) {
-  return `'${value.replace(/'/g, `'\"'\"'`)}'`;
-}
+export { shellQuote } from "./shell-path.js";
 
 function isValidShellEnvKey(value: string) {
   return /^[A-Za-z_][A-Za-z0-9_]*$/.test(value);
@@ -334,20 +334,7 @@ async function runLocalGit(
 }
 
 async function commandExists(command: string): Promise<boolean> {
-  return (await resolveCommandPath(command)) !== null;
-}
-
-async function resolveCommandPath(command: string): Promise<string | null> {
-  try {
-    const result = await execFileText("sh", ["-c", `command -v ${shellQuote(command)}`], {
-      timeout: 5_000,
-      maxBuffer: 8 * 1024,
-    });
-    const resolved = result.stdout.trim().split("\n")[0]?.trim() ?? "";
-    return resolved.length > 0 ? resolved : null;
-  } catch {
-    return null;
-  }
+  return (await resolveCommandPath(command, process.cwd(), process.env)) !== null;
 }
 
 async function withTempFile(
@@ -1715,7 +1702,7 @@ export async function startSshEnvLabFixture(input: {
   if (!support.supported) {
     throw new Error(`SSH env-lab fixture is unavailable: ${support.reason}`);
   }
-  const sshdPath = await resolveCommandPath("sshd");
+  const sshdPath = await resolveCommandPath("sshd", process.cwd(), process.env);
   if (!sshdPath) {
     throw new Error("SSH env-lab fixture is unavailable: missing required command: sshd");
   }

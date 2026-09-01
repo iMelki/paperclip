@@ -1,0 +1,241 @@
+import { describe, expect, it } from "vitest";
+import { REDACTED_EVENT_VALUE, redactEventPayload } from "../redaction.js";
+import {
+  prepareNormalizedHireApprovalPayloadForPersistence,
+  redactHireApprovalConfigForPersistence,
+  restoreHireApprovalPayloadFromPendingAgent,
+} from "../services/hire-approval-payload.js";
+import { secretService } from "../services/secrets.js";
+
+describe("hire approval payload custody", () => {
+  it("preserves only an exactly empty plain binding while redacting secret values", () => {
+    const result = redactHireApprovalConfigForPersistence({
+      env: {
+        OPENAI_API_KEY: { type: "plain", value: "" },
+        NONEMPTY_API_KEY: { type: "plain", value: "sk-live" },
+        WHITESPACE_API_KEY: { type: "plain", value: "   " },
+        REFERENCED_API_KEY: {
+          type: "secret_ref",
+          secretId: "11111111-1111-1111-1111-111111111111",
+          version: "latest",
+        },
+      },
+    });
+
+    expect(result).toEqual({
+      env: {
+        OPENAI_API_KEY: { type: "plain", value: "" },
+        NONEMPTY_API_KEY: { type: "plain", value: REDACTED_EVENT_VALUE },
+        WHITESPACE_API_KEY: { type: "plain", value: REDACTED_EVENT_VALUE },
+        REFERENCED_API_KEY: {
+          type: "secret_ref",
+          secretId: "11111111-1111-1111-1111-111111111111",
+          version: "latest",
+        },
+      },
+    });
+  });
+
+  it("negative-proves the old empty-key failure and the repaired persistence input", async () => {
+    const config = {
+      env: {
+        OPENAI_API_KEY: { type: "plain", value: "" },
+      },
+    };
+    const oldRedacted = redactEventPayload(config) ?? {};
+    const repairedRedacted = redactHireApprovalConfigForPersistence(config);
+    const secrets = secretService({} as never);
+
+    expect(oldRedacted).not.toEqual(config);
+    await expect(
+      secrets.normalizeAdapterConfigForPersistence("company-1", oldRedacted),
+    ).rejects.toThrow("Refusing to persist redacted placeholder for key: OPENAI_API_KEY");
+    await expect(
+      secrets.normalizeAdapterConfigForPersistence("company-1", repairedRedacted),
+    ).resolves.toEqual(config);
+  });
+
+  it("allows exact-empty bindings and secret refs without a pending baseline", () => {
+    const payload = prepareNormalizedHireApprovalPayloadForPersistence({
+      adapterConfig: {
+        env: {
+          OPENAI_API_KEY: { type: "plain", value: "" },
+          REFERENCED_API_KEY: {
+            type: "secret_ref",
+            secretId: "11111111-1111-1111-1111-111111111111",
+            version: "latest",
+          },
+        },
+      },
+    });
+
+    expect(payload).toEqual({
+      adapterConfig: {
+        env: {
+          OPENAI_API_KEY: { type: "plain", value: "" },
+          REFERENCED_API_KEY: {
+            type: "secret_ref",
+            secretId: "11111111-1111-1111-1111-111111111111",
+            version: "latest",
+          },
+        },
+      },
+    });
+  });
+
+  it.each([
+    ["nonempty", "sk-live"],
+    ["whitespace", "   "],
+  ])("rejects a %s sensitive plain binding without a pending baseline", (_case, value) => {
+    let failure: unknown;
+    try {
+      prepareNormalizedHireApprovalPayloadForPersistence({
+        adapterConfig: {
+          env: {
+            OPENAI_API_KEY: { type: "plain", value },
+          },
+        },
+      });
+    } catch (error) {
+      failure = error;
+    }
+
+    expect(failure).toMatchObject({
+      status: 422,
+      details: {
+        code: "hire_approval_secret_baseline_required",
+        path: "adapterConfig.env.OPENAI_API_KEY.value",
+      },
+    });
+  });
+
+  it("restores redacted values only from the same paths in the pending baseline", () => {
+    const restored = restoreHireApprovalPayloadFromPendingAgent(
+      {
+        name: "Codex",
+        adapterConfig: {
+          env: {
+            OPENAI_API_KEY: { type: "plain", value: "" },
+            INTERNAL_TOKEN: { type: "plain", value: REDACTED_EVENT_VALUE },
+          },
+        },
+        runtimeConfig: {
+          nested: { privateKey: REDACTED_EVENT_VALUE },
+        },
+      },
+      {
+        name: "Codex",
+        adapterConfig: {
+          env: {
+            OPENAI_API_KEY: { type: "plain", value: "" },
+            INTERNAL_TOKEN: { type: "plain", value: "persisted-token" },
+          },
+        },
+        runtimeConfig: {
+          nested: { privateKey: "persisted-private-key" },
+        },
+      },
+    );
+
+    expect(restored).toMatchObject({
+      adapterConfig: {
+        env: {
+          OPENAI_API_KEY: { type: "plain", value: "" },
+          INTERNAL_TOKEN: { type: "plain", value: "persisted-token" },
+        },
+      },
+      runtimeConfig: {
+        nested: { privateKey: "persisted-private-key" },
+      },
+    });
+  });
+
+  it("rejects an explicit secret change that cannot be represented by the frozen baseline", () => {
+    let failure: unknown;
+    try {
+      prepareNormalizedHireApprovalPayloadForPersistence(
+        {
+          adapterConfig: {
+            env: {
+              OPENAI_API_KEY: { type: "plain", value: "new-secret" },
+            },
+          },
+        },
+        {
+          adapterConfig: {
+            env: {
+              OPENAI_API_KEY: { type: "plain", value: "persisted-secret" },
+            },
+          },
+        },
+      );
+    } catch (error) {
+      failure = error;
+    }
+
+    expect(failure).toMatchObject({
+      status: 422,
+      details: {
+        code: "hire_approval_secret_baseline_mismatch",
+        path: "adapterConfig.env.OPENAI_API_KEY.value",
+      },
+    });
+  });
+
+  it.each([
+    ["missing", {}],
+    ["sentinel", { INTERNAL_TOKEN: { type: "plain", value: REDACTED_EVENT_VALUE } }],
+  ])("fails closed when a redacted path has a %s baseline value", (_case, env) => {
+    let failure: unknown;
+    try {
+      restoreHireApprovalPayloadFromPendingAgent(
+        {
+          adapterConfig: {
+            env: {
+              INTERNAL_TOKEN: { type: "plain", value: REDACTED_EVENT_VALUE },
+            },
+          },
+        },
+        { adapterConfig: { env } },
+      );
+    } catch (error) {
+      failure = error;
+    }
+
+    expect(failure).toMatchObject({
+      status: 422,
+      details: {
+        code: "hire_approval_redacted_baseline_missing",
+        path: "adapterConfig.env.INTERNAL_TOKEN.value",
+      },
+    });
+  });
+
+  it("fails closed on an embedded marker instead of guessing at mixed command text", () => {
+    let failure: unknown;
+    try {
+      restoreHireApprovalPayloadFromPendingAgent(
+        {
+          adapterConfig: {
+            command: `tool --token ${REDACTED_EVENT_VALUE}`,
+          },
+        },
+        {
+          adapterConfig: {
+            command: "tool --token persisted-token",
+          },
+        },
+      );
+    } catch (error) {
+      failure = error;
+    }
+
+    expect(failure).toMatchObject({
+      status: 422,
+      details: {
+        code: "hire_approval_redacted_baseline_missing",
+        path: "adapterConfig",
+      },
+    });
+  });
+});

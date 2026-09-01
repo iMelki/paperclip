@@ -32,10 +32,55 @@ describe("redactSensitive", () => {
     }
   });
 
-  it("does not redact a bare `token` field — pagination cursors and CSRF tokens are not credentials", () => {
+  it("redacts camelCase credential keys without hiding benign token metrics", () => {
+    const out = redactSensitive({
+      devicePrivateKeyPem: "private-key",
+      githubToken: "github-token",
+      clientSecret: "client-secret",
+      accessToken: "access-token",
+      privateKey: "private-key-short",
+      monkey: "banana",
+      tokenCount: 42,
+    }) as Record<string, unknown>;
+
+    expect(out).toEqual({
+      devicePrivateKeyPem: "[REDACTED]",
+      githubToken: "[REDACTED]",
+      clientSecret: "[REDACTED]",
+      accessToken: "[REDACTED]",
+      privateKey: "[REDACTED]",
+      monkey: "banana",
+      tokenCount: 42,
+    });
+  });
+
+  it("redacts provider-prefixed environment secret keys and their binding objects", () => {
+    const out = redactSensitive({
+      payload: {
+        adapterConfig: {
+          env: {
+            OPENAI_API_KEY: { type: "plain", value: "sk-must-not-reach-http-logs" },
+            ANTHROPIC_TOKEN: { type: "plain", value: "token-secret" },
+            DB_PASSWORD: { type: "plain", value: "database-secret" },
+            SAFE_MODE: { type: "plain", value: "enabled" },
+          },
+        },
+      },
+    }) as {
+      payload: { adapterConfig: { env: Record<string, unknown> } };
+    };
+    const env = out.payload.adapterConfig.env;
+
+    expect(env.OPENAI_API_KEY).toBe("[REDACTED]");
+    expect(env.ANTHROPIC_TOKEN).toBe("[REDACTED]");
+    expect(env.DB_PASSWORD).toBe("[REDACTED]");
+    expect(env.SAFE_MODE).toEqual({ type: "plain", value: "enabled" });
+  });
+
+  it("redacts an ambiguous bare `token` field because authentication routes use it for credentials", () => {
     const out = redactSensitive({ token: "next-page-cursor", limit: 20 }) as Record<string, unknown>;
 
-    expect(out.token).toBe("next-page-cursor");
+    expect(out.token).toBe("[REDACTED]");
     expect(out.limit).toBe(20);
   });
 

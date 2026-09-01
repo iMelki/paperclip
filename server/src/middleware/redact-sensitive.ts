@@ -40,6 +40,9 @@ const SENSITIVE_KEYS = new Set<string>([
   "private_key",
   "privatekey",
 ]);
+const SENSITIVE_KEY_SEGMENT_RE =
+  /(?:^|[_-])(?:api[-_]?key|access[-_]?token|auth[-_]?token|token|secret|passwd|password|credential|jwt|private[-_]?key|cookie|connectionstring)(?:$|[_-])/i;
+const NON_SENSITIVE_METRIC_KEYS = new Set(["token_count", "token_limit"]);
 
 const MAX_DEPTH = 6;
 const REDACTED = "[REDACTED]";
@@ -56,7 +59,12 @@ const URLISH_KEYS = new Set<string>([
 ]);
 
 function isSensitiveKey(key: string): boolean {
-  return SENSITIVE_KEYS.has(key.toLowerCase());
+  const normalized = key
+    .replace(/([a-z0-9])([A-Z])/g, "$1_$2")
+    .replace(/([A-Z]+)([A-Z][a-z])/g, "$1_$2")
+    .toLowerCase();
+  if (NON_SENSITIVE_METRIC_KEYS.has(normalized)) return false;
+  return SENSITIVE_KEYS.has(normalized) || SENSITIVE_KEY_SEGMENT_RE.test(normalized);
 }
 
 function isUrlishKey(key: string): boolean {

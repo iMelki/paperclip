@@ -87,6 +87,29 @@ describe("errorHandler", () => {
     expect(res.__errorContext?.error?.message).toBe("db exploded");
   });
 
+  it("removes Drizzle bound parameters from every HTTP error-log surface", () => {
+    const req = makeReq();
+    const res = makeRes() as any;
+    const next = vi.fn() as unknown as NextFunction;
+    const secret = "sk-must-not-reach-logs";
+    const message = [
+      "Failed query: update agents set adapter_config = $1 where id = $2",
+      `params: {\"env\":{\"OPENAI_API_KEY\":{\"type\":\"plain\",\"value\":\"${secret}\"}}},agent-1`,
+    ].join("\n");
+    const err = new Error(message);
+    err.name = "DrizzleQueryError";
+    err.stack = `${err.name}: ${message}\n    at database-driver.ts:10:2`;
+
+    errorHandler(err, req, res, next);
+
+    expect(res.err).not.toBe(err);
+    expect(res.err.message).toContain("params: ***REDACTED***");
+    expect(res.err.stack).toContain("params: ***REDACTED***");
+    expect(`${res.err.message}\n${res.err.stack}`).not.toContain(secret);
+    expect(JSON.stringify(res.__errorContext)).not.toContain(secret);
+    expect(res.__errorContext?.error?.message).toContain("params: ***REDACTED***");
+  });
+
   it("records responsible-user denial codes on the active agent run", () => {
     const db = { marker: "db" };
     const req = {
