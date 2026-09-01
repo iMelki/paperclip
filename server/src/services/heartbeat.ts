@@ -1482,7 +1482,7 @@ export function deriveRepoNameFromRepoUrl(repoUrl: string | null): string | null
   if (!trimmed) return null;
   // `new URL("C:\\workspace\\repo")` accepts `c:` as a scheme. A host path is
   // not a clone URL and must preserve the managed-workspace fallback instead.
-  if (/^[A-Za-z]:[\\/]/.test(trimmed) || trimmed.includes("\\")) return null;
+  if (/^[A-Za-z]:/.test(trimmed) || trimmed.includes("\\")) return null;
   try {
     const parsed = new URL(trimmed);
     const cleanedPath = parsed.pathname.replace(/\/+$/, "");

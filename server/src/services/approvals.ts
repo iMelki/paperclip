@@ -196,7 +196,9 @@ export function approvalService(db: Db) {
       budgetMonthlyCents:
         typeof payload.budgetMonthlyCents === "number" ? payload.budgetMonthlyCents : 0,
       metadata:
-        typeof payload.metadata === "object" && payload.metadata !== null
+        typeof payload.metadata === "object"
+          && payload.metadata !== null
+          && !Array.isArray(payload.metadata)
           ? (payload.metadata as Record<string, unknown>)
           : null,
       status: "idle",

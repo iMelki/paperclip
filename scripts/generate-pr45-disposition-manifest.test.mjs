@@ -1,10 +1,18 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import {
   buildManifest,
   classifyPath,
+  getPreservationRefSupport,
+  MANIFEST_PATH,
   parseUnifiedZeroPatch,
+  PRESERVATION_LOCAL_BRANCH_CREATE_COMMAND,
+  PRESERVATION_REF_FETCH_COMMAND,
+  SOURCE_REF,
+  SOURCE_REF_EXPECTED_HEAD,
+  SOURCE_REF_EXPECTED_MERGE_BASE,
   validateManifest,
 } from "./generate-pr45-disposition-manifest.mjs";
 
@@ -38,8 +46,22 @@ test("path ownership is explicit and remerge material always requires semantic r
   assert.throws(() => classifyPath("unrecognized/non-merge.txt"), /No owner cluster/);
 });
 
-test("the preserved object census is complete, owned, and has no unknown dispositions", () => {
-  const manifest = buildManifest();
+test("preservation recovery never force-updates the protected local WIP branch", () => {
+  assert.equal(
+    PRESERVATION_REF_FETCH_COMMAND,
+    `git fetch --no-tags origin +refs/heads/${SOURCE_REF}:refs/remotes/origin/${SOURCE_REF}`,
+  );
+  assert.doesNotMatch(PRESERVATION_REF_FETCH_COMMAND, /:refs\/heads\//);
+  assert.equal(
+    PRESERVATION_LOCAL_BRANCH_CREATE_COMMAND,
+    `git branch --no-track ${SOURCE_REF} ${SOURCE_REF_EXPECTED_HEAD}`,
+  );
+  assert.doesNotMatch(PRESERVATION_LOCAL_BRANCH_CREATE_COMMAND, /(?:^|\s)-(?:f|F)(?:\s|$)/);
+});
+
+const preservationSupport = getPreservationRefSupport();
+
+function assertPinnedManifest(manifest) {
   assert.equal(validateManifest(manifest), true);
   assert.equal(manifest.totals.commitPathRows, 162);
   assert.equal(manifest.totals.uniqueHistoricalPaths, 131);
@@ -48,6 +70,23 @@ test("the preserved object census is complete, owned, and has no unknown disposi
   assert.equal(manifest.totals.conflictPaths, 4);
   assert.equal(manifest.totals.unownedRows, 0);
   assert.equal(manifest.totals.unknownDispositions, 0);
+  assert.equal(manifest.preservationRef.expectedHead, SOURCE_REF_EXPECTED_HEAD);
+  assert.equal(manifest.preservationRef.expectedMergeBase, SOURCE_REF_EXPECTED_MERGE_BASE);
+}
+
+test("the checked-in custody manifest always validates even without the local WIP ref", () => {
+  const checkedInManifest = JSON.parse(readFileSync(MANIFEST_PATH, "utf8"));
+  assertPinnedManifest(checkedInManifest);
+  assert.equal(checkedInManifest.preservationRef.localHead, SOURCE_REF_EXPECTED_HEAD);
+  assert.equal(checkedInManifest.preservationRef.remoteTrackingHead, SOURCE_REF_EXPECTED_HEAD);
+  assert.equal(checkedInManifest.preservationRef.computedMergeBase, SOURCE_REF_EXPECTED_MERGE_BASE);
+});
+
+test("the preserved object census is complete, owned, and has no unknown dispositions", {
+  skip: preservationSupport.supported ? false : preservationSupport.reason,
+}, () => {
+  const manifest = buildManifest();
+  assertPinnedManifest(manifest);
   assert.equal(manifest.preservationRef.localHead, manifest.preservationRef.expectedHead);
   assert.equal(manifest.preservationRef.remoteTrackingHead, manifest.preservationRef.expectedHead);
 

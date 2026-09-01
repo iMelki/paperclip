@@ -55,6 +55,10 @@ const NON_PRODUCTION_PATH_PATTERNS = [
 // an unbounded import-graph scan.
 const DECLARED_SOURCE_TESTS = new Map([
   [
+    "tests/e2e/onboarding-hire-route.ts",
+    ["tests/e2e/onboarding-hire-route.spec.ts"],
+  ],
+  [
     "scripts/lib/pr45-disposition-policy.mjs",
     ["scripts/generate-pr45-disposition-manifest.test.mjs"],
   ],
@@ -112,6 +116,7 @@ export function isTestBearingProductionFile(file) {
     return false;
   }
   if (GENERATED_PATH_PATTERN.test(normalized)) return false;
+  if (DECLARED_SOURCE_TESTS.has(normalized)) return true;
   return (
     /^(?:server|ui|cli)\/src\//.test(normalized) ||
     /^packages\/.+\/src\//.test(normalized) ||
@@ -332,7 +337,10 @@ export function selectPrePushTests({ repoRoot, changedFiles, trackedFiles }) {
     ...hostedTestFiles,
     ...removedTestFiles,
     ...removedProductionFiles.filter(
-      (file) => !coverage.some((item) => item.sourceFile === file && item.siblingTests.length > 0),
+      (file) => !coverage.some(
+        (item) => item.sourceFile === file
+          && (item.siblingTests.length > 0 || item.declaredTests.length > 0),
+      ),
     ),
   ])].sort();
   const nonProductionFiles = normalizedChanges.filter(

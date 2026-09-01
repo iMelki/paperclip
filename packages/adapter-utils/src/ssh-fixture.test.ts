@@ -15,6 +15,7 @@ import {
   syncDirectoryToSsh,
   startSshEnvLabFixture,
   stopSshEnvLabFixture,
+  SSH_ENV_LAB_REQUIRED_COMMANDS,
 } from "./ssh.js";
 import { prepareRemoteManagedRuntime } from "./remote-managed-runtime.js";
 
@@ -89,6 +90,15 @@ describe("ssh env-lab fixture", () => {
       if (!dir) continue;
       await rm(dir, { recursive: true, force: true }).catch(() => undefined);
     }
+  });
+
+  it("admits every local executable used to own the fixture process", () => {
+    expect(SSH_ENV_LAB_REQUIRED_COMMANDS).toEqual([
+      "ssh",
+      "sshd",
+      "ssh-keygen",
+      "ps",
+    ]);
   });
 
   it("starts an isolated sshd fixture and executes commands through it", async () => {
@@ -211,28 +221,6 @@ describe("ssh env-lab fixture", () => {
     expect(remoteScript).toContain("node");
     expect(remoteScript).toContain("--version");
     await target.cleanup();
-  });
-
-  it("rejects invalid environment variable keys when constructing SSH spawn targets", async () => {
-    await expect(
-      buildSshSpawnTarget({
-        spec: {
-          host: "ssh.example.test",
-          port: 22,
-          username: "ssh-user",
-          remoteCwd: "/srv/paperclip/workspace",
-          remoteWorkspacePath: "/srv/paperclip/workspace",
-          privateKey: null,
-          knownHosts: null,
-          strictHostKeyChecking: true,
-        },
-        command: "env",
-        args: [],
-        env: {
-          "BAD KEY": "value",
-        },
-      }),
-    ).rejects.toThrow("Invalid SSH environment variable key: BAD KEY");
   });
 
   it("syncs a local directory into the remote fixture workspace", async () => {

@@ -7,7 +7,7 @@ import {
   restoreWorkspaceFromSshExecution,
   syncDirectoryToSsh,
 } from "./ssh.js";
-import { isWindowsAbsolutePath } from "./shell-path.js";
+import { isWindowsAbsolutePath, shellQuote } from "./shell-path.js";
 import type {
   SandboxAdditionalSource,
   SandboxManagedRuntimeAssetRestoreContext,
@@ -63,10 +63,6 @@ function asString(value: unknown): string {
 
 function asNumber(value: unknown): number {
   return typeof value === "number" ? value : Number(value);
-}
-
-function shellQuote(value: string): string {
-  return `'${value.replace(/'/g, `'"'"'`)}'`;
 }
 
 async function readRemoteFile(spec: SshRemoteExecutionSpec, remotePath: string): Promise<Buffer> {

@@ -32,6 +32,28 @@ describe("redactSensitive", () => {
     }
   });
 
+  it("redacts bounded credential-code aliases while preserving ordinary fields", () => {
+    const out = redactSensitive({
+      code: "claim-code",
+      authorization_code: "oauth-code",
+      verificationCode: "verification-code",
+      otp: "one-time-code",
+      pin: "1234",
+      state: "oauth-state",
+      name: "Visible project name",
+    }) as Record<string, unknown>;
+
+    expect(out).toEqual({
+      code: "[REDACTED]",
+      authorization_code: "[REDACTED]",
+      verificationCode: "[REDACTED]",
+      otp: "[REDACTED]",
+      pin: "[REDACTED]",
+      state: "[REDACTED]",
+      name: "Visible project name",
+    });
+  });
+
   it("redacts camelCase credential keys without hiding benign token metrics", () => {
     const out = redactSensitive({
       devicePrivateKeyPem: "private-key",
@@ -39,6 +61,8 @@ describe("redactSensitive", () => {
       clientSecret: "client-secret",
       accessToken: "access-token",
       privateKey: "private-key-short",
+      connectionString: "postgres://user:password@example.test/database",
+      connection_string: "postgres://user:password@example.test/other",
       monkey: "banana",
       tokenCount: 42,
     }) as Record<string, unknown>;
@@ -49,12 +73,14 @@ describe("redactSensitive", () => {
       clientSecret: "[REDACTED]",
       accessToken: "[REDACTED]",
       privateKey: "[REDACTED]",
+      connectionString: "[REDACTED]",
+      connection_string: "[REDACTED]",
       monkey: "banana",
       tokenCount: 42,
     });
   });
 
-  it("redacts provider-prefixed environment secret keys and their binding objects", () => {
+  it("redacts provider-prefixed secrets and every nonempty plain binding", () => {
     const out = redactSensitive({
       payload: {
         adapterConfig: {
@@ -74,7 +100,7 @@ describe("redactSensitive", () => {
     expect(env.OPENAI_API_KEY).toBe("[REDACTED]");
     expect(env.ANTHROPIC_TOKEN).toBe("[REDACTED]");
     expect(env.DB_PASSWORD).toBe("[REDACTED]");
-    expect(env.SAFE_MODE).toEqual({ type: "plain", value: "enabled" });
+    expect(env.SAFE_MODE).toEqual({ type: "plain", value: "[REDACTED]" });
   });
 
   it("redacts an ambiguous bare `token` field because authentication routes use it for credentials", () => {
@@ -90,6 +116,22 @@ describe("redactSensitive", () => {
     }) as Record<string, unknown>;
 
     expect(out.source).toBe("https://github.com/acme/private-skill");
+  });
+
+  it("strips credentials and query values from camelCase URL and URI fields", () => {
+    const out = redactSensitive({
+      apiBaseUrl: "https://user:pass@example.test/run?token=url-secret#fragment-secret",
+      redirectUri: "https://example.test/callback?code=redirect-secret",
+      webhookUrl: "https://example.test/hook?signature=webhook-secret",
+      duration: "10m",
+    }) as Record<string, unknown>;
+
+    expect(out).toEqual({
+      apiBaseUrl: "https://example.test/run",
+      redirectUri: "https://example.test/callback",
+      webhookUrl: "https://example.test/hook",
+      duration: "10m",
+    });
   });
 
   it("recurses into nested objects and arrays", () => {

@@ -435,7 +435,7 @@ describe("approval routes idempotent retries", () => {
       agentId: "00000000-0000-0000-0000-000000000011",
       adapterConfig: {
         env: {
-          OPENAI_API_KEY: { type: "plain", value: "***REDACTED***" },
+          OPENAI_API_KEY: { type: "plain", value: "sk-resubmit-raw-canary" },
         },
       },
     };
@@ -477,9 +477,16 @@ describe("approval routes idempotent retries", () => {
     );
     expect(mockApprovalService.resubmit).toHaveBeenCalledWith(
       "approval-hire",
-      guardedPayload,
+      expect.objectContaining({
+        adapterConfig: {
+          env: {
+            OPENAI_API_KEY: { type: "plain", value: "***REDACTED***" },
+          },
+        },
+      }),
       { strictMode: false },
     );
+    expect(mockApprovalService.resubmit.mock.calls[0]?.[1]).toBe(guardedPayload);
     expect(mockSecretService.normalizeHireApprovalPayloadForPersistence).not.toHaveBeenCalled();
   });
 

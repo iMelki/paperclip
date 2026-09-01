@@ -4,12 +4,44 @@ All notable changes to this repository should be recorded here.
 
 ## Unreleased
 
+- Addressed PR #108's automated-review findings with caller-shaped negative
+  proof: HTTP request logs now omit parsed query/params and query strings,
+  attach rejected-request diagnostics only at response time, redact
+  board-claim path tokens and URL-bearing headers, omit credential-route
+  bodies case-insensitively, and structurally redact ordinary-route bodies.
+  Connection-string and credential-code aliases, nonempty plain bindings, and
+  camelCase URL/URI fields are covered. The final production-shaped security
+  set passes 34/34 after an eight-failure negative control; the independent
+  server regression set passes 109/109.
+
+- Kept the same review repair narrow across approval behavior:
+  standalone-hire metadata accepts only object records; budget writes are
+  tested against the active transaction handle; hire resubmit forwards the
+  exact centralized-guard result; and test-only cleanup guarantees PostgreSQL
+  trigger/function and second-connection teardown.
+
+- Tightened delivery portability after review. Removed production files keep a
+  surviving declared contract test instead of being needlessly deferred to
+  hosted CI; the PR #45 census fails early with exact fetch guidance when its
+  preservation refs or full history are unavailable and never force-updates
+  its protected local WIP branch; SSH fixture admission includes `ps`; all SSH
+  destinations terminate option parsing; and direct plus managed runners share
+  strict environment-key validation and the reviewed shell quoter. The
+  generated Playwright output from focused proof was recycled, not committed.
+
+- **[#47]** Made remote-managed-runtime validation treat `localPath` as a host
+  path, accepting POSIX or Windows absolute forms while keeping the remote
+  sandbox path POSIX-only. The formerly failing Windows tests and related
+  commit hook pass; the real old-head pre-push caller also completed under the
+  identity-bound, disk-monitored process owner with zero survivors.
+
 - Hardened deterministic pre-push coverage for production code exercised by
   intentionally higher-level contract suites. Five exact source-to-test
   declarations now reuse the PR #45 generator, HTTP-log redaction, and
   onboarding persistence suites without restoring an unbounded import-graph
   scan. A missing declared test fails closed by exact source and test path; the
-  selector proofs pass 17/17 and the selected contract suites pass 13/13.
+  selector proofs pass 19/19, including the new onboarding route helper, and
+  the selected contract suites use their exact real runners.
 
 - **[#80]** Turned the four preserved PR #45 WIP commits into a reproducible
   no-loss disposition manifest: 162 commit/path rows, 131 unique historical
@@ -21,7 +53,9 @@ All notable changes to this repository should be recorded here.
   none is called stale without path-specific proof. The generator pins both local and
   remote-tracking preservation refs to `7bae4af2`, and explicitly forbids a
   wholesale merge/cherry-pick, branch deletion, stash mutation, or evidence
-  retirement without separate authority.
+  retirement without separate authority. Recovery fetches only the
+  remote-tracking ref and creates a missing local preservation branch without
+  force; the final owning suite passes 5/5.
 
 - **[#63]** Replaced SSH executable discovery through interpolated
   `sh -c "command -v ..."` with a shared shell-free PATH/PATHEXT resolver, and
@@ -34,6 +68,8 @@ All notable changes to this repository should be recorded here.
   exact caller exit nonzero,
   while passive text and the real SSH source remain accepted. ACPX/Gemini's
   separate `cmd.exe /c` probe stays tracked in #100.
+  Post-review proof also prevents a second private shell quoter and keeps the
+  env-lab admission list synchronized with its required `ps` descendant probe.
 
 - **[#88]** Preserved an intentionally empty plain API-key binding in hire
   approvals while continuing to redact every non-empty or whitespace-only
@@ -47,11 +83,12 @@ All notable changes to this repository should be recorded here.
   icon, runtime config, default environment, and restrictive permissions;
   revision/resubmit updates use status compare-and-set guards. The confirmed
   Drizzle `params:` error-log path, provider-prefixed credentials, camelCase
-  private-key/secret/token keys, and ambiguous bare `token` fields are redacted
-  through the production pino configuration. The final camelCase negative
-  control leaked its canaries and failed three assertions before exact
-  restoration; the restored production-shaped set passed 15/15 and server
-  typecheck passed through the task-owned resource/disk envelope.
+  private-key/secret/token keys, ambiguous bare `token` fields, query objects,
+  and sensitive route/path/header values are redacted or omitted through the
+  production pino configuration. The final production-shaped negative control
+  failed eight exact assertions before restoration; the restored set passed
+  34/34, the independent server set passed 109/109, and server typecheck passed
+  through the task-owned resource/disk envelope.
   Historical-row migration, creation-time
   agent/approval atomicity, durable notification delivery, and broader
   structured error-context allowlisting remain tracked separately in #102,
@@ -81,6 +118,12 @@ All notable changes to this repository should be recorded here.
   config regressions failed for their exact reasons before byte restoration.
   Independent static review is GO with no P0/P1; opaque server-owned config
   revisions/CAS and controller extraction remain tracked in #105 and #107.
+  Two real Playwright journeys now preserve the submitted adapter/config while
+  disabling only automatic wakes, then require Saved configuration to report
+  Verified / Claude Code / Adapter default before **Get started** can proceed.
+  The shared route helper has its own registered Playwright contract and exact
+  deterministic pre-push mapping. The reused Shadcn Badge/StatusGlyph treatment
+  passes the repository token gates without arbitrary palette or grid values.
 
 - Narrow-viewport follow-up for #89/#94: members table stacks below `md`
   (the `--gtc-24` 420px floor was the 99px members overflow), dashboard

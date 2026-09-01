@@ -132,13 +132,13 @@
     {
       "id": "deterministic-pre-push-selector",
       "path": "scripts/pre-push-test-selection.mjs",
-      "description": "Selects exact changed, deterministic sibling, and narrowly declared contract suites; routes them by real runner; assigns non-runnable deletions to hosted CI; and fails closed on uncovered live production, missing declared tests, invalid paths, or symlink traversal.",
+      "description": "Selects exact changed, deterministic sibling, and narrowly declared contract suites; routes them by real runner; assigns a removed production file to hosted CI only when no surviving sibling or declared contract test owns it; and fails closed on uncovered live production, missing declared tests, invalid paths, or symlink traversal.",
       "negativeFixture": "scripts/pre-push-test-selection.test.mjs",
       "observedFailure": {
         "date": "2026-09-01",
         "command": "git push --set-upstream origin agent/codex/47-windows-path-hooks-and-review-governance-20260831; node --test scripts/pre-push-test-selection.test.mjs; node scripts/run-pre-push-tests.mjs --repo-root . --dry-run --changed-file <each of the five non-sibling production paths> --target-ref refs/heads/topic",
-        "reason": "The real pre-push caller rejected five changed production files because their higher-level contract suites were not same-stem siblings. The new committed fixture then omitted the declared http-logger contract test and produced the exact 'declared deterministic test is not a regular file' selection error. Existing fixtures still reject uncovered production, untracked tests, malformed inputs, and escaping or linked paths.",
-        "restoredPass": "With exact source-to-test declarations restored, the selector chose only the existing generator, HTTP redaction, and onboarding persistence contract suites; its caller-shaped dry run reported zero uncovered files and zero selection errors. The selector suite passed 17/17 with no skips."
+        "reason": "The real pre-push caller rejected five changed production files because their higher-level contract suites were not same-stem siblings. The missing-declaration fixture then named the absent http-logger contract test. A post-review control restored the old removed-source rule; the new declared-contract deletion fixture failed because it was incorrectly assigned to hosted CI despite its surviving exact contract test. Existing fixtures still reject uncovered production, untracked tests, malformed inputs, and escaping or linked paths.",
+        "restoredPass": "With exact source-to-test declarations and the deletion ownership rule restored, the selector chose the existing generator, HTTP redaction, and onboarding persistence contract suites; its caller-shaped dry run reported zero uncovered files and zero selection errors. The selector suite passed 18/18 and the complete Node gate group passed 21/21. Negative/restored task receipts: 348a5530df404961b965ca48ee939bef and 6e9e1453d0144a00bd47cd5a041aab01."
       }
     },
     {
@@ -371,7 +371,21 @@
         "command": "pnpm exec vitest run ui/src/lib/onboarding-agent-config.test.ts ui/src/components/OnboardingWizard.config-persistence.test.tsx ui/src/components/OnboardingConfigurationReview.test.tsx",
         "breakApplied": "Separate source controls bypassed the launch/readback gate, restored destructive same-adapter replacement, and passed the Wizard draft rather than the effective preserved configuration to the environment probe. Final baselines are onboarding-agent-config.ts SHA-256 c6ae1558948f7303332da7f87d6aa1cfac6a3412ee48f0bd767f56f7eff825aa and usePersistOnboardingAgentConfig.ts SHA-256 5d76a0a6c5e022d51d740a93e6c6c746eed44776bc15d90c424f87d2ebffac87.",
         "reason": "The launch bypass failed the mismatch and readback-error controls. Destructive replacement failed exact cwd/command/args/url custody. Testing the draft failed 2/7 Wizard tests because hidden command/cwd/env fields did not reach the environment probe and a failing effective configuration could proceed toward PATCH.",
-        "restoredPass": "Exact byte restoration passed 3 files and 21/21 tests, including server-normalized private-field readback without localStorage or rendered exposure, fail-closed reload, effective preserved-config testing before PATCH, and a failing environment result that prevents PATCH. Task-owned UI typecheck receipt 78a91dd920ab43468e29d0d6db65ca35 exited 0 in 58,047 ms with zero surviving Job members. Independent full-diff review reports no P0/P1; real hooks, hosted CI, and exact-head automated review remain separate pending gates."
+        "restoredPass": "Exact byte restoration passed 3 files and 21/21 tests, including server-normalized private-field readback without localStorage or rendered exposure, fail-closed reload, effective preserved-config testing before PATCH, and a failing environment result that prevents PATCH. Final task-owned UI typecheck receipt c6dfeccede894d5a873e12f1f4df34e7 exited 0 in 93,545 ms with peak job memory 2,650,513,408 bytes, maximum S: free-space drop 190,259,200 bytes, and zero surviving Job members. Two real Playwright journeys then preserved the submitted Claude adapter/config, disabled only automatic wakes, read back Saved configuration as Verified / Claude Code / Adapter default, and proved Get started enabled; receipt 6600231310d349a48a00b54e2a2a3268 passed 2/2 with zero surviving Job members. The final independent stable-diff review found no P0/P1 runtime, security, Windows, approval, UI, SSH, E2E-helper, or test-selection defect after the named evidence repairs; real hooks, hosted CI, and exact-head automated review remain separate pending gates."
+      },
+      "maintainabilityReceipt": "doc/evidence/delivery-2026-09-01-maintainability.md"
+    },
+    {
+      "id": "onboarding-hire-route-payload-preservation",
+      "path": "tests/e2e/onboarding-hire-route.ts",
+      "description": "Forwards the original onboarding hire payload through Playwright and changes only heartbeat.enabled and heartbeat.wakeOnDemand to false, so E2E safety no longer replaces the selected adapter or configuration.",
+      "negativeFixture": "tests/e2e/onboarding-hire-route.spec.ts",
+      "observedFailure": {
+        "date": "2026-09-01",
+        "command": "pnpm exec playwright test --config tests/e2e/playwright.config.ts tests/e2e/onboarding-hire-route.spec.ts; node --test scripts/pre-push-test-selection.test.mjs",
+        "breakApplied": "Readback changed the helper back to an inert HTTP-adapter replacement. A separate selector control removed the declared helper-to-contract mapping.",
+        "reason": "The registered Playwright contract failed because adapterType, adapterConfig, runtimeConfig, and metadata were replaced instead of forwarded. The selector then failed because a helper-only production change no longer selected its exact registered contract.",
+        "restoredPass": "Exact restoration passed the registered contract 2/2 and selector 19/19. Negative/restored receipts: 3d85e30cca804fca904a028a2eeb7281 / 8a0e08fbf3c74d4dbd0028d06eebb9b0 and fd0f482b4c294789973259e2472e34b0 / 9658f6fade1544759b066c2a3c3ff0df. Both onboarding browser journeys passed 2/2 under receipt 6600231310d349a48a00b54e2a2a3268."
       },
       "maintainabilityReceipt": "doc/evidence/delivery-2026-09-01-maintainability.md"
     },
@@ -389,6 +403,48 @@
       }
     },
     {
+      "id": "remote-managed-runtime-shared-shell-quote",
+      "path": "packages/adapter-utils/src/remote-managed-runtime.ts",
+      "description": "Requires SSH command construction in the remote managed runtime to import the reviewed shared shellQuote primitive and rejects a new private shellQuote copy.",
+      "negativeFixture": "packages/adapter-utils/src/remote-managed-runtime.test.ts",
+      "observedFailure": {
+        "date": "2026-09-01",
+        "command": "pnpm --filter @paperclipai/adapter-utils exec vitest run src/remote-managed-runtime.test.ts src/ssh-fixture.test.ts",
+        "breakApplied": "Readback restored the removed private shellQuote function and removed the shared shellQuote import while leaving behavior otherwise unchanged.",
+        "reason": "The exact focused caller exited 1 and the structural assertion named both the missing shared import and forbidden private function. The same controlled run also proved the separate missing-ps preflight fixture.",
+        "restoredPass": "Restoring the shared import and deleting the private copy passed 22/22 focused assertions. The complete #63 focused set passed 39/39, and adapter-utils typecheck receipt 6a052428a5d64f52ab89b413d3c36d45 exited 0. Negative/restored receipts: cb6b083bbcff4882b8373c99e9ccbf53 and de13e4b5c9fd4e938caca7757417a463."
+      },
+      "maintainabilityReceipt": "doc/evidence/delivery-2026-09-01-maintainability.md"
+    },
+    {
+      "id": "ssh-env-lab-required-command-preflight",
+      "path": "packages/adapter-utils/src/ssh.ts",
+      "description": "Keeps the local ssh env-lab support probe synchronized with every executable used by fixture ownership, including ps for descendant discovery.",
+      "negativeFixture": "packages/adapter-utils/src/ssh-fixture.test.ts",
+      "observedFailure": {
+        "date": "2026-09-01",
+        "command": "pnpm --filter @paperclipai/adapter-utils exec vitest run src/remote-managed-runtime.test.ts src/ssh-fixture.test.ts",
+        "breakApplied": "Readback removed ps from the exported required-command list while the fixture still uses ps to inspect and own descendants.",
+        "reason": "The exact focused caller exited 1 and the required-command assertion reported the absent ps entry. The same controlled run also proved the separate shared-quoter structural gate.",
+        "restoredPass": "Restoring ps passed 22/22 focused assertions. The complete #63 focused set passed 39/39, and adapter-utils typecheck receipt 6a052428a5d64f52ab89b413d3c36d45 exited 0. Negative/restored receipts: cb6b083bbcff4882b8373c99e9ccbf53 and de13e4b5c9fd4e938caca7757417a463."
+      },
+      "maintainabilityReceipt": "doc/evidence/delivery-2026-09-01-maintainability.md"
+    },
+    {
+      "id": "ssh-spawn-option-and-environment-boundaries",
+      "path": "packages/adapter-utils/src/ssh.ts",
+      "description": "Routes all six SSH destination call sites through one builder that terminates option parsing before the destination and applies the same strict environment-key validation to direct, spawn-target, and managed-runtime execution.",
+      "negativeFixture": "packages/adapter-utils/src/ssh-security.test.ts",
+      "observedFailure": {
+        "date": "2026-09-01",
+        "command": "pnpm --filter @paperclipai/adapter-utils exec vitest run src/ssh-security.test.ts src/remote-managed-runtime.test.ts src/ssh-fixture.test.ts",
+        "breakApplied": "Separate readback controls removed managed-runner environment-key validation and the end-of-options marker before an option-shaped SSH destination.",
+        "reason": "The managed runner accepted BAD KEY and the destination builder exposed -oProxyCommand=malicious as an option-shaped argument. The combined negative run named both controls among its intended failures.",
+        "restoredPass": "The final independent focused adapter-utils run passed 41/41, and task-owned adapter-utils typecheck receipt 6a052428a5d64f52ab89b413d3c36d45 exited 0 with zero survivors. Combined negative receipt: a2ae22e5e432460d9811e02dcab5f79b."
+      },
+      "maintainabilityReceipt": "doc/evidence/delivery-2026-09-01-maintainability.md"
+    },
+    {
       "id": "hire-approval-secret-custody-and-atomic-resolution",
       "path": "server/src/services/hire-approval-payload.ts",
       "description": "Preserves only exact-empty plain adapter bindings, fails closed on unrecoverable redactions, applies every approved standalone-agent field without permission broadening, status-guards revision transitions, redacts ambiguous and camelCase credential keys from HTTP logs, and resolves approval, activation, reconciliation, and budget writes in one transaction before notification.",
@@ -396,24 +452,108 @@
       "observedFailure": {
         "date": "2026-09-01",
         "command": "node scripts/run-vitest-stable.mjs --files server/src/__tests__/hire-approval-payload.test.ts server/src/__tests__/approvals-service.test.ts server/src/__tests__/agents-pending-approval-config.test.ts server/src/__tests__/approval-routes-idempotency.test.ts server/src/__tests__/error-handler.test.ts server/src/__tests__/redact-sensitive.test.ts server/src/__tests__/http-log-redaction.test.ts",
-        "breakApplied": "The custody fixture passes the same exact-empty Codex binding through the legacy generic redactor and asserts that the resulting sentinel is rejected by persistence normalization. A database fixture deliberately raises `forced hire budget failure`. Additional controls removed standalone permission forwarding, the resubmit status predicate, bare-token redaction, and camelCase boundary normalization. Final redact-sensitive.ts baseline SHA-256 is 07d4050a1d0b98f1bd0ddc93398982144790edda78f32009c40144feab079fd8.",
-        "reason": "The legacy-redacted value rejects instead of becoming usable configuration, and the forced final-write failure rolls back approval plus activation plus budget state. Permission and stale-writer controls failed for their exact privilege/race reasons. Removing camelCase normalization failed 2/12 unit assertions and 1/3 production-pino assertions while emitting the devicePrivateKeyPem/githubToken canaries.",
-        "restoredPass": "Exact restoration passed the final two-file redaction set 15/15 with actual pino canary absence. The prior four-file custody/database/logging set passed 47/47, earlier custody/transaction/logging files passed 68/68, and built-in, route, and plugin ingress regressions passed 54/54. Task-owned server typecheck receipt 5dd4547beac74d72a719d5d6bccb47ca exited 0 in 40,621 ms. Independent full-diff review reports no P0/P1; real hooks, hosted CI, and exact-head automated review remain separate pending gates."
+        "breakApplied": "The custody fixture passes the same exact-empty Codex binding through the legacy generic redactor and asserts that the resulting sentinel is rejected by persistence normalization. A database fixture deliberately raises `forced hire budget failure`. Additional controls removed standalone permission forwarding, the resubmit status predicate, bare-token redaction, and camelCase boundary normalization. The final redact-sensitive.ts baseline SHA-256 is 650b2e2ec54b09e50090aa4e7949055f9c659eaa7c297f5d3fb3e1c4c3ff2d54.",
+        "reason": "The legacy-redacted value rejects instead of becoming usable configuration, and the forced final-write failure rolls back approval plus activation plus budget state. Permission and stale-writer controls failed for their exact privilege/race reasons. The final HTTP boundary negative control produced eight exact failures: parsed query/params leakage, missing response-time failure context, case-sensitive route omission, board-claim path-token leakage, credential-code aliases, nonempty plain bindings, and camelCase URL/URI fields.",
+        "restoredPass": "Exact restoration passed the final HTTP policy/redaction/logger set 34/34 under receipt 7162e45e10ef4e2c87aeaae9b579859a after negative receipt 471e809e531d467ca51902aa71872dfb failed 8/34 for the named reasons. The final independent server run passed 109/109 and task-owned server typecheck receipt 209d47d2c3564372ad47affe160ee169 exited 0 in 25,521 ms with peak job memory 3,199,627,264 bytes and zero survivors. The final independent stable-diff review found no P0/P1 defect after evidence repair; real hooks, hosted CI, and exact-head automated review remain separate pending gates."
+      },
+      "maintainabilityReceipt": "doc/evidence/delivery-2026-09-01-maintainability.md"
+    },
+    {
+      "id": "http-log-query-secret-elision",
+      "path": "server/src/middleware/http-logger.ts",
+      "description": "Removes parsed query/params and query strings from serialized requests and messages; emits failure diagnostics only at response time; omits sensitive-route bodies; redacts board-claim path tokens and URL-bearing headers; and structurally redacts ordinary-route bodies.",
+      "negativeFixture": "server/src/__tests__/http-log-redaction.test.ts",
+      "observedFailure": {
+        "date": "2026-09-01",
+        "command": "pnpm --filter @paperclipai/server exec vitest run src/__tests__/http-log-policy.test.ts src/__tests__/http-log-redaction.test.ts src/__tests__/redact-sensitive.test.ts",
+        "breakApplied": "Readback asserted deliberate removals of query/params omission, response-time diagnostic attachment, case-insensitive sensitive-route matching, board-claim path-token redaction, credential-code aliases, nonempty plain-binding redaction, and camelCase URL/URI recognition. Final baselines: http-log-policy.ts 56cc7528cb0ac19c65583ab4c4ebe27addb60187d4489eea003ec50ea6b307e4; http-logger.ts e8c7d43961325c3c0a66672262330dd4531d209fca28eeeebb64aa8a38f97d73; redact-sensitive.ts 650b2e2ec54b09e50090aa4e7949055f9c659eaa7c297f5d3fb3e1c4c3ff2d54.",
+        "reason": "The exact caller exited 1 with 8 failed / 26 passed. The failures were: removes query secrets from success and error request logs; does not emit supported camelCase adapter credentials on a rejected request; omits rejected credential and secret-write bodies plus claim path credentials; redacts bounded credential-code aliases while preserving ordinary fields; redacts provider-prefixed secrets and every nonempty plain binding; strips credentials and query values from camelCase URL and URI fields; omits the complete request body for the mixed-case SECRETS route; and removes claim query and path credentials from the log path.",
+        "restoredPass": "Exact byte restoration passed 34/34. Negative/restored receipts: 471e809e531d467ca51902aa71872dfb and 7162e45e10ef4e2c87aeaae9b579859a. The restored run completed in 3,455 ms, used 534,839,296 bytes peak job memory, dropped at most 155,648 bytes of monitored free space, and proved zero survivors."
+      },
+      "maintainabilityReceipt": "doc/evidence/delivery-2026-09-01-maintainability.md"
+    },
+    {
+      "id": "connection-string-log-redaction",
+      "path": "server/src/middleware/redact-sensitive.ts",
+      "description": "Redacts camelCase, snake_case, and kebab-case connection-string keys at the structured logging boundary.",
+      "negativeFixture": "server/src/__tests__/redact-sensitive.test.ts",
+      "observedFailure": {
+        "date": "2026-09-01",
+        "command": "pnpm --filter @paperclipai/server exec vitest run src/__tests__/redact-sensitive.test.ts",
+        "breakApplied": "Readback restored the undelimited connectionstring-only segment matcher while the fixture supplied connectionString and connection_string canaries.",
+        "reason": "The exact unit caller exited 1 because both connection-string variants remained plaintext instead of becoming [REDACTED].",
+        "restoredPass": "Restoring the separator-aware matcher passed its focused assertions. The final three-file HTTP security caller passed 34/34 with redact-sensitive.ts SHA-256 650b2e2ec54b09e50090aa4e7949055f9c659eaa7c297f5d3fb3e1c4c3ff2d54. Specific negative receipt 67f46f9450bc4547a39f6c5f879fbe2d; final restored receipt 7162e45e10ef4e2c87aeaae9b579859a."
+      },
+      "maintainabilityReceipt": "doc/evidence/delivery-2026-09-01-maintainability.md"
+    },
+    {
+      "id": "hire-approval-metadata-record-boundary",
+      "path": "server/src/services/approvals.ts",
+      "description": "Accepts standalone-hire metadata only as a non-array object record; arrays and other malformed shapes become null before agent creation.",
+      "negativeFixture": "server/src/__tests__/approvals-service.test.ts",
+      "observedFailure": {
+        "date": "2026-09-01",
+        "command": "pnpm --filter @paperclipai/server exec vitest run src/__tests__/approvals-service.test.ts -t 'creates the agent from payload'",
+        "breakApplied": "Readback removed only the Array.isArray rejection from the metadata boundary.",
+        "reason": "The focused caller exited 1 with exactly one failed and 22 skipped tests because the array crossed into agentService.create instead of normalizing to null.",
+        "restoredPass": "Restoring the array rejection passed the focused assertion and the combined server review set passed 72/72. Negative/restored receipts: 43cfbf22c8a84a749c97168f02dd1b77 and f78d6096df5b433fb79dd6e2270c022d."
+      },
+      "maintainabilityReceipt": "doc/evidence/delivery-2026-09-01-maintainability.md"
+    },
+    {
+      "id": "hire-approval-budget-transaction-source",
+      "path": "server/src/services/approvals.ts",
+      "description": "Proves budget policy persistence receives the active Drizzle transaction source rather than the outer database handle.",
+      "negativeFixture": "server/src/__tests__/approvals-service.test.ts",
+      "observedFailure": {
+        "date": "2026-09-01",
+        "command": "pnpm --filter @paperclipai/server exec vitest run src/__tests__/approvals-service.test.ts",
+        "breakApplied": "Readback changed only budgetService(source) to budgetService(db) while the fixture used distinct transaction and outer handles plus a positive budget.",
+        "reason": "The caller exited 1 with exactly the transaction-source assertion failing: the factory received the outer handle containing transaction instead of the callback source.",
+        "restoredPass": "Restoring budgetService(source) passed 23/23 and the combined server review set passed 72/72. Negative/restored receipts: 194885be05544b369d0b90f0b99ef1df and a4eb8a1773434156a131300cf7ad0dd3."
+      },
+      "maintainabilityReceipt": "doc/evidence/delivery-2026-09-01-maintainability.md"
+    },
+    {
+      "id": "hire-resubmit-guarded-payload-forwarding",
+      "path": "server/src/routes/approvals.ts",
+      "description": "Requires hire resubmission to forward the exact payload returned by the centralized persistence guard instead of the raw request body.",
+      "negativeFixture": "server/src/__tests__/approval-routes-idempotency.test.ts",
+      "observedFailure": {
+        "date": "2026-09-01",
+        "command": "pnpm --filter @paperclipai/server exec vitest run src/__tests__/approval-routes-idempotency.test.ts -t 'routes hire resubmission'",
+        "breakApplied": "Readback changed only the resubmit argument from normalizedPayload to req.body.payload; raw and guarded fixtures use distinct secret values and object identities.",
+        "reason": "The focused caller exited 1 with exactly one failed and 12 skipped tests because the raw secret canary reached svc.resubmit instead of the redacted guarded object.",
+        "restoredPass": "Restoring normalizedPayload passed the focused assertion, the complete route file passed 13/13, and the combined server review set passed 72/72. Negative/restored receipts: c2b249b6b4a04e36b1fc460fe9e522aa and d3d56ab8f1c0425a97e47dab2f992137."
       },
       "maintainabilityReceipt": "doc/evidence/delivery-2026-09-01-maintainability.md"
     },
     {
       "id": "pr45-no-loss-disposition-evidence",
       "path": "scripts/generate-pr45-disposition-manifest.mjs",
-      "description": "Pins the four preserved PR #45 commits, merge base, and both preservation refs; owns every historical path and hunk; requires identical landed/current blobs plus an exact named-commit hunk before calling work landed; conservatively routes all remerge material to semantic review; and rejects stale or missing generated custody evidence.",
+      "description": "Fails closed with exact setup guidance when the local preservation branch, remote-tracking preservation ref, or full merge-base history is unavailable; then pins the four preserved PR #45 commits, merge base, and both refs, owns every historical path and hunk, requires identical landed/current blobs plus an exact named-commit hunk before calling work landed, conservatively routes all remerge material to semantic review, and rejects stale generated custody evidence.",
       "negativeFixture": "doc/evidence/pr45-disposition/2026-09-01-pr45-no-loss-disposition.md",
       "observedFailure": {
         "date": "2026-09-01",
         "command": "node scripts/generate-pr45-disposition-manifest.mjs --check",
-        "breakApplied": "Readback confirmed the generated summary contained the deliberate marker `DELIBERATELY STALE NEGATIVE-PROOF INPUT.` while its post-review baseline SHA-256 was preserved as 43623b2bdc16d2aa8b4e183c0f98517d57841b9c6782f7e33c7ec57b9e6fc90d.",
-        "reason": "The real check exited 1 and named the exact stale generated summary instead of accepting evidence that no longer matched the pinned manifest renderer.",
-        "restoredPass": "After removing only the deliberate marker, SHA-256 returned exactly to 43623b2bdc16d2aa8b4e183c0f98517d57841b9c6782f7e33c7ec57b9e6fc90d and the identical check exited 0 with derived net PR path count 130, 131 historical paths, 3,032 hunks, zero unowned rows, and zero unknown dispositions. The owning Node suite also passed 3/3, including the conservative 2,000-hunk remerge rule and identical landed/current blob invariant."
+        "breakApplied": "Readback first confirmed the generated summary contained the deliberate marker `DELIBERATELY STALE NEGATIVE-PROOF INPUT.` while its post-review baseline SHA-256 was preserved as 43623b2bdc16d2aa8b4e183c0f98517d57841b9c6782f7e33c7ec57b9e6fc90d. Later caller-shaped controls changed SOURCE_REF to a deliberately missing name and restored the recovery text's old forced local-branch fetch after asserting each break.",
+        "reason": "The stale-output check named the exact generated summary. The missing-ref check named absent local/remote-tracking refs and full history. The safe-recovery check then failed because the proposed fetch force-updated the protected local WIP branch instead of fetching only the remote-tracking ref and creating a missing local preservation branch separately without force.",
+        "restoredPass": "The final generator SHA-256 is 7880a56d250f64d2aaef9d0a9a9740940be29a4ac17b51bdfb227c7d150d4ec6. The restored Node suite passed 5/5, including the always-run checked-in manifest validation and the protected-branch recovery contract; the full census still reports 130 net PR paths, 131 historical paths, 3,032 hunks, zero unowned rows, and zero unknown dispositions. Safe-recovery negative receipt: 9efc73fe34134bc49be9d0cf127fba8f. No merge, cherry-pick, stash mutation, local/remote WIP branch overwrite, deletion, or evidence retirement is authorized."
       }
+    },
+    {
+      "id": "managed-clone-windows-path-rejection",
+      "path": "server/src/services/heartbeat.ts",
+      "description": "Rejects Windows absolute and drive-relative paths before URL parsing so C:repo and C:workspace\\repo cannot be misclassified as repository URLs or clone names.",
+      "negativeFixture": "server/src/__tests__/heartbeat-managed-clone-credentials.test.ts",
+      "observedFailure": {
+        "date": "2026-09-01",
+        "command": "pnpm --filter @paperclipai/server exec vitest run src/__tests__/heartbeat-managed-clone-credentials.test.ts",
+        "breakApplied": "Readback restored the narrower drive-letter-plus-slash check while the table retained C:repo and C:workspace\\repo.",
+        "reason": "The exact focused assertion accepted the drive-relative value as a URL scheme instead of returning null and preserving managed-workspace fallback behavior.",
+        "restoredPass": "Restoring the all-drive-letter-prefix rejection passed the focused test and the final independent server suite passed 109/109. Combined negative receipt: a2ae22e5e432460d9811e02dcab5f79b."
+      },
+      "maintainabilityReceipt": "doc/evidence/delivery-2026-09-01-maintainability.md"
     },
     {
       "id": "repo-doctor-genome-source-set-references",

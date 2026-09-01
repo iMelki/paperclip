@@ -12,7 +12,7 @@ vi.mock("../services/responsible-user-denial-run-outcomes.js", () => ({
 function makeReq(): Request {
   return {
     method: "GET",
-    originalUrl: "/api/test",
+    originalUrl: "/api/test?code=query-canary-must-not-reach-context",
     body: { a: 1 },
     params: { id: "123" },
     query: { q: "x" },
@@ -46,6 +46,8 @@ describe("errorHandler", () => {
     expect(res.json).toHaveBeenCalledWith({ error: "Internal server error" });
     expect(res.err).toBe(err);
     expect(res.__errorContext?.error?.message).toBe("boom");
+    expect(res.__errorContext?.url).toBe("/api/test");
+    expect(res.__errorContext).not.toHaveProperty("reqQuery");
   });
 
   it("exposes raw 500 messages for trusted Cloud tenant imports", () => {

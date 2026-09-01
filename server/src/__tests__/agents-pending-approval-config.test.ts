@@ -488,30 +488,32 @@ describeEmbeddedPostgres("pending approval agent config integrity", () => {
     const suffix = randomUUID().replace(/-/g, "");
     const functionName = `test_hire_budget_fn_${suffix}`;
     const triggerName = `test_hire_budget_tr_${suffix}`;
-    await db.execute(sql.raw(`
-      CREATE FUNCTION ${functionName}() RETURNS trigger AS $$
-      BEGIN
-        RAISE EXCEPTION 'forced hire budget failure';
-      END;
-      $$ LANGUAGE plpgsql
-    `));
-    await db.execute(sql.raw(`
-      CREATE TRIGGER ${triggerName}
-      BEFORE INSERT OR UPDATE ON budget_policies
-      FOR EACH ROW EXECUTE FUNCTION ${functionName}()
-    `));
-
     try {
-      await expect(
-        approvalSvc.approve(approval.id, "board-user", "Approve atomically"),
-      ).rejects.toMatchObject({
-        cause: {
-          code: "P0001",
-          message: "forced hire budget failure",
-        },
-      });
+      await db.execute(sql.raw(`
+        CREATE FUNCTION ${functionName}() RETURNS trigger AS $$
+        BEGIN
+          RAISE EXCEPTION 'forced hire budget failure';
+        END;
+        $$ LANGUAGE plpgsql
+      `));
+      try {
+        await db.execute(sql.raw(`
+          CREATE TRIGGER ${triggerName}
+          BEFORE INSERT OR UPDATE ON budget_policies
+          FOR EACH ROW EXECUTE FUNCTION ${functionName}()
+        `));
+        await expect(
+          approvalSvc.approve(approval.id, "board-user", "Approve atomically"),
+        ).rejects.toMatchObject({
+          cause: {
+            code: "P0001",
+            message: "forced hire budget failure",
+          },
+        });
+      } finally {
+        await db.execute(sql.raw(`DROP TRIGGER IF EXISTS ${triggerName} ON budget_policies`));
+      }
     } finally {
-      await db.execute(sql.raw(`DROP TRIGGER IF EXISTS ${triggerName} ON budget_policies`));
       await db.execute(sql.raw(`DROP FUNCTION IF EXISTS ${functionName}()`));
     }
 
@@ -606,34 +608,39 @@ describeEmbeddedPostgres("pending approval agent config integrity", () => {
     const releaseUpdate = deferred();
     const blockedDb = pauseApprovalUpdateBeforeReturning(db, reachedUpdate, releaseUpdate);
     const secondConnection = createDb(tempDb!.connectionString);
-    const resubmitOutcome = approvalService(blockedDb)
-      .resubmit(approval.id)
-      .then(
-        (value) => ({ value, error: null }),
-        (error: unknown) => ({ value: null, error }),
-      );
+    try {
+      const resubmitOutcome = approvalService(blockedDb)
+        .resubmit(approval.id)
+        .then(
+          (value) => ({ value, error: null }),
+          (error: unknown) => ({ value: null, error }),
+        );
 
-    await reachedUpdate.promise;
-    const approveResult = await approvalService(secondConnection)
-      .approve(approval.id, "board-user", "Approve while stale writer is paused");
-    releaseUpdate.resolve();
-    const staleResult = await resubmitOutcome;
-    const [reloadedApproval] = await db
-      .select()
-      .from(approvals)
-      .where(eq(approvals.id, approval.id));
-    const createdAgents = await db.select().from(agents).where(eq(agents.companyId, companyId));
+      await reachedUpdate.promise;
+      const approveResult = await approvalService(secondConnection)
+        .approve(approval.id, "board-user", "Approve while stale writer is paused");
+      releaseUpdate.resolve();
+      const staleResult = await resubmitOutcome;
+      const [reloadedApproval] = await db
+        .select()
+        .from(approvals)
+        .where(eq(approvals.id, approval.id));
+      const createdAgents = await db.select().from(agents).where(eq(agents.companyId, companyId));
 
-    expect(approveResult.applied).toBe(true);
-    expect(staleResult.value).toBeNull();
-    expect(staleResult.error).toMatchObject({
-      status: 422,
-      details: {
-        code: "approval_resubmit_not_applied",
-        approvalId: approval.id,
-      },
-    });
-    expect(reloadedApproval.status).toBe("approved");
-    expect(createdAgents).toHaveLength(1);
+      expect(approveResult.applied).toBe(true);
+      expect(staleResult.value).toBeNull();
+      expect(staleResult.error).toMatchObject({
+        status: 422,
+        details: {
+          code: "approval_resubmit_not_applied",
+          approvalId: approval.id,
+        },
+      });
+      expect(reloadedApproval.status).toBe("approved");
+      expect(createdAgents).toHaveLength(1);
+    } finally {
+      releaseUpdate.resolve();
+      await secondConnection.$client.end({ timeout: 0 });
+    }
   });
 });

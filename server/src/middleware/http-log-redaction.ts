@@ -10,4 +10,12 @@ export const HTTP_LOG_REDACT_PATHS = [
   'req.headers["x-csrf-token"]',
   'req.headers["x-xsrf-token"]',
   'req.headers["x-api-key"]',
+  // Browser and proxy URL headers can repeat OAuth, reset, and signed-link
+  // query values even after the request URL itself is normalized.
+  "req.headers.referer",
+  "req.headers.referrer",
+  'req.headers["x-forwarded-uri"]',
+  'req.headers["x-original-url"]',
+  'req.headers["x-rewrite-url"]',
+  "res.headers.location",
 ] as const;

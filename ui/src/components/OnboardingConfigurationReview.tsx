@@ -1,9 +1,11 @@
 import type { AdapterEnvironmentTestResult } from "@paperclipai/shared";
+import type { CSSProperties } from "react";
 
 import { Badge } from "@/components/ui/badge";
 import { getAdapterDisplay } from "../adapters/adapter-display-registry";
 import type { OnboardingAgentConfigReview } from "../lib/onboarding-agent-config";
-import { cn } from "../lib/utils";
+import { taskStatusVar } from "../lib/status-colors";
+import { StatusGlyph } from "./StatusGlyph";
 
 interface OnboardingConfigurationReviewProps {
   savedConfig: OnboardingAgentConfigReview | null;
@@ -32,18 +34,18 @@ function SavedConfigStatusBadge({
   verified: boolean;
   pending: boolean;
 }) {
+  const status = verified ? "done" : pending ? "backlog" : "todo";
+  const style = {
+    "--sc": `var(${taskStatusVar[status]})`,
+  } as CSSProperties;
+
   return (
     <Badge
       variant="outline"
-      className={cn(
-        "text-(length:--text-nano)",
-        verified
-          ? "border-green-500/30 bg-green-500/10 text-green-700 dark:text-green-300"
-          : pending
-            ? "text-muted-foreground"
-            : "border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-300",
-      )}
+      className="status-chip gap-1.5 text-(length:--text-nano)"
+      style={style}
     >
+      <StatusGlyph status={status} size="sm" />
       {verified ? "Verified" : pending ? "Reading..." : "Needs attention"}
     </Badge>
   );
@@ -69,15 +71,19 @@ function SavedConfigurationCard({
       </div>
 
       {savedConfig && (
-        <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-xs">
-          <dt className="text-muted-foreground">Adapter</dt>
-          <dd className="font-medium">
-            {getAdapterDisplay(savedConfig.persistedAdapterType).label}
-          </dd>
-          <dt className="text-muted-foreground">Model</dt>
-          <dd className="font-mono break-all">
-            {savedConfig.persistedModel ?? "Adapter default"}
-          </dd>
+        <dl className="space-y-1 text-xs">
+          <div className="flex gap-3">
+            <dt className="w-16 shrink-0 text-muted-foreground">Adapter</dt>
+            <dd className="min-w-0 font-medium">
+              {getAdapterDisplay(savedConfig.persistedAdapterType).label}
+            </dd>
+          </div>
+          <div className="flex gap-3">
+            <dt className="w-16 shrink-0 text-muted-foreground">Model</dt>
+            <dd className="min-w-0 break-all font-mono">
+              {savedConfig.persistedModel ?? "Adapter default"}
+            </dd>
+          </div>
         </dl>
       )}
 
@@ -91,10 +97,14 @@ function SavedConfigurationCard({
       ) : savedConfig && !savedConfig.matches ? (
         <div
           role="alert"
-          className="rounded-md border border-amber-500/40 bg-amber-500/10 px-2.5 py-2 text-xs text-amber-700 dark:text-amber-300"
+          className="status-chip flex items-start gap-2 rounded-md border px-2.5 py-2 text-xs"
+          style={{ "--sc": `var(${taskStatusVar.todo})` } as CSSProperties}
         >
-          The saved adapter configuration does not match this onboarding
-          setup. Go back and save the configuration again.
+          <StatusGlyph status="todo" size="sm" className="mt-0.5 shrink-0" />
+          <span>
+            The saved adapter configuration does not match this onboarding
+            setup. Go back and save the configuration again.
+          </span>
         </div>
       ) : null}
     </div>

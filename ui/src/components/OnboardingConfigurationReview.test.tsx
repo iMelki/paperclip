@@ -75,7 +75,7 @@ describe("OnboardingConfigurationReview", () => {
     expect(alert?.className).toContain("bg-destructive/10");
   });
 
-  it("announces a saved/draft mismatch with amber treatment", () => {
+  it("announces a saved/draft mismatch with the shared warning status treatment", () => {
     renderReview({
       savedConfig: {
         ...matchingConfig,
@@ -88,8 +88,9 @@ describe("OnboardingConfigurationReview", () => {
 
     const alert = container.querySelector<HTMLElement>('[role="alert"]');
     expect(alert?.textContent).toContain("does not match");
-    expect(alert?.className).toContain("border-amber-500/40");
-    expect(alert?.className).toContain("bg-amber-500/10");
+    expect(alert?.className).toContain("status-chip");
+    expect(alert?.style.getPropertyValue("--sc")).toBe("var(--status-task-todo)");
+    expect(alert?.className).not.toMatch(/amber|green/);
   });
 
   it("shows the authoritative adapter and model without an alert when verified", () => {
@@ -99,5 +100,10 @@ describe("OnboardingConfigurationReview", () => {
     expect(container.textContent).toContain("gpt-5.4");
     expect(container.textContent).toContain("Verified");
     expect(container.querySelector('[role="alert"]')).toBeNull();
+    const badge = [...container.querySelectorAll<HTMLElement>("span")]
+      .find((element) => element.textContent?.includes("Verified"));
+    expect(badge?.className).toContain("status-chip");
+    expect(badge?.style.getPropertyValue("--sc")).toBe("var(--status-task-done)");
+    expect(badge?.className).not.toMatch(/amber|green/);
   });
 });

@@ -44,6 +44,8 @@ describe("ensureManagedProjectWorkspace clone credentials", () => {
   it.each([
     ["C:\\Users\\operator\\workspace", null],
     ["C:/Users/operator/workspace", null],
+    ["C:workspace\\repo", null],
+    ["C:repo", null],
     ["https://github.com/iMelki/paperclip.git", "paperclip"],
   ])("derives a repo name only from a real repository URL: %s", (repoUrl, expected) => {
     expect(deriveRepoNameFromRepoUrl(repoUrl)).toBe(expected);

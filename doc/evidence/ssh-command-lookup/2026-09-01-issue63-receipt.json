@@ -17,7 +17,10 @@
       "adapter-utils SSH local command-path discovery",
       "shared shell-free PATH/PATHEXT resolution",
       "canonical shellQuote reuse",
-      "SSH command-lookup regression ratchet"
+      "SSH command-lookup regression ratchet",
+      "complete env-lab command admission including ps",
+      "shared strict SSH environment-key validation",
+      "end-of-options termination before every SSH destination"
     ],
     "excluded": [
       "ACPX/Gemini interpolation tracked by issue #100",
@@ -29,6 +32,8 @@
     "summary": "Extract one node-only command-path leaf module and reuse it from server-utils and ssh.ts.",
     "reason": "This removes the local sh -c command-v launch, follows Node's unset and empty POSIX PATH behavior, falls back to the current process PATH when a Windows child environment omits PATH, honors case-insensitive Windows environment names and documented PATHEXT fallback, rejects directories, avoids an import cycle, and eliminates the second private resolver.",
     "quoting": "ssh.ts imports and re-exports shellQuote from shell-path.ts; remote command construction keeps shellQuote semantics and does not apply local Windows path conversion.",
+    "destinationArguments": "All six SSH call sites use buildSshDestinationArgs, which places -- before username@host so option-shaped destination data cannot re-enter option parsing.",
+    "environmentBoundary": "validatedSshEnvEntries is shared by direct commands, spawn targets, and the managed runtime; every non-undefined key must match the portable shell identifier grammar before interpolation.",
     "ratchetBoundary": "The exact CLI gate rejects known Node process-launch APIs that run sh/bash/dash/zsh/ksh/ash executable paths plus simple or composite command flags (for example -c, -lc, -ec, or --command) around command-v or which lookup. It covers trusted named-import launcher aliases, aliased shell, argv, lookup strings, template interpolation, and concatenation. Restricting findings to process launchers and trusted import modules avoids labeling passive logging or unrelated same-named imports as execution; unrelated remote shell commands remain allowed."
   },
   "maintainability": {
@@ -52,9 +57,16 @@
       {
         "path": "packages/adapter-utils/src/ssh.ts",
         "before": 1873,
-        "after": 1860,
-        "delta": -13,
-        "decision": "Removed the private shell-spawn resolver and duplicate quote implementation."
+        "after": 1871,
+        "delta": -2,
+        "decision": "Removed the private shell-spawn resolver and duplicate quote implementation, then added two small shared argument/environment builders used by all affected call sites. Existing prepare/fixture/sync functions over 80 lines do not grow."
+      },
+      {
+        "path": "packages/adapter-utils/src/ssh-security.test.ts",
+        "before": 0,
+        "after": 65,
+        "delta": 65,
+        "decision": "Separates pure command-construction security contracts from the oversized live SSH fixture suite."
       },
       {
         "path": "packages/adapter-utils/src/command-path.test.ts",
@@ -111,8 +123,8 @@
         "decision": "The package typecheck command runs the SSH lookup gate before tsc."
       }
     ],
-    "duplicationDecision": "One shared primitive is preferable because both consumers implement the same host executable discovery contract; the new module imports only Node built-ins and creates no dependency cycle.",
-    "exception": "No new file or function crosses the maintainability review bands. Both pre-existing oversized production files shrink."
+    "duplicationDecision": "Shared primitives now own command discovery, shell quoting, environment validation, and destination argument construction. This removes private copies without conflating intentional remote POSIX shell semantics with local process launch.",
+    "exception": "No new file or function crosses the maintainability review bands. server-utils and ssh.ts both shrink versus origin/dev; prepareRemoteManagedRuntime (133), startSshEnvLabFixture (123), syncDirectoryToSsh (115), and syncDirectoryFromSsh (108) are unchanged exact-patch exceptions."
   },
   "negativeProof": {
     "gate": "packages/adapter-utils/scripts/ssh-command-lookup-gate.mjs",
@@ -123,13 +135,15 @@
     "expectedFailureReason": "SSH_COMMAND_LOOKUP_UNSAFE ... interpolated command lookup passed to shell executable /bin/sh",
     "expectedImportAliasFailureReason": "SSH_COMMAND_LOOKUP_UNSAFE ... interpolated command lookup passed to shell executable /usr/bin/bash",
     "expectedWhichFailureReason": "SSH_COMMAND_LOOKUP_UNSAFE ... interpolated command lookup passed to shell executable /usr/bin/zsh",
-    "restoredInput": "packages/adapter-utils/src/ssh.ts at SHA-256 8a45668251f70ffdb9d51586877ed6cb894f3e2b7686d5491c3e205acd08ac69",
+    "additionalBrokenInputs": "Separate readback controls restored a private remote-runtime shell quoter, removed ps from fixture admission, bypassed managed-runner environment-key validation, and removed -- before an option-shaped SSH destination.",
+    "additionalFailureReason": "The focused contracts named the private copy, absent ps command, accepted BAD KEY, and exposed -oProxyCommand=malicious as destination data before restoration.",
+    "restoredInput": "Final packages/adapter-utils/src/ssh.ts SHA-256 cb348321e3b4b353a011e9bbb797caf986a09b4196f22d5c516115bd29db0ea1",
     "expectedRestoredExitCode": 0,
-    "result": "passed: the exact no-argument package typecheck caller rejected deliberately broken default ssh.ts before tsc; fixture callers rejected both alias forms; restored ssh.ts hash and default gate passed"
+    "result": "passed: the exact no-argument package typecheck caller rejected deliberately broken default ssh.ts before tsc; fixture callers rejected both alias forms; the four post-review security controls failed for their exact reasons; final focused tests and typecheck passed"
   },
   "validation": {
-    "status": "focused-pass-typecheck-held",
-    "reason": "Machine Health reopened bounded focused tests with C:-resident TEMP/TMP/TMPDIR. Package typecheck remains held until the independently reviewed task-owned runner is committed and pushed.",
+    "status": "focused-pass-typecheck-pass",
+    "reason": "Bounded focused tests and package typecheck completed with C:-resident private receipts, S:-volume pressure cancellation, and zero surviving owned processes.",
     "current": [
       {
         "command": "pnpm --filter @paperclipai/adapter-utils typecheck with the deliberate unsafe default src/ssh.ts",
@@ -166,6 +180,17 @@
         "result": "2 files and 17 tests passed after the broadened POSIX-shell/flag/which ratchet",
         "durationMs": 5785,
         "exitCode": 0
+      },
+      {
+        "command": "independent final adapter-utils focused set",
+        "result": "41/41 passed across command lookup, remote runtime, fixture admission, environment validation, and destination option termination",
+        "exitCode": 0
+      },
+      {
+        "command": "pnpm --filter @paperclipai/adapter-utils typecheck",
+        "result": "exit 0 under task-owned receipt 6a052428a5d64f52ab89b413d3c36d45 with zero surviving Job members",
+        "receiptId": "6a052428a5d64f52ab89b413d3c36d45",
+        "exitCode": 0
       }
     ],
     "superseded": [
@@ -200,7 +225,7 @@
       "tracked-file git diff --check reported no whitespace errors",
       "new command-path, test, and gate files contain no lines over 120 characters"
     ],
-    "warning": "Focused executable validation and the staged runtime-source scan are current. Hosted CI and exact-head automated review remain pending."
+    "warning": "Focused executable validation, typecheck, token gates, and independent stable-diff review are current with no P0/P1 code defect. Real final-commit hooks, hosted exact-head CI, and exact-head automated review remain pending."
   },
   "admission": {
     "sDriveFreeBytesBeforeFinalValidation": 9889394688,
@@ -237,6 +262,7 @@
     "committed": true,
     "baseCommit": "ed273d038",
     "pushed": false,
-    "reason": "The base delivery commit passed the real commit hook. A narrow fixture-placement correction still requires its own real hook before the branch can be pushed."
+    "reviewRepairCommitted": false,
+    "reason": "Earlier delivery commits passed their real commit hooks. The final reviewed repair bytes still require their own real commit and pre-push hooks before the branch can be pushed."
   }
 }

@@ -12,6 +12,7 @@ const mockNotifyHireApproved = vi.hoisted(() => vi.fn());
 const mockBudgetService = vi.hoisted(() => ({
   upsertPolicy: vi.fn(),
 }));
+const mockBudgetServiceFactory = vi.hoisted(() => vi.fn(() => mockBudgetService));
 const mockSecretService = vi.hoisted(() => ({
   normalizeHireApprovalPayloadForPersistence: vi.fn(),
 }));
@@ -25,7 +26,7 @@ vi.mock("../services/hire-hook.js", () => ({
 }));
 
 vi.mock("../services/budgets.js", () => ({
-  budgetService: vi.fn(() => mockBudgetService),
+  budgetService: mockBudgetServiceFactory,
 }));
 
 vi.mock("../services/secrets.js", () => ({
@@ -72,9 +73,10 @@ function createDbStub(
   const insert = vi.fn(() => ({ values: insertValues }));
 
   let committed = false;
-  const db = { select, update, insert } as Record<string, unknown>;
+  const transactionSource = { select, update, insert } as Record<string, unknown>;
+  const db = { ...transactionSource } as Record<string, unknown>;
   const transaction = vi.fn(async (callback: (source: unknown) => Promise<unknown>) => {
-    const result = await callback(db);
+    const result = await callback(transactionSource);
     committed = true;
     return result;
   });
@@ -87,6 +89,7 @@ function createDbStub(
     set,
     insertValues,
     transaction,
+    transactionSource,
     isCommitted: () => committed,
   };
 }
@@ -430,7 +433,10 @@ describe("approvalService resolution idempotency", () => {
   });
 
   it("still performs side effects when the resolution update is newly applied", async () => {
-    const approved = createApproval("approved");
+    const approved = {
+      ...createApproval("approved"),
+      payload: { agentId: "agent-1", budgetMonthlyCents: 1_000 },
+    };
     const dbStub = createDbStub([[createApproval("pending")]], [approved]);
 
     const svc = approvalService(dbStub.db as any);
@@ -438,6 +444,7 @@ describe("approvalService resolution idempotency", () => {
 
     expect(result.applied).toBe(true);
     expect(mockAgentService.activatePendingApproval).toHaveBeenCalledWith("agent-1", approved.payload);
+    expect(mockBudgetServiceFactory).toHaveBeenCalledWith(dbStub.transactionSource);
     expect(mockNotifyHireApproved).toHaveBeenCalledTimes(1);
   });
 
@@ -549,6 +556,7 @@ describe("approvalService resolution idempotency", () => {
         runtimeConfig,
         defaultEnvironmentId: "00000000-0000-4000-8000-000000000001",
         permissions: restrictivePermissions,
+        metadata: ["not", "an", "object-record"],
         adapterConfig: {
           env: {
             API_KEY: {
@@ -574,6 +582,7 @@ describe("approvalService resolution idempotency", () => {
         runtimeConfig,
         defaultEnvironmentId: approved.payload.defaultEnvironmentId,
         permissions: restrictivePermissions,
+        metadata: null,
       }),
     );
   });

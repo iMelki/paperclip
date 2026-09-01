@@ -6,6 +6,7 @@ import { trackErrorHandlerCrash } from "@paperclipai/shared/telemetry";
 import { getTelemetryClient } from "../telemetry.js";
 import { COMPANY_IMPORT_API_PATH } from "../routes/company-import-paths.js";
 import { logger } from "./logger.js";
+import { requestPathForHttpLog } from "./http-log-policy.js";
 import {
   recordResponsibleUserDenialOnActiveRun,
 } from "../services/responsible-user-denial-run-outcomes.js";
@@ -38,7 +39,6 @@ export interface ErrorContext {
   url: string;
   reqBody?: unknown;
   reqParams?: unknown;
-  reqQuery?: unknown;
 }
 
 function isRedactedSkillPolicyDenial(details: Record<string, unknown> | null) {
@@ -59,10 +59,9 @@ function attachErrorContext(
       stack: redactDatabaseQueryParams(payload.stack),
     },
     method: req.method,
-    url: req.originalUrl,
+    url: requestPathForHttpLog(req.originalUrl),
     reqBody: req.body,
     reqParams: req.params,
-    reqQuery: req.query,
   } satisfies ErrorContext;
   if (safeRawError) {
     (res as any).err = safeRawError;

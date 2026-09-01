@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -37,6 +37,18 @@ describe("remote managed runtime", () => {
       if (!dir) continue;
       await rm(dir, { recursive: true, force: true }).catch(() => undefined);
     }
+  });
+
+  it("uses the shared shell quoting primitive", async () => {
+    const source = await readFile(
+      new URL("./remote-managed-runtime.ts", import.meta.url),
+      "utf8",
+    );
+
+    expect(source).toMatch(
+      /import \{ isWindowsAbsolutePath, shellQuote \} from "\.\/shell-path\.js";/,
+    );
+    expect(source).not.toMatch(/\bfunction\s+shellQuote\s*\(/);
   });
 
   it("restores runtime assets without restoring an in-place SSH workspace", async () => {

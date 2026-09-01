@@ -14,6 +14,8 @@ describe("hire approval payload custody", () => {
         OPENAI_API_KEY: { type: "plain", value: "" },
         NONEMPTY_API_KEY: { type: "plain", value: "sk-live" },
         WHITESPACE_API_KEY: { type: "plain", value: "   " },
+        DATABASE_URL: { type: "plain", value: "postgres://user:secret@example.test/db" },
+        DISPLAY_NAME: { type: "plain", value: "apparently-benign-but-still-private" },
         REFERENCED_API_KEY: {
           type: "secret_ref",
           secretId: "11111111-1111-1111-1111-111111111111",
@@ -27,6 +29,8 @@ describe("hire approval payload custody", () => {
         OPENAI_API_KEY: { type: "plain", value: "" },
         NONEMPTY_API_KEY: { type: "plain", value: REDACTED_EVENT_VALUE },
         WHITESPACE_API_KEY: { type: "plain", value: REDACTED_EVENT_VALUE },
+        DATABASE_URL: { type: "plain", value: REDACTED_EVENT_VALUE },
+        DISPLAY_NAME: { type: "plain", value: REDACTED_EVENT_VALUE },
         REFERENCED_API_KEY: {
           type: "secret_ref",
           secretId: "11111111-1111-1111-1111-111111111111",
@@ -84,15 +88,16 @@ describe("hire approval payload custody", () => {
   });
 
   it.each([
-    ["nonempty", "sk-live"],
-    ["whitespace", "   "],
-  ])("rejects a %s sensitive plain binding without a pending baseline", (_case, value) => {
+    ["nonempty", "OPENAI_API_KEY", "sk-live"],
+    ["whitespace", "OPENAI_API_KEY", "   "],
+    ["non-secret-shaped key", "DISPLAY_NAME", "private runtime value"],
+  ])("rejects a %s plain binding without a pending baseline", (_case, key, value) => {
     let failure: unknown;
     try {
       prepareNormalizedHireApprovalPayloadForPersistence({
         adapterConfig: {
           env: {
-            OPENAI_API_KEY: { type: "plain", value },
+            [key]: { type: "plain", value },
           },
         },
       });
@@ -104,7 +109,7 @@ describe("hire approval payload custody", () => {
       status: 422,
       details: {
         code: "hire_approval_secret_baseline_required",
-        path: "adapterConfig.env.OPENAI_API_KEY.value",
+        path: `adapterConfig.env.${key}.value`,
       },
     });
   });

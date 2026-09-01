@@ -30,6 +30,11 @@ export const COMPARISON_COMMIT = "f8e718e4a4ae5bae9fb570aff59b56c89fe1a715";
 export const SOURCE_REF = "wip/coordination-engine-20260802";
 export const SOURCE_REF_EXPECTED_HEAD = "7bae4af253dfd96ac8a4d44807b479bcece01865";
 export const SOURCE_REF_EXPECTED_MERGE_BASE = "a8f5370cf02b200b0c1210f4bf6b0c59c057fdf7";
+export const PRESERVATION_REF_FETCH_COMMAND =
+  `git fetch --no-tags origin ` +
+  `+refs/heads/${SOURCE_REF}:refs/remotes/origin/${SOURCE_REF}`;
+export const PRESERVATION_LOCAL_BRANCH_CREATE_COMMAND =
+  `git branch --no-track ${SOURCE_REF} ${SOURCE_REF_EXPECTED_HEAD}`;
 export const PRESERVED_COMMITS = [
   {
     sha: "36ba7d088ac3207b2a2fe2054d8ecaebc59385ab",
@@ -77,6 +82,41 @@ function git(args, { allowFailure = false } = {}) {
 
 function gitLine(args) {
   return git(args).trim();
+}
+
+export function getPreservationRefSupport() {
+  const localHead = git(
+    ["rev-parse", "--verify", `refs/heads/${SOURCE_REF}^{commit}`],
+    { allowFailure: true },
+  )?.trim() ?? null;
+  const remoteTrackingHead = git(
+    ["rev-parse", "--verify", `refs/remotes/origin/${SOURCE_REF}^{commit}`],
+    { allowFailure: true },
+  )?.trim() ?? null;
+  const computedMergeBase = localHead && remoteTrackingHead
+    ? git(
+        ["merge-base", COMPARISON_COMMIT, SOURCE_REF_EXPECTED_HEAD],
+        { allowFailure: true },
+      )?.trim() ?? null
+    : null;
+  const missing = [];
+  if (!localHead) missing.push(`refs/heads/${SOURCE_REF}`);
+  if (!remoteTrackingHead) missing.push(`refs/remotes/origin/${SOURCE_REF}`);
+  if (!computedMergeBase) missing.push("full merge-base history");
+  const supported = missing.length === 0;
+  return {
+    supported,
+    localHead,
+    remoteTrackingHead,
+    computedMergeBase,
+    reason: supported
+      ? null
+      : `PR #45 custody evidence requires ${missing.join(", ")}. ` +
+        `If the checkout is shallow, run 'git fetch --unshallow origin' first. ` +
+        `Then run '${PRESERVATION_REF_FETCH_COMMAND}'. If the local preservation branch is missing, ` +
+        `first verify the fetched remote-tracking ref resolves to ${SOURCE_REF_EXPECTED_HEAD}, then run ` +
+        `'${PRESERVATION_LOCAL_BRANCH_CREATE_COMMAND}'. Never force-update an existing local preservation branch.`,
+  };
 }
 
 function objectExists(spec) {
@@ -281,6 +321,10 @@ function countDispositions(commits) {
 }
 
 export function buildManifest() {
+  const preservationSupport = getPreservationRefSupport();
+  if (!preservationSupport.supported) {
+    throw new Error(preservationSupport.reason);
+  }
   const blobCache = new Map();
   const firstParentCache = new Map();
   const diffCache = new Map();
@@ -295,11 +339,7 @@ export function buildManifest() {
   const unknownDispositions =
     allPathRecords.filter((entry) => !DISPOSITIONS.has(entry.disposition)).length +
     allHunks.filter((entry) => !DISPOSITIONS.has(entry.disposition)).length;
-  const pullRequestMergeBase = gitLine([
-    "merge-base",
-    COMPARISON_COMMIT,
-    SOURCE_REF_EXPECTED_HEAD,
-  ]);
+  const pullRequestMergeBase = preservationSupport.computedMergeBase;
   const netPullRequestPaths = git([
     "diff",
     "--name-only",
@@ -318,8 +358,8 @@ export function buildManifest() {
       expectedHead: SOURCE_REF_EXPECTED_HEAD,
       expectedMergeBase: SOURCE_REF_EXPECTED_MERGE_BASE,
       computedMergeBase: pullRequestMergeBase,
-      localHead: gitLine(["rev-parse", `refs/heads/${SOURCE_REF}`]),
-      remoteTrackingHead: gitLine(["rev-parse", `refs/remotes/origin/${SOURCE_REF}`]),
+      localHead: preservationSupport.localHead,
+      remoteTrackingHead: preservationSupport.remoteTrackingHead,
     },
     mutationIntent: "none",
     prohibitions: [

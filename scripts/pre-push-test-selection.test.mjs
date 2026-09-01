@@ -93,6 +93,31 @@ test("selects exact declared contract tests without widening to an import graph"
   });
 });
 
+test("selects the registered Playwright contract for the onboarding hire route helper", () => {
+  withFixture(({ repoRoot, trackedFiles, write }) => {
+    write(
+      "tests/e2e/onboarding-hire-route.ts",
+      "export const suppressAutomaticWakes = true;\n",
+    );
+    write(
+      "tests/e2e/onboarding-hire-route.spec.ts",
+      "test('preserves adapter config', () => {});\n",
+    );
+    const result = selectPrePushTests({
+      repoRoot,
+      changedFiles: ["tests/e2e/onboarding-hire-route.ts"],
+      trackedFiles,
+    });
+    assert.deepEqual(result.hostedTestFiles, [
+      "tests/e2e/onboarding-hire-route.spec.ts",
+    ]);
+    assert.deepEqual(result.coverage[0].declaredTests, [
+      "tests/e2e/onboarding-hire-route.spec.ts",
+    ]);
+    assert.deepEqual(result.selectionErrors, []);
+  });
+});
+
 test("fails closed when a declared contract test is absent", () => {
   withFixture(({ repoRoot, trackedFiles, write }) => {
     write("server/src/middleware/http-logger.ts", "export const logger = true;\n");
@@ -180,6 +205,24 @@ test("a removed production file runs a surviving sibling or requires hosted CI",
     assert.deepEqual(withoutSibling.removedProductionFiles, ["server/src/removed-without-test.ts"]);
     assert.deepEqual(withoutSibling.hostedCiFiles, ["server/src/removed-without-test.ts"]);
     assert.deepEqual(withoutSibling.selectionErrors, []);
+  });
+});
+
+test("a removed production file with a declared contract test does not require hosted CI", () => {
+  withFixture(({ repoRoot, trackedFiles, write }) => {
+    write(
+      "server/src/__tests__/http-log-redaction.test.ts",
+      "test('remaining declared contract', () => {});\n",
+    );
+    const result = selectPrePushTests({
+      repoRoot,
+      changedFiles: ["server/src/middleware/http-logger.ts"],
+      trackedFiles,
+    });
+    assert.deepEqual(result.removedProductionFiles, ["server/src/middleware/http-logger.ts"]);
+    assert.deepEqual(result.vitestFiles, ["server/src/__tests__/http-log-redaction.test.ts"]);
+    assert.deepEqual(result.hostedCiFiles, []);
+    assert.deepEqual(result.selectionErrors, []);
   });
 });
 

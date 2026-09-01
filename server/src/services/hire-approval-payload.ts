@@ -28,20 +28,23 @@ function isExactEmptyPlainBinding(value: unknown): value is { type: "plain"; val
   return isPlainRecord(value) && value.type === "plain" && value.value === "";
 }
 
-function preserveExactEmptyPlainBindings(original: unknown, redacted: unknown): unknown {
-  if (isExactEmptyPlainBinding(original)) {
-    return { type: "plain", value: "" };
+function enforcePlainBindingRedaction(original: unknown, redacted: unknown): unknown {
+  if (isPlainRecord(original) && original.type === "plain"
+    && Object.prototype.hasOwnProperty.call(original, "value")) {
+    const binding = isPlainRecord(redacted) ? { ...redacted } : { ...original };
+    binding.value = isExactEmptyPlainBinding(original) ? "" : REDACTED_EVENT_VALUE;
+    return binding;
   }
   if (Array.isArray(original) && Array.isArray(redacted)) {
     return redacted.map((value, index) =>
-      preserveExactEmptyPlainBindings(original[index], value));
+      enforcePlainBindingRedaction(original[index], value));
   }
   if (!isPlainRecord(original) || !isPlainRecord(redacted)) return redacted;
 
   const restored = { ...redacted };
   for (const [key, value] of Object.entries(original)) {
     if (!Object.prototype.hasOwnProperty.call(redacted, key)) continue;
-    restored[key] = preserveExactEmptyPlainBindings(value, redacted[key]);
+    restored[key] = enforcePlainBindingRedaction(value, redacted[key]);
   }
   return restored;
 }
@@ -169,7 +172,7 @@ export function redactHireApprovalConfigForPersistence(
   config: Record<string, unknown>,
 ): Record<string, unknown> {
   const redacted = redactEventPayload(config) ?? {};
-  return preserveExactEmptyPlainBindings(config, redacted) as Record<string, unknown>;
+  return enforcePlainBindingRedaction(config, redacted) as Record<string, unknown>;
 }
 
 /**
@@ -204,7 +207,7 @@ export function prepareNormalizedHireApprovalPayloadForPersistence(
         field,
       );
     }
-    restoreHireApprovalPayloadFromPendingAgent(persisted, pendingAgent);
+    assertHireApprovalPayloadIsRestorable(persisted, pendingAgent);
     return persisted;
   }
 
@@ -243,4 +246,15 @@ export function restoreHireApprovalPayloadFromPendingAgent(
     }
   }
   return restored;
+}
+
+/**
+ * Validate that every marker can be restored, then deliberately discard the
+ * plaintext-bearing result so the persisted approval remains redacted at rest.
+ */
+function assertHireApprovalPayloadIsRestorable(
+  payload: Record<string, unknown>,
+  pendingAgent: Record<string, unknown>,
+): void {
+  restoreHireApprovalPayloadFromPendingAgent(payload, pendingAgent);
 }
