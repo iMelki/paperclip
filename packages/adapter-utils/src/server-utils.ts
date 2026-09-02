@@ -2286,7 +2286,7 @@ export async function resolveCommandForLogs(
   return (await resolveCommandPath(command, cwd, env)) ?? command;
 }
 
-function quoteForCmd(arg: string) {
+export function quoteForCmd(arg: string): string {
   if (!arg.length) return '""';
   const escaped = arg.replace(/"/g, '""');
   return /[\s"&<>|^()]/.test(escaped) ? `"${escaped}"` : escaped;
@@ -2299,7 +2299,7 @@ export function sanitizeSshRemoteEnv(
   return sanitizeRemoteExecutionEnv(env, inheritedEnv);
 }
 
-function resolveWindowsCmdShell(): string {
+export function resolveWindowsCmdShell(): string {
   // Child env is adapter-controlled. Resolve cmd.exe only from the host so a
   // configured SystemRoot/ComSpec cannot redirect batch execution.
   const fallbackRoot = process.env.SystemRoot || process.env.WINDIR || "C:\\Windows";

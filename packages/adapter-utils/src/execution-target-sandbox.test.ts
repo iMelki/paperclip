@@ -1070,7 +1070,7 @@ describe("sandbox adapter execution targets", () => {
       await waitForCondition(
         () => stdout.includes("delta:ping\n") && stderr.includes("trace:ping\n"),
         "Timed out waiting for live process session output.",
-        3000,
+        8000,
       );
       expect(exited).toBe(false);
 

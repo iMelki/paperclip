@@ -9,6 +9,7 @@ const mockAgentService = vi.hoisted(() => ({
 }));
 
 const mockNotifyHireApproved = vi.hoisted(() => vi.fn());
+const mockQueueDurableHireNotification = vi.hoisted(() => vi.fn());
 const mockBudgetService = vi.hoisted(() => ({
   upsertPolicy: vi.fn(),
 }));
@@ -23,6 +24,7 @@ vi.mock("../services/agents.js", () => ({
 
 vi.mock("../services/hire-hook.js", () => ({
   notifyHireApproved: mockNotifyHireApproved,
+  queueDurableHireNotification: mockQueueDurableHireNotification,
 }));
 
 vi.mock("../services/budgets.js", () => ({

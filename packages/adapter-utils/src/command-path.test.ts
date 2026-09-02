@@ -239,3 +239,25 @@ describe("resolveCommandPath", () => {
     expect(attempted).toEqual(["/usr/bin/ssh;touch owned"]);
   });
 });
+
+describe("quoteForCmd and Windows shell resolution", () => {
+  it("safely quotes Windows paths with spaces and metacharacters for cmd.exe", async () => {
+    const { quoteForCmd, resolveWindowsCmdShell } = await import("./server-utils.js");
+    expect(quoteForCmd("")).toBe('""');
+    expect(quoteForCmd("C:\\normal\\path.cmd")).toBe("C:\\normal\\path.cmd");
+    expect(quoteForCmd("C:\\Program Files\\Gemini CLI\\gemini.cmd")).toBe(
+      '"C:\\Program Files\\Gemini CLI\\gemini.cmd"',
+    );
+    expect(quoteForCmd("C:\\Tools (x86)\\test & run.bat")).toBe(
+      '"C:\\Tools (x86)\\test & run.bat"',
+    );
+    expect(quoteForCmd('C:\\path with "quotes"\\tool.cmd')).toBe(
+      '"C:\\path with ""quotes""\\tool.cmd"',
+    );
+
+    const shell = resolveWindowsCmdShell();
+    expect(shell.toLowerCase()).toContain("cmd.exe");
+    expect(shell.toLowerCase()).toContain("system32");
+  });
+});
+

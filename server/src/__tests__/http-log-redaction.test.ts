@@ -185,14 +185,90 @@ describe("HTTP logger redaction", () => {
       req: { url: "/success" },
     });
     expect(logs[1]).toMatchObject({
-      msg: "GET /failure-context 500 — context failure",
+      msg: "GET /failure-context 500 — request failed",
       req: { url: "/failure-context" },
     });
     expect(logs[2]).toMatchObject({
-      msg: "GET /failure-request 500 — request failure",
+      msg: "GET /failure-request 500 — request failed",
       req: { url: "/failure-request" },
     });
     expect(logs.every((log) => log.req.query === undefined && log.req.params === undefined)).toBe(true);
+  });
+
+  it("allowlists safe errorContext properties and drops unredacted raw error details and secret messages", async () => {
+    const rawSecretMessage = "raw-secret-message-canary-must-not-reach-pino";
+    const nestedSecretDetails = "nested-secret-details-canary-must-not-reach-pino";
+    const chunks: string[] = [];
+    const stream = new Writable({
+      write(chunk, _encoding, callback) {
+        chunks.push(chunk.toString());
+        callback();
+      },
+    });
+    const logger = pino({}, stream);
+    const httpLogger = createHttpLogger(logger);
+    const app = express();
+    app.use(httpLogger);
+    app.get("/error-context-check", (_req, res) => {
+      (res as any).__errorContext = {
+        error: {
+          code: "test_error_code",
+          name: "TestError",
+          statusCode: 400,
+          status: 400,
+          path: "/test/path",
+          reason: "safe_reason",
+          message: rawSecretMessage,
+          details: { secret: nestedSecretDetails },
+          raw: { apiKey: "secret-key" },
+        },
+      };
+      res.status(400).send("failed");
+    });
+    const server = createServer(app);
+
+    try {
+      await new Promise<void>((resolve, reject) => {
+        server.once("error", reject);
+        server.listen(0, "127.0.0.1", () => resolve());
+      });
+      const address = server.address() as any;
+      await new Promise<void>((resolve, reject) => {
+        const client = request(
+          { hostname: "127.0.0.1", port: address.port, path: "/error-context-check" },
+          (res) => {
+            res.resume();
+            res.on("end", resolve);
+          },
+        );
+        client.on("error", reject);
+        client.end();
+      });
+      await new Promise((resolve) => setImmediate(resolve));
+    } finally {
+      await new Promise<void>((resolve, reject) => {
+        server.close((err) => (err ? reject(err) : resolve()));
+      });
+    }
+
+    const output = chunks.join("");
+    expect(output).not.toContain(rawSecretMessage);
+    expect(output).not.toContain(nestedSecretDetails);
+    expect(output).not.toContain("secret-key");
+
+    const parsed = JSON.parse(output.trim()) as {
+      msg: string;
+      errorContext?: Record<string, unknown>;
+    };
+    expect(parsed.msg).toBe("GET /error-context-check 400");
+    expect(parsed.errorContext).toEqual({
+      code: "[REDACTED]",
+      name: "TestError",
+      statusCode: 400,
+      status: 400,
+      path: "/test/path",
+      reason: "safe_reason",
+    });
   });
 
   it("does not emit supported camelCase adapter credentials on a rejected request", async () => {

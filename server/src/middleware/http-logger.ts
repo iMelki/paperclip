@@ -14,11 +14,34 @@ function isNonEmptyRecord(value: unknown): value is Record<string, unknown> {
     && Object.keys(value).length > 0;
 }
 
+const ALLOWED_ERROR_CONTEXT_KEYS = new Set([
+  "code",
+  "name",
+  "statusCode",
+  "status",
+  "path",
+  "reason",
+]);
+
+function buildSafeErrorContext(error: unknown): Record<string, unknown> | null {
+  if (!isNonEmptyRecord(error)) return null;
+  const safeRecord: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(error)) {
+    if (ALLOWED_ERROR_CONTEXT_KEYS.has(key)) {
+      safeRecord[key] = value;
+    }
+  }
+  return isNonEmptyRecord(safeRecord) ? (redactSensitive(safeRecord) as Record<string, unknown>) : null;
+}
+
 function buildFailedResponseContext(req: any, res: any): Record<string, unknown> {
   const props: Record<string, unknown> = {};
   const ctx = res.__errorContext;
   const requestUrl = req.originalUrl ?? req.url;
-  if (ctx?.error) props.errorContext = redactSensitive(ctx.error);
+  if (ctx?.error) {
+    const safeContext = buildSafeErrorContext(ctx.error);
+    if (safeContext) props.errorContext = safeContext;
+  }
 
   const body = ctx?.reqBody ?? req.body;
   if (!shouldOmitHttpRequestBody(requestUrl) && isNonEmptyRecord(body)) {
@@ -54,10 +77,8 @@ export function createHttpLogger(baseLogger: Logger) {
     customSuccessMessage(req, res) {
       return `${req.method} ${requestPathForHttpLog(req.url)} ${res.statusCode}`;
     },
-    customErrorMessage(req, res, err) {
-      const ctx = (res as any).__errorContext;
-      const errMsg = ctx?.error?.message || err?.message || (res as any).err?.message || "unknown error";
-      return `${req.method} ${requestPathForHttpLog(req.url)} ${res.statusCode} — ${errMsg}`;
+    customErrorMessage(req, res) {
+      return `${req.method} ${requestPathForHttpLog(req.url)} ${res.statusCode} — request failed`;
     },
     customSuccessObject(req, res, value) {
       if (res.statusCode < 400) return value;

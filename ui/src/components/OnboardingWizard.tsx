@@ -43,6 +43,7 @@ import {
 } from "../lib/onboarding-agent-config";
 import { useOnboardingAgentConfigReview } from "../hooks/useOnboardingAgentConfigReview";
 import { usePersistOnboardingAgentConfig } from "../hooks/usePersistOnboardingAgentConfig";
+import { useOnboardingHeartbeatCoordinator } from "../hooks/useOnboardingHeartbeatCoordinator";
 import { buildNewAgentRuntimeConfig } from "../lib/new-agent-runtime-config";
 import { DEFAULT_CODEX_LOCAL_BYPASS_APPROVALS_AND_SANDBOX } from "@paperclipai/adapter-codex-local";
 import { DEFAULT_CURSOR_LOCAL_MODEL } from "@paperclipai/adapter-cursor-local";
@@ -550,6 +551,7 @@ export function OnboardingWizard() {
     step === 5 && !hasPersistedAdapterConfigExpectation
       ? "Return to configuration and save again before launch. The prior exact save expectation is not available after reload."
       : persistedConfigReadbackErrorMessage;
+  const coordinateHeartbeat = useOnboardingHeartbeatCoordinator();
 
   async function runAdapterEnvironmentTest(
     adapterConfigOverride?: Record<string, unknown>
@@ -640,124 +642,38 @@ export function OnboardingWizard() {
   // adapter configuration. A returning flow updates its existing lead instead
   // of hiring a duplicate, then Review verifies the authoritative readback.
   async function handleGiveHeartbeat() {
-    if (!createdCompanyId) return;
-    setLoading(true);
-    setError(null);
-    try {
-      if (adapterType === "opencode_local") {
-        const selectedModelId = model.trim();
-        if (!isValidOpenCodeModelId(selectedModelId)) {
-          setError(
-            "OpenCode requires an explicit model in provider/model format."
-          );
-          return;
-        }
-        if (adapterModelsError) {
-          setError(
-            adapterModelsError instanceof Error
-              ? adapterModelsError.message
-              : "Failed to load OpenCode models."
-          );
-          return;
-        }
-        if (adapterModelsLoading || adapterModelsFetching) {
-          setError(
-            "OpenCode models are still loading. Please wait and try again."
-          );
-          return;
-        }
-        const discoveredModels = adapterModels ?? [];
-        if (!discoveredModels.some((entry) => entry.id === selectedModelId)) {
-          setError(
-            discoveredModels.length === 0
-              ? "No OpenCode models discovered. Run `opencode models` and authenticate providers."
-              : `Configured OpenCode model is unavailable: ${selectedModelId}`
-          );
-          return;
-        }
-      }
-
-      const adapterConfig = buildAdapterConfig();
-
-      if (createdAgentId) {
-        const persisted = await persistOnboardingAgentConfig({
-          companyId: createdCompanyId,
-          agentId: createdAgentId,
-          adapterType,
-          adapterConfig,
-          intent: {
-            model: modelTouched,
-            url: urlTouched,
-          },
-          verifyEffectiveAdapterConfig: verifyAdapterEnvironmentForSave,
-        });
-        if (!persisted) return;
-        setPersistedAdapterConfigExpectation(persisted.expectedAdapterConfig);
-        setStep(5);
-        return;
-      }
-
-      if (!(await verifyAdapterEnvironmentForSave(adapterConfig))) return;
-
-      const hire = await agentsApi.hire(createdCompanyId, {
-        name: agentName.trim(),
-        role: "ceo",
-        adapterType,
-        adapterConfig,
-        runtimeConfig: buildNewAgentRuntimeConfig()
-      });
-      if (hire.approval) {
-        await approvalsApi.approve(
-          hire.approval.id,
-          "Approved during onboarding first-agent setup."
-        );
-        queryClient.invalidateQueries({
-          queryKey: queryKeys.approvals.list(createdCompanyId)
-        });
-      }
-      const agent = hire.agent;
-      setCreatedAgentId(agent.id);
-      setPersistedAdapterConfigExpectation(agent.adapterConfig);
-      queryClient.invalidateQueries({
-        queryKey: queryKeys.agents.list(createdCompanyId)
-      });
-      queryClient.invalidateQueries({
-        queryKey: queryKeys.agents.detail(agent.id)
-      });
-
-      // Seed the CEO's agent instructions file so the agent always has
-      // company context + a hiring-plan output format rule. Non-fatal on
-      // failure — the agent can still function with adapter defaults.
-      try {
-        const bundle = await agentsApi.instructionsBundle(agent.id, createdCompanyId);
-        await agentsApi.saveInstructionsFile(
-          agent.id,
-          {
-            path: bundle.entryFile,
-            content: composeCeoInstructions({
-              companyName,
-              companyGoal,
-              growPath: onboardingPath === "grow",
-              growWorkflows,
-              growPainPoints,
-              growAutomate,
-              q1, q2, q3, q4,
-            }),
-          },
-          createdCompanyId,
-        );
-      } catch (err) {
-        console.warn("Failed to seed CEO instructions:", err);
-      }
-
-      // Advance to the Review step — the lead is now online. The user drives
-      // strategy + hiring from the planning chat after "Get started".
-      setStep(5);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to create agent");
-    } finally {
-      setLoading(false);
-    }
+    await coordinateHeartbeat({
+      createdCompanyId,
+      createdAgentId,
+      agentName,
+      adapterType,
+      model,
+      modelTouched,
+      urlTouched,
+      adapterModels,
+      adapterModelsLoading,
+      adapterModelsFetching,
+      adapterModelsError,
+      companyName,
+      companyGoal,
+      onboardingPath,
+      growWorkflows,
+      growPainPoints,
+      growAutomate,
+      q1,
+      q2,
+      q3,
+      q4,
+      buildAdapterConfig,
+      buildNewAgentRuntimeConfig,
+      verifyAdapterEnvironmentForSave,
+      persistOnboardingAgentConfig,
+      setCreatedAgentId,
+      setPersistedAdapterConfigExpectation,
+      setStep,
+      setError,
+      setLoading,
+    });
   }
 
   async function handleUnsetAnthropicApiKey() {

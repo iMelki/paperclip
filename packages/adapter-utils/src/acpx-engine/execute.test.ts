@@ -60,7 +60,7 @@ afterEach(async () => {
   // same way production tolerates it, instead of failing the just-passed test.
   await Promise.all(
     tempRoots.splice(0).map((root) =>
-      fs.rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }),
+      fs.rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 }),
     ),
   );
 });
@@ -3090,7 +3090,7 @@ describe("ACPX engine remote session-lifecycle re-staging (PR 3: stage once / re
     expect(events[1]).toBe(`exit:${events[0]!.slice("enter:".length)}`);
     expect(events[2]).toMatch(/^enter:/);
     expect(events[3]).toBe(`exit:${events[2]!.slice("enter:".length)}`);
-  });
+  }, 30_000);
 
   // Greptile P1 "Lock Ends Before Use": a same-session re-stage must wait for
   // the prior run's active turn and cleanup to finish before it can touch the

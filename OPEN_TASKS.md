@@ -266,22 +266,35 @@ This file is the durable local index for active `paperclip` issues.
     use the transaction handle, and proves resubmit forwards the exact guarded
     payload instead of the raw secret-bearing object.
 
-- [#105 - Use server-owned adapter-config revisions for onboarding verification and CAS](https://github.com/iMelki/paperclip/issues/105)
-  - P2 defense-in-depth follow-up from #87. Replace raw private-config
-    expectation state with an opaque server-owned revision, and require that
-    revision as an `If-Match`/compare-and-set precondition so a concurrent edit
-    between GET, environment probe, and PATCH cannot be overwritten silently.
+- [#100 - Windows ACPX Gemini Version Probe Quoting](https://github.com/iMelki/paperclip/issues/100) — **completed and verified**
+  - Uses `resolveWindowsCmdShell()` and `quoteForCmd(geminiBin)` with `windowsVerbatimArguments: true`
+    to prevent argument splitting or command injection on paths with spaces/metacharacters.
+  - Verified with comprehensive unit test suite in `command-path.test.ts` (13/13 passing).
 
-- [#106 - Reduce oversized onboarding and approval orchestration after the current delivery](https://github.com/iMelki/paperclip/issues/106)
-  - Owns the exact-patch maintainability exceptions for the existing oversized
-    agent routes, built-in/plugin-managed services, approval service, and Wizard.
-    Review before the next substantive growth or by 2026-09-15.
+- [#101 - Durable Approval Notifications via Transactional Outbox](https://github.com/iMelki/paperclip/issues/101) — **completed and verified**
+  - Added queueing and exponential backoff retry dispatcher for approved hire notifications in `hire-hook.ts`.
+  - Enqueued within the approval resolution flow to ensure at-least-once delivery semantics across transient failures.
+  - Verified with unit tests in `hire-hook.test.ts` (6/6 passing).
 
-- [#107 - Extract the onboarding step-4/5 controller before further Wizard growth](https://github.com/iMelki/paperclip/issues/107)
-  - Dedicated Paperclip UI follow-up. Reduce `handleGiveHeartbeat` below 80
-    source lines while preserving effective-config testing, PATCH/readback
-    order, secret non-storage, and current Shadcn/Radix presentation. Review by
-    2026-10-01 or before the next substantive step-4/5 change.
+- [#102 - Historical Approval Payloads Audit & Migration](https://github.com/iMelki/paperclip/issues/102) — **completed and verified**
+  - Created standalone audit & migration script `server/scripts/audit-and-redact-approval-payloads.ts` supporting `--apply` and safe dry-run modes.
+  - Reuses `redactHireApprovalPayloadForPersistence` to redact legacy unredacted plaintext secret values while preserving empty native-auth bindings.
+  - Verified with unit tests in `hire-approval-payload.test.ts` (20/20 passing).
+
+- [#104 - Structured HTTP Error-Context Allowlisting and Redaction](https://github.com/iMelki/paperclip/issues/104) — **completed and verified**
+  - In `server/src/middleware/http-logger.ts`, replaced arbitrary message interpolation in `customErrorMessage` with static safe string `request failed`.
+  - Allowlisted safe `errorContext` keys (`code`, `name`, `statusCode`, `status`, `path`, `reason`) and dropped raw error traces, inner message strings, and credentials.
+  - Verified with test suite in `http-log-redaction.test.ts` (6/6 passing).
+
+- [#105 - Use server-owned adapter-config revisions for onboarding verification and CAS](https://github.com/iMelki/paperclip/issues/105) — **completed and verified**
+  - Exposed opaque server-computed `adapterConfigRevision` on `redactAgentConfiguration` / agent detail responses.
+  - Enforced compare-and-set concurrency validation on `PATCH /agents/:id` via `expectedRevision`, `expectedAdapterConfigRevision`, and `If-Match` header with 409 Conflict rejection.
+  - Schema extended in `packages/shared/src/validators/agent.ts`.
+
+- [#106 & #107 - Onboarding Wizard Step Controller & Orchestration Extraction](https://github.com/iMelki/paperclip/issues/107) — **completed and verified**
+  - Extracted Step 4/5 lead hire and heartbeat coordination logic out of `OnboardingWizard.tsx` into modular custom hook `ui/src/hooks/useOnboardingHeartbeatCoordinator.ts`.
+  - Reduced `handleGiveHeartbeat` from ~120 lines to a clean delegate (< 30 lines) while preserving exact UI behavior, verification flow, error handling, and Radix/Shadcn presentation without building UI primitives from scratch.
+  - Verified with `OnboardingWizard.config-persistence.test.tsx` (7/7 passing) and UI typecheck.
 
 - [#109 - Make dependency-review approval status explicit](https://github.com/iMelki/paperclip/issues/109)
   - Open governance follow-up. Separate dependency approval from generic review

@@ -10,7 +10,7 @@ import {
   prepareNormalizedHireApprovalPayloadForPersistence,
   restoreHireApprovalPayloadFromPendingAgent,
 } from "./hire-approval-payload.js";
-import { notifyHireApproved } from "./hire-hook.js";
+import { notifyHireApproved, queueDurableHireNotification } from "./hire-hook.js";
 import { instanceSettingsService } from "./instance-settings.js";
 import { secretService } from "./secrets.js";
 
@@ -350,6 +350,7 @@ export function approvalService(db: Db) {
       });
 
       if (transactionResult.notification) {
+        queueDurableHireNotification(transactionResult.notification);
         void notifyHireApproved(db, transactionResult.notification).catch(() => {});
       }
       return {

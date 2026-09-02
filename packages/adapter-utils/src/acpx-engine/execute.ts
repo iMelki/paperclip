@@ -45,11 +45,13 @@ import {
   joinPromptSections,
   materializePaperclipSkillCopy,
   parseObject,
+  quoteForCmd,
   readPaperclipRuntimeSkillEntries,
   readPaperclipIssueWorkModeFromContext,
   renderPaperclipWakePrompt,
   renderTemplate,
   resolvePaperclipInstanceRootForAdapter,
+  resolveWindowsCmdShell,
   selectPaperclipTaskMarkdown,
   resolvePaperclipDesiredSkillNames,
   removeMaintainerOnlySkillSymlinks,
@@ -644,10 +646,13 @@ async function resolveGeminiCommandExecutable(commandToken: string, env: NodeJS.
 async function probeGeminiVersionOutput(commandToken: string, env: NodeJS.ProcessEnv): Promise<string> {
   const geminiBin = await resolveGeminiCommandExecutable(commandToken, env);
   if (process.platform === "win32" && /\.(?:cmd|bat)$/i.test(geminiBin)) {
-    const { stdout } = await execFileAsync("cmd.exe", ["/d", "/s", "/c", `${geminiBin} --version`], {
+    const shell = resolveWindowsCmdShell();
+    const commandLine = `"${quoteForCmd(geminiBin)} --version"`;
+    const { stdout } = await execFileAsync(shell, ["/d", "/s", "/c", commandLine], {
       timeout: GEMINI_VERSION_PROBE_TIMEOUT_MS,
       encoding: "utf8",
       env,
+      windowsVerbatimArguments: true,
     });
     return stdout;
   }

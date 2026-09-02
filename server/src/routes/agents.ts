@@ -1,5 +1,5 @@
 import { Router, type NextFunction, type Request, type Response } from "express";
-import { generateKeyPairSync, randomUUID } from "node:crypto";
+import { createHash, generateKeyPairSync, randomUUID } from "node:crypto";
 import path from "node:path";
 import type { Db } from "@paperclipai/db";
 import { agents as agentsTable, companies, heartbeatRuns, issues as issuesTable, projects as projectsTable } from "@paperclipai/db";
@@ -1747,6 +1747,7 @@ export function agentRoutes(
       reportsTo: agent.reportsTo,
       adapterType: agent.adapterType,
       adapterConfig: redactEventPayload(agent.adapterConfig),
+      adapterConfigRevision: computeAdapterConfigRevision(agent.adapterConfig),
       runtimeConfig: redactEventPayload(agent.runtimeConfig),
       permissions: agent.permissions,
       updatedAt: agent.updatedAt,
@@ -1783,6 +1784,11 @@ export function agentRoutes(
       beforeConfig: redactRevisionSnapshot(revision.beforeConfig),
       afterConfig: redactRevisionSnapshot(revision.afterConfig),
     };
+  }
+
+  function computeAdapterConfigRevision(adapterConfig: unknown): string {
+    const serialized = JSON.stringify(adapterConfig ?? {});
+    return createHash("sha256").update(serialized).digest("hex");
   }
 
   function toLeanOrgNode(node: Record<string, unknown>): Record<string, unknown> {
@@ -3123,6 +3129,27 @@ export function agentRoutes(
     const patchData = { ...(req.body as Record<string, unknown>) };
     const replaceAdapterConfig = patchData.replaceAdapterConfig === true;
     delete patchData.replaceAdapterConfig;
+
+    const expectedRevision =
+      (typeof patchData.expectedRevision === "string" ? patchData.expectedRevision : null) ??
+      (typeof patchData.expectedAdapterConfigRevision === "string" ? patchData.expectedAdapterConfigRevision : null) ??
+      (typeof req.headers["if-match"] === "string" ? req.headers["if-match"].replace(/^["']|["']$/g, "") : null);
+    delete patchData.expectedRevision;
+    delete patchData.expectedAdapterConfigRevision;
+
+    if (expectedRevision) {
+      const currentRevision = computeAdapterConfigRevision(existing.adapterConfig);
+      if (expectedRevision !== currentRevision) {
+        res.status(409).json({
+          error: "Agent adapter configuration revision conflict",
+          code: "revision_conflict",
+          expectedRevision,
+          currentRevision,
+        });
+        return;
+      }
+    }
+
     if (hasOwn(patchData, "adapterConfig")) {
       const adapterConfig = asRecord(patchData.adapterConfig);
       if (!adapterConfig) {

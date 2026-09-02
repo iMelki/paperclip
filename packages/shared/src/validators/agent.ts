@@ -119,6 +119,8 @@ export const updateAgentSchema = createAgentSchema
   .extend({
     permissions: z.never().optional(),
     replaceAdapterConfig: z.boolean().optional(),
+    expectedRevision: z.string().trim().min(1).optional(),
+    expectedAdapterConfigRevision: z.string().trim().min(1).optional(),
     status: z.enum(AGENT_STATUSES).optional(),
     spentMonthlyCents: z.number().int().nonnegative().optional(),
   });
