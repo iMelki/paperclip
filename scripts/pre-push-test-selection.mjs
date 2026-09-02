@@ -49,6 +49,37 @@ const NON_PRODUCTION_PATH_PATTERNS = [
   /^(?:doc|docs)\//,
 ];
 
+// Some suites intentionally exercise production code through a higher-level
+// contract test whose name cannot be derived from the source filename. Keep
+// those exceptions explicit and exact instead of widening test discovery to
+// an unbounded import-graph scan.
+const DECLARED_SOURCE_TESTS = new Map([
+  [
+    "tests/e2e/onboarding-hire-route.ts",
+    ["tests/e2e/onboarding-hire-route.spec.ts"],
+  ],
+  [
+    "scripts/lib/pr45-disposition-policy.mjs",
+    ["scripts/generate-pr45-disposition-manifest.test.mjs"],
+  ],
+  [
+    "scripts/lib/unified-zero-patch.mjs",
+    ["scripts/generate-pr45-disposition-manifest.test.mjs"],
+  ],
+  [
+    "server/src/middleware/http-logger.ts",
+    ["server/src/__tests__/http-log-redaction.test.ts"],
+  ],
+  [
+    "ui/src/hooks/useOnboardingAgentConfigReview.ts",
+    ["ui/src/components/OnboardingWizard.config-persistence.test.tsx"],
+  ],
+  [
+    "ui/src/hooks/usePersistOnboardingAgentConfig.ts",
+    ["ui/src/components/OnboardingWizard.config-persistence.test.tsx"],
+  ],
+]);
+
 export class TestSelectionIntegrityError extends Error {
   constructor(message) {
     super(message);
@@ -85,6 +116,7 @@ export function isTestBearingProductionFile(file) {
     return false;
   }
   if (GENERATED_PATH_PATTERN.test(normalized)) return false;
+  if (DECLARED_SOURCE_TESTS.has(normalized)) return true;
   return (
     /^(?:server|ui|cli)\/src\//.test(normalized) ||
     /^packages\/.+\/src\//.test(normalized) ||
@@ -215,6 +247,26 @@ function discoverSiblingTests(repoRoot, sourceFile) {
   return matches.sort();
 }
 
+function discoverDeclaredTests(repoRoot, sourceFile) {
+  const declaredTests = DECLARED_SOURCE_TESTS.get(normalizeRepoPath(sourceFile)) ?? [];
+  const matches = [];
+  const errors = [];
+
+  for (const declaredTest of declaredTests) {
+    const normalizedTest = normalizeRepoPath(declaredTest);
+    const kind = readPathKind(repoRoot, normalizedTest);
+    if (kind !== "file") {
+      errors.push(
+        `declared deterministic test is not a regular file: ${sourceFile} -> ${normalizedTest}`,
+      );
+      continue;
+    }
+    matches.push(normalizedTest);
+  }
+
+  return { tests: matches.sort(), errors };
+}
+
 function isHostedCiPath(file) {
   if (NON_PRODUCTION_PATH_PATTERNS.some((pattern) => pattern.test(file))) return false;
   if (HOSTED_CI_PATH_PATTERNS.some((pattern) => pattern.test(file))) return true;
@@ -249,16 +301,25 @@ export function selectPrePushTests({ repoRoot, changedFiles, trackedFiles }) {
   const coverage = [];
   const uncoveredProductionFiles = [];
   const removedProductionFiles = [];
+  const declaredCoverageErrors = [];
   for (const sourceFile of productionFiles) {
     const sourceKind = readPathKind(repoRoot, sourceFile);
     if (sourceKind !== "absent" && sourceKind !== "file") {
       throw new TestSelectionIntegrityError(`changed production path is not a regular file: ${sourceFile}`);
     }
     const siblingTests = discoverSiblingTests(repoRoot, sourceFile);
-    coverage.push({ sourceFile, sourceRemoved: sourceKind === "absent", siblingTests });
+    const declared = discoverDeclaredTests(repoRoot, sourceFile);
+    const deterministicTests = [...new Set([...siblingTests, ...declared.tests])].sort();
+    coverage.push({
+      sourceFile,
+      sourceRemoved: sourceKind === "absent",
+      siblingTests,
+      declaredTests: declared.tests,
+    });
+    declaredCoverageErrors.push(...declared.errors);
     if (sourceKind === "absent") removedProductionFiles.push(sourceFile);
-    else if (siblingTests.length === 0) uncoveredProductionFiles.push(sourceFile);
-    siblingTests.forEach((file) => selected.add(file));
+    else if (deterministicTests.length === 0) uncoveredProductionFiles.push(sourceFile);
+    deterministicTests.forEach((file) => selected.add(file));
   }
 
   const vitestFiles = [];
@@ -276,7 +337,10 @@ export function selectPrePushTests({ repoRoot, changedFiles, trackedFiles }) {
     ...hostedTestFiles,
     ...removedTestFiles,
     ...removedProductionFiles.filter(
-      (file) => !coverage.some((item) => item.sourceFile === file && item.siblingTests.length > 0),
+      (file) => !coverage.some(
+        (item) => item.sourceFile === file
+          && (item.siblingTests.length > 0 || item.declaredTests.length > 0),
+      ),
     ),
   ])].sort();
   const nonProductionFiles = normalizedChanges.filter(
@@ -284,8 +348,9 @@ export function selectPrePushTests({ repoRoot, changedFiles, trackedFiles }) {
   );
   const selectionErrors = [
     ...uncoveredProductionFiles.map(
-      (file) => `test-bearing production file lacks a deterministic sibling test: ${file}`,
+      (file) => `test-bearing production file lacks a deterministic sibling or declared test: ${file}`,
     ),
+    ...declaredCoverageErrors,
     ...[...selected]
       .filter((file) => !trackedFiles.has(file))
       .map((file) => `selected test is not tracked in the pushed HEAD: ${file}`),

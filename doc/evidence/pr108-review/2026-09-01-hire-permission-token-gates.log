@@ -1,0 +1,14 @@
+
+> paperclip@ check:token-gates S:\source\CCAI\Assistants\tools\paperclip
+> node scripts/check-token-gates.mjs
+
+check-token-gates summary
+  Files scanned:                 773
+  Allowlist entries loaded:      35
+  Allowlisted issues skipped:    116
+
+  Gate 1 (color literals):       CLEAN
+  Gate 2 (arbitrary bracket vals): CLEAN
+  Gate 3 (raw font-size):        CLEAN
+
+All gates clean.

@@ -5,6 +5,7 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { Transform } from "node:stream";
+import { resolveCommandPath } from "./command-path.js";
 import type { CommandManagedRuntimeRunner } from "./command-managed-runtime.js";
 import { readSanitizedOriginRemoteUrl } from "./git-workspace-sync.js";
 import type { RunProcessResult } from "./server-utils.js";
@@ -16,6 +17,7 @@ import {
   type RuntimeProgressPhase,
   type RuntimeProgressSink,
 } from "./runtime-progress.js";
+import { shellQuote } from "./shell-path.js";
 
 export interface SshConnectionConfig {
   host: string;
@@ -53,8 +55,7 @@ export function createSshCommandManagedRuntimeRunner(input: {
       const command = commandInput.command.trim();
       const args = commandInput.args ?? [];
       const cwd = commandInput.cwd?.trim() || defaultCwd;
-      const envEntries = Object.entries(commandInput.env ?? {})
-        .filter((entry): entry is [string, string] => typeof entry[1] === "string");
+      const envEntries = validatedSshEnvEntries(commandInput.env);
       const envPrefix = envEntries.length > 0
         ? `env ${envEntries.map(([key, value]) => `${key}=${shellQuote(value)}`).join(" ")} `
         : "";
@@ -120,6 +121,8 @@ export interface SshEnvLabSupport {
   reason: string | null;
 }
 
+export const SSH_ENV_LAB_REQUIRED_COMMANDS = ["ssh", "sshd", "ssh-keygen", "ps"] as const;
+
 export interface SshEnvLabFixtureState {
   kind: "ssh_openbsd";
   bindHost: string;
@@ -147,12 +150,36 @@ interface LocalGitWorkspaceSnapshot {
   deletedPaths: string[];
 }
 
-export function shellQuote(value: string) {
-  return `'${value.replace(/'/g, `'\"'\"'`)}'`;
-}
+export { shellQuote } from "./shell-path.js";
 
 function isValidShellEnvKey(value: string) {
   return /^[A-Za-z_][A-Za-z0-9_]*$/.test(value);
+}
+
+function validatedSshEnvEntries(
+  env: Record<string, string | undefined> | undefined,
+): Array<[string, string]> {
+  const entries = Object.entries(env ?? {})
+    .filter((entry): entry is [string, string] => typeof entry[1] === "string");
+  for (const [key] of entries) {
+    if (!isValidShellEnvKey(key)) {
+      throw new Error(`Invalid SSH environment variable key: ${key}`);
+    }
+  }
+  return entries;
+}
+
+export function buildSshDestinationArgs(
+  config: Pick<SshConnectionConfig, "host" | "port" | "username">,
+  remoteCommand: string,
+): string[] {
+  return [
+    "-p",
+    String(config.port),
+    "--",
+    `${config.username}@${config.host}`,
+    remoteCommand,
+  ];
 }
 
 export function parseSshRemoteExecutionSpec(value: unknown): SshRemoteExecutionSpec | null {
@@ -334,20 +361,7 @@ async function runLocalGit(
 }
 
 async function commandExists(command: string): Promise<boolean> {
-  return (await resolveCommandPath(command)) !== null;
-}
-
-async function resolveCommandPath(command: string): Promise<string | null> {
-  try {
-    const result = await execFileText("sh", ["-c", `command -v ${shellQuote(command)}`], {
-      timeout: 5_000,
-      maxBuffer: 8 * 1024,
-    });
-    const resolved = result.stdout.trim().split("\n")[0]?.trim() ?? "";
-    return resolved.length > 0 ? resolved : null;
-  } catch {
-    return null;
-  }
+  return (await resolveCommandPath(command, process.cwd(), process.env)) !== null;
 }
 
 async function withTempFile(
@@ -652,10 +666,10 @@ async function streamLocalFileToSsh(input: {
   const auth = await createSshAuthArgs(input.spec);
   const sshArgs = [
     ...auth.args,
-    "-p",
-    String(input.spec.port),
-    `${input.spec.username}@${input.spec.host}`,
-    `sh -c ${shellQuote(input.remoteScript)}`,
+    ...buildSshDestinationArgs(
+      input.spec,
+      `sh -c ${shellQuote(input.remoteScript)}`,
+    ),
   ];
 
   await new Promise<void>((resolve, reject) => {
@@ -707,10 +721,10 @@ async function streamSshToLocalFile(input: {
   const auth = await createSshAuthArgs(input.spec);
   const sshArgs = [
     ...auth.args,
-    "-p",
-    String(input.spec.port),
-    `${input.spec.username}@${input.spec.host}`,
-    `sh -c ${shellQuote(input.remoteScript)}`,
+    ...buildSshDestinationArgs(
+      input.spec,
+      `sh -c ${shellQuote(input.remoteScript)}`,
+    ),
   ];
 
   await new Promise<void>((resolve, reject) => {
@@ -1131,7 +1145,7 @@ export async function getSshEnvLabSupport(): Promise<SshEnvLabSupport> {
     };
   }
 
-  for (const command of ["ssh", "sshd", "ssh-keygen"]) {
+  for (const command of SSH_ENV_LAB_REQUIRED_COMMANDS) {
     if (!(await commandExists(command))) {
       return {
         supported: false,
@@ -1169,13 +1183,7 @@ export async function runSshCommand(
     const auth = await createSshAuthArgs(config);
     cleanup = auth.cleanup;
     const sshArgs = [...auth.args];
-    const envEntries = Object.entries(options.env ?? {})
-      .filter((entry): entry is [string, string] => typeof entry[1] === "string");
-    for (const [key] of envEntries) {
-      if (!isValidShellEnvKey(key)) {
-        throw new Error(`Invalid SSH environment variable key: ${key}`);
-      }
-    }
+    const envEntries = validatedSshEnvEntries(options.env);
 
     // Mirror buildSshSpawnTarget: source the login profiles first, then run
     // `env KEY=VAL cmd` so user-supplied identity overrides win over anything a
@@ -1199,12 +1207,10 @@ export async function runSshCommand(
         : `exec sh -c ${shellQuote(remoteCommand)}`,
     ].join(" && ");
 
-    sshArgs.push(
-      "-p",
-      String(config.port),
-      `${config.username}@${config.host}`,
+    sshArgs.push(...buildSshDestinationArgs(
+      config,
       `sh -c ${shellQuote(remoteScript)}`,
-    );
+    ));
 
     return options.stdin != null
       ? await spawnText("ssh", sshArgs, {
@@ -1231,16 +1237,10 @@ export async function buildSshSpawnTarget(input: {
   args: string[];
   cleanup: () => Promise<void>;
 }> {
-  for (const key of Object.keys(input.env)) {
-    if (!isValidShellEnvKey(key)) {
-      throw new Error(`Invalid SSH environment variable key: ${key}`);
-    }
-  }
+  const envEntries = validatedSshEnvEntries(input.env);
   const auth = await createSshAuthArgs(input.spec);
   const sshArgs = [...auth.args];
-  const envArgs = Object.entries(input.env)
-    .filter((entry): entry is [string, string] => typeof entry[1] === "string")
-    .map(([key, value]) => `${key}=${shellQuote(value)}`);
+  const envArgs = envEntries.map(([key, value]) => `${key}=${shellQuote(value)}`);
   const remoteCommandParts = [shellQuote(input.command), ...input.args.map((arg) => shellQuote(arg))].join(" ");
   // Source the login profiles first, then run `env KEY=VAL cmd` so
   // user-supplied identity overrides win over anything a profile re-exports.
@@ -1264,12 +1264,10 @@ export async function buildSshSpawnTarget(input: {
       : `exec ${remoteCommandParts}`,
   ].join(" && ");
 
-  sshArgs.push(
-    "-p",
-    String(input.spec.port),
-    `${input.spec.username}@${input.spec.host}`,
+  sshArgs.push(...buildSshDestinationArgs(
+    input.spec,
     `sh -c ${shellQuote(remoteScript)}`,
-  );
+  ));
 
   return {
     command: "ssh",
@@ -1290,10 +1288,10 @@ export async function syncDirectoryToSsh(input: {
   const auth = await createSshAuthArgs(input.spec);
   const sshArgs = [
     ...auth.args,
-    "-p",
-    String(input.spec.port),
-    `${input.spec.username}@${input.spec.host}`,
-    `sh -c ${shellQuote(`mkdir -p ${shellQuote(input.remoteDir)} && tar -xf - -C ${shellQuote(input.remoteDir)}`)}`,
+    ...buildSshDestinationArgs(
+      input.spec,
+      `sh -c ${shellQuote(`mkdir -p ${shellQuote(input.remoteDir)} && tar -xf - -C ${shellQuote(input.remoteDir)}`)}`,
+    ),
   ];
 
   // tar's archive size isn't known until tar finishes, so estimate it from the
@@ -1418,10 +1416,10 @@ export async function syncDirectoryFromSsh(input: {
   ].join(" && ");
   const sshArgs = [
     ...auth.args,
-    "-p",
-    String(input.spec.port),
-    `${input.spec.username}@${input.spec.host}`,
-    `sh -c ${shellQuote(remoteTarScript)}`,
+    ...buildSshDestinationArgs(
+      input.spec,
+      `sh -c ${shellQuote(remoteTarScript)}`,
+    ),
   ];
 
   // The remote tar size isn't known locally, so probe the remote directory for
@@ -1715,7 +1713,7 @@ export async function startSshEnvLabFixture(input: {
   if (!support.supported) {
     throw new Error(`SSH env-lab fixture is unavailable: ${support.reason}`);
   }
-  const sshdPath = await resolveCommandPath("sshd");
+  const sshdPath = await resolveCommandPath("sshd", process.cwd(), process.env);
   if (!sshdPath) {
     throw new Error("SSH env-lab fixture is unavailable: missing required command: sshd");
   }

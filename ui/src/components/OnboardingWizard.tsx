@@ -38,6 +38,11 @@ import {
   selectDefaultCompanyGoalId,
   selectReusableOnboardingProject,
 } from "../lib/onboarding-launch";
+import {
+  selectOnboardingAdapterModel,
+} from "../lib/onboarding-agent-config";
+import { useOnboardingAgentConfigReview } from "../hooks/useOnboardingAgentConfigReview";
+import { usePersistOnboardingAgentConfig } from "../hooks/usePersistOnboardingAgentConfig";
 import { buildNewAgentRuntimeConfig } from "../lib/new-agent-runtime-config";
 import { DEFAULT_CODEX_LOCAL_BYPASS_APPROVALS_AND_SANDBOX } from "@paperclipai/adapter-codex-local";
 import { DEFAULT_CURSOR_LOCAL_MODEL } from "@paperclipai/adapter-cursor-local";
@@ -47,6 +52,7 @@ import { resolveRouteOnboardingOptions } from "../lib/onboarding-route";
 import { AsciiArtAnimation } from "./AsciiArtAnimation";
 import { FrontDoor } from "./FrontDoor";
 import { AgentCapsule } from "./AgentCapsule";
+import { OnboardingConfigurationReview } from "./OnboardingConfigurationReview";
 import { Badge } from "@/components/ui/badge";
 import {
   Building2,
@@ -110,6 +116,7 @@ export function OnboardingWizard() {
   } = useDialog();
   const { companies, setSelectedCompanyId, loading: companiesLoading } = useCompany();
   const queryClient = useQueryClient();
+  const persistOnboardingAgentConfig = usePersistOnboardingAgentConfig();
   const navigate = useNavigate();
   const location = useLocation();
   const { companyPrefix } = useParams<{ companyPrefix?: string }>();
@@ -169,9 +176,15 @@ export function OnboardingWizard() {
   const [adapterType, setAdapterType] = useState<AdapterType>((saved?.adapterType as AdapterType) ?? "claude_local");
   const [cwd, setCwd] = useState((saved?.cwd as string) ?? "");
   const [model, setModel] = useState((saved?.model as string) ?? "");
+  const [modelTouched, setModelTouched] = useState(
+    (saved?.modelTouched as boolean) ?? false,
+  );
   const [command, setCommand] = useState((saved?.command as string) ?? "");
   const [args, setArgs] = useState((saved?.args as string) ?? "");
   const [url, setUrl] = useState((saved?.url as string) ?? "");
+  const [urlTouched, setUrlTouched] = useState(
+    (saved?.urlTouched as boolean) ?? false,
+  );
   const [adapterEnvResult, setAdapterEnvResult] =
     useState<AdapterEnvironmentTestResult | null>(null);
   const [adapterEnvError, setAdapterEnvError] = useState<string | null>(null);
@@ -198,6 +211,8 @@ export function OnboardingWizard() {
   const [createdIssueRef, setCreatedIssueRef] = useState<string | null>(
     (saved?.createdIssueRef as string) ?? null
   );
+  const [persistedAdapterConfigExpectation, setPersistedAdapterConfigExpectation] =
+    useState<Record<string, unknown> | null>(null);
 
   // Reset the route-dismissed flag when navigating to a different path.
   useEffect(() => {
@@ -234,7 +249,8 @@ export function OnboardingWizard() {
     if (!effectiveOnboardingOpen) return;
     const state = {
       step, companyName, companyGoal, missionPath, missionConfirmed,
-      q1, q2, q3, q4, agentName, adapterType, cwd, model, command, args, url,
+      q1, q2, q3, q4, agentName, adapterType, cwd, model, modelTouched,
+      command, args, url, urlTouched,
       createdCompanyId, createdCompanyPrefix, createdAgentId,
       createdCompanyGoalId, createdProjectId, createdIssueRef,
       onboardingPath, growWorkflows, growPainPoints, growAutomate,
@@ -242,7 +258,8 @@ export function OnboardingWizard() {
     localStorage.setItem(ONBOARDING_STORAGE_KEY, JSON.stringify(state));
   }, [
     effectiveOnboardingOpen, step, companyName, companyGoal, missionPath, missionConfirmed,
-    q1, q2, q3, q4, agentName, adapterType, cwd, model, command, args, url,
+    q1, q2, q3, q4, agentName, adapterType, cwd, model, modelTouched,
+    command, args, url, urlTouched,
     createdCompanyId, createdCompanyPrefix, createdAgentId,
     createdCompanyGoalId, createdProjectId, createdIssueRef,
     onboardingPath, growWorkflows, growPainPoints, growAutomate,
@@ -380,9 +397,11 @@ export function OnboardingWizard() {
     setAgentName("Chief of staff");
     setAdapterType("claude_local");
     setModel("");
+    setModelTouched(false);
     setCommand("");
     setArgs("");
     setUrl("");
+    setUrlTouched(false);
     setAdapterEnvResult(null);
     setAdapterEnvError(null);
     setAdapterEnvLoading(false);
@@ -394,6 +413,7 @@ export function OnboardingWizard() {
     setCreatedCompanyGoalId(null);
     setCreatedProjectId(null);
     setCreatedIssueRef(null);
+    setPersistedAdapterConfigExpectation(null);
   }
 
   function handleClose() {
@@ -411,6 +431,7 @@ export function OnboardingWizard() {
       setError(INCOMPLETE_ONBOARDING_STATE_MESSAGE);
       return;
     }
+    if (!persistedConfigVerified) return;
     setLoading(true);
     setError(null);
     try {
@@ -505,6 +526,31 @@ export function OnboardingWizard() {
     return config;
   }
 
+  const hasPersistedAdapterConfigExpectation =
+    persistedAdapterConfigExpectation !== null;
+  const {
+    review: persistedConfigReview,
+    pending: persistedConfigReadbackPending,
+    errorMessage: persistedConfigReadbackErrorMessage,
+    verified: persistedConfigReadbackVerified,
+  } = useOnboardingAgentConfigReview({
+    companyId: createdCompanyId,
+    agentId: createdAgentId,
+    adapterType,
+    adapterConfig: persistedAdapterConfigExpectation ?? {},
+    exactAdapterConfig: true,
+    enabled:
+      effectiveOnboardingOpen
+      && step === 5
+      && hasPersistedAdapterConfigExpectation,
+  });
+  const persistedConfigVerified =
+    hasPersistedAdapterConfigExpectation && persistedConfigReadbackVerified;
+  const persistedReadbackErrorMessage =
+    step === 5 && !hasPersistedAdapterConfigExpectation
+      ? "Return to configuration and save again before launch. The prior exact save expectation is not available after reload."
+      : persistedConfigReadbackErrorMessage;
+
   async function runAdapterEnvironmentTest(
     adapterConfigOverride?: Record<string, unknown>
   ): Promise<AdapterEnvironmentTestResult | null> {
@@ -534,6 +580,21 @@ export function OnboardingWizard() {
     } finally {
       setAdapterEnvLoading(false);
     }
+  }
+
+  async function verifyAdapterEnvironmentForSave(
+    adapterConfig: Record<string, unknown>,
+  ) {
+    if (!isLocalAdapter) return true;
+    const result = await runAdapterEnvironmentTest(adapterConfig);
+    if (!result) return false;
+    if (result.status === "fail") {
+      setError(
+        "Adapter environment check failed. Resolve the reported checks before saving."
+      );
+      return false;
+    }
+    return true;
   }
 
   // Step 2 → 3 ("Confirm mission"): create the company + its company-level
@@ -575,15 +636,11 @@ export function OnboardingWizard() {
     }
   }
 
-  // Step 4 → 5 ("Give it a heartbeat"): hire the lead agent + seed its
-  // instructions, then advance to Review. Guarded so revisiting step 4
-  // doesn't hire a second agent.
+  // Step 4 → 5 ("Give it a heartbeat"): test and persist the selected
+  // adapter configuration. A returning flow updates its existing lead instead
+  // of hiring a duplicate, then Review verifies the authoritative readback.
   async function handleGiveHeartbeat() {
     if (!createdCompanyId) return;
-    if (createdAgentId) {
-      setStep(5);
-      return;
-    }
     setLoading(true);
     setError(null);
     try {
@@ -620,16 +677,33 @@ export function OnboardingWizard() {
         }
       }
 
-      if (isLocalAdapter) {
-        const result = adapterEnvResult ?? (await runAdapterEnvironmentTest());
-        if (!result) return;
+      const adapterConfig = buildAdapterConfig();
+
+      if (createdAgentId) {
+        const persisted = await persistOnboardingAgentConfig({
+          companyId: createdCompanyId,
+          agentId: createdAgentId,
+          adapterType,
+          adapterConfig,
+          intent: {
+            model: modelTouched,
+            url: urlTouched,
+          },
+          verifyEffectiveAdapterConfig: verifyAdapterEnvironmentForSave,
+        });
+        if (!persisted) return;
+        setPersistedAdapterConfigExpectation(persisted.expectedAdapterConfig);
+        setStep(5);
+        return;
       }
+
+      if (!(await verifyAdapterEnvironmentForSave(adapterConfig))) return;
 
       const hire = await agentsApi.hire(createdCompanyId, {
         name: agentName.trim(),
         role: "ceo",
         adapterType,
-        adapterConfig: buildAdapterConfig(),
+        adapterConfig,
         runtimeConfig: buildNewAgentRuntimeConfig()
       });
       if (hire.approval) {
@@ -643,8 +717,12 @@ export function OnboardingWizard() {
       }
       const agent = hire.agent;
       setCreatedAgentId(agent.id);
+      setPersistedAdapterConfigExpectation(agent.adapterConfig);
       queryClient.invalidateQueries({
         queryKey: queryKeys.agents.list(createdCompanyId)
+      });
+      queryClient.invalidateQueries({
+        queryKey: queryKeys.agents.detail(agent.id)
       });
 
       // Seed the CEO's agent instructions file so the agent always has
@@ -746,6 +824,7 @@ export function OnboardingWizard() {
   if (!effectiveOnboardingOpen) return null;
 
   const launchStateIncomplete = step === 5 && (!createdCompanyId || !createdAgentId);
+  const launchConfigurationBlocked = step === 5 && !persistedConfigVerified;
   const visibleError = error ?? (launchStateIncomplete ? INCOMPLETE_ONBOARDING_STATE_MESSAGE : null);
 
   return (
@@ -1256,15 +1335,15 @@ export function OnboardingWizard() {
                           )}
                           onClick={() => {
                             const nextType = opt.type;
+                            if (nextType !== adapterType) setModelTouched(true);
                             setAdapterType(nextType);
-                            if (nextType === "codex_local") {
-                              return;
-                            }
-                            if (nextType === "opencode_local") {
-                              setModel(DEFAULT_OPENCODE_LOCAL_MODEL);
-                              return;
-                            }
-                            setModel("");
+                            setModel(
+                              selectOnboardingAdapterModel(
+                                adapterType,
+                                nextType,
+                                model,
+                              ),
+                            );
                           }}
                         >
                           {opt.recommended && (
@@ -1308,24 +1387,19 @@ export function OnboardingWizard() {
                                  ? "border-foreground bg-accent"
                                  : "border-border hover:bg-accent/50"
                              )}
-                             onClick={() => {
-                               if (opt.comingSoon) return;
-                               const nextType = opt.type;
-                              setAdapterType(nextType);
-                              if (nextType === "gemini_local" && !model) {
-                                setModel(DEFAULT_GEMINI_LOCAL_MODEL);
-                                return;
-                              }
-                              if (nextType === "cursor" && !model) {
-                                setModel(DEFAULT_CURSOR_LOCAL_MODEL);
-                                return;
-                              }
-                              if (nextType === "opencode_local") {
-                                setModel(DEFAULT_OPENCODE_LOCAL_MODEL);
-                                return;
-                              }
-                              setModel("");
-                            }}
+                               onClick={() => {
+                                 if (opt.comingSoon) return;
+                                 const nextType = opt.type;
+                                 if (nextType !== adapterType) setModelTouched(true);
+                                 setAdapterType(nextType);
+                                setModel(
+                                  selectOnboardingAdapterModel(
+                                    adapterType,
+                                    nextType,
+                                    model,
+                                  ),
+                                );
+                             }}
                           >
                             <opt.icon className="h-4 w-4" />
                             <span className="font-medium">{opt.label}</span>
@@ -1386,9 +1460,10 @@ export function OnboardingWizard() {
                               <button
                                 className={cn(
                                   "flex items-center gap-2 w-full px-2 py-1.5 text-sm rounded hover:bg-accent/50",
-                                  !model && "bg-accent"
+                                 !model && "bg-accent"
                                 )}
                                 onClick={() => {
+                                  setModelTouched(true);
                                   setModel("");
                                   setModelOpen(false);
                                 }}
@@ -1412,9 +1487,10 @@ export function OnboardingWizard() {
                                       key={m.id}
                                       className={cn(
                                         "flex items-center w-full px-2 py-1.5 text-sm rounded hover:bg-accent/50",
-                                        m.id === model && "bg-accent"
+                                       m.id === model && "bg-accent"
                                       )}
                                       onClick={() => {
+                                        setModelTouched(true);
                                         setModel(m.id);
                                         setModelOpen(false);
                                       }}
@@ -1577,7 +1653,10 @@ export function OnboardingWizard() {
                             : "https://..."
                         }
                         value={url}
-                        onChange={(e) => setUrl(e.target.value)}
+                        onChange={(e) => {
+                          setUrlTouched(true);
+                          setUrl(e.target.value);
+                        }}
                       />
                     </div>
                   )}
@@ -1593,7 +1672,7 @@ export function OnboardingWizard() {
                       { label: "Company name", done: Boolean(companyName.trim()) },
                       { label: "Mission", done: Boolean(companyGoal.trim()) },
                       { label: "Agent created", done: Boolean(createdAgentId) },
-                      { label: "Model connected", done: Boolean(createdAgentId) },
+                      { label: "Saved configuration verified", done: persistedConfigVerified },
                     ].map(({ label, done }) => (
                       <div key={label} className="flex items-center gap-2 text-sm">
                         <span
@@ -1612,6 +1691,17 @@ export function OnboardingWizard() {
                       </div>
                     ))}
                   </div>
+
+                  <OnboardingConfigurationReview
+                    savedConfig={persistedConfigReview}
+                    savedConfigVerified={persistedConfigVerified}
+                    savedConfigPending={persistedConfigReadbackPending}
+                    savedConfigError={persistedReadbackErrorMessage}
+                    environmentRequired={isLocalAdapter}
+                    environmentResult={adapterEnvResult}
+                    environmentLoading={adapterEnvLoading}
+                    environmentError={adapterEnvError}
+                  />
 
                   {companyGoal.trim() && (
                     <p className="text-sm text-muted-foreground italic text-center">
@@ -1702,7 +1792,11 @@ export function OnboardingWizard() {
                     <Button
                       size="sm"
                       onClick={handleLaunchToDashboard}
-                      disabled={loading || launchStateIncomplete}
+                      disabled={
+                        loading ||
+                        launchStateIncomplete ||
+                        launchConfigurationBlocked
+                      }
                     >
                       {loading ? (
                         <Loader2 className="h-3.5 w-3.5 mr-1 animate-spin" />

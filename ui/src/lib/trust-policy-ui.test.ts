@@ -4,12 +4,33 @@ import {
   clearSingleLowTrustBoundaryTarget,
   getLowTrustBoundary,
   getSingleLowTrustBoundaryTarget,
+  getTrustPreset,
   isCeLowTrustBoundaryEditable,
   setSingleLowTrustBoundaryTarget,
   summarizeLowTrustBoundaryTarget,
 } from "./trust-policy-ui";
 
 describe("trust-policy-ui low-trust boundary helpers", () => {
+  it.each([
+    { authorizationPolicy: { trustPreset: "low_trust_review" as const } },
+    {
+      authorizationPolicy: {
+        reviewPreset: {
+          id: "low_trust_review" as const,
+          version: 1 as const,
+          rawOutputDisposition: "quarantine" as const,
+        },
+      },
+    },
+    {
+      authorizationPolicy: {
+        trustBoundary: { mode: "low_trust_review" as const },
+      },
+    },
+  ])("resolves nested low-trust policy forms", (permissions) => {
+    expect(getTrustPreset(permissions)).toBe("low_trust_review");
+  });
+
   it("writes one project boundary with mode and company id", () => {
     const permissions = setSingleLowTrustBoundaryTarget(null, "company-1", {
       type: "project",

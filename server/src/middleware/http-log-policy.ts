@@ -30,11 +30,35 @@ const SILENCED_SUCCESS_STATIC_PATHS = new Set([
   "/sw.js",
 ]);
 
+const SENSITIVE_REQUEST_BODY_PATHS = [
+  /^\/api\/auth(?:\/|$)/i,
+  /^\/api\/board-claim(?:\/|$)/i,
+  /^\/api\/cli-auth(?:\/|$)/i,
+  /\/(?:secrets?|user-secrets?|secret-proposals?|secret-provider-configs?)(?:\/|$)/i,
+];
+
+export function requestPathWithoutQuery(url: string | undefined): string {
+  if (!url) return "";
+  const queryStart = url.indexOf("?");
+  return queryStart === -1 ? url : url.slice(0, queryStart);
+}
+
+export function requestPathForHttpLog(url: string | undefined): string {
+  return requestPathWithoutQuery(url).replace(
+    /^(\/api\/board-claim\/)[^/]+/i,
+    "$1[REDACTED]",
+  );
+}
+
+export function shouldOmitHttpRequestBody(url: string | undefined): boolean {
+  const pathname = requestPathWithoutQuery(url);
+  return SENSITIVE_REQUEST_BODY_PATHS.some((pattern) => pattern.test(pathname));
+}
+
 function normalizePath(url: string): string {
-  const trimmed = url.trim();
+  const trimmed = requestPathWithoutQuery(url).trim();
   if (trimmed.length === 0) return "/";
-  const pathname = trimmed.split("?")[0]?.trim() ?? "/";
-  return pathname.length > 0 ? pathname : "/";
+  return trimmed;
 }
 
 export function shouldSilenceHttpSuccessLog(method: string | undefined, url: string | undefined, statusCode: number): boolean {

@@ -71,6 +71,69 @@ test("selects deterministic co-located and parent __tests__ siblings", () => {
   });
 });
 
+test("selects exact declared contract tests without widening to an import graph", () => {
+  withFixture(({ repoRoot, trackedFiles, write }) => {
+    write("server/src/middleware/http-logger.ts", "export const logger = true;\n");
+    write(
+      "server/src/__tests__/http-log-redaction.test.ts",
+      "test('redaction', () => {});\n",
+    );
+    write("server/src/__tests__/unrelated.test.ts", "test('other', () => {});\n");
+    const result = selectPrePushTests({
+      repoRoot,
+      changedFiles: ["server/src/middleware/http-logger.ts"],
+      trackedFiles,
+    });
+    assert.deepEqual(result.vitestFiles, ["server/src/__tests__/http-log-redaction.test.ts"]);
+    assert.deepEqual(result.coverage[0].siblingTests, []);
+    assert.deepEqual(result.coverage[0].declaredTests, [
+      "server/src/__tests__/http-log-redaction.test.ts",
+    ]);
+    assert.deepEqual(result.selectionErrors, []);
+  });
+});
+
+test("selects the registered Playwright contract for the onboarding hire route helper", () => {
+  withFixture(({ repoRoot, trackedFiles, write }) => {
+    write(
+      "tests/e2e/onboarding-hire-route.ts",
+      "export const suppressAutomaticWakes = true;\n",
+    );
+    write(
+      "tests/e2e/onboarding-hire-route.spec.ts",
+      "test('preserves adapter config', () => {});\n",
+    );
+    const result = selectPrePushTests({
+      repoRoot,
+      changedFiles: ["tests/e2e/onboarding-hire-route.ts"],
+      trackedFiles,
+    });
+    assert.deepEqual(result.hostedTestFiles, [
+      "tests/e2e/onboarding-hire-route.spec.ts",
+    ]);
+    assert.deepEqual(result.coverage[0].declaredTests, [
+      "tests/e2e/onboarding-hire-route.spec.ts",
+    ]);
+    assert.deepEqual(result.selectionErrors, []);
+  });
+});
+
+test("fails closed when a declared contract test is absent", () => {
+  withFixture(({ repoRoot, trackedFiles, write }) => {
+    write("server/src/middleware/http-logger.ts", "export const logger = true;\n");
+    const result = selectPrePushTests({
+      repoRoot,
+      changedFiles: ["server/src/middleware/http-logger.ts"],
+      trackedFiles,
+    });
+    assert.deepEqual(result.vitestFiles, []);
+    assert.match(
+      result.selectionErrors.join("\n"),
+      /declared deterministic test is not a regular file/,
+    );
+  });
+});
+
 test("routes each test family to its real runner", () => {
   assert.equal(classifyTestRunner("scripts/check-no-git-push.test.mjs"), "node-test");
   assert.equal(classifyTestRunner("tests/e2e/onboarding.spec.ts"), "hosted-playwright");
@@ -91,7 +154,7 @@ test("fails closed in its result when production code has no sibling test", () =
     });
     assert.deepEqual(result.vitestFiles, []);
     assert.deepEqual(result.uncoveredProductionFiles, ["packages/adapter-utils/src/uncovered.ts"]);
-    assert.match(result.selectionErrors[0], /lacks a deterministic sibling test/);
+    assert.match(result.selectionErrors[0], /lacks a deterministic sibling or declared test/);
   });
 });
 
@@ -142,6 +205,24 @@ test("a removed production file runs a surviving sibling or requires hosted CI",
     assert.deepEqual(withoutSibling.removedProductionFiles, ["server/src/removed-without-test.ts"]);
     assert.deepEqual(withoutSibling.hostedCiFiles, ["server/src/removed-without-test.ts"]);
     assert.deepEqual(withoutSibling.selectionErrors, []);
+  });
+});
+
+test("a removed production file with a declared contract test does not require hosted CI", () => {
+  withFixture(({ repoRoot, trackedFiles, write }) => {
+    write(
+      "server/src/__tests__/http-log-redaction.test.ts",
+      "test('remaining declared contract', () => {});\n",
+    );
+    const result = selectPrePushTests({
+      repoRoot,
+      changedFiles: ["server/src/middleware/http-logger.ts"],
+      trackedFiles,
+    });
+    assert.deepEqual(result.removedProductionFiles, ["server/src/middleware/http-logger.ts"]);
+    assert.deepEqual(result.vitestFiles, ["server/src/__tests__/http-log-redaction.test.ts"]);
+    assert.deepEqual(result.hostedCiFiles, []);
+    assert.deepEqual(result.selectionErrors, []);
   });
 });
 

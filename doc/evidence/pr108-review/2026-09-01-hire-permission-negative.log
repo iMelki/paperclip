@@ -1,0 +1,54 @@
+
+ RUN  v4.1.10 S:/source/CCAI/Assistants/tools/paperclip/server
+
+ ❯ src/__tests__/approvals-service.test.ts (24 tests | 1 failed | 23 skipped) 11ms
+     × fails closed before creating an agent from a legacy standalone privilege escalation 10ms
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/__tests__/approvals-service.test.ts > approvalService resolution idempotency > fails closed before creating an agent from a legacy standalone privilege escalation
+AssertionError: promise resolved "{ approval: { …(6) }, applied: true }" instead of rejecting
+
+- Expected
++ Received
+
+- Error {
+-   "message": "rejected promise",
++ {
++   "applied": true,
++   "approval": {
++     "companyId": "company-1",
++     "id": "approval-1",
++     "payload": {
++       "adapterType": "process",
++       "name": "Hidden Delegation",
++       "permissions": {
++         "canCreateAgents": true,
++       },
++       "role": "engineer",
++     },
++     "requestedByAgentId": "requester-1",
++     "status": "approved",
++     "type": "hire_agent",
++   },
+  }
+
+ ❯ src/__tests__/approvals-service.test.ts:609:5
+    607|     await expect(
+    608|       approvalService(dbStub.db as any).approve("approval-1", "board",…
+    609|     ).rejects.toMatchObject({
+       |     ^
+    610|       status: 422,
+    611|       details: {
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  1 failed | 23 skipped (24)
+   Start at  16:17:17
+   Duration  2.97s (transform 1.68s, setup 214ms, import 2.47s, tests 11ms, environment 0ms)
+
+undefined
+S:\source\CCAI\Assistants\tools\paperclip\server:
+ ERR_PNPM_RECURSIVE_EXEC_FIRST_FAIL  Command failed with exit code 1: vitest run src/__tests__/approvals-service.test.ts -t fails closed before creating an agent from a legacy standalone privilege escalation

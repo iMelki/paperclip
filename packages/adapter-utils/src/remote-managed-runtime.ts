@@ -7,6 +7,7 @@ import {
   restoreWorkspaceFromSshExecution,
   syncDirectoryToSsh,
 } from "./ssh.js";
+import { isWindowsAbsolutePath, shellQuote } from "./shell-path.js";
 import type {
   SandboxAdditionalSource,
   SandboxManagedRuntimeAssetRestoreContext,
@@ -62,10 +63,6 @@ function asString(value: unknown): string {
 
 function asNumber(value: unknown): number {
   return typeof value === "number" ? value : Number(value);
-}
-
-function shellQuote(value: string): string {
-  return `'${value.replace(/'/g, `'"'"'`)}'`;
 }
 
 async function readRemoteFile(spec: SshRemoteExecutionSpec, remotePath: string): Promise<Buffer> {
@@ -181,7 +178,7 @@ export async function prepareRemoteManagedRuntime(input: {
   for (const source of input.additionalSources ?? []) {
     const { localPath, projectId } = source;
     try {
-      if (!path.posix.isAbsolute(localPath)) {
+      if (!path.posix.isAbsolute(localPath) && !isWindowsAbsolutePath(localPath)) {
         throw new Error(`additional source localPath is not an absolute path: ${localPath}`);
       }
       if (

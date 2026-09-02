@@ -1,6 +1,27 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { findExistingComment } from '../run-quality-gates.mjs';
+import { readFile } from 'node:fs/promises';
+import { buildComment, findExistingComment } from '../run-quality-gates.mjs';
+
+const contributingUrl = new URL('../../../CONTRIBUTING.md', import.meta.url);
+
+test('buildComment: routes clean PRs to CodeRabbit or the Cursor fallback', () => {
+  const comment = buildComment('contributor', [], []);
+
+  assert.match(comment, /CodeRabbit/);
+  assert.match(comment, /Cursor when CodeRabbit is unavailable/);
+  assert.doesNotMatch(comment, /Greptile/);
+  assert.match(comment, /maintainer approval/);
+});
+
+test('contributor policy keeps Greptile optional and rejects mandatory 5/5 claims', async () => {
+  const policy = await readFile(contributingUrl, 'utf8');
+
+  assert.match(policy, /Greptile is optional\./);
+  assert.match(policy, /If CodeRabbit is unavailable, use Cursor Bugbot or Cursor review/);
+  assert.doesNotMatch(policy, /Greptile(?: score)? is 5\/5/i);
+  assert.doesNotMatch(policy, /must achieve a \*\*5\/5 Greptile score\*\*/);
+});
 
 test('findExistingComment: paginates until it finds the commitperclip comment', async () => {
   const seenPaths = [];

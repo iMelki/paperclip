@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -37,6 +37,18 @@ describe("remote managed runtime", () => {
       if (!dir) continue;
       await rm(dir, { recursive: true, force: true }).catch(() => undefined);
     }
+  });
+
+  it("uses the shared shell quoting primitive", async () => {
+    const source = await readFile(
+      new URL("./remote-managed-runtime.ts", import.meta.url),
+      "utf8",
+    );
+
+    expect(source).toMatch(
+      /import \{ isWindowsAbsolutePath, shellQuote \} from "\.\/shell-path\.js";/,
+    );
+    expect(source).not.toMatch(/\bfunction\s+shellQuote\s*\(/);
   });
 
   it("restores runtime assets without restoring an in-place SSH workspace", async () => {
@@ -181,6 +193,41 @@ describe("remote managed runtime", () => {
     expect(Object.keys(prepared.additionalSourceDirs)).toEqual(["healthy"]);
     expect(syncDirectoryToSsh).not.toHaveBeenCalledWith(expect.objectContaining({
       localDir: "relative/referenced",
+    }));
+  });
+
+  it("stages a Windows-absolute additional project path", async () => {
+    const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-remote-runtime-windows-path-"));
+    cleanupDirs.push(rootDir);
+    const workspaceDir = path.join(rootDir, "workspace");
+    await mkdir(workspaceDir, { recursive: true });
+    const windowsPath = "C:\\workspace\\referenced-project";
+
+    const prepared = await prepareRemoteManagedRuntime({
+      spec: {
+        host: "127.0.0.1",
+        port: 2222,
+        username: "fixture",
+        remoteWorkspacePath: "/app",
+        remoteCwd: "/app",
+        privateKey: "PRIVATE KEY",
+        knownHosts: "KNOWN HOSTS",
+        strictHostKeyChecking: true,
+      },
+      runId: "run-windows-path",
+      adapterKey: "codex",
+      workspaceLocalDir: workspaceDir,
+      workspaceRemoteDir: "/app",
+      syncWorkspace: false,
+      additionalSources: [{ localPath: windowsPath, projectId: "windows-project" }],
+    });
+
+    expect(prepared.additionalSourceDirs).toEqual({
+      "windows-project": "/app/.paperclip-runtime/codex/project-windows-project",
+    });
+    expect(syncDirectoryToSsh).toHaveBeenCalledWith(expect.objectContaining({
+      localDir: windowsPath,
+      remoteDir: "/app/.paperclip-runtime/codex/project-windows-project",
     }));
   });
 });

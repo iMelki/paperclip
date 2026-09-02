@@ -1,15 +1,45 @@
 # Paperclip Open Tasks
 
-Last updated: 2026-08-27
+Last updated: 2026-09-01
 
 2026-08-25: [paperclip#95](https://github.com/iMelki/paperclip/issues/95) —
 Windows factory start failed migrate (`42P07` / later `42703`) because the
 Drizzle journal lagged the existing schema. Ledger repaired in `client.ts`
-without wiping the factory DB. Start remains gated on a clean `dev` tree.
+without wiping the factory DB. The current gate is post-PR #108 no-loss
+fast-forward of the clean isolated factory checkout, then a governed wrapper
+pin/path update and fresh owner/listener/version/health proof on port 5113.
 
 This file is the durable local index for active `paperclip` issues.
 
 ## Recently Closed Issues
+
+- [#57 - Mixed-separator Windows paths broke tar sandbox commands](https://github.com/iMelki/paperclip/issues/57) — **closed 2026-09-01 after exact ancestry and current-tree audit**
+  - The original diagnosis was too broad: the `ce906e60f` baseline already
+    handled mixed separators in `shellQuotePath`. The observed failure was
+    resolved by PR #66's removal of raw callback interpolation and PR #69's
+    exported, hermetically tested Windows path helpers. Both merge commits are
+    ancestors of `origin/dev`; the current delivery branch does not change the
+    relevant files.
+
+- [#58 - Windows command-managed-runtime tests hardcoded `/bin/sh`](https://github.com/iMelki/paperclip/issues/58) — **closed 2026-09-01 by PR #66/#69 evidence**
+  - PR #66 repaired the two exact `/bin/sh` call sites. PR #69's final receipt
+    records the command-managed-runtime suite at 23/23 with the exported shell
+    resolver. Both fixes are ancestors of `origin/dev`; no remaining #58
+    source delta exists on the current delivery branch.
+
+- [#67 - PR CI did not validate the `dev` target](https://github.com/iMelki/paperclip/issues/67) — **closed 2026-09-01 after PR #78 and repeated hosted proof**
+  - PR #78 made `.github/workflows/pr.yml` cover pull requests into both
+    `master` and `dev`, prohibited `push`, and added a negative-proof policy
+    gate. PRs #78, #79, #81, #83, and #99 each completed the 22-check PR
+    workflow. The merge is an ancestor of `origin/dev`, so #67 is no longer an
+    active bootstrap task.
+
+- [#73 - Push lockout: the exhaustive pre-push gate rejected every push](https://github.com/iMelki/paperclip/issues/73) — **closed 2026-08-20 after PR #66 exact caller proof**
+  - Commit `43011d50` changed the planner from the stale remote-topic baseline
+    to the push destination's advertised `dev` object. PR #78 merged as
+    `9983a44a`; the repaired PR #66 head then passed workflow `32092799583`
+    and merged as `90bd179dd`. Current GitHub state is closed, so this is not
+    an active task.
 
 - [#70 - Test fixtures are not hermetic against host git config (insteadOf + autocrlf)](https://github.com/iMelki/paperclip/issues/70) — **closed 2026-08-18 by PR #69**
   - PR #69 squash-merged into `dev` at `987700f91` (PR head `670447a38`) with
@@ -40,6 +70,28 @@ This file is the durable local index for active `paperclip` issues.
     exact-head hosted readback completed via the PR #66 head `aeea981d2`
     (24 checks + expected neutral, merged as `90bd179dd`) and the PR #69
     matrices at `bbb37f640`/`670447a38` (merged as `987700f91`).
+
+- [#82 - Review `getIssueCoordination` loader/projector split before further growth](https://github.com/iMelki/paperclip/issues/82) —
+  **closed 2026-08-21 through merged PR #83**
+  - PR #81 delivered the #52 company-scoped coordination repair as squash
+    `7239123cf`. The #82 slice kept every company predicate inside private
+    loader helpers and reduced `getIssueCoordination` from 181 to 8 nonblank
+    lines. Pure projection receives an explicit clock and performs no database
+    access, authorization, or filtering. The negative/restored proofs and
+    42/42 final projector/route/isolation run are recorded in
+    `doc/evidence/coordination-loader-projector/2026-08-21-issue82-receipt.json`.
+    PR #83 merged into `dev` at `5efbc05824656b00d474fd47a2e55be17029a167`
+    after exact-head hosted CI, CodeRabbit, independent security review, and
+    human merge. #53 remains the separate evidence-truthfulness follow-up; it
+    must not be represented as shipped by this behavior-preserving refactor.
+
+- [#85 - Forbidden-token gate failed in linked worktrees](https://github.com/iMelki/paperclip/issues/85) — **closed 2026-09-01 as already delivered by PR #86**
+  - `check-forbidden-tokens-core.cjs` resolves the shared private token file
+    through `git rev-parse --git-common-dir`, while the repository-owned list
+    stays clone-delivered. A real linked-worktree fixture proves the path avoids
+    `.git/worktrees/<name>`, rejects a tracked private-token leak, and passes
+    after the leak is scrubbed. Merge `8cbc9479010fc26a3ccae450a7d8453ab92c3628`
+    is an ancestor of `origin/dev`; no duplicate implementation is required.
 
 ## Active Issues
 
@@ -97,52 +149,207 @@ This file is the durable local index for active `paperclip` issues.
     exclusions. Agent Settings fixed the classification contract in
     `c91e70cc`; an invalid genome remains non-green and no analyzer ran.
 
+- [#80 - Disposition matrix: extract, land, or retire preserved PR #45 without losing WIP](https://github.com/iMelki/paperclip/issues/80) — **no-loss census complete locally; reviewed delivery pending**
+  - The protected local and remote-tracking source refs both still resolve to
+    `7bae4af253dfd96ac8a4d44807b479bcece01865`; PR #45 remains an open draft.
+    The generated manifest owns all four commits, 162 commit/path rows, 131
+    unique historical paths, and 3,032 unified-zero hunks with zero unowned or
+    unknown rows. Twelve hunks are already landed with exact named-commit and
+    pinned-current-tree evidence; 936 remain selective-extraction candidates,
+    2,084 require semantic re-derivation, including all 2,000 remerge-diff
+    hunks. Those reconstructed-merge differences can contain meaningful manual
+    conflict resolution, so none is called stale without path-specific proof.
+    The focused generator suite passed 5/5, including checked-in manifest
+    validation and a recovery contract that never force-updates the protected
+    local WIP branch,
+    and `--check` reproduced the evidence under
+    `doc/evidence/pr45-disposition/`. No merge, wholesale cherry-pick, stash
+    mutation, source-branch deletion, or evidence retirement is authorized.
+    Generic or shallow checkouts now receive an explicit skipped-test reason,
+    while the CLI itself fails closed before census work and prints exact
+    unshallow and preservation-ref fetch commands.
+
+- [#53 - Make coordination evidence and health fail closed](https://github.com/iMelki/paperclip/issues/53)
+  - #82 is closed and is no longer a blocker. The remaining v2 contract is an
+    additive presentation-only route with a persisted root coordination
+    generation. `unassigned` is a non-authorizing sentinel; unknown,
+    malformed, stale, or ownership-mismatched facts must stay non-positive and
+    can never be projected as healthy. Existing v1 behavior remains untouched.
+    The preserved PR #45/p53 commits are evidence inputs, not cherry-pick
+    authority; implementation still needs its own migration, Ajv schema,
+    route/service tests, and caller-shaped negative proof on current `dev`.
+
+- [#56 - Normalize Vitest scratch roots and prove abnormal-exit cleanup](https://github.com/iMelki/paperclip/issues/56)
+  - Current `run-vitest-stable.mjs` creates `pcvt-*` roots, controls only
+    `TMPDIR`, and does not own cleanup; on Windows, children commonly follow
+    `TEMP`/`TMP` instead. The narrow planned fix is one outer
+    `eph-paperclip-vitest-*` root with all three variables bound to it, a
+    manifest/receipt, quiescence proof, and bounded same-run cleanup after
+    success, failure, timeout, or interruption. A broad prefix sweeper is not
+    acceptable because old roots can contain unrelated or secret-bearing state.
+
+- [#65 - Consolidate duplicated process-tree termination](https://github.com/iMelki/paperclip/issues/65)
+  - The original eight-site count is stale: the current audit finds five
+    production raw teardown implementations plus support/vendored exceptions.
+    The intended shared primitive is a zero-dependency
+    `packages/process-custody` boundary with typed ownership and structured
+    receipts. Migrate by risk and add a no-new-private-copy ratchet only after
+    every production consumer has moved; PostgreSQL graceful shutdown and SSH
+    remote teardown remain separate semantics, not forced consumers.
+
+- [#84 - Clarify or restore the Greptile 5/5 merge gate](https://github.com/iMelki/paperclip/issues/84)
+  - Decision implemented locally, pending reviewed delivery: Greptile is
+    optional and must be marked N/A when unconfigured. CodeRabbit is primary;
+    exact-head Cursor Bugbot/review is the documented fallback. CI and human
+    review remain separate. The old 5/5 sentence failed the real policy test,
+    and the restored policy passed 4/4.
+
+- [#108 - Harden Windows delivery, onboarding, and approvals](https://github.com/iMelki/paperclip/pull/108)
+  - Active reviewed-delivery vehicle for #47, #63, #80, #84, #87, and #88.
+    The first hosted run exposed two stale Playwright adapter stubs; the
+    repaired real journeys now pass 2/2 with authoritative Saved configuration
+    readback. CodeRabbit's actionable findings have caller-shaped negative
+    proofs; the final HTTP security set passes 34/34 and the independent server
+    regression set passes 109/109. The stable-diff review found no P0/P1 code
+    defect after exact evidence repair. Final commit/pre-push hooks, fresh
+    exact-head hosted CI, and fresh exact-head automated review remain gates.
+
 - [#87 - Bug: onboarding shows Codex but persists Claude adapter](https://github.com/iMelki/paperclip/issues/87)
-  - Current state: the onboarding UI can show a successful Codex selection and
-    environment check while the persisted team lead remains on `claude_local`.
-    The lead is not started. Fix the saved adapter update and show the persisted
-    adapter on the review step before using this flow for provider switching.
+  - Implemented locally, pending reviewed delivery. A returning flow now updates
+    the existing lead through a custody-preserving PATCH. Same-adapter resumes
+    retain hidden ACP/profile/arguments/workspace/runtime/timeout policy and
+    merge only onboarding-owned edits; adapter changes still discard stale
+    adapter-specific state/model. Review reads the saved agent and requires the
+    server-normalized saved config, not only adapter/model. Pending, failed,
+    mismatched, or reload-without-exact-expectation readback blocks **Get
+    started** with an accessible alert. Returning agents test the effective
+    merged command/cwd/env configuration before PATCH. The final set passed
+    21/21 plus the task-owned UI typecheck. Deliberate launch-gate,
+    destructive-replace, and draft-instead-of-effective-config controls failed
+    for their exact reasons before byte restoration. Independent stable-diff
+    review is GO with no P0/P1 after evidence repair. #105 owns opaque
+    revision/CAS hardening and #107
+    owns the accepted Wizard reduction follow-up.
+    Fresh browser proof passes both affected journeys and verifies Saved
+    configuration as Verified / Claude Code / Adapter default before enabling
+    **Get started**; the intercept no longer swaps the submitted adapter to an
+    inert HTTP stub and disables only automatic wakes.
 
-- [#82 - Review `getIssueCoordination` loader/projector split before further growth](https://github.com/iMelki/paperclip/issues/82) —
-  **in progress in PR #83; review hardening and fresh exact-head CI pending**
-  - PR #81 delivered the #52 company-scoped coordination repair as squash
-    `7239123cf`. The current #82 slice keeps every company predicate inside
-    private loader helpers and reduces `getIssueCoordination` from 181 to 8
-    nonblank lines. Pure projection now receives an explicit clock and performs
-    no database access, authorization, or filtering. A deliberate child-query
-    scope break failed exactly the direct-service and real-HTTP controls; the
-    exact restore passed 4/4, the final projector/route/isolation run passed
-    42/42, and server plus real pre-push workspace typechecks passed. A second
-    deliberate break proves newest-heartbeat selection is independent of row
-    order. Receipt:
-    `doc/evidence/coordination-loader-projector/2026-08-21-issue82-receipt.json`.
-    No #53/v2 truthfulness behavior is included. Current coordination use is
-    not blocked. PR #83 is the exact review surface; fresh exact-head hosted CI,
-    genuine CodeRabbit review, thread reconciliation, and human review remain
-    the delivery gates.
+- [#88 - Pending Codex hire approval redacts intentional empty API key and leaves agent stuck](https://github.com/iMelki/paperclip/issues/88)
+  - Source, focused executable proof, and server typecheck are complete locally;
+    real hooks and hosted delivery remain. Exact-empty plain bindings survive
+    while non-empty and
+    whitespace-only secrets remain redacted. Hire preparation is enforced at
+    the service boundary, same-company pending baselines are required for
+    restoration, approval/activation/reconciliation/budget writes are one
+    transaction, and notification starts after commit. Standalone approvals
+    apply icon, runtime config, default environment, and restrictive permissions
+    exactly; request-revision and resubmit transitions use status predicates.
+    Ambiguous bare `token`, camelCase private-key/secret/token credentials, and
+    provider-prefixed request keys are redacted from actual pino output. The
+    final HTTP policy/redactor/pino set passed 34/34 after its deliberately
+    broken control failed eight exact assertions for query, context, route,
+    path-token, code-alias, plain-binding, and URL/URI leaks. The independent
+    server regression set passes 109/109; the prior post-review set passed 47/47,
+    including embedded-Postgres exact readback and a two-connection stale-writer
+    barrier; its three deliberately broken controls failed for the expected
+    privilege, race, and log-canary reasons before exact restoration. Earlier
+    custody/transaction/logging proof passed 68/68 and built-in, route, and
+    plugin ingress regressions passed 54/54, all with C:-resident scratch.
+    The task-owned server typecheck exited 0. Separate residuals stay open as
+    [#101 - durable approval notification outbox](https://github.com/iMelki/paperclip/issues/101),
+    [#102 - historical approval secret audit/migration](https://github.com/iMelki/paperclip/issues/102),
+    [#103 - atomic pending-agent plus approval creation](https://github.com/iMelki/paperclip/issues/103),
+    and [#104 - allowlisted structured error-context logs](https://github.com/iMelki/paperclip/issues/104).
+    PR-review follow-up also strips query strings from request logs, redacts
+    connection-string variants, rejects array metadata, proves budget writes
+    use the transaction handle, and proves resubmit forwards the exact guarded
+    payload instead of the raw secret-bearing object.
 
-- [#63 - Shell-safety siblings: git-workspace-sync legacy quoter, bare-sh spawns, unguarded postUploadCommand](https://github.com/iMelki/paperclip/issues/63) — **three named clusters closed by PR #69; SSH-lane residuals remain**
+- [#105 - Use server-owned adapter-config revisions for onboarding verification and CAS](https://github.com/iMelki/paperclip/issues/105)
+  - P2 defense-in-depth follow-up from #87. Replace raw private-config
+    expectation state with an opaque server-owned revision, and require that
+    revision as an `If-Match`/compare-and-set precondition so a concurrent edit
+    between GET, environment probe, and PATCH cannot be overwritten silently.
+
+- [#106 - Reduce oversized onboarding and approval orchestration after the current delivery](https://github.com/iMelki/paperclip/issues/106)
+  - Owns the exact-patch maintainability exceptions for the existing oversized
+    agent routes, built-in/plugin-managed services, approval service, and Wizard.
+    Review before the next substantive growth or by 2026-09-15.
+
+- [#107 - Extract the onboarding step-4/5 controller before further Wizard growth](https://github.com/iMelki/paperclip/issues/107)
+  - Dedicated Paperclip UI follow-up. Reduce `handleGiveHeartbeat` below 80
+    source lines while preserving effective-config testing, PATCH/readback
+    order, secret non-storage, and current Shadcn/Radix presentation. Review by
+    2026-10-01 or before the next substantive step-4/5 change.
+
+- [#109 - Make dependency-review approval status explicit](https://github.com/iMelki/paperclip/issues/109)
+  - Open governance follow-up. Separate dependency approval from generic review
+    labels and make trusted-maintainer grant, revocation, and exact-head status
+    observable and fail closed.
+
+- [#110 - Ratchet local shell/tool spawn boundaries](https://github.com/iMelki/paperclip/issues/110)
+  - Open broader follow-up beyond #63's SSH scope. Inventory local launch sites,
+    migrate safe consumers to canonical helpers, then add a caller-shaped
+    no-new-private-copy gate.
+
+- [#111 - Remove contributor-home paths and add a portability/privacy ratchet](https://github.com/iMelki/paperclip/issues/111)
+  - Open current-tip cleanup; no history rewrite or force-push. Replace local
+    home paths with repository-relative links or neutral placeholders and add a
+    prospective cross-platform documentation check.
+
+- [#112 - Fail closed when Cursor `--trust` is unsupported](https://github.com/iMelki/paperclip/issues/112)
+  - Open provider-capability follow-up. Probe or pin an authoritative minimum
+    version, emit an actionable error, and never substitute `--force`, `--yolo`,
+    or another approval bypass.
+
+- [#63 - Shell-safety siblings: git-workspace-sync legacy quoter, bare-sh spawns, unguarded postUploadCommand](https://github.com/iMelki/paperclip/issues/63) — **SSH focused proof and adapter-utils typecheck complete; reviewed delivery pending**
   - PR #69 (squash `987700f91`, 2026-08-18) aliased `git-workspace-sync` to
     `shellQuotePath`, routed the six bare-`sh` test spawns through
     `resolveTestShellCommand`, and exported `quoteSandboxProvisionPath` /
     `buildSandboxRuntimeAssetExtractCommand` as the provision contract. The
     exact-head CodeRabbit review also fixed the `mkdir` parent derivation with
     `dirnamePortablePath` — the #36 defect class at the git-workspace-sync
-    site. Remaining residuals keep this issue open: `ssh.ts:150` legacy quoter
-    and `ssh.ts:342` bare-`sh` spawn (trace SSH callers first; do not batch),
-    `remote-managed-runtime.ts:184` posix-only `localPath` validation (fails
-    2 Windows-host tests at the `dev` tip and blocks pre-commit
-    `related`-suite expansions that select that suite — the #47 phenomenon
-    class), and
-    enforcement that prevents new bare-shell/bare-tool spawns.
+    site. PR #108's delivery branch reuses the canonical `shellQuote` in the
+    remote managed runtime, and a structural test rejects another private copy.
+    The SSH env-lab preflight now includes every local command it invokes,
+    including `ps` for descendant discovery. Both SSH support detection and
+    fixture startup now use the shell-free
+    PATH/PATHEXT resolver shared with `server-utils`. Independent review rejected
+    the first resolver/ratchet pass because it did not fully preserve Node PATH
+    semantics or prove the invoked gate could fail. The source-only repair now
+    handles unset and empty POSIX PATH, file-type plus access checks,
+    platform-correct path-like commands, case-insensitive Windows environment
+    keys, current-process PATH fallback when a Windows child environment omits
+    PATH, the documented PATHEXT default, aliased `/bin/sh` plus argv forms, and
+    named child-process import aliases such as `spawn as run`.
+    Package `typecheck` now invokes the exact gate first. The real package
+    caller exited 1 for both `/bin/sh` and named-import `/usr/bin/bash`
+    interpolation fixtures, exited 0 for passive text and restored `ssh.ts`,
+    and the final focused adapter-utils set passed 41/41. The ratchet now also proves
+    `which` under zsh with a composite `-ec` command flag, and covers the common
+    sh/bash/dash/zsh/ksh/ash shell names. The receipt also corrects the pnpm
+    forwarding syntax to `--source` (an extra `--` is forwarded literally and
+    produces the CLI's usage error). Package typecheck passed inside the
+    reviewed task-owned runner; earlier first-pass typecheck evidence stays
+    superseded. The `remote-managed-runtime.ts` host-local `localPath` check now
+    accepts both POSIX and Windows absolute paths, and its focused Windows tests
+    pass. The SSH-specific AST ratchet prevents new shell-backed `command -v`
+    or `which` lookups across the supported local shell/argv forms. ACPX/Gemini
+    interpolation remains separately tracked in #100 and is intentionally
+    outside this SSH-specific change. The post-review focused set passes 22/22
+    and the full #63 focused set passes 39/39; exact-head hosted proof remains
+    pending.
 
 - [#47 - dev tip fails 2 Windows path tests — hook rejects all commits](https://github.com/iMelki/paperclip/issues/47)
-  - Open. The same phenomenon recurred 2026-08-18 during the PR #69 repair
-    commit: the pre-commit `related`-suite expansion selected
-    `remote-managed-runtime.test.ts`, which fails 2 Windows-host tests at the
-    `dev` tip (tracked as a #63 residual). The commit used the hook's
-    documented `PAPERCLIP_PRECOMMIT_RELATED_CAP` knob with full attribution;
-    receipt: `doc/evidence/precommit-related-isolation/2026-08-18-pr69-receipt.json`.
+  - Local repair complete. `remote-managed-runtime.ts` now treats its
+    `localPath` as a host path and accepts either POSIX or Windows absolute
+    forms while retaining POSIX remote sandbox paths. The two formerly failing
+    Windows cases pass. The real old-head push hook receipt
+    `d5f924ecfaf943189522a2e94b772e49` passed the complete 22m57s caller inside
+    an identity-bound Job Object with disk-pressure monitoring and zero
+    survivors. The next gate is the real final-commit pre-push plus fresh
+    exact-head hosted CI and automated review on PR #108.
 
 - [#62 - Windows: symlinks do not survive the tar create/extract round-trip in runtime asset sync](https://github.com/iMelki/paperclip/issues/62)
   - Open remote tar-transport follow-up. Not addressed by PR #66/#69; keep with
@@ -152,32 +359,6 @@ This file is the durable local index for active `paperclip` issues.
   - Open. The environment transport remains bounded per the PR #66 changelog
     entry; reducing or replacing the oversized ambient-env payload (and its
     unrelated-secret exposure) remains this issue's scope.
-
-- [#73 - Push lockout: the exhaustive pre-push gate rejects every push](https://github.com/iMelki/paperclip/issues/73) — **reopened after a real existing-topic push**
-  - PR #78 replaced the uncapped related sweep and merged as `9983a44a`, but a
-    PR #66 push after merging that `dev` tip exposed one uncovered existing-ref
-    path: the planner diffed the old remote topic tip to `HEAD`, re-selected five
-    already-published `dev` files, and rejected them for missing siblings.
-  - Commit `43011d50` resolves advertised `dev` for every content update,
-    requires it as an ancestor, and tests the final `dev..HEAD` tree while the
-    secret scanner keeps the exact outgoing topic range. Deliberate old-baseline
-    proof failed for A versus C, focused planner/secret tests passed 22/22, and
-    the real hook passed 31-project typecheck plus 35 Node and ten isolated
-    Vitest suites. The first exact-head hosted matrix then exposed a latent
-    streamed-proxy `ERR_STREAM_WRITE_AFTER_END` race; the socket-state guard,
-    owning suite, and adapter-utils typecheck are green locally. A hosted matrix
-    for the repaired head confirmed that fix and exposed one stale OpenCode
-    startup-error assertion; its focused repair is green. The next hosted matrix
-    passed, and genuine exact-head CodeRabbit review found one bounded
-    test-helper child-custody gap. Its first repair was green on Windows but the
-    hosted matrix caught a POSIX-only direct `.mjs` fixture `EACCES`; the fixture
-    now uses the current Node executable explicitly. Those closing gates have
-    since completed for real: the PR #66 head `aeea981d2` passed the 24-check
-    hosted matrix plus expected neutral and merged as `90bd179dd`
-    (2026-08-18T02:51Z), and the PR #69 pushes `ebc5f66c5..bbb37f640` (4.9 min)
-    and `bbb37f640..670447a38` (3.7 min) passed the full hook end to end before
-    merging as `987700f91`. Read this issue's own acceptance criteria back
-    before closing it.
 
 - [#77 - check-no-git-push extension allowlist is fail-open by omission](https://github.com/iMelki/paperclip/issues/77) — **local repair and proof complete**
   - The scanner now rejects every undeclared file type under its required roots.
@@ -194,13 +375,6 @@ This file is the durable local index for active `paperclip` issues.
     quality gate remains explicitly disabled until React Doctor is declared in
     the manifest/lockfile and receives license, dependency-closure,
     offline/Windows/Linux, and authenticated-consumer qualification evidence.
-
-- [#67 - CI never validates dev: pr.yml is scoped to PRs into master](https://github.com/iMelki/paperclip/issues/67)
-  - Bootstrap prepared: PR CI covers `master` and `dev`, never `push: dev`, and a
-    static gate fails if either branch disappears or a push event is added. The
-    bootstrap PR launched and completed the full hosted matrix on two repaired
-    heads. The policy now mechanically requires the stable-runner regression;
-    read back the final repaired head before closing this issue.
 
 - [#68 - Deep gitleaks history scan fails; no pushed-range mode](https://github.com/iMelki/paperclip/issues/68)
   - `verify-gitleaks.mjs --history` exits 2 with 24 pre-existing findings across 7837

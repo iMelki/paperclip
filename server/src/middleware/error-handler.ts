@@ -6,9 +6,32 @@ import { trackErrorHandlerCrash } from "@paperclipai/shared/telemetry";
 import { getTelemetryClient } from "../telemetry.js";
 import { COMPANY_IMPORT_API_PATH } from "../routes/company-import-paths.js";
 import { logger } from "./logger.js";
+import { requestPathForHttpLog } from "./http-log-policy.js";
 import {
   recordResponsibleUserDenialOnActiveRun,
 } from "../services/responsible-user-denial-run-outcomes.js";
+
+const REDACTED_DATABASE_QUERY_PARAMS = "***REDACTED***";
+
+function redactDatabaseQueryParams(value: string | undefined) {
+  if (!value) return value;
+  const markerIndex = value.indexOf("\nparams:");
+  if (markerIndex < 0) return value;
+  // DrizzleQueryError includes every bound value after this marker. Do not try
+  // to recover the original stack after attacker-controlled parameter text;
+  // a value could imitate a stack-frame delimiter and escape redaction.
+  return `${value.slice(0, markerIndex)}\nparams: ${REDACTED_DATABASE_QUERY_PARAMS}`;
+}
+
+function logSafeError(rawError: Error) {
+  const message = redactDatabaseQueryParams(rawError.message) ?? rawError.message;
+  const stack = redactDatabaseQueryParams(rawError.stack);
+  if (message === rawError.message && stack === rawError.stack) return rawError;
+  const safeError = new Error(message);
+  safeError.name = rawError.name;
+  safeError.stack = stack;
+  return safeError;
+}
 
 export interface ErrorContext {
   error: { message: string; stack?: string; name?: string; details?: unknown; raw?: unknown };
@@ -16,7 +39,6 @@ export interface ErrorContext {
   url: string;
   reqBody?: unknown;
   reqParams?: unknown;
-  reqQuery?: unknown;
 }
 
 function isRedactedSkillPolicyDenial(details: Record<string, unknown> | null) {
@@ -29,16 +51,20 @@ function attachErrorContext(
   payload: ErrorContext["error"],
   rawError?: Error,
 ) {
+  const safeRawError = rawError ? logSafeError(rawError) : null;
   (res as any).__errorContext = {
-    error: payload,
+    error: {
+      ...payload,
+      message: redactDatabaseQueryParams(payload.message) ?? payload.message,
+      stack: redactDatabaseQueryParams(payload.stack),
+    },
     method: req.method,
-    url: req.originalUrl,
+    url: requestPathForHttpLog(req.originalUrl),
     reqBody: req.body,
     reqParams: req.params,
-    reqQuery: req.query,
   } satisfies ErrorContext;
-  if (rawError) {
-    (res as any).err = rawError;
+  if (safeRawError) {
+    (res as any).err = safeRawError;
   }
 }
 
@@ -103,7 +129,7 @@ export function errorHandler(
       if (tc) trackErrorHandlerCrash(tc, { errorCode: err.name });
     }
     res.status(err.status).json({
-      error: err.message,
+      error: redactDatabaseQueryParams(err.message) ?? err.message,
       ...(typeof details?.code === "string" ? { code: details.code } : {}),
       ...(redactedSkillPolicyDenial && typeof details?.reason === "string" ? { reason: details.reason } : {}),
       ...(typeof details?.remediation === "string" || (structuredConnectionError && details?.remediation && typeof details.remediation === "object")
@@ -123,6 +149,7 @@ export function errorHandler(
   }
 
   const rootError = err instanceof Error ? err : new Error(String(err));
+  const safeRootError = logSafeError(rootError);
   attachErrorContext(
     req,
     res,
@@ -137,7 +164,7 @@ export function errorHandler(
 
   res.status(500).json({
     error: "Internal server error",
-    ...(shouldExposeTrustedCloudTenantImportError(req) ? { message: rootError.message } : {}),
+    ...(shouldExposeTrustedCloudTenantImportError(req) ? { message: safeRootError.message } : {}),
   });
 }
 

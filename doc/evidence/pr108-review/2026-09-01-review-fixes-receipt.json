@@ -1,0 +1,234 @@
+{
+  "schema": "paperclip-pr-review-receipt/v1",
+  "date": "2026-09-01",
+  "pullRequest": 108,
+  "baseBranch": "dev",
+  "reviewedBranchHeadBeforeFixes": "9f07841fa81367cf64514474eeaa93395fddbda7",
+  "mutationIntent": "source-tests-docs-only",
+  "finalBaselines": {
+    "server/src/middleware/redact-sensitive.ts": "650b2e2ec54b09e50090aa4e7949055f9c659eaa7c297f5d3fb3e1c4c3ff2d54",
+    "server/src/middleware/http-logger.ts": "e8c7d43961325c3c0a66672262330dd4531d209fca28eeeebb64aa8a38f97d73",
+    "server/src/middleware/http-log-policy.ts": "56cc7528cb0ac19c65583ab4c4ebe27addb60187d4489eea003ec50ea6b307e4",
+    "server/src/middleware/http-log-redaction.ts": "ab4fc713125305d001bc98f443604e2e2a19353fa4d3a07a803d97c09fb4919b",
+    "server/src/__tests__/http-log-redaction.test.ts": "65fe8f0a81337d3e31a06bc6ad465c8976c5a4e6f200754a146dbecd51b509d5",
+    "server/src/__tests__/http-log-policy.test.ts": "217fed778809af6828b63624a40ada5aed9fc6c044aadd59fe1dfd159b8d6517",
+    "server/src/__tests__/redact-sensitive.test.ts": "64950257a2ffe41bf3c696c11f7e1ac964324b8587b2207bde640ba51da96306"
+  },
+  "summary": {
+    "actionableAutomatedReviewFindingsAddressed": 9,
+    "finalIndependentReview": "no-p0-p1-code-defects-after-evidence-repair",
+    "focusedNegativeProofs": 13,
+    "focusedRestoredPasses": 14,
+    "generatedArtifactsRecycled": 1,
+    "survivingOwnedProcesses": 0
+  },
+  "gateEvidence": [
+    {
+      "gate": "remote-managed-runtime-shared-shell-quote-and-ssh-ps-preflight",
+      "receiptId": "cb6b083bbcff4882b8373c99e9ccbf53",
+      "expectedExitCode": 1,
+      "observedReason": "The focused tests named both the restored private shell quoter and the missing ps preflight entry."
+    },
+    {
+      "gate": "http-log-production-security-envelope",
+      "receiptId": "471e809e531d467ca51902aa71872dfb",
+      "expectedExitCode": 1,
+      "observedReason": "The 34-test production-shaped caller failed exactly eight named tests: removes query secrets from success and error request logs; does not emit supported camelCase adapter credentials on a rejected request; omits rejected credential and secret-write bodies plus claim path credentials; redacts bounded credential-code aliases while preserving ordinary fields; redacts provider-prefixed secrets and every nonempty plain binding; strips credentials and query values from camelCase URL and URI fields; omits the complete request body for the mixed-case SECRETS route; and removes claim query and path credentials from the log path."
+    },
+    {
+      "gate": "connection-string-log-redaction",
+      "receiptId": "67f46f9450bc4547a39f6c5f879fbe2d",
+      "expectedExitCode": 1,
+      "observedReason": "connectionString and connection_string values remained plaintext."
+    },
+    {
+      "gate": "removed-source-declared-contract-selection",
+      "receiptId": "348a5530df404961b965ca48ee939bef",
+      "expectedExitCode": 1,
+      "observedReason": "The removed production source was incorrectly assigned to hosted CI despite its surviving declared contract test."
+    },
+    {
+      "gate": "pr45-preservation-ref-preflight",
+      "receiptId": "4e0e770a6c43485c8f47c0c774eeed9a",
+      "expectedExitCode": 1,
+      "observedReason": "The generator named missing local/remote preservation refs and full history, then printed bounded recovery commands."
+    },
+    {
+      "gate": "pr45-protected-branch-recovery",
+      "receiptId": "9efc73fe34134bc49be9d0cf127fba8f",
+      "expectedExitCode": 1,
+      "observedReason": "The owning test rejected recovery text that force-updated the protected local WIP branch instead of fetching only the remote-tracking preservation ref."
+    },
+    {
+      "gate": "hire-approval-metadata-record-boundary",
+      "receiptId": "43cfbf22c8a84a749c97168f02dd1b77",
+      "expectedExitCode": 1,
+      "observedReason": "The focused assertion showed an array crossing into agent creation instead of normalizing to null."
+    },
+    {
+      "gate": "hire-approval-budget-transaction-source",
+      "receiptId": "194885be05544b369d0b90f0b99ef1df",
+      "expectedExitCode": 1,
+      "observedReason": "The budget factory received the outer database handle instead of the distinct transaction callback source."
+    },
+    {
+      "gate": "hire-resubmit-guarded-payload-forwarding",
+      "receiptId": "c2b249b6b4a04e36b1fc460fe9e522aa",
+      "expectedExitCode": 1,
+      "observedReason": "The focused route assertion received the raw secret canary instead of the exact guarded object."
+    },
+    {
+      "gate": "onboarding-e2e-hire-payload-preservation",
+      "receiptId": "3d85e30cca804fca904a028a2eeb7281",
+      "expectedExitCode": 1,
+      "observedReason": "The registered Playwright contract rejected a deliberate regression that replaced the submitted Claude adapter/config instead of forwarding it and changing only automatic-wake fields."
+    },
+    {
+      "gate": "onboarding-helper-pre-push-selection",
+      "receiptId": "fd0f482b4c294789973259e2472e34b0",
+      "expectedExitCode": 1,
+      "observedReason": "A helper-only production change failed closed when its exact registered Playwright contract mapping was deliberately removed."
+    },
+    {
+      "gate": "ssh-environment-and-destination-argument-safety",
+      "receiptId": "a2ae22e5e432460d9811e02dcab5f79b",
+      "expectedExitCode": 1,
+      "observedReason": "The controlled run rejected missing managed-runner environment-key validation and removal of the end-of-options marker before an option-shaped SSH destination."
+    },
+    {
+      "gate": "managed-clone-windows-drive-relative-path-rejection",
+      "receiptId": "a2ae22e5e432460d9811e02dcab5f79b",
+      "expectedExitCode": 1,
+      "observedReason": "The table-driven clone-name contract rejected a deliberate return to slash-only Windows path detection because C:repo was parsed as a URL scheme instead of preserving the managed-workspace fallback."
+    }
+  ],
+  "restoredValidation": [
+    {
+      "scope": "adapter-utils focused shell/fixture tests",
+      "receiptId": "de13e4b5c9fd4e938caca7757417a463",
+      "testsPassed": 22,
+      "testsFailed": 0,
+      "exitCode": 0
+    },
+    {
+      "scope": "adapter-utils complete focused set",
+      "receiptId": "40ec73a77a62412e8b5640c0df7b7f09",
+      "testsPassed": 39,
+      "testsFailed": 0,
+      "exitCode": 0
+    },
+    {
+      "scope": "adapter-utils typecheck",
+      "receiptId": "6a052428a5d64f52ab89b413d3c36d45",
+      "exitCode": 0,
+      "zeroActiveProcessesProven": true
+    },
+    {
+      "scope": "deterministic Node gate group",
+      "receiptId": "6e9e1453d0144a00bd47cd5a041aab01",
+      "testsPassed": 21,
+      "testsFailed": 0,
+      "exitCode": 0
+    },
+    {
+      "scope": "PR45 preservation manifest and protected-branch recovery contracts",
+      "receiptId": null,
+      "testsPassed": 5,
+      "testsFailed": 0,
+      "exitCode": 0,
+      "command": "node --test scripts/generate-pr45-disposition-manifest.test.mjs"
+    },
+    {
+      "scope": "metadata record boundary",
+      "receiptId": "f78d6096df5b433fb79dd6e2270c022d",
+      "testsPassed": 1,
+      "testsFailed": 0,
+      "testsSkipped": 22,
+      "exitCode": 0
+    },
+    {
+      "scope": "budget transaction source",
+      "receiptId": "a4eb8a1773434156a131300cf7ad0dd3",
+      "testsPassed": 23,
+      "testsFailed": 0,
+      "exitCode": 0
+    },
+    {
+      "scope": "resubmit guarded payload forwarding",
+      "receiptId": "d3d56ab8f1c0425a97e47dab2f992137",
+      "testsPassed": 1,
+      "testsFailed": 0,
+      "testsSkipped": 12,
+      "exitCode": 0
+    },
+    {
+      "scope": "final HTTP policy, redactor, and production pino security set",
+      "receiptId": "7162e45e10ef4e2c87aeaae9b579859a",
+      "testsPassed": 34,
+      "testsFailed": 0,
+      "durationMs": 3455,
+      "peakJobMemoryBytes": 534839296,
+      "maximumDiskFreeSpaceDropBytes": 155648,
+      "zeroActiveProcessesProven": true,
+      "exitCode": 0
+    },
+    {
+      "scope": "authoritative saved-adapter browser journeys",
+      "receiptId": "6600231310d349a48a00b54e2a2a3268",
+      "testsPassed": 2,
+      "testsFailed": 0,
+      "zeroActiveProcessesProven": true,
+      "exitCode": 0
+    },
+    {
+      "scope": "registered onboarding hire helper contract",
+      "receiptId": "8a0e08fbf3c74d4dbd0028d06eebb9b0",
+      "testsPassed": 2,
+      "testsFailed": 0,
+      "zeroActiveProcessesProven": true,
+      "exitCode": 0
+    },
+    {
+      "scope": "deterministic selector including helper contract",
+      "receiptId": "9658f6fade1544759b066c2a3c3ff0df",
+      "testsPassed": 19,
+      "testsFailed": 0,
+      "zeroActiveProcessesProven": true,
+      "exitCode": 0
+    },
+    {
+      "scope": "final server typecheck",
+      "receiptId": "209d47d2c3564372ad47affe160ee169",
+      "durationMs": 25521,
+      "peakJobMemoryBytes": 3199627264,
+      "zeroActiveProcessesProven": true,
+      "exitCode": 0
+    },
+    {
+      "scope": "final UI typecheck",
+      "receiptId": "c6dfeccede894d5a873e12f1f4df34e7",
+      "durationMs": 93545,
+      "peakJobMemoryBytes": 2650513408,
+      "maximumDiskFreeSpaceDropBytes": 190259200,
+      "zeroActiveProcessesProven": true,
+      "exitCode": 0
+    }
+  ],
+  "cleanup": {
+    "pathClass": "generated-playwright-test-results",
+    "recycledTargetCount": 1,
+    "fileCount": 6,
+    "pngScreenshotCount": 6,
+    "totalBytes": 351534,
+    "disposition": "recycled",
+    "recoverable": true
+  },
+  "remainingDeliveryGates": [
+    "real commit hook on final bytes",
+    "real pre-push hook on final commit",
+    "fresh exact-head hosted CI",
+    "fresh exact-head CodeRabbit full review or governed Cursor fallback",
+    "merge into dev after all exact-head gates",
+    "governed factory reconciliation and 5113 health proof"
+  ]
+}

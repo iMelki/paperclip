@@ -19,9 +19,11 @@ import { checkDependencies } from './check-pr-dependencies.mjs';
 
 const COMMENT_SIGNATURE = '— commitperclip';
 
-function buildComment(author, failures, informational) {
+export function buildComment(author, failures, informational) {
   if (failures.length === 0 && informational.length === 0) {
-    return `✅ All checks passing — ready for Greptile review and maintainer approval.\n\n${COMMENT_SIGNATURE}`;
+    return `✅ All commitperclip policy checks pass — ready for automated review ` +
+      `(CodeRabbit, or Cursor when CodeRabbit is unavailable) and maintainer approval.\n\n` +
+      COMMENT_SIGNATURE;
   }
 
   const lines = [
