@@ -155,7 +155,7 @@ This file is the durable local index for active `paperclip` issues.
     exclusions. Agent Settings fixed the classification contract in
     `c91e70cc`; an invalid genome remains non-green and no analyzer ran.
 
-- [#80 - Disposition matrix: extract, land, or retire preserved PR #45 without losing WIP](https://github.com/iMelki/paperclip/issues/80) — **no-loss census complete locally; reviewed delivery pending**
+- [#80 - Disposition matrix: extract, land, or retire preserved PR #45 without losing WIP](https://github.com/iMelki/paperclip/issues/80) — **no-loss census rechecked after #113; reviewed delivery pending**
   - The protected local and remote-tracking source refs both still resolve to
     `7bae4af253dfd96ac8a4d44807b479bcece01865`; PR #45 remains an open draft.
     The generated manifest owns all four commits, 162 commit/path rows, 131
@@ -169,13 +169,15 @@ This file is the durable local index for active `paperclip` issues.
     validation and a recovery contract that never force-updates the protected
     local WIP branch,
     and `--check` reproduced the evidence under
-    `doc/evidence/pr45-disposition/`. No merge, wholesale cherry-pick, stash
+    `doc/evidence/pr45-disposition/`; the 2026-09-06 `--check` rerun reproduced
+    131 historical paths, 3,032 hunks, zero unowned/unknown rows after #113.
+    No merge, wholesale cherry-pick, stash
     mutation, source-branch deletion, or evidence retirement is authorized.
     Generic or shallow checkouts now receive an explicit skipped-test reason,
     while the CLI itself fails closed before census work and prints exact
     unshallow and preservation-ref fetch commands.
 
-- [#53 - Make coordination evidence and health fail closed](https://github.com/iMelki/paperclip/issues/53)
+- [#53 - Make coordination evidence and health fail closed](https://github.com/iMelki/paperclip/issues/53) — **merged via PR #113 (`715b453bc`)**
   - #82 is closed and is no longer a blocker. The remaining v2 contract is an
     additive presentation-only route at
     `/api/issues/:rootIssueId/coordination/v2`, backed by migration `0213` and
@@ -187,8 +189,10 @@ This file is the durable local index for active `paperclip` issues.
     foreign-company HTTP isolation cases pass, along with 5/5 v2 tests,
     caller-shaped negative proofs, server/db typechecks, and the DB contract
     suite. The preserved PR #45/p53 commits remain evidence inputs, not
-    cherry-pick authority; this slice is ready for its own exact-head PR and
-    fresh CI plus CodeRabbit/Cursor review.
+    cherry-pick authority. PR #113 passed fresh exact-head CI; CodeRabbit's
+    three actionable findings were fixed before merge, while a follow-up
+    CodeRabbit run was rate-limited and Cursor's review lanes were neutral due
+    the team usage cap.
 
 - [#56 - Normalize Vitest scratch roots and prove abnormal-exit cleanup](https://github.com/iMelki/paperclip/issues/56)
   - Current `run-vitest-stable.mjs` creates `pcvt-*` roots, controls only

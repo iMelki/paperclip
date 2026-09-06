@@ -4,7 +4,8 @@ All notable changes to this repository should be recorded here.
 
 ## Unreleased
 
-- **[#53]** Added a fail-closed, additive task-coordination v2 route at
+- **[#53]** Added and merged (PR #113, `715b453bc`) a fail-closed, additive
+  task-coordination v2 route at
   `/api/issues/:rootIssueId/coordination/v2`. It persists a positive root
   coordination generation, vendors and pins the canonical Projects Ops schema
   by SHA-256, keeps company predicates in the loader, limits placements to the
