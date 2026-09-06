@@ -1,6 +1,6 @@
 # Paperclip Open Tasks
 
-Last updated: 2026-09-06
+Last updated: 2026-09-07
 
 2026-08-25: [paperclip#95](https://github.com/iMelki/paperclip/issues/95) —
 Windows factory start failed migrate (`42P07` / later `42703`) because the
@@ -8,12 +8,16 @@ Drizzle journal lagged the existing schema. Ledger repaired in `client.ts`
 without wiping the factory DB. The current gate is post-PR #108 no-loss
 fast-forward of the clean isolated factory checkout, then a governed wrapper
 pin/path update and fresh owner/listener/version/health proof on port 5113.
-2026-09-06 checkpoint: the isolated checkout is now clean `dev`, exactly
-matching the current Paperclip `origin/dev` tip, with dependencies present.
-The governed start remains correctly
-blocked until the shared `PaperclipFactory.Common.ps1` pin is updated from
-`51cdabdd9b6465e8df9fe3fcba8b3c5e2e720df9` to this reviewed `dev` SHA by the
-agent-settings owner; no provenance bypass was used.
+2026-09-07 reconciliation: the isolated factory checkout is clean on `dev`
+at `1e3a74847f46691e8027fc55cf8deedd230223eb`, exactly matching Paperclip
+`origin/dev`; dependencies are present; and the shared
+`PaperclipFactory.Common.ps1` pin is already the same SHA. The provenance gate
+therefore passes. The latest governed start still ended `status=degraded` with
+no listener on port 5113 because embedded PostgreSQL was launched from an
+elevated Windows token and refused to start (paperclip#35). No orphan process
+or listener remains. The next gate is a separately authorized non-elevated
+governed start, or the durable `pg_ctl`-based fix tracked in #35; do not bypass
+provenance or fall back to the canonical checkout.
 
 This file is the durable local index for active `paperclip` issues.
 
