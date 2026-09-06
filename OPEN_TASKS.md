@@ -204,24 +204,27 @@ This file is the durable local index for active `paperclip` issues.
     remote teardown remain separate semantics, not forced consumers.
 
 - [#84 - Clarify or restore the Greptile 5/5 merge gate](https://github.com/iMelki/paperclip/issues/84)
-  - Decision implemented locally, pending reviewed delivery: Greptile is
+  - Decision shipped in merged PR #108: Greptile is
     optional and must be marked N/A when unconfigured. CodeRabbit is primary;
     exact-head Cursor Bugbot/review is the documented fallback. CI and human
     review remain separate. The old 5/5 sentence failed the real policy test,
     and the restored policy passed 4/4.
 
 - [#108 - Harden Windows delivery, onboarding, and approvals](https://github.com/iMelki/paperclip/pull/108)
-  - Active reviewed-delivery vehicle for #47, #63, #80, #84, #87, and #88.
+  - **Merged and on `dev`**; this was the reviewed-delivery vehicle for #47,
+    #63, #80, #84, #87, and #88.
     The first hosted run exposed two stale Playwright adapter stubs; the
     repaired real journeys now pass 2/2 with authoritative Saved configuration
-    readback. CodeRabbit's actionable findings have caller-shaped negative
+    readback. CodeRabbit's actionable findings had caller-shaped negative
     proofs; the final HTTP security set passes 34/34 and the independent server
     regression set passes 109/109. The stable-diff review found no P0/P1 code
     defect after exact evidence repair. Final commit/pre-push hooks, fresh
-    exact-head hosted CI, and fresh exact-head automated review remain gates.
+    exact-head hosted CI, and fresh exact-head automated review are complete;
+    remaining work is limited to the explicitly listed issue residuals and
+    the separate factory pin gate in #95.
 
 - [#87 - Bug: onboarding shows Codex but persists Claude adapter](https://github.com/iMelki/paperclip/issues/87)
-  - Implemented locally, pending reviewed delivery. A returning flow now updates
+  - Delivered in merged PR #108. A returning flow now updates
     the existing lead through a custody-preserving PATCH. Same-adapter resumes
     retain hidden ACP/profile/arguments/workspace/runtime/timeout policy and
     merge only onboarding-owned edits; adapter changes still discard stale
@@ -242,8 +245,8 @@ This file is the durable local index for active `paperclip` issues.
     inert HTTP stub and disables only automatic wakes.
 
 - [#88 - Pending Codex hire approval redacts intentional empty API key and leaves agent stuck](https://github.com/iMelki/paperclip/issues/88)
-  - Source, focused executable proof, and server typecheck are complete locally;
-    real hooks and hosted delivery remain. Exact-empty plain bindings survive
+  - Delivered in merged PR #108; the remaining linked work is tracked in #101,
+    #102, #103, and #104. Exact-empty plain bindings survive
     while non-empty and
     whitespace-only secrets remain redacted. Hire preparation is enforced at
     the service boundary, same-company pending baselines are required for
@@ -322,7 +325,7 @@ This file is the durable local index for active `paperclip` issues.
     version, emit an actionable error, and never substitute `--force`, `--yolo`,
     or another approval bypass.
 
-- [#63 - Shell-safety siblings: git-workspace-sync legacy quoter, bare-sh spawns, unguarded postUploadCommand](https://github.com/iMelki/paperclip/issues/63) — **SSH focused proof and adapter-utils typecheck complete; reviewed delivery pending**
+- [#63 - Shell-safety siblings: git-workspace-sync legacy quoter, bare-sh spawns, unguarded postUploadCommand](https://github.com/iMelki/paperclip/issues/63) — **SSH focused proof and adapter-utils typecheck complete; delivered in merged PR #108**
   - PR #69 (squash `987700f91`, 2026-08-18) aliased `git-workspace-sync` to
     `shellQuotePath`, routed the six bare-`sh` test spawns through
     `resolveTestShellCommand`, and exported `quoteSandboxProvisionPath` /
@@ -361,14 +364,14 @@ This file is the durable local index for active `paperclip` issues.
     pending.
 
 - [#47 - dev tip fails 2 Windows path tests — hook rejects all commits](https://github.com/iMelki/paperclip/issues/47)
-  - Local repair complete. `remote-managed-runtime.ts` now treats its
+  - Delivered in merged PR #108. `remote-managed-runtime.ts` now treats its
     `localPath` as a host path and accepts either POSIX or Windows absolute
     forms while retaining POSIX remote sandbox paths. The two formerly failing
     Windows cases pass. The real old-head push hook receipt
     `d5f924ecfaf943189522a2e94b772e49` passed the complete 22m57s caller inside
     an identity-bound Job Object with disk-pressure monitoring and zero
-    survivors. The next gate is the real final-commit pre-push plus fresh
-    exact-head hosted CI and automated review on PR #108.
+    survivors. PR #108's final pre-push, exact-head hosted CI, and automated
+    review are complete; no additional delivery gate remains for this fix.
 
 - [#62 - Windows: symlinks do not survive the tar create/extract round-trip in runtime asset sync](https://github.com/iMelki/paperclip/issues/62)
   - Open remote tar-transport follow-up. Not addressed by PR #66/#69; keep with
