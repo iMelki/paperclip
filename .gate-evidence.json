@@ -567,6 +567,21 @@
         "reason": "The exact resolver exited 2 with status=invalid, plan=null, and named only that gate on_demand selected missing-source-set without an exact declaration.",
         "restoredPass": "After removing the undeclared ID, the exact resolver exited 0 with status=resolved and the shared adapter exited 0 with diagnosticCode=plan-resolved. Both selected 3,246 authored files, excluded the two declared generated files, retained profile=observe and mutationIntent=none, and ran no analyzer."
       }
+    },
+    {
+      "id": "coordination-v2-fail-closed-evidence",
+      "path": "server/src/services/coordination-v2.ts",
+      "description": "Keeps the additive coordination v2 projection fail-closed: exact schema bytes are pinned, persisted generation is positive, process/output claims remain false without independent evidence, and placements are limited to board or assigned/participating agents.",
+      "negativeFixture": "server/src/services/coordination-v2.test.ts",
+      "observedFailure": {
+        "date": "2026-09-06",
+        "command": "node scripts/run-vitest-stable.mjs --files server/src/services/coordination-v2.test.ts",
+        "breakApplied": "Four caller-shaped breaks were applied and read back one at a time: widened placement audience, fabricated process evidence, relaxed positive-generation guard, and a deliberately stale schema digest.",
+        "reason": "The exact test caller exited 1 for each break: assigned-agent placement disappeared, processEvidence became true, Ajv rejected generation 0 with a minimum violation, and module import rejected the schema SHA mismatch. Receipts: doc/evidence/coordination-v2/2026-09-06-negative-audience.log, 2026-09-06-negative-health.log, 2026-09-06-negative-generation.log, and 2026-09-06-negative-schema-drift.log.",
+        "restoredPass": "All four source changes were restored byte-for-byte. The identical exact caller exited 0 with 5/5 tests; the restored receipt is doc/evidence/coordination-v2/2026-09-06-restored.log.",
+        "artifactPath": "doc/evidence/coordination-v2/2026-09-06-issue53-receipt.json"
+      },
+      "maintainabilityReceipt": "doc/evidence/coordination-v2/2026-09-06-maintainability.md"
     }
   ]
 }

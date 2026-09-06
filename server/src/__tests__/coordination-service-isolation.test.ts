@@ -295,5 +295,28 @@ describeEmbeddedPostgres("coordination service company isolation", () => {
       .get(`/api/issues/${seeded.rootId}/coordination`);
     expect(foreign.status).toBe(404);
     expect(foreign.body).toEqual({ error: "Root issue not found" });
+
+    const authorizedV2 = await request(routeApp(ctx.db, seeded.companyA.actor, coordinationRoutes))
+      .get(`/api/issues/${seeded.rootId}/coordination/v2`);
+    expect(authorizedV2.status, JSON.stringify(authorizedV2.body)).toBe(200);
+    expect(authorizedV2.body.schemaVersion).toBe("task-coordination.v2");
+    expect(authorizedV2.body.task.paperclipParentIssueId).toBe(seeded.rootId);
+    expect(authorizedV2.body.workUnits.map((unit: { id: string }) => unit.id).sort()).toEqual([
+      seeded.childAId,
+      seeded.childForeignLeaseId,
+    ].sort());
+    expect(authorizedV2.body.placements.map((placement: { hostId: string }) => placement.hostId)).toEqual([
+      "host-a",
+    ]);
+    expect(authorizedV2.body.controls).toEqual({
+      permittedIntents: [],
+      pendingIntents: [],
+      completedReceipts: [],
+    });
+
+    const foreignV2 = await request(routeApp(ctx.db, seeded.companyB.actor, coordinationRoutes))
+      .get(`/api/issues/${seeded.rootId}/coordination/v2`);
+    expect(foreignV2.status).toBe(404);
+    expect(foreignV2.body).toEqual({ error: "Root issue not found" });
   });
 });

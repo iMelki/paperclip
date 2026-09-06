@@ -1,4 +1,5 @@
 import { getTableName } from "drizzle-orm";
+import fs from "node:fs";
 import { describe, expect, it } from "vitest";
 import {
   hostNodes,
@@ -6,6 +7,7 @@ import {
   taskParticipations,
   mutationLeases,
   controlIntents,
+  issues,
 } from "./schema/index.js";
 
 describe("Task Coordination Schema Foundation", () => {
@@ -27,5 +29,16 @@ describe("Task Coordination Schema Foundation", () => {
     expect(getTableName(taskParticipations)).toBe("task_participations");
     expect(getTableName(mutationLeases)).toBe("mutation_leases");
     expect(getTableName(controlIntents)).toBe("control_intents");
+  });
+
+  it("persists a strictly positive coordination generation", () => {
+    expect(issues.coordinationGeneration).toBeDefined();
+    const migration = fs.readFileSync(
+      new URL("./migrations/0213_coordination_generation.sql", import.meta.url),
+      "utf8",
+    );
+    expect(migration).toContain('"coordination_generation" integer DEFAULT 1 NOT NULL');
+    expect(migration).toContain("issues_coordination_generation_positive_ck");
+    expect(migration).toContain('CHECK ("coordination_generation" > 0)');
   });
 });

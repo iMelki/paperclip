@@ -69,7 +69,10 @@ async function loadCoordinationHosts(
   db: Db,
   companyId: string,
   participations: CoordinationProjectionSnapshot["participations"],
-): Promise<CoordinationProjectionSnapshot["hosts"]> {
+): Promise<{
+  hosts: CoordinationProjectionSnapshot["hosts"];
+  agentIdsByInstanceId: Map<string, string>;
+}> {
   const agentInstanceIds = [
     ...new Set(
       participations
@@ -83,6 +86,9 @@ async function loadCoordinationHosts(
       eq(agentInstances.companyId, companyId),
     ))
     : [];
+  const agentIdsByInstanceId = new Map(
+    instances.map((instance) => [instance.id, instance.agentId] as const),
+  );
   const hostNodeIds = [
     ...new Set(
       instances
@@ -90,15 +96,16 @@ async function loadCoordinationHosts(
         .filter((id): id is string => typeof id === "string"),
     ),
   ];
-  return hostNodeIds.length > 0
-    ? db.select().from(hostNodes).where(and(
+  const hosts = hostNodeIds.length > 0
+    ? await db.select().from(hostNodes).where(and(
       inArray(hostNodes.id, hostNodeIds),
       eq(hostNodes.companyId, companyId),
     ))
     : [];
+  return { hosts, agentIdsByInstanceId };
 }
 
-async function loadIssueCoordinationSnapshot(
+export async function loadIssueCoordinationSnapshot(
   db: Db,
   rootIssueId: string,
   companyId: string,
@@ -118,12 +125,18 @@ async function loadIssueCoordinationSnapshot(
     .where(and(eq(issues.parentId, rootIssueId), eq(issues.companyId, companyId)));
   const allIssueIds = [rootIssue.id, ...childIssues.map((c) => c.id)];
   const rows = await loadCompanyScopedCoordinationRows(db, allIssueIds, rootIssue.id, companyId);
-  const hosts = await loadCoordinationHosts(db, companyId, rows.participations);
+  const { hosts, agentIdsByInstanceId } = await loadCoordinationHosts(db, companyId, rows.participations);
   return {
     observedAt: new Date(),
     rootIssue,
     childIssues,
     ...rows,
+    participations: rows.participations.map((participation) => ({
+      ...participation,
+      agentId: participation.agentInstanceId
+        ? agentIdsByInstanceId.get(participation.agentInstanceId) ?? null
+        : null,
+    })),
     hosts,
   };
 }

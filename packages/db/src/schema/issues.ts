@@ -50,6 +50,7 @@ export const issues = pgTable(
     originId: text("origin_id"),
     originRunId: text("origin_run_id"),
     originFingerprint: text("origin_fingerprint").notNull().default("default"),
+    coordinationGeneration: integer("coordination_generation").notNull().default(1),
     requestDepth: integer("request_depth").notNull().default(0),
     billingCode: text("billing_code"),
     assigneeAdapterOverrides: jsonb("assignee_adapter_overrides").$type<Record<string, unknown>>(),

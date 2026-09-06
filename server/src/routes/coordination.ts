@@ -5,6 +5,7 @@ import {
   getIssueCoordination,
   getIssueCoordinationRootScope,
 } from "../services/coordination.js";
+import { getIssueCoordinationV2 } from "../services/coordination-v2.js";
 import { assertAuthenticated, assertCompanyAccess, getAccessibleResource } from "./authz.js";
 
 export function coordinationRoutes(db: Db) {
@@ -38,6 +39,34 @@ export function coordinationRoutes(db: Db) {
       if (!root) return;
 
       const view = await getIssueCoordination(db, rootIssueId, root.companyId);
+      if (!view) {
+        res.status(404).json({ error: "Root issue not found" });
+        return;
+      }
+      res.json(view);
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.get("/issues/:rootIssueId/coordination/v2", async (req, res, next) => {
+    try {
+      const rootIssueId = req.params.rootIssueId as string;
+      assertAuthenticated(req);
+      const root = await getAccessibleResource(
+        req,
+        res,
+        getIssueCoordinationRootScope(db, rootIssueId),
+        "Root issue not found",
+      );
+      if (!root) return;
+
+      const view = await getIssueCoordinationV2(
+        db,
+        rootIssueId,
+        root.companyId,
+        req.actor.type === "agent" ? req.actor.agentId ?? null : null,
+      );
       if (!view) {
         res.status(404).json({ error: "Root issue not found" });
         return;
