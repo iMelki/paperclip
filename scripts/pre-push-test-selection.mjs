@@ -78,6 +78,10 @@ const DECLARED_SOURCE_TESTS = new Map([
     "ui/src/hooks/usePersistOnboardingAgentConfig.ts",
     ["ui/src/components/OnboardingWizard.config-persistence.test.tsx"],
   ],
+  [
+    "packages/db/src/schema/issues.ts",
+    ["packages/db/src/coordination-schema.test.ts"],
+  ],
 ]);
 
 export class TestSelectionIntegrityError extends Error {

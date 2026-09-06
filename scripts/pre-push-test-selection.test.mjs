@@ -93,6 +93,26 @@ test("selects exact declared contract tests without widening to an import graph"
   });
 });
 
+test("selects the DB coordination contract for the shared issues schema", () => {
+  withFixture(({ repoRoot, trackedFiles, write }) => {
+    write("packages/db/src/schema/issues.ts", "export const issues = true;\n");
+    write(
+      "packages/db/src/coordination-schema.test.ts",
+      "test('coordination schema', () => {});\n",
+    );
+    const result = selectPrePushTests({
+      repoRoot,
+      changedFiles: ["packages/db/src/schema/issues.ts"],
+      trackedFiles,
+    });
+    assert.deepEqual(result.vitestFiles, ["packages/db/src/coordination-schema.test.ts"]);
+    assert.deepEqual(result.coverage[0].declaredTests, [
+      "packages/db/src/coordination-schema.test.ts",
+    ]);
+    assert.deepEqual(result.selectionErrors, []);
+  });
+});
+
 test("selects the registered Playwright contract for the onboarding hire route helper", () => {
   withFixture(({ repoRoot, trackedFiles, write }) => {
     write(

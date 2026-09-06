@@ -1,0 +1,38 @@
+
+[test:run] exact pre-push selection: server/src/services/coordination-v2.test.ts
+
+ RUN  v4.1.10 <repo-root>
+
+ ❯ |@paperclipai/server| src/services/coordination-v2.test.ts (5 tests | 1 failed) 17ms
+     ✓ pins the exact canonical schema bytes 2ms
+     × never fabricates identity, health, controls, or process evidence 12ms
+     ✓ hides host placement from an unrelated same-company agent 1ms
+     ✓ fails closed for malformed persisted participant enums 0ms
+     ✓ rejects a missing or non-positive persisted generation 1ms
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  |@paperclipai/server| src/services/coordination-v2.test.ts > task coordination v2 > never fabricates identity, health, controls, or process evidence
+AssertionError: expected true to be false // Object.is equality
+
+- Expected
++ Received
+
+- false
++ true
+
+ ❯ src/services/coordination-v2.test.ts:71:41
+     69|     expect(view.task.generation).toBe(2);
+     70|     expect(view.health.status).toBe("reporting_degraded");
+     71|     expect(view.health.processEvidence).toBe(false);
+       |                                         ^
+     72|     expect(view.health.outputEvidence).toBe(false);
+     73|     expect(view.controls).toEqual({ permittedIntents: [], pendingInten…
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  1 failed | 4 passed (5)
+   Start at  05:41:32
+     Duration  2.40s (transform 1.25s, setup 147ms, import 1.97s, tests 17ms, environment 0ms)

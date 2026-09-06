@@ -1,0 +1,38 @@
+
+[test:run] exact pre-push selection: server/src/services/coordination-v2.test.ts
+
+ RUN  v4.1.10 <repo-root>
+
+ ❯ |@paperclipai/server| src/services/coordination-v2.test.ts (5 tests | 1 failed) 18ms
+     ✓ pins the exact canonical schema bytes 2ms
+     ✓ never fabricates identity, health, controls, or process evidence 8ms
+     × hides host placement from an unrelated same-company agent 6ms
+     ✓ fails closed for malformed persisted participant enums 1ms
+     ✓ rejects a missing or non-positive persisted generation 1ms
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  |@paperclipai/server| src/services/coordination-v2.test.ts > task coordination v2 > hides host placement from an unrelated same-company agent
+AssertionError: expected [] to have a length of 1 but got +0
+
+- Expected
++ Received
+
+- 1
++ 0
+
+ ❯ src/services/coordination-v2.test.ts:80:80
+     78|   it("hides host placement from an unrelated same-company agent", () =…
+     79|     expect(projectTaskCoordinationViewV2(snapshot(), "other-agent").pl…
+     80|     expect(projectTaskCoordinationViewV2(snapshot(), "agent-lead").pla…
+       |                                                                                ^
+     81|   });
+     82|
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  1 failed | 4 passed (5)
+   Start at  05:41:16
+     Duration  2.35s (transform 1.19s, setup 173ms, import 1.88s, tests 18ms, environment 0ms)

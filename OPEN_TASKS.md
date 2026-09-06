@@ -1,6 +1,6 @@
 # Paperclip Open Tasks
 
-Last updated: 2026-09-01
+Last updated: 2026-09-06
 
 2026-08-25: [paperclip#95](https://github.com/iMelki/paperclip/issues/95) —
 Windows factory start failed migrate (`42P07` / later `42703`) because the
@@ -177,13 +177,18 @@ This file is the durable local index for active `paperclip` issues.
 
 - [#53 - Make coordination evidence and health fail closed](https://github.com/iMelki/paperclip/issues/53)
   - #82 is closed and is no longer a blocker. The remaining v2 contract is an
-    additive presentation-only route with a persisted root coordination
-    generation. `unassigned` is a non-authorizing sentinel; unknown,
-    malformed, stale, or ownership-mismatched facts must stay non-positive and
-    can never be projected as healthy. Existing v1 behavior remains untouched.
-    The preserved PR #45/p53 commits are evidence inputs, not cherry-pick
-    authority; implementation still needs its own migration, Ajv schema,
-    route/service tests, and caller-shaped negative proof on current `dev`.
+    additive presentation-only route at
+    `/api/issues/:rootIssueId/coordination/v2`, backed by migration `0213` and
+    the exact vendored Projects Ops schema (SHA-256
+    `3f47037b1f7b5e1705e719e4b087be88223abac19590521024d2f8960823b258`).
+    `unassigned` is a non-authorizing sentinel; unknown, malformed, stale, or
+    ownership-mismatched facts stay non-positive and can never be projected as
+    healthy. Existing v1 behavior remains untouched. The real same-company and
+    foreign-company HTTP isolation cases pass, along with 5/5 v2 tests,
+    caller-shaped negative proofs, server/db typechecks, and the DB contract
+    suite. The preserved PR #45/p53 commits remain evidence inputs, not
+    cherry-pick authority; this slice is ready for its own exact-head PR and
+    fresh CI plus CodeRabbit/Cursor review.
 
 - [#56 - Normalize Vitest scratch roots and prove abnormal-exit cleanup](https://github.com/iMelki/paperclip/issues/56)
   - Current `run-vitest-stable.mjs` creates `pcvt-*` roots, controls only

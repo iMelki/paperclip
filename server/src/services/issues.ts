@@ -3118,6 +3118,7 @@ const issueListSelect = {
   originId: issues.originId,
   originRunId: issues.originRunId,
   originFingerprint: issues.originFingerprint,
+  coordinationGeneration: issues.coordinationGeneration,
   requestDepth: issues.requestDepth,
   billingCode: issues.billingCode,
   assigneeAdapterOverrides: issues.assigneeAdapterOverrides,

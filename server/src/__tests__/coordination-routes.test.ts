@@ -5,11 +5,16 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const mockGetCompanyCoordinationTasks = vi.hoisted(() => vi.fn());
 const mockGetIssueCoordination = vi.hoisted(() => vi.fn());
 const mockGetIssueCoordinationRootScope = vi.hoisted(() => vi.fn());
+const mockGetIssueCoordinationV2 = vi.hoisted(() => vi.fn());
 
 vi.mock("../services/coordination.js", () => ({
   getCompanyCoordinationTasks: mockGetCompanyCoordinationTasks,
   getIssueCoordination: mockGetIssueCoordination,
   getIssueCoordinationRootScope: mockGetIssueCoordinationRootScope,
+}));
+
+vi.mock("../services/coordination-v2.js", () => ({
+  getIssueCoordinationV2: mockGetIssueCoordinationV2,
 }));
 
 async function createApp(actor: Record<string, unknown> = {
@@ -41,6 +46,7 @@ describe("coordination routes", () => {
     mockGetCompanyCoordinationTasks.mockReset();
     mockGetIssueCoordination.mockReset();
     mockGetIssueCoordinationRootScope.mockReset();
+    mockGetIssueCoordinationV2.mockReset();
   });
 
   it("returns task coordination array for GET /api/companies/:companyId/coordination/tasks", async () => {
@@ -174,6 +180,28 @@ describe("coordination routes", () => {
 
     expect(res.status).toBe(401);
     expect(mockGetIssueCoordinationRootScope).not.toHaveBeenCalled();
+    expect(mockGetIssueCoordination).not.toHaveBeenCalled();
+  });
+
+  it("serves the additive v2 route without changing the v1 route", async () => {
+    const mockDetail = {
+      schemaVersion: "task-coordination.v2",
+      task: { canonicalKey: null, accountableLead: "unassigned", generation: 1 },
+    };
+    mockGetIssueCoordinationRootScope.mockResolvedValue({ companyId: "company-1" });
+    mockGetIssueCoordinationV2.mockResolvedValue(mockDetail);
+    const app = await createApp();
+
+    const res = await request(app).get("/api/issues/22222222-2222-4222-8222-222222222222/coordination/v2");
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual(mockDetail);
+    expect(mockGetIssueCoordinationV2).toHaveBeenCalledWith(
+      expect.anything(),
+      "22222222-2222-4222-8222-222222222222",
+      "company-1",
+      null,
+    );
     expect(mockGetIssueCoordination).not.toHaveBeenCalled();
   });
 

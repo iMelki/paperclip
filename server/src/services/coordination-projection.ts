@@ -117,6 +117,7 @@ export interface CoordinationProjectionSnapshot {
     issueNumber: number | null;
     status: string;
     assigneeAgentId: string | null;
+    coordinationGeneration?: number;
     createdAt: Date;
     updatedAt: Date;
   };
@@ -129,6 +130,7 @@ export interface CoordinationProjectionSnapshot {
   participations: Array<{
     id: string;
     agentInstanceId: string | null;
+    agentId?: string | null;
     runtime: string;
     role: string;
     mode: string;

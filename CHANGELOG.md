@@ -4,6 +4,16 @@ All notable changes to this repository should be recorded here.
 
 ## Unreleased
 
+- **[#53]** Added a fail-closed, additive task-coordination v2 route at
+  `/api/issues/:rootIssueId/coordination/v2`. It persists a positive root
+  coordination generation, vendors and pins the canonical Projects Ops schema
+  by SHA-256, keeps company predicates in the loader, limits placements to the
+  board or assigned/participating agent, and never claims process/output health
+  without independent evidence. Focused v2, route, real HTTP isolation, and DB
+  contract tests pass; deliberate audience, evidence-authority, generation,
+  and schema-drift breaks fail for the expected reasons with receipts under
+  `doc/evidence/coordination-v2/`.
+
 - Addressed PR #108's automated-review findings with caller-shaped negative
   proof: HTTP request logs now omit parsed query/params and query strings,
   attach rejected-request diagnostics only at response time, redact

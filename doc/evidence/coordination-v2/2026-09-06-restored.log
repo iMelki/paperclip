@@ -1,0 +1,11 @@
+
+[test:run] exact pre-push selection: server/src/services/coordination-v2.test.ts
+
+ RUN  v4.1.10 <repo-root>
+
+ ✓ |@paperclipai/server| src/services/coordination-v2.test.ts (5 tests) 14ms
+
+ Test Files  1 passed (1)
+      Tests  5 passed (5)
+   Start at  05:42:19
+   Duration  3.03s (transform 1.79s, setup 140ms, import 2.60s, tests 14ms, environment 0ms)

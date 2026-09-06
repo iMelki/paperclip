@@ -2168,6 +2168,15 @@ registry.registerPath({
 
 registry.registerPath({
   method: "get",
+  path: "/api/issues/{rootIssueId}/coordination/v2",
+  tags: ["coordination"],
+  summary: "Get fail-closed coordination details for a root issue",
+  request: { params: z.object({ rootIssueId: z.string() }) },
+  responses: { 200: r.ok(), 401: r.unauthorized, 404: r.notFound },
+});
+
+registry.registerPath({
+  method: "get",
   path: "/api/issues/{id}",
   tags: ["issues"],
   summary: "Get an issue",
