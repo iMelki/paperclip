@@ -8,6 +8,12 @@ Drizzle journal lagged the existing schema. Ledger repaired in `client.ts`
 without wiping the factory DB. The current gate is post-PR #108 no-loss
 fast-forward of the clean isolated factory checkout, then a governed wrapper
 pin/path update and fresh owner/listener/version/health proof on port 5113.
+2026-09-06 checkpoint: the isolated checkout is now clean `dev` at
+`a6c67022885dad920b686ef78a6ae2c3ce8b9841`, exactly matching Paperclip
+`origin/dev`, with dependencies present. The governed start remains correctly
+blocked until the shared `PaperclipFactory.Common.ps1` pin is updated from
+`51cdabdd9b6465e8df9fe3fcba8b3c5e2e720df9` to this reviewed `dev` SHA by the
+agent-settings owner; no provenance bypass was used.
 
 This file is the durable local index for active `paperclip` issues.
 
