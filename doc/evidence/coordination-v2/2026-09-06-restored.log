@@ -1,7 +1,7 @@
 
 [test:run] exact pre-push selection: server/src/services/coordination-v2.test.ts
 
- RUN  v4.1.10 S:/source/CCAI/Assistants/tools/paperclip
+ RUN  v4.1.10 <repo-root>
 
  ✓ |@paperclipai/server| src/services/coordination-v2.test.ts (5 tests) 14ms
 

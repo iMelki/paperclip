@@ -38,6 +38,9 @@ describe("Task Coordination Schema Foundation", () => {
       "utf8",
     );
     expect(migration).toContain('"coordination_generation" integer DEFAULT 1 NOT NULL');
+    expect(migration).toContain('ALTER COLUMN "coordination_generation" SET DEFAULT 1');
+    expect(migration).toContain('SET "coordination_generation" = 1');
+    expect(migration).toContain('ALTER COLUMN "coordination_generation" SET NOT NULL');
     expect(migration).toContain("issues_coordination_generation_positive_ck");
     expect(migration).toContain('CHECK ("coordination_generation" > 0)');
   });

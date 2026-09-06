@@ -151,7 +151,11 @@ function validParticipant(
     && ["observe", "enforce_mutations"].includes(participation.enforcementMode)
     && Number.isFinite(participation.startedAt.getTime())
     && Number.isFinite(participation.lastSeenAt.getTime())
-    && (participation.endedAt === null || Number.isFinite(participation.endedAt.getTime()));
+    && participation.lastSeenAt >= participation.startedAt
+    && (participation.endedAt === null || (
+      Number.isFinite(participation.endedAt.getTime())
+      && participation.endedAt >= participation.startedAt
+    ));
 }
 
 function deriveCoordinationEvidence(
@@ -195,7 +199,7 @@ function deriveCoordinationEvidence(
     };
   }
   const age = Math.floor((now.getTime() - mostRecent.getTime()) / 1000);
-  const status = age > 1800 ? "orphaned" : age > 300 ? "stale" : "reporting_degraded";
+  const status = age > 1800 ? "orphaned" : age > 900 ? "stale" : "reporting_degraded";
   return {
     health: {
       heartbeatAgeSeconds: age,

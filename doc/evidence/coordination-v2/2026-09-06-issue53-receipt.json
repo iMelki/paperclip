@@ -5,7 +5,9 @@
     "route": "GET /api/issues/:rootIssueId/coordination/v2",
     "schemaSha256": "3f47037b1f7b5e1705e719e4b087be88223abac19590521024d2f8960823b258",
     "migration": "0213_coordination_generation.sql",
-    "databaseField": "issues.coordination_generation"
+    "databaseField": "issues.coordination_generation",
+    "migrationRepair": "Existing NULL values are repaired to 1; DEFAULT and NOT NULL are reasserted before the positive check is added.",
+    "v1Compatibility": "The issue-list select may read the field for internal typing, but v1 HTTP serialization strips coordinationGeneration before returning public issue rows."
   },
   "negativeProofs": [
     {
@@ -40,6 +42,7 @@
   "restoredPass": {
     "command": "node scripts/run-vitest-stable.mjs --files server/src/services/coordination-v2.test.ts",
     "result": "exit 0; 5/5 tests passed.",
-    "log": "2026-09-06-restored.log"
+    "log": "2026-09-06-restored.log",
+    "thresholdCoverage": "Explicit stale (901s), orphaned (1801s), future, and contradictory timestamp fixtures remain non-positive."
   }
 }

@@ -91,6 +91,49 @@ describe("task coordination v2", () => {
     expect(view.provenance.driftDetails.join(" ")).toMatch(/failed runtime evidence validation/i);
   });
 
+  it("keeps stale, orphaned, future, and contradictory evidence non-positive", () => {
+    const stale = projectTaskCoordinationViewV2(snapshot({
+      participations: [{
+        ...snapshot().participations[0],
+        lastSeenAt: new Date(NOW.getTime() - 901_000),
+      }],
+    }));
+    expect(stale.health.status).toBe("stale");
+    expect(stale.health.heartbeatAgeSeconds).toBe(901);
+    expect(stale.health.processEvidence).toBe(false);
+    expect(stale.health.outputEvidence).toBe(false);
+
+    const orphaned = projectTaskCoordinationViewV2(snapshot({
+      participations: [{
+        ...snapshot().participations[0],
+        lastSeenAt: new Date(NOW.getTime() - 1_801_000),
+      }],
+    }));
+    expect(orphaned.health.status).toBe("orphaned");
+    expect(orphaned.health.heartbeatAgeSeconds).toBe(1801);
+
+    const future = projectTaskCoordinationViewV2(snapshot({
+      participations: [{
+        ...snapshot().participations[0],
+        lastSeenAt: new Date(NOW.getTime() + 1_000),
+      }],
+    }));
+    expect(future.health.status).toBe("error");
+    expect(future.health.heartbeatAgeSeconds).toBeNull();
+    expect(future.health.processEvidence).toBe(false);
+
+    const contradictory = projectTaskCoordinationViewV2(snapshot({
+      participations: [{
+        ...snapshot().participations[0],
+        startedAt: new Date(NOW.getTime() - 10_000),
+        lastSeenAt: new Date(NOW.getTime() - 20_000),
+      }],
+    }));
+    expect(contradictory.participants).toEqual([]);
+    expect(contradictory.health.status).toBe("error");
+    expect(contradictory.provenance.confidence).toBe(0);
+  });
+
   it("rejects a missing or non-positive persisted generation", () => {
     expect(() => projectTaskCoordinationViewV2(snapshot({
       rootIssue: { ...snapshot().rootIssue, coordinationGeneration: 0 },

@@ -231,6 +231,11 @@ const updateIssueRouteSchema = updateIssueSchema.extend({
   interrupt: z.boolean().optional(),
 });
 
+function stripCoordinationGeneration<T extends { coordinationGeneration?: unknown }>(issue: T) {
+  const { coordinationGeneration: _coordinationGeneration, ...publicIssue } = issue;
+  return publicIssue;
+}
+
 function prefersMinimalIssueUpdateResponse(req: Request) {
   return (req.get("Prefer") ?? "")
     .split(",")
@@ -5457,7 +5462,7 @@ export function issueRoutes(
           }));
           const compactResult = result.map((issue) =>
             toCompactIssue({
-              ...issue,
+              ...stripCoordinationGeneration(issue),
               activeRecoveryAction: recoveryActionByIssue.get(issue.id) ?? null,
               successfulRunHandoff: handoffStates.get(issue.id) ?? null,
             }));
@@ -5488,7 +5493,7 @@ export function issueRoutes(
         return {
           kind: "full",
           body: result.map((issue) => ({
-            ...issue,
+            ...stripCoordinationGeneration(issue),
             successfulRunHandoff: handoffStates.get(issue.id) ?? null,
             activeRecoveryAction: recoveryActionByIssue.get(issue.id) ?? null,
           })),

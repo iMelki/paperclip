@@ -16,3 +16,6 @@
 - Extraction decision: no further split is warranted in this narrow producer;
   the next independent review should revisit the exception if delivery,
   controls, or additional evidence authorities are added.
+- Review follow-up: migration repair semantics, schema-compatible stale
+  thresholds, v1 field stripping, and stale/future/contradictory fixtures were
+  added after the independent review pass.
