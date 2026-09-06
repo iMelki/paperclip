@@ -212,7 +212,7 @@ This file is the durable local index for active `paperclip` issues.
     every production consumer has moved; PostgreSQL graceful shutdown and SSH
     remote teardown remain separate semantics, not forced consumers.
 
-- [#84 - Clarify or restore the Greptile 5/5 merge gate](https://github.com/iMelki/paperclip/issues/84)
+- [#84 - Clarify or restore the Greptile 5/5 merge gate](https://github.com/iMelki/paperclip/issues/84) — **closed as completed in merged PR #108**
   - Decision shipped in merged PR #108: Greptile is
     optional and must be marked N/A when unconfigured. CodeRabbit is primary;
     exact-head Cursor Bugbot/review is the documented fallback. CI and human
@@ -232,7 +232,7 @@ This file is the durable local index for active `paperclip` issues.
     remaining work is limited to the explicitly listed issue residuals and
     the separate factory pin gate in #95.
 
-- [#87 - Bug: onboarding shows Codex but persists Claude adapter](https://github.com/iMelki/paperclip/issues/87)
+- [#87 - Bug: onboarding shows Codex but persists Claude adapter](https://github.com/iMelki/paperclip/issues/87) — **closed as completed in merged PR #108**
   - Delivered in merged PR #108. A returning flow now updates
     the existing lead through a custody-preserving PATCH. Same-adapter resumes
     retain hidden ACP/profile/arguments/workspace/runtime/timeout policy and
@@ -253,7 +253,7 @@ This file is the durable local index for active `paperclip` issues.
     **Get started**; the intercept no longer swaps the submitted adapter to an
     inert HTTP stub and disables only automatic wakes.
 
-- [#88 - Pending Codex hire approval redacts intentional empty API key and leaves agent stuck](https://github.com/iMelki/paperclip/issues/88)
+- [#88 - Pending Codex hire approval redacts intentional empty API key and leaves agent stuck](https://github.com/iMelki/paperclip/issues/88) — **closed as completed in merged PR #108**
   - Delivered in merged PR #108; the remaining linked work is tracked in #101,
     #102, #103, and #104. Exact-empty plain bindings survive
     while non-empty and
@@ -334,7 +334,7 @@ This file is the durable local index for active `paperclip` issues.
     version, emit an actionable error, and never substitute `--force`, `--yolo`,
     or another approval bypass.
 
-- [#63 - Shell-safety siblings: git-workspace-sync legacy quoter, bare-sh spawns, unguarded postUploadCommand](https://github.com/iMelki/paperclip/issues/63) — **SSH focused proof and adapter-utils typecheck complete; delivered in merged PR #108**
+- [#63 - Shell-safety siblings: git-workspace-sync legacy quoter, bare-sh spawns, unguarded postUploadCommand](https://github.com/iMelki/paperclip/issues/63) — **closed as completed in merged PR #108**
   - PR #69 (squash `987700f91`, 2026-08-18) aliased `git-workspace-sync` to
     `shellQuotePath`, routed the six bare-`sh` test spawns through
     `resolveTestShellCommand`, and exported `quoteSandboxProvisionPath` /
@@ -372,7 +372,7 @@ This file is the durable local index for active `paperclip` issues.
     and the full #63 focused set passes 39/39; exact-head hosted proof remains
     pending.
 
-- [#47 - dev tip fails 2 Windows path tests — hook rejects all commits](https://github.com/iMelki/paperclip/issues/47)
+- [#47 - dev tip fails 2 Windows path tests — hook rejects all commits](https://github.com/iMelki/paperclip/issues/47) — **closed as completed in merged PR #108**
   - Delivered in merged PR #108. `remote-managed-runtime.ts` now treats its
     `localPath` as a host path and accepts either POSIX or Windows absolute
     forms while retaining POSIX remote sandbox paths. The two formerly failing
