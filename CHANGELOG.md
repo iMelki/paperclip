@@ -4,6 +4,15 @@ All notable changes to this repository should be recorded here.
 
 ## Unreleased
 
+- **[#114]** Added optional company/system/account-scoped source identities to
+  cost events. Identical imports replay without duplicating spend; changed
+  payloads return HTTP 409. Company totals and budget pauses are transactional,
+  and replay retries failed cancellation. Existing reports without source IDs
+  remain append-only. Migration 0214 is prepared; live databases are unchanged.
+- **[#115]** Removed synthetic provider/biller budget percentages and inferred
+  weekly allowances. Cards show recorded spend with unallocated budgets and
+  keep provider-reported quota separate.
+
 - **[#53]** Added and merged (PR #113, `715b453bc`) a fail-closed, additive
   task-coordination v2 route at
   `/api/issues/:rootIssueId/coordination/v2`. It persists a positive root

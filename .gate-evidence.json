@@ -46,6 +46,19 @@
   },
   "gates": [
     {
+      "id": "cost-source-identity-contract",
+      "path": "packages/shared/src/validators/cost.ts",
+      "description": "Require a complete company/system/account/event identity and reject immutable-payload conflicts without overwriting cost history.",
+      "negativeFixture": "server/src/__tests__/cost-event-ingestion.test.ts",
+      "observedFailure": {
+        "date": "2026-09-07",
+        "command": "node node_modules/vitest/vitest.mjs run packages/shared/src/validators/cost.test.ts server/src/__tests__/cost-event-source-routes.test.ts server/src/__tests__/cost-event-ingestion.test.ts ui/src/components/ProviderQuotaCard.test.tsx --maxWorkers=1 --no-file-parallelism --reporter=default --testTimeout=30000 --hookTimeout=60000",
+        "reason": "Fixtures assert missing sourceAccountId, then observe the exact must-be-supplied-together HTTP 400 error and PostgreSQL 23514 cost_events_source_identity_complete_ck rejection. Changed payloads observe service/HTTP 409 with the explicit different-cost-payload reason. These are application/database failures inside passing test fixtures, not a nonzero Vitest process exit.",
+        "restoredPass": "Complete identity is accepted; replaying the original after changed-payload rejection returns the unchanged row. Four concurrent replays produce one row and unchanged totals. All 14 focused tests passed without skips; existing 24 cost/budget regressions and recursive typecheck also passed.",
+        "artifactPath": "doc/evidence/cost-source-identity/2026-09-07.md"
+      }
+    },
+    {
       "id": "adapter-runtime-no-git-push",
       "path": "scripts/check-no-git-push.mjs",
       "description": "Rejects git push/send-pack in adapter/runtime source; all declared Paperclip roots are required; unreadable, missing, symlinked, tracked-generated, or unsupported tree entries fail integrity; declared generated output is excluded only after Git proves it untracked; success reports root, directory, entry, policy-skip, and file coverage.",

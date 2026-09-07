@@ -2,6 +2,20 @@
 
 Last updated: 2026-09-07
 
+- [#114 — Replay-safe cost imports](https://github.com/iMelki/paperclip/issues/114):
+  scoped source identities, immutable replay conflicts and budget retry recovery
+  implemented; heartbeat producer conversion remains open. See
+  [contract](doc/cost-event-source-identity.md).
+- [#115 — Honest provider and biller budgets](https://github.com/iMelki/paperclip/issues/115):
+  removed proportional allowances and invented weekly quota; recorded spend and
+  provider-reported quota remain separate. Delivery validation in progress.
+- [#116 — Reconcile historical migration snapshots](https://github.com/iMelki/paperclip/issues/116):
+  generation exposes unrelated existing-schema drift; 0214 is scoped to cost
+  identities. Snapshot reconciliation needs isolated upgrade proof.
+- [#20 — Windows test process ownership](https://github.com/iMelki/paperclip/issues/20):
+  embedded-Postgres vendor spawns omit windowless flags. Cost import tests use a
+  private canonical process host; upstream harness repair remains open.
+
 2026-08-25: [paperclip#95](https://github.com/iMelki/paperclip/issues/95) —
 Windows factory start failed migrate (`42P07` / later `42703`) because the
 Drizzle journal lagged the existing schema. Ledger repaired in `client.ts`

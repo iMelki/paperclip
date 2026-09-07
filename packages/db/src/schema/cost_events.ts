@@ -1,4 +1,5 @@
-import { pgTable, uuid, text, timestamp, integer, index } from "drizzle-orm/pg-core";
+import { sql } from "drizzle-orm";
+import { pgTable, uuid, text, timestamp, integer, index, uniqueIndex, check } from "drizzle-orm/pg-core";
 import { companies } from "./companies.js";
 import { agents } from "./agents.js";
 import { issues } from "./issues.js";
@@ -11,6 +12,9 @@ export const costEvents = pgTable(
   {
     id: uuid("id").primaryKey().defaultRandom(),
     companyId: uuid("company_id").notNull().references(() => companies.id),
+    sourceSystem: text("source_system"),
+    sourceAccountId: text("source_account_id"),
+    sourceEventId: text("source_event_id"),
     agentId: uuid("agent_id").notNull().references(() => agents.id),
     issueId: uuid("issue_id").references(() => issues.id),
     projectId: uuid("project_id").references(() => projects.id),
@@ -30,6 +34,15 @@ export const costEvents = pgTable(
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({
+    sourceIdentityIdx: uniqueIndex("cost_events_company_source_event_uq").on(
+      table.companyId, table.sourceSystem, table.sourceAccountId, table.sourceEventId,
+    ),
+    sourceIdentityComplete: check("cost_events_source_identity_complete_ck", sql`
+      (${table.sourceSystem} IS NULL AND ${table.sourceAccountId} IS NULL AND ${table.sourceEventId} IS NULL)
+      OR (length(trim(${table.sourceSystem})) > 0 AND ${table.sourceSystem} IS NOT NULL
+        AND length(trim(${table.sourceAccountId})) > 0 AND ${table.sourceAccountId} IS NOT NULL
+        AND length(trim(${table.sourceEventId})) > 0 AND ${table.sourceEventId} IS NOT NULL)
+    `),
     companyOccurredIdx: index("cost_events_company_occurred_idx").on(table.companyId, table.occurredAt),
     companyAgentOccurredIdx: index("cost_events_company_agent_occurred_idx").on(
       table.companyId,
