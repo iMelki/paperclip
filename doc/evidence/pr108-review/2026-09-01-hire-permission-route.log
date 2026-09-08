@@ -1,0 +1,30 @@
+
+ RUN  v4.1.10 S:/source/CCAI/Assistants/tools/paperclip/server
+
+ ❯ src/__tests__/approval-routes-idempotency.test.ts (13 tests | 1 failed) 9941ms
+     × does not emit duplicate approval side effects when approve is already resolved 5249ms
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/__tests__/approval-routes-idempotency.test.ts > approval routes idempotent retries > does not emit duplicate approval side effects when approve is already resolved
+Error: Test timed out in 5000ms.
+If this is a long-running test, pass a timeout value as the last argument or configure it globally with "testTimeout".
+ ❯ src/__tests__/approval-routes-idempotency.test.ts:152:3
+    150|   });
+    151|
+    152|   it("does not emit duplicate approval side effects when approve is al…
+       |   ^
+    153|     mockApprovalService.getById.mockResolvedValue({
+    154|       id: "approval-1",
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  1 failed | 12 passed (13)
+   Start at  16:22:58
+   Duration  10.53s (transform 5.67s, setup 153ms, import 164ms, tests 9.94s, environment 0ms)
+
+undefined
+S:\source\CCAI\Assistants\tools\paperclip\server:
+ ERR_PNPM_RECURSIVE_EXEC_FIRST_FAIL  Command failed with exit code 1: vitest run src/__tests__/approval-routes-idempotency.test.ts

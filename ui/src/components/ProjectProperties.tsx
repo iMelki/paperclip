@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { Link } from "@/lib/router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import type { Project } from "@paperclipai/shared";
+import type { Project, SharedWorkspaceConcurrency } from "@paperclipai/shared";
 import { StatusBadge } from "./StatusBadge";
 import { cn, formatDate } from "../lib/utils";
 import { environmentsApi } from "../api/environments";
@@ -23,6 +23,7 @@ import { DraftInput } from "./agent-config-primitives";
 import { InlineEditor } from "./InlineEditor";
 import { EnvironmentVariablesEditor } from "./environment-variables-editor";
 import { Badge } from "@/components/ui/badge";
+import { useConfirmDialog } from "@/hooks/useConfirmDialog";
 
 const PROJECT_STATUSES = [
   { value: "backlog", label: "Backlog" },
@@ -50,12 +51,36 @@ export type ProjectConfigFieldKey =
   | "env"
   | "execution_workspace_enabled"
   | "execution_workspace_default_mode"
+  | "execution_workspace_shared_concurrency"
   | "execution_workspace_environment"
   | "execution_workspace_base_ref"
   | "execution_workspace_branch_template"
   | "execution_workspace_worktree_parent_dir"
   | "execution_workspace_provision_command"
+  | "execution_workspace_runtime_provision_command"
   | "execution_workspace_teardown_command";
+
+const SHARED_WORKSPACE_CONCURRENCY_OPTIONS: {
+  value: SharedWorkspaceConcurrency;
+  label: string;
+  help: string;
+}[] = [
+  {
+    value: "auto",
+    label: "Auto",
+    help: "Concurrent runs on local/SSH runners; runs take turns in cloud sandboxes.",
+  },
+  {
+    value: "serialize",
+    label: "Serialize",
+    help: "Runs always take turns in the shared project workspace.",
+  },
+  {
+    value: "allow",
+    label: "Allow",
+    help: "Runs never wait for the workspace; concurrent edits are possible.",
+  },
+];
 
 function SaveIndicator({ state }: { state: ProjectFieldSaveState }) {
   if (state === "saving") {
@@ -231,6 +256,7 @@ export function ProjectProperties({ project, onUpdate, onFieldUpdate, getFieldSa
   const [workspaceCwd, setWorkspaceCwd] = useState("");
   const [workspaceRepoUrl, setWorkspaceRepoUrl] = useState("");
   const [workspaceError, setWorkspaceError] = useState<string | null>(null);
+  const { confirm, confirmDialog } = useConfirmDialog();
 
   const commitField = (field: ProjectConfigFieldKey, data: Record<string, unknown>) => {
     if (onFieldUpdate) {
@@ -304,6 +330,9 @@ export function ProjectProperties({ project, onUpdate, onFieldUpdate, getFieldSa
   const isolatedWorkspacesEnabled = experimentalSettings?.enableIsolatedWorkspaces === true;
   const executionWorkspaceDefaultMode =
     executionWorkspacePolicy?.defaultMode === "isolated_workspace" ? "isolated_workspace" : "shared_workspace";
+  // Absent/unset round-trips as "auto" — we only write a value once the user picks one.
+  const executionWorkspaceSharedConcurrency: SharedWorkspaceConcurrency =
+    executionWorkspacePolicy?.sharedWorkspaceConcurrency ?? "auto";
   const executionWorkspaceEnvironmentId = executionWorkspacePolicy?.environmentId ?? "";
   const executionWorkspaceStrategy = executionWorkspacePolicy?.workspaceStrategy ?? {
     type: "git_worktree",
@@ -484,23 +513,48 @@ export function ProjectProperties({ project, onUpdate, onFieldUpdate, getFieldSa
     persistCodebase({ repoUrl });
   };
 
-  const clearLocalWorkspace = () => {
-    const confirmed = window.confirm(
-      codebase.repoUrl
+  const clearLocalWorkspace = async () => {
+    const keepsRepo = Boolean(codebase.repoUrl);
+    const confirmed = await confirm({
+      title: keepsRepo
         ? "Clear local folder from this workspace?"
         : "Delete this workspace local folder?",
-    );
+      tone: "destructive",
+      confirmLabel: "Clear folder",
+      consequences: {
+        immediateEffect: keepsRepo
+          ? "The local folder link is removed from this project's workspace."
+          : "This project's workspace record is removed.",
+        confirmedEffect: keepsRepo
+          ? "The workspace is saved with only its repo; agents stop using the local folder."
+          : "Agents stop using the local folder because the workspace is removed.",
+        resultLocation: "The Workspace section on this panel updates.",
+        willNotHappen: "No files on disk are deleted; the folder itself is untouched.",
+      },
+    });
     if (!confirmed) return;
     persistCodebase({ cwd: null });
   };
 
-  const clearRepoWorkspace = () => {
+  const clearRepoWorkspace = async () => {
     const hasLocalFolder = Boolean(codebase.localFolder);
-    const confirmed = window.confirm(
-      hasLocalFolder
+    const confirmed = await confirm({
+      title: hasLocalFolder
         ? "Clear repo from this workspace?"
         : "Delete this workspace repo?",
-    );
+      tone: "destructive",
+      confirmLabel: "Clear repo",
+      consequences: {
+        immediateEffect: hasLocalFolder
+          ? "The repo link is removed from this project's workspace."
+          : "This project's workspace record is removed.",
+        confirmedEffect: hasLocalFolder
+          ? "The workspace is saved with only its local folder; agents stop cloning this repo."
+          : "Agents stop cloning this repo because the workspace is removed.",
+        resultLocation: "The Workspace section on this panel updates.",
+        willNotHappen: "The GitHub repository itself is not modified or deleted.",
+      },
+    });
     if (!confirmed) return;
     if (primaryCodebaseWorkspace && hasLocalFolder) {
       updateWorkspace.mutate({
@@ -719,7 +773,7 @@ export function ProjectProperties({ project, onUpdate, onFieldUpdate, getFieldSa
                     <Button
                       variant="ghost"
                       size="icon-xs"
-                      onClick={clearRepoWorkspace}
+                      onClick={() => void clearRepoWorkspace()}
                       aria-label="Clear repo"
                     >
                       <Trash2 className="h-3 w-3" />
@@ -773,7 +827,7 @@ export function ProjectProperties({ project, onUpdate, onFieldUpdate, getFieldSa
                     <Button
                       variant="ghost"
                       size="icon-xs"
-                      onClick={clearLocalWorkspace}
+                      onClick={() => void clearLocalWorkspace()}
                       aria-label="Clear local folder"
                     >
                       <Trash2 className="h-3 w-3" />
@@ -994,6 +1048,46 @@ export function ProjectProperties({ project, onUpdate, onFieldUpdate, getFieldSa
                       />
                     </div>
 
+                    <div className="space-y-0.5">
+                      <div className="mb-1 flex items-center gap-1.5">
+                        <label className="flex items-center gap-2 text-sm">
+                          <span>Shared workspace concurrency</span>
+                          <SaveIndicator state={fieldState("execution_workspace_shared_concurrency")} />
+                        </label>
+                      </div>
+                      {onUpdate || onFieldUpdate ? (
+                        <select
+                          className="w-full rounded border border-border bg-transparent px-2 py-1 text-xs outline-none"
+                          aria-label="Shared workspace concurrency"
+                          value={executionWorkspaceSharedConcurrency}
+                          onChange={(e) =>
+                            commitField(
+                              "execution_workspace_shared_concurrency",
+                              updateExecutionWorkspacePolicy({
+                                sharedWorkspaceConcurrency: e.target.value as SharedWorkspaceConcurrency,
+                              })!,
+                            )}
+                        >
+                          {SHARED_WORKSPACE_CONCURRENCY_OPTIONS.map((option) => (
+                            <option key={option.value} value={option.value}>
+                              {option.label}
+                            </option>
+                          ))}
+                        </select>
+                      ) : (
+                        <div className="text-xs">
+                          {SHARED_WORKSPACE_CONCURRENCY_OPTIONS.find(
+                            (option) => option.value === executionWorkspaceSharedConcurrency,
+                          )?.label}
+                        </div>
+                      )}
+                      <p className="text-(length:--text-micro) text-muted-foreground">
+                        {SHARED_WORKSPACE_CONCURRENCY_OPTIONS.find(
+                          (option) => option.value === executionWorkspaceSharedConcurrency,
+                        )?.help}
+                      </p>
+                    </div>
+
                     <div className="border-t border-border/60 pt-2">
                       <button
                         type="button"
@@ -1138,6 +1232,33 @@ export function ProjectProperties({ project, onUpdate, onFieldUpdate, getFieldSa
                         <div>
                           <div className="mb-1 flex items-center gap-1.5">
                             <label className="flex items-center gap-2 text-xs text-muted-foreground">
+                              <span>Runtime provision command</span>
+                              <SaveIndicator state={fieldState("execution_workspace_runtime_provision_command")} />
+                            </label>
+                          </div>
+                          <DraftInput
+                            value={executionWorkspaceStrategy.runtimeProvisionCommand ?? ""}
+                            onCommit={(value) =>
+                              commitField("execution_workspace_runtime_provision_command", {
+                                ...updateExecutionWorkspacePolicy({
+                                  workspaceStrategy: {
+                                    ...executionWorkspaceStrategy,
+                                    type: "git_worktree",
+                                    runtimeProvisionCommand: value || null,
+                                  },
+                                })!,
+                              })}
+                            immediate
+                            className="w-full rounded border border-border bg-transparent px-2 py-1 text-xs font-mono outline-none"
+                            placeholder="bash ./scripts/provision-worktree-runtime.sh"
+                          />
+                          <p className="mt-1 text-xs text-muted-foreground">
+                            Runs once before the first runtime-service start (heavy setup, e.g. DB seed). Leave empty to keep eager provisioning.
+                          </p>
+                        </div>
+                        <div>
+                          <div className="mb-1 flex items-center gap-1.5">
+                            <label className="flex items-center gap-2 text-xs text-muted-foreground">
                               <span>Teardown command</span>
                               <SaveIndicator state={fieldState("execution_workspace_teardown_command")} />
                             </label>
@@ -1189,6 +1310,7 @@ export function ProjectProperties({ project, onUpdate, onFieldUpdate, getFieldSa
           </div>
         </>
       )}
+      {confirmDialog}
     </div>
   );
 }

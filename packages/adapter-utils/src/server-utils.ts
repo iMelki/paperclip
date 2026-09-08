@@ -3,6 +3,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { constants as fsConstants, existsSync, promises as fs, type Dirent } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { resolveCommandPath } from "./command-path.js";
 import { sanitizeRemoteExecutionEnv } from "./remote-execution-env.js";
 import {
   buildLocalProcessSandboxSpawnTarget,
@@ -23,6 +24,12 @@ export interface RunProcessResult {
   stderr: string;
   pid: number | null;
   startedAt: string | null;
+  // The stop timestamp and the measured wall time of one execution. Both are
+  // optional and additive: a producer that does not measure them leaves them
+  // absent, so the many existing `RunProcessResult` producers stay unchanged.
+  // The sandbox runner sets them, so the exec span records a true wall time.
+  finishedAt?: string | null;
+  durationMs?: number | null;
   terminalResultCleanup?: TerminalResultCleanupEvidence | null;
 }
 
@@ -56,6 +63,7 @@ interface SpawnTarget {
   args: string[];
   cwd?: string;
   env?: Record<string, string | undefined>;
+  windowsVerbatimArguments?: boolean;
   cleanup?: () => Promise<void>;
 }
 
@@ -163,7 +171,7 @@ export const DEFAULT_PAPERCLIP_AGENT_PROMPT_TEMPLATE = [
   "- If woken by a human comment on a dependency-blocked issue, respond or triage the comment without treating the blocked deliverable work as unblocked.",
   "- Create child issues directly when you know what needs to be done; use issue-thread interactions when the board/user must choose suggested tasks, answer structured questions, or confirm a proposal.",
   "- Use `PAPERCLIP_SCRATCH_DIR` / `PAPERCLIP_RUN_SCRATCH_DIR` for temporary scratch files instead of ad hoc `/tmp` paths; Paperclip removes that run-owned directory after the run ends.",
-  "- To ask for that input, create an interaction on the current issue with POST /api/issues/{issueId}/interactions using kind suggest_tasks, ask_user_questions, or request_confirmation. Use continuationPolicy wake_assignee when you need to resume after a response; for request_confirmation this resumes only after acceptance.",
+  "- To ask for that input, create an interaction on the current issue with POST /api/issues/{issueId}/interactions using kind suggest_tasks, ask_user_questions, or request_confirmation. Use continuationPolicy wake_assignee when you need to resume after a response (it wakes on acceptance and rejection alike; only expiry does not wake); use wake_assignee_on_accept when you want to resume only after acceptance.",
   "- When you intentionally restart follow-up work on a completed assigned issue, include structured `resume: true` with the POST /api/issues/{issueId}/comments or PATCH /api/issues/{issueId} comment payload. Generic agent comments on closed issues are inert by default.",
   "- For plan approval, update the plan document first, then create request_confirmation targeting the latest plan revision with idempotencyKey confirmation:{issueId}:plan:{revisionId}. Wait for acceptance before creating implementation subtasks, and create a fresh confirmation after superseding board/user comments if approval is still needed.",
   "- If blocked, mark the issue blocked and name the unblock owner and action.",
@@ -660,6 +668,9 @@ type PaperclipWakePayload = {
   recovery: PaperclipWakeRecovery | null;
   issue: PaperclipWakeIssue | null;
   checkedOutByHarness: boolean;
+  // Experimental: write user-interaction content in ASD-STE100 Simplified
+  // Technical English with brief decision context.
+  simplifiedEnglishInteractions: boolean;
   dependencyBlockedInteraction: boolean;
   treeHoldInteraction: boolean;
   activeTreeHold: PaperclipWakeTreeHoldSummary | null;
@@ -1311,6 +1322,7 @@ export function normalizePaperclipWakePayload(value: unknown): PaperclipWakePayl
     recovery,
     issue: normalizePaperclipWakeIssue(payload.issue),
     checkedOutByHarness: asBoolean(payload.checkedOutByHarness, false),
+    simplifiedEnglishInteractions: asBoolean(payload.simplifiedEnglishInteractions, false),
     dependencyBlockedInteraction: asBoolean(payload.dependencyBlockedInteraction, false),
     treeHoldInteraction: asBoolean(payload.treeHoldInteraction, false),
     activeTreeHold,
@@ -1437,7 +1449,7 @@ export function renderPaperclipWakePrompt(
   const recoveryInstruction = (() => {
     switch (recovery?.cause) {
       case "process_lost":
-        return `Your previous run on this issue was lost (${recovery.failureSummary ?? "no failure summary available"}). Try again — resume from durable progress; don't redo completed steps.`;
+        return `Your previous run on this issue was lost (${recovery.failureSummary ?? "no failure summary available"}). Try again — resume from durable progress; don't redo completed steps. Do not narrate the recovery in your next comment — at most one short sentence; lead with the work.`;
       case "successful_run_missing_state":
       case "successful_run_missing_issue_disposition":
         return "Your run completed but left no final disposition. Post a comment summarizing the state and set the correct disposition (`done` / `in_review` / `blocked` / `in_progress` with a live path). Do not start new work.";
@@ -1480,6 +1492,10 @@ export function renderPaperclipWakePrompt(
     ? [
         "Recovery contract: your job is to RECOVER this task, not to do the work. Do not produce the deliverable yourself.",
         `Cause-specific instruction: ${recoveryInstruction}`,
+        ...(recovery?.cause === "successful_run_missing_state" ||
+            recovery?.cause === "successful_run_missing_issue_disposition"
+          ? []
+          : ["Record the outcome in the resolve call's `resolutionNote`. Any comment you post on the source issue must be ≤3 lines (cause → what you did → hand-back). No headings, no run-by-run narrative."]),
         `Fallback preference order: (1) send back to ${originalAssigneeLabel} with a retry instruction; (2) fix the runtime/adapter/workspace problem, then send it back; (3) reassign to another agent with the right specialty; (4) convert to an explicit manual-review state for the board.`,
         "",
       ]
@@ -1510,6 +1526,9 @@ export function renderPaperclipWakePrompt(
             ? [`- routing fallback: ${recovery.routingFallbackReason}`]
             : []),
         ]
+      : []),
+    ...(normalized.reason === "issue_recovery_action_restored"
+      ? ["- instruction: Do not narrate the recovery in your next comment — at most one short sentence; lead with the work."]
       : []),
   ];
   const lines = resumedSession
@@ -1609,6 +1628,11 @@ export function renderPaperclipWakePrompt(
   if (!resumedSession && normalized.executionWorkspace?.branchName) {
     lines.push(
       `- execution workspace branch: you are running in an execution workspace on branch ${markdownInlineCode(normalized.executionWorkspace.branchName)}. Do not switch, rename, or re-point this branch; keep all commits on it.`,
+    );
+  }
+  if (normalized.simplifiedEnglishInteractions) {
+    lines.push(
+      "- interaction language (experimental): write every user interaction you post (request_confirmation, ask_user_questions, suggest_tasks, checkbox prompts and options, and any other content rendered inside an interaction block) in ASD-STE100 Simplified Technical English. In each interaction, briefly tell the user what information they need to make the decision and what happens for each choice. This applies only to interaction content — write your thinking, comments, documents, and other responses in your usual style.",
     );
   }
   if (normalized.dependencyBlockedInteraction) {
@@ -2019,6 +2043,15 @@ export function shapePaperclipWorkspaceEnvForExecution(input: {
   workspaceHints?: Array<Record<string, unknown>>;
   executionTargetIsRemote?: boolean;
   executionCwd?: string | null;
+  /**
+   * On a remote target, the map of referenced (mentioned) project id to the staged in-sandbox
+   * directory that received that project's tree (`project-<projectId>`). A non-anchor hint whose
+   * `projectId` has an entry repoints its `cwd` to the staged directory. A non-anchor hint with no
+   * entry loses its `cwd`, so the agent never receives a path the transport did not stage. The map
+   * is empty on a local target and defaults to empty, so a caller that passes nothing keeps the
+   * previous behavior (every non-anchor hint loses its `cwd` on a remote target).
+   */
+  stagedProjectDirs?: Record<string, string>;
 }): {
   workspaceCwd: string | null;
   workspaceWorktreePath: string | null;
@@ -2061,6 +2094,7 @@ export function shapePaperclipWorkspaceEnvForExecution(input: {
   }
   const realizedWorkspaceCwd = executionCwd;
   const localWorkspaceCwd = workspaceCwd ? path.resolve(workspaceCwd) : null;
+  const stagedProjectDirs = input.stagedProjectDirs ?? {};
   const shapedWorkspaceHints = workspaceHints.map((hint) => {
     const nextHint = { ...hint };
     const hintCwd = typeof nextHint.cwd === "string" ? nextHint.cwd.trim() : "";
@@ -2075,7 +2109,19 @@ export function shapePaperclipWorkspaceEnvForExecution(input: {
       return nextHint;
     }
 
-    delete nextHint.cwd;
+    // A referenced (mentioned) project hint carries its `projectId`. When the transport staged that
+    // project into the sandbox, repoint the hint at its staged `project-<projectId>` directory so
+    // the agent reads it there. Without a staged directory the hint would point at a local path that
+    // the remote target cannot reach, so remove the `cwd` (fail loud — never expose an unstaged
+    // path). This also removes the `cwd` of a non-anchor hint that carries no `projectId`, such as an
+    // alternative anchor-project workspace, which keeps the previous behavior for those hints.
+    const hintProjectId = typeof nextHint.projectId === "string" ? nextHint.projectId : "";
+    const stagedProjectDir = hintProjectId ? stagedProjectDirs[hintProjectId] : undefined;
+    if (stagedProjectDir && stagedProjectDir.trim().length > 0) {
+      nextHint.cwd = stagedProjectDir.trim();
+    } else {
+      delete nextHint.cwd;
+    }
     return nextHint;
   });
 
@@ -2138,6 +2184,8 @@ export function refreshPaperclipWorkspaceEnvForExecution(input: {
   agentHome?: string | null;
   executionTargetIsRemote?: boolean;
   executionCwd?: string | null;
+  /** Referenced-project id to staged in-sandbox directory map; see {@link shapePaperclipWorkspaceEnvForExecution}. */
+  stagedProjectDirs?: Record<string, string>;
 }): {
   workspaceCwd: string | null;
   workspaceWorktreePath: string | null;
@@ -2149,6 +2197,7 @@ export function refreshPaperclipWorkspaceEnvForExecution(input: {
     workspaceHints: input.workspaceHints,
     executionTargetIsRemote: input.executionTargetIsRemote,
     executionCwd: input.executionCwd,
+    stagedProjectDirs: input.stagedProjectDirs,
   });
 
   delete input.env.PAPERCLIP_WORKSPACE_CWD;
@@ -2214,53 +2263,12 @@ export function defaultPathForPlatform() {
   return "/usr/local/bin:/opt/homebrew/bin:/usr/local/sbin:/usr/bin:/bin:/usr/sbin:/sbin";
 }
 
-function windowsPathExts(env: NodeJS.ProcessEnv): string[] {
-  return (env.PATHEXT ?? ".EXE;.CMD;.BAT;.COM").split(";").filter(Boolean);
-}
-
 function windowsPosixToolDirs(): string[] {
   if (process.platform !== "win32") return [];
   return [
     "C:\\Program Files\\Git\\usr\\bin",
     "C:\\Program Files (x86)\\Git\\usr\\bin",
   ].filter((candidate) => existsSync(candidate));
-}
-
-async function pathExists(candidate: string) {
-  try {
-    await fs.access(candidate, process.platform === "win32" ? fsConstants.F_OK : fsConstants.X_OK);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-async function resolveCommandPath(command: string, cwd: string, env: NodeJS.ProcessEnv): Promise<string | null> {
-  const hasPathSeparator = command.includes("/") || command.includes("\\");
-  if (hasPathSeparator) {
-    const absolute = path.isAbsolute(command) ? command : path.resolve(cwd, command);
-    return (await pathExists(absolute)) ? absolute : null;
-  }
-
-  const pathValue = env.PATH ?? env.Path ?? "";
-  const delimiter = process.platform === "win32" ? ";" : ":";
-  const dirs = pathValue.split(delimiter).filter(Boolean);
-  const exts = process.platform === "win32" ? windowsPathExts(env) : [""];
-  const hasExtension = process.platform === "win32" && path.extname(command).length > 0;
-
-  for (const dir of dirs) {
-    const candidates =
-      process.platform === "win32"
-        ? hasExtension
-          ? [path.join(dir, command)]
-          : [path.join(dir, command), ...exts.map((ext) => path.join(dir, `${command}${ext}`))]
-        : [path.join(dir, command)];
-    for (const candidate of candidates) {
-      if (await pathExists(candidate)) return candidate;
-    }
-  }
-
-  return null;
 }
 
 export async function resolveCommandForLogs(
@@ -2278,7 +2286,7 @@ export async function resolveCommandForLogs(
   return (await resolveCommandPath(command, cwd, env)) ?? command;
 }
 
-function quoteForCmd(arg: string) {
+export function quoteForCmd(arg: string): string {
   if (!arg.length) return '""';
   const escaped = arg.replace(/"/g, '""');
   return /[\s"&<>|^()]/.test(escaped) ? `"${escaped}"` : escaped;
@@ -2291,8 +2299,10 @@ export function sanitizeSshRemoteEnv(
   return sanitizeRemoteExecutionEnv(env, inheritedEnv);
 }
 
-function resolveWindowsCmdShell(env: NodeJS.ProcessEnv): string {
-  const fallbackRoot = env.SystemRoot || process.env.SystemRoot || "C:\\Windows";
+export function resolveWindowsCmdShell(): string {
+  // Child env is adapter-controlled. Resolve cmd.exe only from the host so a
+  // configured SystemRoot/ComSpec cannot redirect batch execution.
+  const fallbackRoot = process.env.SystemRoot || process.env.WINDIR || "C:\\Windows";
   return path.join(fallbackRoot, "System32", "cmd.exe");
 }
 
@@ -2391,12 +2401,16 @@ async function resolveSpawnTarget(
   }
 
   const resolved = await resolveCommandPath(command, cwd, env);
-  const executable = resolved ?? command;
+  if (!resolved) {
+    if (command.includes("/") || command.includes("\\")) {
+      const absolute = path.isAbsolute(command) ? command : path.resolve(cwd, command);
+      throw new Error(`Command is not executable: "${command}" (resolved: "${absolute}")`);
+    }
+    throw new Error(`Command not found in PATH: "${command}"`);
+  }
+  const executable = resolved;
 
   if (options.localProcessSandbox) {
-    if (!resolved) {
-      throw new Error(`Command not found in PATH: "${command}"`);
-    }
     const requestedSandboxCommand = options.localProcessSandbox.command?.trim() || "bwrap";
     const sandboxCommand = await resolveCommandPath(requestedSandboxCommand, cwd, env);
     if (!sandboxCommand) {
@@ -2420,11 +2434,12 @@ async function resolveSpawnTarget(
   if (/\.(cmd|bat)$/i.test(executable)) {
     // Always use cmd.exe for .cmd/.bat wrappers. Some environments override
     // ComSpec to PowerShell, which breaks cmd-specific flags like /d /s /c.
-    const shell = resolveWindowsCmdShell(env);
+    const shell = resolveWindowsCmdShell();
     const commandLine = [quoteForCmd(executable), ...args.map(quoteForCmd)].join(" ");
     return {
       command: shell,
-      args: ["/d", "/s", "/c", commandLine],
+      args: ["/d", "/s", "/c", `"${commandLine}"`],
+      windowsVerbatimArguments: true,
     };
   }
 
@@ -3293,6 +3308,7 @@ export async function runChildProcess(
           env: childEnv,
           detached: process.platform !== "win32",
           shell: false,
+          windowsVerbatimArguments: target.windowsVerbatimArguments,
           stdio: [opts.stdin != null ? "pipe" : "ignore", "pipe", "pipe"],
         }) as ChildProcessWithEvents;
         const startedAt = new Date().toISOString();

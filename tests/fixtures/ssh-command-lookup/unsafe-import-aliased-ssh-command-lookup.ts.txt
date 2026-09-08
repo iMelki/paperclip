@@ -1,0 +1,5 @@
+import { spawn as run } from "node:child_process";
+
+declare const command: string;
+const argvAlias = ["-c", `command -v ${command}`];
+void run("/usr/bin/bash", argvAlias);

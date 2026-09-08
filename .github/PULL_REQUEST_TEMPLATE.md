@@ -19,10 +19,11 @@
 ## Linked Issues or Issue Description
 
 <!--
-  Required. Pick ONE of the following two paths:
+  Required. Pick ONE of the two paths below.
 
-  (A) Issue exists — tag each linked issue with `Fixes: #123`, `Closes #123`,
-      or `Refs #123`. Include duplicates and closely related issues too.
+  (A) Issue exists — replace the placeholder below with your issue links.
+      Tag each linked issue with `Fixes: #123`, `Closes #123`, or `Refs #123`.
+      Include duplicates and closely related issues too.
 
   Only reference PUBLIC GitHub issues/PRs here. Do NOT paste internal,
   instance-local Paperclip references — ticket ids like PAPA-123 / PAP-224,
@@ -30,11 +31,18 @@
   contributors cannot open them. See CONTRIBUTING.md → "No Internal Issue
   References".
 
-  (B) No issue exists — describe the underlying problem here, following the
-      relevant issue template so reviewers get the same fields:
-        • Bug:     .github/ISSUE_TEMPLATE/bug_report.yml
-        • Feature: .github/ISSUE_TEMPLATE/feature_request.yml
-        • Adapter: .github/ISSUE_TEMPLATE/adapter_request.yml
+  (B) No issue exists — describe the underlying problem here. Follow the issue
+      template that fits your change. Open the matching file and copy its field
+      labels into your description:
+        • Bug:         .github/ISSUE_TEMPLATE/bug_report.yml
+        • Feature:     .github/ISSUE_TEMPLATE/feature_request.yml
+        • Adapter:     .github/ISSUE_TEMPLATE/adapter_request.yml
+        • Enhancement: .github/ISSUE_TEMPLATE/enhancement.yml
+        • Docs:        .github/ISSUE_TEMPLATE/docs_issue.yml
+      An automated check reads the literal bold labels AND the content under
+      each label. Keep at least three of these labels, each alone on its own
+      line, and write real content under each. A label with only the bare "-"
+      placeholder does not count, and the check fails.
 
   See CONTRIBUTING.md → "Link Issues or Describe Them In-PR".
 -->
@@ -106,8 +114,9 @@
 - [ ] I have updated relevant documentation to reflect my changes
 - [ ] I have considered and documented any risks above
 - [ ] All Paperclip CI gates are green
-- [ ] Greptile is 5/5 with no open P2s, recommendations, or follow-ups
+- [ ] Greptile review: N/A — Greptile is not configured for this repository. Do not claim a score or completion.
+- [ ] If Greptile is configured for this PR, I have linked its review and resolved documented findings.
 - [ ] Related issue is linked
 - [ ] Scope matches the issue and out-of-scope work was split
 - [ ] Human review is requested for medium, high, or critical risk
-- [ ] I will address all Greptile and reviewer comments before requesting merge
+- [ ] I will address all applicable reviewer comments before requesting merge

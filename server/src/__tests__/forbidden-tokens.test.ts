@@ -54,27 +54,85 @@ describe("forbidden token check", () => {
   });
 
   it("reports matches without leaking which token was searched", () => {
-    const exec = vi
+    const grep = vi
       .fn()
-      .mockReturnValueOnce("server/file.ts:1:found\n")
-      .mockImplementation(() => {
-        throw new Error("not found");
-      });
+      .mockReturnValueOnce({ status: 0, stdout: "server/file.ts:1:found\n" })
+      .mockReturnValue({ status: 1, stdout: "" });
     const log = vi.fn();
     const error = vi.fn();
 
     const exitCode = runForbiddenTokenCheck({
       repoRoot: "/repo",
       tokens: ["paperclip", "custom-token"],
-      exec,
+      grep,
       log,
       error,
     });
 
     expect(exitCode).toBe(1);
-    expect(exec).toHaveBeenCalledTimes(2);
+    expect(grep).toHaveBeenCalledTimes(2);
     expect(error).toHaveBeenCalledWith("ERROR: Forbidden tokens found in tracked files:\n");
     expect(error).toHaveBeenCalledWith("  server/file.ts:1:found");
     expect(error).toHaveBeenCalledWith("\nBuild blocked. Remove the forbidden token(s) before publishing.");
+  });
+
+  it("treats git exit 1 as a clean tree, not an error", () => {
+    const grep = vi.fn().mockReturnValue({ status: 1, stdout: "" });
+    const log = vi.fn();
+    const error = vi.fn();
+
+    const exitCode = runForbiddenTokenCheck({ repoRoot: "/repo", tokens: ["a"], grep, log, error });
+
+    expect(exitCode).toBe(0);
+    expect(error).not.toHaveBeenCalled();
+  });
+
+  // Regression: the scan used to run through cmd.exe, which left single quotes on
+  // the pathspecs, so git aborted with 128 on every call and the catch-all read it
+  // as "no matches". The check passed unconditionally on every Windows host.
+  // A scan that did not run must never be reported as a scan that found nothing.
+  it("fails closed when git aborts instead of reporting no matches", () => {
+    const grep = vi.fn().mockReturnValue({ status: 128, stdout: "" });
+    const log = vi.fn();
+    const error = vi.fn();
+
+    const exitCode = runForbiddenTokenCheck({ repoRoot: "/repo", tokens: ["a"], grep, log, error });
+
+    expect(exitCode).toBe(1);
+    expect(error).toHaveBeenCalledWith(
+      "ERROR: forbidden-token scan did not run (git exited 128).",
+    );
+    expect(log).not.toHaveBeenCalledWith("  ✓  No forbidden tokens found.");
+  });
+
+  it("fails closed when the git process never produced an exit status", () => {
+    const grep = vi.fn().mockReturnValue({ status: null, stdout: "" });
+    const error = vi.fn();
+
+    const exitCode = runForbiddenTokenCheck({
+      repoRoot: "/repo",
+      tokens: ["a"],
+      grep,
+      log: vi.fn(),
+      error,
+    });
+
+    expect(exitCode).toBe(1);
+    expect(error).toHaveBeenCalledWith(
+      "ERROR: forbidden-token scan did not run (git exited abnormally).",
+    );
+  });
+
+  // The bug was invisible to every mocked test because no mock reproduced the
+  // real shell. This exercises the real git binary against the real repo: it must
+  // return a usable status (0 or 1), never an abort.
+  it("actually runs git against this repo (no shell quoting in the path)", async () => {
+    const { gitGrepToken } = require(
+      resolve(process.cwd(), "scripts/check-forbidden-tokens-core.cjs"),
+    ) as { gitGrepToken: (o: { token: string; repoRoot: string }) => { status: number | null } };
+
+    const result = gitGrepToken({ token: "paperclip", repoRoot: process.cwd() });
+
+    expect([0, 1]).toContain(result.status);
   });
 });

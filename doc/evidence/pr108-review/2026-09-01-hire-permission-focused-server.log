@@ -1,0 +1,9 @@
+
+ RUN  v4.1.10 S:/source/CCAI/Assistants/tools/paperclip/server
+
+
+ Test Files  2 passed (2)
+      Tests  43 passed (43)
+   Start at  16:33:22
+   Duration  7.13s (transform 3.86s, setup 282ms, import 6.41s, tests 43ms, environment 0ms)
+

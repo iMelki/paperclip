@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -15,7 +15,7 @@ const {
     stdout: Buffer.from('{"token":"remote"}\n').toString("base64"),
     stderr: "",
   })),
-  syncDirectoryToSsh: vi.fn(async () => undefined),
+  syncDirectoryToSsh: vi.fn(async (_input: { localDir: string }) => undefined),
 }));
 
 vi.mock("./ssh.js", () => ({
@@ -37,6 +37,18 @@ describe("remote managed runtime", () => {
       if (!dir) continue;
       await rm(dir, { recursive: true, force: true }).catch(() => undefined);
     }
+  });
+
+  it("uses the shared shell quoting primitive", async () => {
+    const source = await readFile(
+      new URL("./remote-managed-runtime.ts", import.meta.url),
+      "utf8",
+    );
+
+    expect(source).toMatch(
+      /import \{ isWindowsAbsolutePath, shellQuote \} from "\.\/shell-path\.js";/,
+    );
+    expect(source).not.toMatch(/\bfunction\s+shellQuote\s*\(/);
   });
 
   it("restores runtime assets without restoring an in-place SSH workspace", async () => {
@@ -91,5 +103,131 @@ describe("remote managed runtime", () => {
       { maxBuffer: 1024 * 1024 },
     );
     expect(restoredAuth).toBe('{"token":"remote"}\n');
+  });
+
+  it("stages each additional project into its own isolated SSH dir, isolating one failure", async () => {
+    const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-remote-runtime-additional-"));
+    cleanupDirs.push(rootDir);
+    const workspaceDir = path.join(rootDir, "workspace");
+    const firstDir = path.join(rootDir, "referenced-first");
+    const secondDir = path.join(rootDir, "referenced-second");
+    const brokenDir = path.join(rootDir, "referenced-broken");
+    await mkdir(workspaceDir, { recursive: true });
+
+    // The transfer rejects only for the broken project's directory.
+    syncDirectoryToSsh.mockImplementation(async (input: { localDir: string }) => {
+      if (input.localDir === brokenDir) throw new Error("ssh transfer failed");
+      return undefined;
+    });
+
+    const prepared = await prepareRemoteManagedRuntime({
+      spec: {
+        host: "127.0.0.1",
+        port: 2222,
+        username: "fixture",
+        remoteWorkspacePath: "/app",
+        remoteCwd: "/app",
+        privateKey: "PRIVATE KEY",
+        knownHosts: "KNOWN HOSTS",
+        strictHostKeyChecking: true,
+      },
+      runId: "run-additional",
+      adapterKey: "codex",
+      workspaceLocalDir: workspaceDir,
+      workspaceRemoteDir: "/app",
+      syncWorkspace: false,
+      additionalSources: [
+        { localPath: firstDir, projectId: "first" },
+        { localPath: brokenDir, projectId: "broken" },
+        { localPath: secondDir, projectId: "second" },
+      ],
+    });
+
+    // Each healthy project staged into its OWN isolated dir under the runtime
+    // root; the broken one is skipped, not fatal.
+    expect(Object.keys(prepared.additionalSourceDirs).sort()).toEqual(["first", "second"]);
+    expect(prepared.additionalSourceDirs.first).toBe("/app/.paperclip-runtime/codex/project-first");
+    expect(prepared.additionalSourceDirs.second).toBe("/app/.paperclip-runtime/codex/project-second");
+    expect(prepared.additionalSourceDirs.broken).toBeUndefined();
+    expect(syncDirectoryToSsh).toHaveBeenCalledWith(expect.objectContaining({
+      localDir: firstDir,
+      remoteDir: "/app/.paperclip-runtime/codex/project-first",
+    }));
+    expect(syncDirectoryToSsh).toHaveBeenCalledWith(expect.objectContaining({
+      localDir: secondDir,
+      remoteDir: "/app/.paperclip-runtime/codex/project-second",
+    }));
+  });
+
+  it("skips an additional project whose localPath is not absolute", async () => {
+    const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-remote-runtime-relative-"));
+    cleanupDirs.push(rootDir);
+    const workspaceDir = path.join(rootDir, "workspace");
+    const healthyDir = path.join(rootDir, "referenced-healthy");
+    await mkdir(workspaceDir, { recursive: true });
+
+    const prepared = await prepareRemoteManagedRuntime({
+      spec: {
+        host: "127.0.0.1",
+        port: 2222,
+        username: "fixture",
+        remoteWorkspacePath: "/app",
+        remoteCwd: "/app",
+        privateKey: "PRIVATE KEY",
+        knownHosts: "KNOWN HOSTS",
+        strictHostKeyChecking: true,
+      },
+      runId: "run-relative",
+      adapterKey: "codex",
+      workspaceLocalDir: workspaceDir,
+      workspaceRemoteDir: "/app",
+      syncWorkspace: false,
+      additionalSources: [
+        { localPath: "relative/referenced", projectId: "relative" },
+        { localPath: healthyDir, projectId: "healthy" },
+      ],
+    });
+
+    // The relative-path project never reaches the transfer and is skipped; the
+    // absolute-path project still stages.
+    expect(Object.keys(prepared.additionalSourceDirs)).toEqual(["healthy"]);
+    expect(syncDirectoryToSsh).not.toHaveBeenCalledWith(expect.objectContaining({
+      localDir: "relative/referenced",
+    }));
+  });
+
+  it("stages a Windows-absolute additional project path", async () => {
+    const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-remote-runtime-windows-path-"));
+    cleanupDirs.push(rootDir);
+    const workspaceDir = path.join(rootDir, "workspace");
+    await mkdir(workspaceDir, { recursive: true });
+    const windowsPath = "C:\\workspace\\referenced-project";
+
+    const prepared = await prepareRemoteManagedRuntime({
+      spec: {
+        host: "127.0.0.1",
+        port: 2222,
+        username: "fixture",
+        remoteWorkspacePath: "/app",
+        remoteCwd: "/app",
+        privateKey: "PRIVATE KEY",
+        knownHosts: "KNOWN HOSTS",
+        strictHostKeyChecking: true,
+      },
+      runId: "run-windows-path",
+      adapterKey: "codex",
+      workspaceLocalDir: workspaceDir,
+      workspaceRemoteDir: "/app",
+      syncWorkspace: false,
+      additionalSources: [{ localPath: windowsPath, projectId: "windows-project" }],
+    });
+
+    expect(prepared.additionalSourceDirs).toEqual({
+      "windows-project": "/app/.paperclip-runtime/codex/project-windows-project",
+    });
+    expect(syncDirectoryToSsh).toHaveBeenCalledWith(expect.objectContaining({
+      localDir: windowsPath,
+      remoteDir: "/app/.paperclip-runtime/codex/project-windows-project",
+    }));
   });
 });

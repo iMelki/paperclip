@@ -212,6 +212,13 @@ describe("CompanyAccess", () => {
     expect(container.textContent).toContain("Core keeps this page focused on membership");
     expect(container.textContent).toContain("Humans");
     expect(container.textContent).toContain("Pending human joins");
+    const memberRow = Array.from(container.querySelectorAll("div")).find((node) =>
+      node.className.includes("md:grid-cols-(--gtc-24)") && node.className.includes("grid-cols-1"),
+    );
+    expect(memberRow).toBeTruthy();
+    expect(memberRow?.className).toContain("grid-cols-1");
+    expect(memberRow?.className).toContain("md:grid-cols-(--gtc-24)");
+
     expect(container.textContent).toContain("User account");
     expect(container.textContent).not.toContain("Grants");
     expect(container.textContent).not.toContain("explicit grants");

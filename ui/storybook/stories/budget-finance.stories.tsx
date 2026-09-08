@@ -622,11 +622,8 @@ function BudgetFinanceMatrix() {
               <ProviderQuotaCard
                 provider="anthropic"
                 rows={providerRowsByProvider.anthropic}
-                budgetMonthlyCents={250_000}
-                totalCompanySpendCents={83_000}
                 weekSpendCents={3_870}
                 windowRows={providerWindowRows.anthropic}
-                showDeficitNotch={false}
                 quotaWindows={claudeQuotaWindows}
                 quotaSource="anthropic-oauth"
               />
@@ -635,24 +632,18 @@ function BudgetFinanceMatrix() {
               <ProviderQuotaCard
                 provider="openai"
                 rows={providerRowsByProvider.openai}
-                budgetMonthlyCents={250_000}
-                totalCompanySpendCents={218_000}
                 weekSpendCents={10_430}
                 windowRows={providerWindowRows.openai}
-                showDeficitNotch={false}
                 quotaWindows={codexQuotaWindows}
                 quotaSource="codex-rpc"
               />
             </CaseFrame>
-            <CaseFrame title="Critical biller" detail="OpenRouter credits are beyond the monthly allocation and show deficit treatment." tone="critical">
+            <CaseFrame title="Critical provider quota" detail="OpenRouter reports low remaining credits; no provider budget is allocated." tone="critical">
               <ProviderQuotaCard
                 provider="openrouter"
                 rows={providerRowsByProvider.openrouter}
-                budgetMonthlyCents={250_000}
-                totalCompanySpendCents={286_000}
                 weekSpendCents={14_630}
                 windowRows={providerWindowRows.openrouter}
-                showDeficitNotch
                 quotaWindows={[
                   { label: "Credits", usedPercent: 97, resetsAt: null, valueLabel: "$8.17 remaining", detail: "Critical credit balance before next top-up." },
                   { label: "Requests", usedPercent: 89, resetsAt: at(-520).toISOString(), valueLabel: null, detail: "Warning-level gateway request window." },
@@ -672,15 +663,13 @@ function BudgetFinanceMatrix() {
             {billerSpendRows.map((entry) => (
               <CaseFrame
                 key={entry.row.biller}
-                title={`${entry.state[0]!.toUpperCase()}${entry.state.slice(1)} allocation`}
+                title={`${entry.row.biller} recorded spend`}
                 detail="The card compares period spend, weekly spend, billing types, and upstream providers."
                 tone={entry.state}
               >
                 <BillerSpendCard
                   row={entry.row}
                   weekSpendCents={entry.weekSpendCents}
-                  budgetMonthlyCents={250_000}
-                  totalCompanySpendCents={entry.totalCompanySpendCents}
                   providerRows={entry.providerRows}
                 />
               </CaseFrame>

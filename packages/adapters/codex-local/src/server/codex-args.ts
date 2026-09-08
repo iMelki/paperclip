@@ -81,6 +81,10 @@ function managedArgumentName(token: string): string | null {
   if (token === "exec" || token === "resume" || token === "review" || token === "-") {
     return token;
   }
+  // The runner may request this harmless repository probe flag either through
+  // the structured option or an adapter-provided extra arg. Treat it as
+  // idempotent so upstream callers do not receive the flag twice.
+  if (token === "--skip-git-repo-check") return null;
   const name = token.split("=", 1)[0] ?? token;
   if (MANAGED_CODEX_ARGUMENTS.has(name)) return name;
   if (/^-(?:a|c|C|m|o|p|s).+/.test(token)) return token.slice(0, 2);
@@ -157,7 +161,9 @@ export function buildCodexExecArgs(
   if (sandboxMode) args.push("--sandbox", sandboxMode);
   if (configProfile) args.push("--profile", configProfile);
   args.push("exec", "--json");
-  if (options.skipGitRepoCheck) args.push("--skip-git-repo-check");
+  if (options.skipGitRepoCheck && !extraArgs.includes("--skip-git-repo-check")) {
+    args.push("--skip-git-repo-check");
+  }
   if (ignoreUserConfig) args.push("--ignore-user-config");
   if (bypass) args.push("--dangerously-bypass-approvals-and-sandbox");
   if (model) args.push("--model", model);

@@ -14,6 +14,9 @@ drizzle/meta/
 .vite/
 coverage/
 .DS_Store
+._*
+.AppleDouble
+.LSOverride
 data/
 .paperclip/
 .pnpm-store/
@@ -71,6 +74,9 @@ tests/storybook-visual/playwright-report/
 .claude/worktrees/
 .herenow
 
+# Local agent/operator run logs. Fleet convention (agent-settings, projects-ops,
+# command-center, mission-control-kanban). Untracked logs here break pre-push
+# pristine-worktree checks and can exceed Repo Doctor per-file size limits.
+/.local-logs/
 # Local scratch/receipt dirs (not source, not review artifacts)
-.local-logs/
 .tmp-validation/

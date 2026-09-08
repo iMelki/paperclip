@@ -1,6 +1,7 @@
 import {
   useCallback,
   useEffect,
+  useMemo,
   useRef,
   useState,
 } from "react";
@@ -31,12 +32,18 @@ import {
   type EnvironmentVariablesEditorHandle,
 } from "@/components/environment-variables-editor";
 import { JsonSchemaForm, getDefaultValues, validateJsonSchemaForm } from "@/components/JsonSchemaForm";
+import {
+  SecretRefHintsContext,
+  type SecretRefHint,
+  type SecretRefHintsContextValue,
+} from "@/components/SecretBindingPicker";
 import { useBreadcrumbs } from "@/context/BreadcrumbContext";
 import { useCompany } from "@/context/CompanyContext";
 import { useToast } from "@/context/ToastContext";
 import { queryKeys } from "@/lib/queryKeys";
 import { Link, useNavigate, useParams } from "@/lib/router";
 import { buildSameOriginWebSocketUrl } from "@/lib/websocket-url";
+import { useConfirmDialog } from "@/hooks/useConfirmDialog";
 import {
   Field,
   ToggleField,
@@ -1143,6 +1150,7 @@ export function CompanyEnvironments({ mode = "list" }: CompanyEnvironmentsProps)
   const { setBreadcrumbs } = useBreadcrumbs();
   const { pushToast } = useToast();
   const queryClient = useQueryClient();
+  const { confirm, confirmDialog } = useConfirmDialog();
   const isEnvironmentFormPage = mode === "create" || mode === "edit";
   const editingEnvironmentId = mode === "edit" ? routeEnvironmentId ?? null : null;
   const [environmentForm, setEnvironmentForm] = useState<EnvironmentFormState>(createEmptyEnvironmentForm);
@@ -1190,6 +1198,37 @@ export function CompanyEnvironments({ mode = "list" }: CompanyEnvironmentsProps)
     enabled: Boolean(selectedCompanyId) && environmentsEnabled,
   });
   const savedEnvironments = environments ?? [];
+  // Descriptors for the edited environment's secret refs. Environments are
+  // instance-scoped while secrets are company-scoped, so a ref may point at
+  // a secret this company's picker cannot list; these hints let the picker
+  // name it instead of calling it missing.
+  const environmentSecretRefsQuery = useQuery({
+    queryKey: editingEnvironmentId
+      ? ["environment-secret-refs", editingEnvironmentId]
+      : ["environment-secret-refs", "none"],
+    queryFn: () => environmentsApi.secretRefs(editingEnvironmentId!),
+    enabled: Boolean(editingEnvironmentId) && environmentsEnabled,
+    retry: false,
+  });
+  const environmentSecretRefHints = useMemo<SecretRefHintsContextValue>(() => {
+    // A new environment has no persisted refs, so the empty map is
+    // authoritative. For an existing environment the map is only "ready"
+    // once the descriptor request resolved — the picker must not call a
+    // reference missing off a pending or failed lookup.
+    if (!editingEnvironmentId) return { status: "ready", hints: {} };
+    if (environmentSecretRefsQuery.isError) return { status: "error", hints: {} };
+    if (!environmentSecretRefsQuery.data) return { status: "loading", hints: {} };
+    const hints: Record<string, SecretRefHint> = {};
+    for (const ref of environmentSecretRefsQuery.data.refs) {
+      hints[ref.secretId] = {
+        name: ref.name,
+        status: ref.status,
+        companyId: ref.companyId,
+        companyName: ref.companyName,
+      };
+    }
+    return { status: "ready", hints };
+  }, [editingEnvironmentId, environmentSecretRefsQuery.data, environmentSecretRefsQuery.isError]);
   const { data: environmentCapabilities } = useQuery({
     queryKey: selectedCompanyId ? ["environment-capabilities", selectedCompanyId] : ["environment-capabilities", "none"],
     queryFn: () => environmentsApi.capabilities(selectedCompanyId!),
@@ -1407,12 +1446,23 @@ export function CompanyEnvironments({ mode = "list" }: CompanyEnvironmentsProps)
     selectedCompanyId,
   ]);
 
-  function confirmDiscardEnvironmentChanges() {
-    return (
-      !environmentHasUnsavedChanges ||
-      typeof window === "undefined" ||
-      window.confirm(DISCARD_ENVIRONMENT_CHANGES_MESSAGE)
-    );
+  const requestDiscardEnvironmentChanges = useCallback(() => {
+    return confirm({
+      title: DISCARD_ENVIRONMENT_CHANGES_MESSAGE,
+      tone: "destructive",
+      confirmLabel: "Discard changes",
+      consequences: {
+        immediateEffect: "Your unsaved edits to this environment are discarded.",
+        confirmedEffect: "Nothing is sent to the server; the saved environment stays as it was.",
+        resultLocation: "The environments list shows the last saved configuration.",
+        willNotHappen: "The saved environment and its secrets are not modified or deleted.",
+      },
+    });
+  }, [confirm]);
+
+  async function confirmDiscardEnvironmentChanges() {
+    if (!environmentHasUnsavedChanges) return true;
+    return requestDiscardEnvironmentChanges();
   }
 
   // The form page is routed, so leaving it (tab close, reload, or an in-app
@@ -1453,9 +1503,14 @@ export function CompanyEnvironments({ mode = "list" }: CompanyEnvironmentsProps)
         return;
       }
 
-      if (window.confirm(DISCARD_ENVIRONMENT_CHANGES_MESSAGE)) return;
+      // Block the navigation now, then replay it if the operator confirms
+      // discarding the draft in the review dialog.
       event.preventDefault();
       event.stopPropagation();
+      void (async () => {
+        if (!(await requestDiscardEnvironmentChanges())) return;
+        navigate(`${nextUrl.pathname}${nextUrl.search}${nextUrl.hash}`);
+      })();
     }
 
     window.addEventListener("beforeunload", handleBeforeUnload);
@@ -1464,11 +1519,11 @@ export function CompanyEnvironments({ mode = "list" }: CompanyEnvironmentsProps)
       window.removeEventListener("beforeunload", handleBeforeUnload);
       document.removeEventListener("click", handleDocumentClick, true);
     };
-  }, [environmentHasUnsavedChanges]);
+  }, [environmentHasUnsavedChanges, navigate, requestDiscardEnvironmentChanges]);
 
-  function closeEnvironmentForm() {
+  async function closeEnvironmentForm() {
     if (environmentMutation.isPending) return;
-    if (!confirmDiscardEnvironmentChanges()) return;
+    if (!(await confirmDiscardEnvironmentChanges())) return;
     initializedFormKeyRef.current = null;
     setEnvironmentForm(createEmptyEnvironmentForm());
     setEnvironmentFormBaselineKey(null);
@@ -1699,6 +1754,7 @@ export function CompanyEnvironments({ mode = "list" }: CompanyEnvironmentsProps)
       ) : null}
 
       {isEnvironmentFormPage && (mode === "create" || editingEnvironment) ? (
+        <SecretRefHintsContext.Provider value={environmentSecretRefHints}>
         <div className="rounded-md border border-border bg-background" data-testid="environment-form-page">
           <div className="border-b border-border/60 px-6 pb-4 pt-6">
             <div className="mb-4">
@@ -1960,7 +2016,7 @@ export function CompanyEnvironments({ mode = "list" }: CompanyEnvironmentsProps)
           <div className="flex flex-wrap justify-end gap-2 border-t border-border/60 bg-background px-6 py-4">
             <Button
               variant="outline"
-              onClick={closeEnvironmentForm}
+              onClick={() => void closeEnvironmentForm()}
               disabled={environmentMutation.isPending}
             >
               Cancel
@@ -1988,7 +2044,9 @@ export function CompanyEnvironments({ mode = "list" }: CompanyEnvironmentsProps)
             </Button>
           </div>
         </div>
+        </SecretRefHintsContext.Provider>
       ) : null}
+      {confirmDialog}
     </div>
   );
 }

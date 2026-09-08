@@ -381,6 +381,7 @@ export function toolAccessRoutes(
         profileEntryCount: result.profileEntries.length,
         profileBindingCount: result.profileBindings.length,
         askFirstPolicyCount: result.policies.length,
+        reviewedCatalogEntryCount: req.body.reviewedCatalogEntryIds?.length ?? 0,
         access: req.body.access,
       },
     });

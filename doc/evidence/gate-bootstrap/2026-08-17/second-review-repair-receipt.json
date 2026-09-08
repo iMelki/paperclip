@@ -1,0 +1,73 @@
+{
+  "schemaVersion": "paperclip.gate-bootstrap-repair-receipt.v2",
+  "recordedAtUtc": "2026-08-16T22:02:24.9919430Z",
+  "recordedAtLocal": "2026-08-17T01:02:24.9919430+03:00",
+  "lineage": {
+    "priorCodeRabbitReviewedHead": "b6e8ae0794bd8ca2f1e2625daadfd095f461955c",
+    "testedRepairImplementationCommit": "a3dba3f74681fcfa9a3c49ce613e78def67507d2",
+    "receiptIntroductionCommit": "81b2c101dd448832252ed8ba80028ee33e6cc55e",
+    "relationship": "The prior reviewed head is the direct parent of the tested repair implementation commit; the receipt introduction commit is its documentation-only child."
+  },
+  "implementationManifest": {
+    "path": "doc/evidence/gate-bootstrap/2026-08-17/second-review-implementation-sha256.txt",
+    "fileCount": 19,
+    "sha256": "632ffec7b88c70cd22bfcf0b59d46f4e0a31b0e01ac46b10688521294524cfd6",
+    "scope": "Changed implementation files in testedRepairImplementationCommit only; unchanged regression owners exercised by focusedTests are intentionally outside this hash manifest."
+  },
+  "focusedTests": {
+    "command": "node --test scripts/check-no-git-push-source.test.mjs scripts/git-push-scan-integrity.test.mjs scripts/check-no-git-push.test.mjs scripts/check-pr-workflow-trigger.test.mjs scripts/is-main-module.test.mjs scripts/pre-push-callers.test.mjs scripts/pre-push-test-selection.test.mjs scripts/run-vitest-direct.test.mjs scripts/scan-pre-push-secrets.test.mjs scripts/run-pre-push-tests.test.mjs scripts/verify-gitleaks.test.mjs scripts/__tests__/run-vitest-stable-shard.test.mjs",
+    "scope": "Changed owning suites plus unchanged regression owners needed to prove the integrated gate contract.",
+    "unchangedRegressionOwners": [
+      "scripts/__tests__/run-vitest-stable-shard.test.mjs",
+      "scripts/check-no-git-push.test.mjs",
+      "scripts/git-push-scan-integrity.test.mjs",
+      "scripts/verify-gitleaks.test.mjs"
+    ],
+    "total": 121,
+    "passed": 121,
+    "failed": 0,
+    "skipped": 0,
+    "durationSeconds": 9.0
+  },
+  "brokenRestoredProofs": {
+    "unicodeLexer": {
+      "broken": "A real required-root fixture with an allow marker, an astral-character comment, and a live push exited 1 and named line 3.",
+      "restored": "Removing the fixture restored exit 0 with 1298 files, 114 directories, 1435 entries, and 4/4 roots scanned."
+    },
+    "workflowPolicy": {
+      "broken": "Replacing the required stable-runner shard test path made the real workflow checker exit 1 for the exact missing test.",
+      "restored": "Restoring the exact path returned the real workflow checker to exit 0."
+    },
+    "platformCallers": {
+      "broken": "The real PowerShell caller retained native stderr and named fake exit 17 even when its parent enabled PSNativeCommandUseErrorActionPreference; the real POSIX caller handled TERM at exit 143.",
+      "restored": "Both callers removed update and active-step artifacts and passed with restored children; the caller suite ran without skips."
+    },
+    "exactVitest": {
+      "broken": "The real exact-file caller ran a valid shared test, then rejected an existing .spec.ts file excluded by that project's include glob at exit 1.",
+      "restored": "Renaming the fixture to the supported .test.ts form made both exact per-file invocations pass (10 tests total)."
+    },
+    "cliValues": {
+      "broken": "Both planners rejected an option token where a required value was expected at exit 2 before reading Git state or an updates file.",
+      "restored": "Valid caller arguments remained covered by the passing platform and planner suites."
+    },
+    "newBranchAncestry": {
+      "broken": "Git merge-base exit 1 produced the exact advertised-dev ancestry reason while exit 128 remained an infrastructure failure.",
+      "restored": "A valid ancestor continued to exact path and secret-range planning."
+    }
+  },
+  "staticChecks": {
+    "nodeSyntax": "pass",
+    "powershellParser": "pass",
+    "posixShellSyntax": "pass",
+    "psscriptanalyzer": {
+      "errors": 0,
+      "longLines": 0,
+      "warnings": 2
+    },
+    "scanner": "pass: 1298 files, 114 directories, 1435 entries, 4/4 roots",
+    "workflowPolicy": "pass",
+    "diffCheck": "pass",
+    "repoHealth": "29 pass, 2 known warnings, 0 fail; 22 gates proved"
+  },
+  "hostedStatus": "pending repaired-head push"
+}

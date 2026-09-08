@@ -17,8 +17,7 @@ import { companies } from "./companies.js";
 import { heartbeatRuns } from "./heartbeat_runs.js";
 import { projectWorkspaces } from "./project_workspaces.js";
 import { executionWorkspaces } from "./execution_workspaces.js";
-import type { SourceTrustMetadata } from "@paperclipai/shared";
-import type { IssueUnblockDescriptor } from "@paperclipai/shared";
+import type { IssueReviewPolicy, IssueUnblockDescriptor, SourceTrustMetadata } from "@paperclipai/shared";
 
 export const issues = pgTable(
   "issues",
@@ -35,6 +34,7 @@ export const issues = pgTable(
     workMode: text("work_mode").notNull().default("standard"),
     harnessKind: text("harness_kind"),
     priority: text("priority").notNull().default("medium"),
+    reviewPolicy: text("review_policy").$type<IssueReviewPolicy>(),
     assigneeAgentId: uuid("assignee_agent_id").references(() => agents.id),
     assigneeUserId: text("assignee_user_id"),
     checkoutRunId: uuid("checkout_run_id").references(() => heartbeatRuns.id, { onDelete: "set null" }),
@@ -50,6 +50,7 @@ export const issues = pgTable(
     originId: text("origin_id"),
     originRunId: text("origin_run_id"),
     originFingerprint: text("origin_fingerprint").notNull().default("default"),
+    coordinationGeneration: integer("coordination_generation").notNull().default(1),
     requestDepth: integer("request_depth").notNull().default(0),
     billingCode: text("billing_code"),
     assigneeAdapterOverrides: jsonb("assignee_adapter_overrides").$type<Record<string, unknown>>(),

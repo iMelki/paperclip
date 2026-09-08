@@ -41,7 +41,7 @@ Request human review for medium, high, and critical risk changes. Treat remote e
 - Touch the **smallest possible number of files**
 - Make sure the change is very targeted and easy to review
 - All tests pass and CI is green
-- Greptile score is 5/5 with all comments addressed
+- Complete the [automated review evidence](#automated-review-evidence) requirement
 - Use the [PR template](.github/PULL_REQUEST_TEMPLATE.md)
 
 These almost always get merged quickly when they're clean.
@@ -56,7 +56,7 @@ These almost always get merged quickly when they're clean.
   - Clear description of what & why
   - Proof it works (manual testing notes)
   - All tests passing and CI green
-  - Greptile score 5/5 with all comments addressed
+  - Complete the [automated review evidence](#automated-review-evidence) requirement
   - [PR template](.github/PULL_REQUEST_TEMPLATE.md) fully filled out
 
 PRs that follow this path are **much** more likely to be accepted, even when they're large.
@@ -119,6 +119,93 @@ Every PR must include a **Model Used** section specifying which AI model produce
 
 All tests must pass before a PR can be merged. Run them locally first and verify CI is green after pushing.
 
+#### What the pre-commit hook runs
+
+**Budget: p95 ≤ 90 s, hard cap 180 s.** A check that cannot meet that budget **moves to a
+separately scheduled or CI exhaustive tier — it is never deleted.** The budget is written down so it can be defended: this
+hook previously reached roughly 88 minutes (13 min `pnpm -r typecheck` plus a ~75 min full
+suite) one "just this once" check at a time.
+
+**This repo does not meet its own budget yet** — see the measurements below and
+[#71](https://github.com/iMelki/paperclip/issues/71). The number stays as the target;
+the gap is tracked rather than papered over by raising it.
+
+The pre-commit hook is scoped to your staged change so it stays in the seconds-to-minutes range:
+
+- **Typecheck** runs on the workspace packages your staged files touch, expanded to their
+  dependents (`pnpm --filter ...<pkg> typecheck`). Staging a root build input — the root
+  `package.json`, `pnpm-workspace.yaml`, `pnpm-lock.yaml`, a root `tsconfig*.json`, or
+  `vitest.config.ts` — falls back to the full `pnpm -r typecheck` sweep.
+- **Unit tests** run only the suites whose module graph reaches a staged file
+  (`vitest --related`). A staged file no suite imports runs no tests and passes.
+- **Forbidden tokens, Gitleaks, and React Doctor are unscoped and unchanged** — those gates
+  still see every commit.
+
+#### Where push verification happens
+
+`.husky/pre-push` runs `scripts/pre-push-check.ps1` (or the `.sh` mirror): the workspace
+link preflight, the forbidden-token check, the fail-closed adapter/runtime `git push`
+scanner, the PR-trigger policy, full `pnpm -r typecheck`, and a deterministic exact-test
+plan. The planner reads Git's four-field pre-push protocol rather than guessing from an
+upstream branch. It accepts one pristine checked-out HEAD, verifies the exact push URL,
+and bases a new topic branch on the destination's advertised `dev` object. Tests cover
+the resulting current-tree paths; Gitleaks covers every commit in the exact range.
+
+Changed test files run directly. Changed production files select only co-located or named
+sibling suites; live production without a discoverable sibling is an explicit failure,
+not an empty pass. A deleted test, or deleted production without a surviving sibling, is
+assigned to hosted CI so deletion remains possible through a reviewed topic PR. Node test files use `node --test`; suites owned by
+the root Vitest projects use `run-vitest-stable.mjs --files`; Playwright, unregistered
+workspace, workflow, hook, manifest, and test-config changes are declared for hosted CI.
+Those hosted-only changes may be pushed to a topic branch, but not directly to `dev` or
+`master`. Documentation is explicitly non-production; every other changed path has a
+local test or hosted-CI owner rather than falling through an empty plan.
+
+`.github/workflows/pr.yml` runs on pull requests into both `master` and `dev`; it must not
+run on every push to `dev`. Hosted CI owns Linux/POSIX behaviour, clean frozen-lockfile
+installs, and exhaustive suites. Its secret scan uses the exact PR commit range. The known
+24 historical fixture findings remain tracked in
+[#68](https://github.com/iMelki/paperclip/issues/68) without making every dev PR red.
+
+**If you disable or bypass the pre-push hook, you lose the local security scanners, full
+typecheck, deterministic exact suites, and the direct-protected-branch CI policy.** A
+missing `.husky/pre-push` looks exactly like a pass because the Husky shim exits 0 when the
+hook file is absent.
+
+To reproduce the full sweep on demand:
+
+```bash
+pnpm run test:run                          # full suite on its own
+PAPERCLIP_PRECOMMIT_ALL=1 git commit ...   # full typecheck + full test suite at commit time
+node scripts/run-vitest-stable.mjs --files path/to/exact.test.ts
+node scripts/run-pre-push-tests.mjs --changed-file path/to/source.ts --target-ref refs/heads/topic --dry-run
+```
+
+#### Measured cost (2026-08-13, contended host: ~120 node processes, ~58% CPU)
+
+| Stage | Leaf change (`ui/src/lib/activity-format.ts`) | Hub change (`server/src/services/heartbeat.ts`) |
+| :--- | ---: | ---: |
+| `--related` suites selected | 9 of 1130 | **159**, capped to 12 |
+| `--related` run (wall) | 93.6 s | 304.8 s |
+| Scoped typecheck, cold | 137.6 s | 168.5 s |
+| Scoped typecheck, warm (incremental) | 68.6 s | — |
+
+Reference points: full `pnpm -r typecheck` is **184.3 s** warm across all 32 workspace
+packages, and the full suite is ~75 min.
+
+Two things follow, and they are why pre-commit remains capped while pre-push uses exact suites:
+
+- **Cost is import, not execution.** The capped 12-suite hub run spent **227.8 s of 262.7 s
+  (87%) importing modules** and only 29.6 s executing tests — about 22-25 s per suite,
+  scaling linearly with suite *count*. So an *uncapped* `--related` on a hub module (159
+  suites) would cost more than the full suite it replaced, which amortizes imports across
+  shards. Uncapped `--related` is not a cheaper full suite; it is a slower one with less
+  coverage.
+- **Scoping the typecheck buys less than it looks.** `pnpm -r` already runs packages in
+  parallel, so the full sweep costs roughly the slowest package: 184.3 s for 32 packages
+  versus 137.6 s for the single `ui` package. The saving comes from tsc's incremental
+  cache (`ui/tsconfig.tsbuildinfo`), not from narrowing the package set.
+
 ### Telemetry Changes
 
 If your change adds, removes, or modifies emitted telemetry events, update the [Telemetry Data Contract](packages/shared/src/telemetry/README.md) in the same PR. Keep clients emitting raw dimension values and avoid documenting or relying on private delivery details.
@@ -127,15 +214,30 @@ If your change adds, removes, or modifies emitted telemetry events, update the [
 
 All Paperclip CI gates (lint, typecheck, tests, build, and any other required checks) must be satisfied before a PR can be merged. Don't ask for a merge while gates are red — fix them first.
 
-### Greptile Review
+### Automated Review Evidence
 
-We use [Greptile](https://greptile.com) for automated code review. Your PR must achieve a **5/5 Greptile score** before it can be merged, with:
+Automated code review is required, but its evidence must name the provider and
+the exact change that provider reviewed. A green CI run is test evidence, not
+automated-review evidence.
 
-- **No open P2 (or higher) comments**
-- **No open recommendations**
-- **No open follow-ups**
+1. Use CodeRabbit when its pull-request review is configured and available.
+   Confirm the review covers the current PR head and resolve every actionable
+   finding.
+2. If CodeRabbit is unavailable, use Cursor Bugbot or Cursor review on the same
+   exact PR head. Record the reviewed commit SHA, or the matching patch id when
+   Cursor supplies one, and resolve every actionable finding.
+3. If neither lane can provide exact review evidence, do not claim that
+   automated review passed. Ask a maintainer how to proceed.
 
-We hold the bar high here on purpose — we want code quality to be as high as possible. If Greptile leaves comments, fix them (or, if a comment is wrong, reply explaining why) and request a re-review.
+Keep human review separate. Medium, high, and critical risk changes still need
+the human review required by this repository's risk policy.
+
+Greptile is optional. It is not a merge requirement unless maintainers install
+the integration, enable this repository, and explicitly activate that gate. If
+Greptile is not configured for a PR, mark its checklist item `N/A — Greptile is
+not configured for this repository`. If it is configured, link its review and
+resolve its documented findings. Never infer a Greptile score from CI,
+CodeRabbit, Cursor, or another provider's result.
 
 ## Helping Other Contributors
 

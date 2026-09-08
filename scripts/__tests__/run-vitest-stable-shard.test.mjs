@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
@@ -14,12 +15,15 @@ const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), ".."
 const script = path.join(repoRoot, "scripts", "run-vitest-stable.mjs");
 const durationsManifest = path.join(repoRoot, "scripts", "general-server-shard-durations.json");
 
-function dryRun(args) {
-  const result = spawnSync(process.execPath, [script, ...args, "--dry-run"], {
+function runScript(args) {
+  return spawnSync(process.execPath, [script, ...args], {
     cwd: repoRoot,
     encoding: "utf8",
   });
-  return result;
+}
+
+function dryRun(args) {
+  return runScript([...args, "--dry-run"]);
 }
 
 function dryRunJson(args) {
@@ -28,7 +32,20 @@ function dryRunJson(args) {
   return JSON.parse(result.stdout);
 }
 
-const SHARD_COUNT = 3;
+const SHARD_COUNT = 5;
+const SERIALIZED_SHARD_COUNT = 5;
+
+
+test("the serialized shards form a complete, non-overlapping partition", () => {
+  const shards = Array.from({ length: SERIALIZED_SHARD_COUNT }, (_, index) =>
+    dryRunJson(["--mode", "serialized", "--shard-index", String(index), "--shard-count", String(SERIALIZED_SHARD_COUNT)]),
+  );
+
+  const total = shards[0].serializedSuiteCount;
+  const selected = shards.flatMap((shard) => shard.selectedSerializedSuites);
+  assert.equal(selected.length, total, "every serialized suite must be selected exactly once");
+  assert.equal(new Set(selected).size, total, "serialized shards must not overlap");
+});
 
 test("the general-server shards form a complete, non-overlapping partition", () => {
   const shards = Array.from({ length: SHARD_COUNT }, (_, index) =>
@@ -96,6 +113,55 @@ test("every stable Vitest child receives one isolated temp root through all plat
 test("shard flags are rejected for the parallel workspace groups", () => {
   const result = dryRun(["--mode", "general", "--group", "general-workspaces-a", "--shard-index", "0", "--shard-count", "3"]);
   assert.notEqual(result.status, 0, "workspace groups must not accept shard flags");
+});
+
+test("shard count alone is rejected for related and exact-file modes", () => {
+  for (const args of [
+    ["--related", "server/src/probe.ts", "--shard-count", "3"],
+    ["--files", "server/src/probe.test.ts", "--shard-count", "3"],
+  ]) {
+    const result = runScript(args);
+    assert.notEqual(result.status, 0, `expected failure for ${args.join(" ")}`);
+    assert.match(result.stderr, /cannot be combined with --mode\/--group\/--shard-\*\/--dry-run/);
+  }
+});
+
+test("related selections dispatch every selected suite through an independent Vitest process", () => {
+  const source = readFileSync(script, "utf8");
+  const relatedSuitesBody = source.slice(
+    source.indexOf("async function runRelatedSuites"),
+    source.indexOf("function runRelatedFilesIndependently"),
+  );
+  const relatedDispatcherBody = source.slice(
+    source.indexOf("function runRelatedFilesIndependently"),
+    source.indexOf("function runExactSuites"),
+  );
+
+  assert.match(
+    relatedSuitesBody,
+    /if \(cap === 0\) \{[\s\S]*?runRelatedFilesIndependently\(\s*selected,/,
+    "the uncapped path must isolate every resolved suite",
+  );
+  assert.match(
+    relatedSuitesBody,
+    /if \(selected\.length <= cap\) \{[\s\S]*?runRelatedFilesIndependently\(\s*selected,/,
+    "the within-cap path must isolate every resolved suite",
+  );
+  assert.match(
+    relatedSuitesBody,
+    /const subset =[\s\S]*?runRelatedFilesIndependently\(\s*subset,/,
+    "the representative subset path must isolate every selected suite",
+  );
+  assert.doesNotMatch(
+    relatedSuitesBody,
+    /runVitest\(|subcommand:\s*["']related["']/,
+    "related selection must never launch a batched Vitest coordinator directly",
+  );
+  assert.match(
+    relatedDispatcherBody,
+    /forEachExactVitestFile\(files,[\s\S]*?serializedServerVitestArgs,[\s\S]*?file/,
+    "the related dispatcher must launch exactly one selected file per invocation",
+  );
 });
 
 test("duration-aware partition balances skewed weights better than round-robin", () => {

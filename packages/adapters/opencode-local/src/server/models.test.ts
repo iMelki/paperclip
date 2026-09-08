@@ -43,7 +43,7 @@ describe("openCode models", () => {
       ensureOpenCodeModelConfiguredAndAvailable({
         model: "openai/gpt-5",
       }),
-    ).rejects.toThrow("Failed to start command");
+    ).rejects.toThrow('Command not found in PATH: "__paperclip_missing_opencode_command__"');
   });
 
   it("skips the availability check when OPENCODE_ALLOW_ALL_MODELS is set in the run env", async () => {

@@ -310,7 +310,7 @@ export function CompanyAccess() {
         ) : null}
 
         <div className="overflow-hidden rounded-xl border border-border">
-          <div className="grid grid-cols-(--gtc-24) gap-3 border-b border-border px-4 py-3 text-xs font-medium uppercase tracking-wide text-muted-foreground">
+          <div className="hidden gap-3 border-b border-border px-4 py-3 text-xs font-medium uppercase tracking-wide text-muted-foreground md:grid md:grid-cols-(--gtc-24)">
             <div>User account</div>
             <div>Role</div>
             <div>Status</div>
@@ -325,24 +325,26 @@ export function CompanyAccess() {
               return (
                 <div
                   key={member.id}
-                  className="grid grid-cols-(--gtc-24) gap-3 border-b border-border px-4 py-3 last:border-b-0"
+                  className="grid grid-cols-1 gap-3 border-b border-border px-4 py-3 last:border-b-0 md:grid-cols-(--gtc-24) md:items-center"
                 >
                   <div className="min-w-0">
                     <div className="truncate font-medium">{member.user?.name?.trim() || member.user?.email || member.principalId}</div>
                     <div className="truncate text-xs text-muted-foreground">{member.user?.email || member.principalId}</div>
                   </div>
-                  <div className="text-sm">
+                  <div className="flex flex-wrap items-center gap-2 text-sm">
+                    <span className="text-xs font-medium uppercase tracking-wide text-muted-foreground md:hidden">Role</span>
                     {member.membershipRole
                       ? HUMAN_COMPANY_MEMBERSHIP_ROLE_LABELS[member.membershipRole]
                       : "Unset"}
                   </div>
-                  <div>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="text-xs font-medium uppercase tracking-wide text-muted-foreground md:hidden">Status</span>
                     <Badge variant={member.status === "active" ? "secondary" : member.status === "suspended" ? "destructive" : "outline"}>
                       {member.status.replace("_", " ")}
                     </Badge>
                   </div>
-                  <div className="space-y-1 text-right">
-                    <div className="flex justify-end gap-2">
+                  <div className="space-y-1 md:text-right">
+                    <div className="flex flex-wrap gap-2 md:justify-end">
                       <Button size="sm" variant="outline" onClick={() => setEditingMemberId(member.id)}>
                         Edit
                       </Button>

@@ -1,0 +1,76 @@
+{
+  "schemaVersion": "paperclip.prepush-authoritative-dev-baseline-receipt.v1",
+  "recordedAtUtc": "2026-08-17T23:26:11.5584724Z",
+  "recordedAtLocal": "2026-08-18T02:26:11.5659462+03:00",
+  "lineage": {
+    "baseDevCommit": "9983a44a81e08b6d0c8020f30026013a887b6966",
+    "remoteTopicCommit": "16ab663ce00e02ecbbae926974a4b0b106076850",
+    "preFixHead": "b00dacc132842a704ba6b5e4333484846cff4fe1",
+    "testedRepairCommit": "43011d50341202f5eacfcf93726d253ea1f62634"
+  },
+  "implementation": {
+    "planner": {
+      "path": "scripts/run-pre-push-tests.mjs",
+      "sha256": "de71aab4a3e09db903beeb28b1493abcdff5d7643a8b0aff32070904ba935f1c",
+      "physicalLines": 444
+    },
+    "plannerTest": {
+      "path": "scripts/run-pre-push-tests.test.mjs",
+      "sha256": "eed26480d98540878730a1acafd1fcbb3bc21ca366e1b94575f8d0a28190b9a1",
+      "physicalLines": 476
+    },
+    "secretTest": {
+      "path": "scripts/scan-pre-push-secrets.test.mjs",
+      "sha256": "4da471697f8f2ef2beac6fb33416cb6b809e885469b219e7c60e0d44bf8e2829",
+      "physicalLines": 190
+    }
+  },
+  "realBrokenCaller": {
+    "command": "git push origin fix/59-60-windows-spawn-argv",
+    "head": "b00dacc132842a704ba6b5e4333484846cff4fe1",
+    "outcome": "rejected",
+    "gateExitCode": 2,
+    "reason": "The existing-topic planner diffed remote topic to HEAD and selected five files whose blobs were already identical on advertised dev; each failed only for a missing deterministic sibling.",
+    "unrelatedDevFilesSelected": 5
+  },
+  "deliberateNegativeProof": {
+    "command": "node --test --test-name-pattern existing topic ref scripts/run-pre-push-tests.test.mjs",
+    "breakApplied": "The existing-topic diff base was deliberately changed from advertised dev C back to remote topic A.",
+    "outcome": "fail",
+    "assertedReason": "The exact Git call contained A..B where the fixture required advertised-dev C..B.",
+    "restoredSourceSha256": "de71aab4a3e09db903beeb28b1493abcdff5d7643a8b0aff32070904ba935f1c"
+  },
+  "focusedRestoredPass": {
+    "command": "node --test scripts/run-pre-push-tests.test.mjs scripts/scan-pre-push-secrets.test.mjs",
+    "passed": 22,
+    "failed": 0,
+    "existingTopicTestRange": "advertised-dev..local-head",
+    "existingTopicSecretRange": "remote-topic..local-head",
+    "newBranchSecretRange": "advertised-dev..local-head"
+  },
+  "realRestoredCaller": {
+    "command": "git push origin fix/59-60-windows-spawn-argv",
+    "head": "43011d50341202f5eacfcf93726d253ea1f62634",
+    "hookOutcome": "pass",
+    "transportOutcome": "remote SSH connection closed while the 9.4-minute hook ran; no branch update occurred",
+    "typecheckProjects": 31,
+    "nodeTestsPassed": 35,
+    "vitestFilesPassed": 10,
+    "vitestTestsPassed": 313,
+    "vitestTestsSkipped": 21,
+    "vitestTestsFailed": 0,
+    "durationMinutes": 9.4,
+    "gitleaks": {
+      "version": "8.30.1",
+      "commitsScanned": 19,
+      "bytesScanned": 781411,
+      "findings": 0
+    }
+  },
+  "independentReview": {
+    "reviewers": 2,
+    "outcome": "approved",
+    "maintainability": "Planner source shrank from 472 to 444 physical lines; largest function is 49 lines and no threshold was crossed."
+  },
+  "hostedStatus": "pending final receipt commit push and exact-head CI/CodeRabbit"
+}

@@ -1,5 +1,6 @@
 import { UserPlus, Lightbulb, ShieldAlert, ShieldCheck } from "lucide-react";
 import { formatCents } from "../lib/utils";
+import { HirePermissionSummary } from "./HirePermissionSummary";
 
 export const typeLabel: Record<string, string> = {
   hire_agent: "Hire Agent",
@@ -105,6 +106,7 @@ export function HireAgentPayload({ payload }: { payload: Record<string, unknown>
         </div>
       )}
       <SkillList values={payload.desiredSkills} />
+      <HirePermissionSummary payload={payload} />
     </div>
   );
 }

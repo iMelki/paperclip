@@ -242,3 +242,38 @@ describe("Skill Studio routes", () => {
     expect(createIndexes[1]).toBeLessThan(detailIndexes[1]!);
   });
 });
+
+describe("Standalone landmarks", () => {
+  it("wraps standalone routes while keeping the unprefixed onboarding route behind the access gate", () => {
+    expect(appSource).toContain("function StandaloneMain");
+    expect(appSource).toContain('<Route path="onboarding" element={<StandaloneMain><OnboardingRoutePage /></StandaloneMain>} />');
+    const onboardingRoute = appSource.indexOf('<Route path="onboarding" element={<StandaloneMain>');
+    const accessGate = appSource.indexOf("<Route element={<CloudAccessGate />}>");
+    const accessGateEnd = appSource.indexOf("\n          </Route>", accessGate);
+
+    expect(onboardingRoute).toBeGreaterThan(accessGate);
+    expect(onboardingRoute).toBeLessThan(accessGateEnd);
+    expect(appSource).toContain(
+      '<Route path="ux-lab/responsible-user-denial" element={<StandaloneMain><ResponsibleUserDenialUxLab /></StandaloneMain>} />',
+    );
+    expect(appSource).toContain(
+      '<Route path="ux-lab/cross-issue-collaboration" element={<StandaloneMain><CrossIssueCollaborationUxLab /></StandaloneMain>} />',
+    );
+    expect(appSource).toContain(
+      '<Route path="ux-lab/issue-chat" element={<StandaloneMain><IssueChatUxLab /></StandaloneMain>} />',
+    );
+    expect(appSource).toContain(
+      '<Route path="ux-lab/loading-chrome" element={<StandaloneMain><LoadingChromeUxLab /></StandaloneMain>} />',
+    );
+  });
+});
+
+describe("Apps routes", () => {
+  it("uses browse as the Apps landing page and gives connections a canonical URL", () => {
+    expect(appSource).toContain('<Route path="apps" element={<Browse />} />');
+    expect(appSource).toContain('<Route path="apps/browse" element={<Navigate to="/apps" replace />} />');
+    expect(appSource).toContain('<Route path="apps/connections" element={<Connections />} />');
+    expect(appSource).toContain('<Route path="apps/connect/:appKey" element={<Navigate to="/apps" replace />} />');
+    expect(appSource).toContain('<Route path="apps/connect/:appKey/:stage" element={<Navigate to="/apps" replace />} />');
+  });
+});

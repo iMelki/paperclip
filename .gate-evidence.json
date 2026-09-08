@@ -1,0 +1,600 @@
+{
+  "version": 1,
+  "_doc": "Negative-proof ledger introduced for the fork dependency gate. Exact historical gate paths are excluded until their own controls are changed and proved; future undisclosed gates remain discoverable.",
+  "exclude": [
+    ".agents/skills/pr-gardening/scripts/check-readiness.mjs",
+    ".github/scripts/check-pr-dedup-search.mjs",
+    ".github/scripts/check-pr-dependencies.mjs",
+    ".github/scripts/check-pr-linked-issue.mjs",
+    ".github/scripts/check-pr-lockfile.mjs",
+    ".github/scripts/check-pr-security.mjs",
+    ".github/scripts/check-pr-template.mjs",
+    ".github/scripts/check-pr-test-coverage.mjs",
+    ".github/workflows/agent-runtime-images.yml",
+    ".github/workflows/docker.yml",
+    ".github/workflows/e2e.yml",
+    ".github/workflows/refresh-lockfile.yml",
+    ".github/workflows/release-smoke.yml",
+    ".github/workflows/release-verify.yml",
+    ".github/workflows/release.yml",
+    ".github/workflows/storybook-visual.yml",
+    ".github/workflows/sync-upstream.yml",
+    "packages/db/src/check-migration-numbering.ts",
+    "packages/db/src/check-migration-safety.test.ts",
+    "packages/db/src/check-migration-safety.ts",
+    "scripts/check-docker-deps-stage.mjs",
+    "scripts/check-forbidden-tokens-core.cjs",
+    "scripts/check-forbidden-tokens.mjs",
+    "scripts/check-release-package-bootstrap.mjs",
+    "scripts/check-release-package-bootstrap.test.mjs",
+    "scripts/check-task-chat-motion.mjs",
+    "scripts/check-token-gates.mjs",
+    "scripts/verify-release-registry-state.mjs",
+    "scripts/verify-release-registry-state.test.mjs",
+    "server/src/services/change-consent-gate.ts"
+  ],
+  "finalRepairedSnapshot": {
+    "_status": "Intentional frozen historical snapshot of the 2026-08-17 gate-bootstrap repair bundle. PR #66 merged into dev as 90bd179dd and PR #69 as 987700f91 without re-recording this baseline; the PR #69 delivery evidence lives in doc/evidence/*/2026-08-18-pr69-receipt.json.",
+    "date": "2026-08-17",
+    "recordedAtUtc": "2026-08-16T22:02:24.9919430Z",
+    "baseHead": "b6e8ae0794bd8ca2f1e2625daadfd095f461955c",
+    "codeCommit": "a3dba3f74681fcfa9a3c49ce613e78def67507d2",
+    "implementationFileCount": 19,
+    "implementationManifestSha256": "632ffec7b88c70cd22bfcf0b59d46f4e0a31b0e01ac46b10688521294524cfd6",
+    "receipt": "doc/evidence/gate-bootstrap/2026-08-17/second-review-repair-receipt.json",
+    "focusedTests": "121/121 passed with no skip"
+  },
+  "gates": [
+    {
+      "id": "cost-source-identity-contract",
+      "path": "packages/shared/src/validators/cost.ts",
+      "description": "Require a complete company/system/account/event identity and reject immutable-payload conflicts without overwriting cost history.",
+      "negativeFixture": "server/src/__tests__/cost-event-ingestion.test.ts",
+      "observedFailure": {
+        "date": "2026-09-07",
+        "command": "node node_modules/vitest/vitest.mjs run packages/shared/src/validators/cost.test.ts server/src/__tests__/cost-event-source-routes.test.ts server/src/__tests__/cost-event-ingestion.test.ts ui/src/components/ProviderQuotaCard.test.tsx --maxWorkers=1 --no-file-parallelism --reporter=default --testTimeout=30000 --hookTimeout=60000",
+        "reason": "Fixtures assert missing sourceAccountId, then observe the exact must-be-supplied-together HTTP 400 error and PostgreSQL 23514 cost_events_source_identity_complete_ck rejection. Changed payloads observe service/HTTP 409 with the explicit different-cost-payload reason. These are application/database failures inside passing test fixtures, not a nonzero Vitest process exit.",
+        "restoredPass": "Complete identity is accepted; replaying the original after changed-payload rejection returns the unchanged row. Four concurrent replays produce one row and unchanged totals. All 14 focused tests passed without skips; existing 24 cost/budget regressions and recursive typecheck also passed.",
+        "artifactPath": "doc/evidence/cost-source-identity/2026-09-07.md"
+      }
+    },
+    {
+      "id": "adapter-runtime-no-git-push",
+      "path": "scripts/check-no-git-push.mjs",
+      "description": "Rejects git push/send-pack in adapter/runtime source; all declared Paperclip roots are required; unreadable, missing, symlinked, tracked-generated, or unsupported tree entries fail integrity; declared generated output is excluded only after Git proves it untracked; success reports root, directory, entry, policy-skip, and file coverage.",
+      "negativeFixture": "scripts/check-no-git-push.test.mjs",
+      "observedFailure": {
+        "date": "2026-08-16",
+        "command": "node scripts/check-no-git-push.mjs (run in a scratch fixture whose four scan roots were renamed, with the offending file still on disk)",
+        "reason": "Exited 2 with 'scanned 0 files and therefore cannot report a pass' and named all four absent roots. Under real EPERM the same run exits 2 with 'cannot list directory packages/adapters/deep: EPERM' and 'cannot read packages/adapters/evil.ts: EPERM'. The pre-fix script exited 0 printing the success line in all three cases, having read nothing.",
+        "restoredPass": "With the roots restored and readable, the same fixture exits 0 and prints the denominator '4 file(s) scanned across 4 of 4 scan root(s)'; a seeded offender still exits 1 and names the file and line. The 2026-08-16 real-checkout caller run exited 0 after scanning 1298 files, 114 directories, and 1435 entries across 4 of 4 roots.",
+        "preFixTestRun": "Run against a scratch copy of the pre-fix module (94a4a440c), the suite is 14 pass / 8 fail; against the fixed module it is 22 pass / 0 fail. The 8 are the seven new #76 fixtures plus the happy-path assertion that the pass line carries a non-zero scanned-file count."
+      },
+      "followupProofDefinition": {
+        "status": "proved-2026-08-16",
+        "command": "node --test scripts/check-no-git-push-source.test.mjs scripts/git-push-scan-integrity.test.mjs scripts/check-no-git-push.test.mjs",
+        "failureReason": "A scratch real-caller run moved an asserted unsupported file into packages/adapters and exited 2 naming 'undeclared file type inside scan root: packages/adapters/hostile.unknown'. A separate real repository committed a forbidden git push, marked that path skip-worktree, substituted clean bytes in place, and remained status-clean; the real scanner still exited 2 naming the exact hidden/non-normal index path. Clearing the flag and committing the clean bytes restored exit 0. A tracked manifest without its paired index state now exits for EINDEXUNKNOWN, while injected ENOBUFS/timeout child results name the bounded Git-enumeration failure before any scan is trusted. Multiline real callers exited 1 and named the exact lines for PowerShell expandable here-string and unquoted shell-heredoc substitutions, an indented fake PowerShell closer, fragmented ordinary/ANSI-quoted delimiters followed by real commands, and a line-continued expanding delimiter. Bash-syntax-validated arithmetic fixtures exited 1 on the real push instead of misclassifying << as a hiding heredoc, including nested command substitutions whose comments or quoted arguments contained misleading closing parentheses, Bash's legacy square-bracket arithmetic expansion, both double- and single-quoted indexed-array subscripts, and a false indexed-array delimiter whose exact text was the later executable push line; each proof passed after safe restoration. A UTF-16-indexed fixture with an astral character between an allow marker and a live push exited 1 and named line 3. The scanner keeps every quoted or unquoted LF/CRLF heredoc body and terminator line scan-visible, and the 46/46 matrix also covers YAML/Python/batch marker spoofing, generated-name symlinks, and Windows case folding.",
+        "preFixAuthority": "Run the new fixtures against 79dcf8e1d to demonstrate the partial-root and directory-symlink cases exit 0 before this repair.",
+        "upstreamReopenedEvidence": {
+          "commit": "bf81b90e9acd8a5a6acde731d151f55f301c63b2",
+          "preFixFacts": "One renamed required root passed, a committed mode-120000 directory symlink dropped its target subtree because its directory entry described the link rather than the target, and .mts/.cts/.jsx files were unscanned; each was reproduced against 79dcf8e1d with a live control.",
+          "finalDisposition": "The integrated hardening keeps required-root and extension coverage, but deliberately rejects every symlink or junction instead of traversing it; tracked-tree and normal-index reconciliation cover hidden or substituted pushed bytes."
+        }
+      }
+    },
+    {
+      "id": "no-git-push-source-policy",
+      "path": "scripts/check-no-git-push-source.mjs",
+      "description": "Language-aware source policy that detects direct and indirect Git publication commands while keeping ambiguous multiline shell and PowerShell constructs scan-visible.",
+      "negativeFixture": "scripts/check-no-git-push-source.test.mjs",
+      "observedFailure": {
+        "date": "2026-08-17",
+        "command": "node --test scripts/check-no-git-push-source.test.mjs",
+        "reason": "Deliberately seeded direct, array, shell, send-pack, executable here-string/heredoc, marker-spoof, and Bash arithmetic/heredoc-confusion forms were each attributed to their exact source line instead of disappearing behind comment, quote, delimiter, or arithmetic state.",
+        "restoredPass": "Safe comments, literal data, documentation markers, and grammar-valid multiline controls remained accepted; the owning suite passed 16/16 inside the final repaired-snapshot bundle."
+      }
+    },
+    {
+      "id": "no-git-push-source-negative-fixture-gate",
+      "path": "scripts/check-no-git-push-source.test.mjs",
+      "description": "Workflow-executed negative fixture that proves the source-policy lexer observes hostile command and multiline-language inputs before accepting restored source.",
+      "negativeFixture": "scripts/check-no-git-push-source.test.mjs",
+      "observedFailure": {
+        "date": "2026-08-17",
+        "command": "node --test scripts/check-no-git-push-source.test.mjs",
+        "reason": "Every hostile fixture asserts the exact detected line and form; removing the detector behavior makes the corresponding assertion fail rather than producing a green policy job.",
+        "restoredPass": "The complete source-policy fixture passed 16/16 and is an active, unmasked member of the required PR policy command."
+      }
+    },
+    {
+      "id": "tracked-manifest-integrity",
+      "path": "scripts/git-push-scan-integrity.mjs",
+      "description": "Enumerates the tracked index through a shell-free, timeout- and buffer-bounded Git child; rejects malformed manifests, non-normal index flags, and physically unobserved tracked paths.",
+      "negativeFixture": "scripts/git-push-scan-integrity.test.mjs",
+      "observedFailure": {
+        "date": "2026-08-17",
+        "command": "node --test scripts/git-push-scan-integrity.test.mjs",
+        "reason": "Malformed records, missing paired index state, non-normal index tags, child ENOENT, injected ENOBUFS, injected ETIMEDOUT, and non-zero Git status each raised ScanIntegrityError with the attributable code/reason instead of returning an empty trusted manifest.",
+        "restoredPass": "A valid NUL-delimited H manifest returned exact tracked paths; the child received shell=false, SIGKILL, a 120-second timeout, and a 64 MiB maxBuffer. The owning suite passed 3/3 inside the final repaired-snapshot bundle (121/121)."
+      }
+    },
+    {
+      "id": "shell-free-vitest-launcher",
+      "path": "scripts/run-vitest-direct.mjs",
+      "description": "Resolves Vitest from its installed package manifest, requires the declared executable to remain inside the package, and launches it with process.execPath and shell=false.",
+      "negativeFixture": "scripts/run-vitest-direct.test.mjs",
+      "observedFailure": {
+        "date": "2026-08-16",
+        "command": "node --test scripts/run-vitest-direct.test.mjs",
+        "reason": "Missing or escaping manifest bin declarations were rejected before launch; a hostile Git-derived filename remained one literal argv element and produced no shell side effect.",
+        "restoredPass": "The installed Vitest manifest resolved to its in-package vitest.mjs entry; exact files remained separate invocations, and the shell-free launcher suite passed 3/3."
+      }
+    },
+    {
+      "id": "stable-vitest-exact-mode",
+      "path": "scripts/run-vitest-stable.mjs",
+      "description": "Runs every exact or related selected Vitest file independently so one suite cannot mask, contaminate, or retain coordinator-owned state for another, while rejecting incompatible grouping, sharding, related, or dry-run options.",
+      "negativeFixture": "scripts/__tests__/run-vitest-stable-shard.test.mjs",
+      "observedFailure": {
+        "date": "2026-08-16",
+        "command": "node --test scripts/__tests__/run-vitest-stable-shard.test.mjs",
+        "reason": "Supplying shard-count alone with --files or --related raises the declared --shard-* incompatibility. A real exact invocation then ran one valid shared test before rejecting an existing .spec.ts file excluded by that project's include glob, proving the valid file could not mask it. On 2026-08-17 UTC, deliberately restoring the uncapped related branch to one batched Vitest coordinator made the owning test fail for the exact reason 'related selection must never launch a batched Vitest coordinator directly'.",
+        "restoredPass": "Renaming the fixture to the supported .test.ts form made both exact per-file invocations pass (10 tests total). Restoring the isolated related dispatcher returned the shard suite to 13/13 and the real pre-commit caller resolved 322 candidates, ran its 12-suite cap in separate processes, and passed 335 tests with 21 declared platform skips and zero failures. Portable receipt: doc/evidence/precommit-related-isolation/2026-08-18-pr66-receipt.json."
+      }
+    },
+    {
+      "id": "deterministic-pre-push-selector",
+      "path": "scripts/pre-push-test-selection.mjs",
+      "description": "Selects exact changed, deterministic sibling, and narrowly declared contract suites; routes them by real runner; assigns a removed production file to hosted CI only when no surviving sibling or declared contract test owns it; and fails closed on uncovered live production, missing declared tests, invalid paths, or symlink traversal.",
+      "negativeFixture": "scripts/pre-push-test-selection.test.mjs",
+      "observedFailure": {
+        "date": "2026-09-01",
+        "command": "git push --set-upstream origin agent/codex/47-windows-path-hooks-and-review-governance-20260831; node --test scripts/pre-push-test-selection.test.mjs; node scripts/run-pre-push-tests.mjs --repo-root . --dry-run --changed-file <each of the five non-sibling production paths> --target-ref refs/heads/topic",
+        "reason": "The real pre-push caller rejected five changed production files because their higher-level contract suites were not same-stem siblings. The missing-declaration fixture then named the absent http-logger contract test. A post-review control restored the old removed-source rule; the new declared-contract deletion fixture failed because it was incorrectly assigned to hosted CI despite its surviving exact contract test. Existing fixtures still reject uncovered production, untracked tests, malformed inputs, and escaping or linked paths.",
+        "restoredPass": "With exact source-to-test declarations and the deletion ownership rule restored, the selector chose the existing generator, HTTP redaction, and onboarding persistence contract suites; its caller-shaped dry run reported zero uncovered files and zero selection errors. The selector suite passed 18/18 and the complete Node gate group passed 21/21. Negative/restored task receipts: 348a5530df404961b965ca48ee939bef and 6e9e1453d0144a00bd47cd5a041aab01."
+      }
+    },
+    {
+      "id": "pre-push-git-update-planner",
+      "path": "scripts/run-pre-push-tests.mjs",
+      "description": "Parses Git's four-field pre-push protocol, including the literal HEAD local-ref emitted for HEAD:topic refspecs; binds tested bytes to one pristine HEAD with repository-wide normal index state; resolves the exact configured destination's advertised dev object for every content update; requires that object to be an ancestor; tests the final dev-relative branch tree; rejects zero/unresolved ranges; and runs the runner-aware exact plan.",
+      "negativeFixture": "scripts/run-pre-push-tests.test.mjs",
+      "observedFailure": {
+        "date": "2026-08-18",
+        "command": "git push origin fix/59-60-windows-spawn-argv; node --test scripts/run-pre-push-tests.test.mjs scripts/scan-pre-push-secrets.test.mjs",
+        "reason": "The real pre-push caller at b00dacc1 first passed policy, Gitleaks, and the 31-project typecheck, then rejected five files whose blobs were already identical on advertised dev because the existing-topic path diffed the old remote topic tip instead of dev. Deliberately restoring that old A..B baseline after adding the owning fixture made the fixture fail with actual A where authoritative advertised dev C was required. Existing fail-closed proofs still reject malformed/empty protocol, dirty/non-HEAD/multi-ref state, unsafe destination identity, missing CLI values, bounded Git failures, hidden index state, divergent advertised dev, and selected-child failures for their exact reasons.",
+        "restoredPass": "Restoring source SHA-256 de71aab4a3e09db903beeb28b1493abcdff5d7643a8b0aff32070904ba935f1c made the planner and secret suites pass 22/22. The planner now reads the configured push URL, advertises dev C, proves C is an ancestor of B, and diffs C..B for both new and existing topic updates; deletion-only updates still issue no Git child. The distinct secret fixture retains the existing remote-topic A..B scan while a new branch scans advertised-dev D..C. The exact normal push caller at 43011d50 then passed all gates: 31-project typecheck, 35/35 Node gate tests, and ten isolated Vitest files with 313 passed, 21 declared skips, and zero failures. Portable receipt: doc/evidence/prepush-authoritative-dev-baseline/2026-08-18-pr66-receipt.json. Two subsequent real existing-topic pushes for PR #69 (ebc5f66c5..bbb37f640 in 4.9 minutes and bbb37f640..670447a38 in 3.7 minutes) passed the advertised-dev baseline planner normally end to end; portable receipt: doc/evidence/prepush-authoritative-dev-baseline/2026-08-18-pr69-receipt.json."
+      }
+    },
+    {
+      "id": "pre-push-platform-callers",
+      "path": "scripts/pre-push-check.ps1",
+      "description": "PowerShell and POSIX callers preserve Git arguments/stdin, invoke the same security/workflow/exact-plan gates, and reject any non-zero child.",
+      "negativeFixture": "scripts/pre-push-callers.test.mjs",
+      "observedFailure": {
+        "date": "2026-08-16",
+        "command": "node --test scripts/pre-push-callers.test.mjs",
+        "reason": "The real PowerShell and POSIX callers received fake scanner exit 17, secret-range exit 23, and planner exit 19; every invocation rejected and its log named the exact child exit. The PowerShell proof enabled PSNativeCommandUseErrorActionPreference and emitted native stderr before exit 17; the caller retained the output and exact status. The POSIX proof delivered TERM during an active child and returned 143. The first cleanup proof had caught a surviving .step-1 artifact before the exact-path repair.",
+        "restoredPass": "With all children restored to exit 0, both callers passed the same Git update and forwarded the exact remote name/location; native-error, interrupt, failure, and success paths removed their update/step artifacts while retaining the consolidated log. The platform run passed 3/3 with no skip; portable summary: doc/evidence/gate-bootstrap/2026-08-17/second-review-repair-receipt.json."
+      }
+    },
+    {
+      "id": "pre-push-posix-caller",
+      "path": "scripts/pre-push-check.sh",
+      "description": "POSIX mirror of the deterministic pre-push caller; captures stdin before any child and preserves exact child failure status in its log.",
+      "negativeFixture": "scripts/pre-push-callers.test.mjs",
+      "observedFailure": {
+        "date": "2026-08-16",
+        "command": "node --test scripts/pre-push-callers.test.mjs",
+        "reason": "The automatically discovered POSIX shell ran the real caller; fake scanner exit 17, secret-range exit 23, and planner exit 19 each rejected with the exact exit in output. TERM during an active child returned 143. The initial cleanup fixture had failed because a platform-sensitive wildcard left .step-1 behind.",
+        "restoredPass": "Portable symbolic signal traps and exact active-step cleanup removed update and step artifacts on interrupt, every failure, and success. Restored children exited 0, both remote arguments were forwarded, and the dedicated caller run passed 3/3 with zero skips."
+      }
+    },
+    {
+      "id": "pre-push-husky-dispatch",
+      "path": ".husky/pre-push",
+      "description": "Forwards Git's remote arguments and untouched update stdin to the available platform caller and propagates its status.",
+      "negativeFixture": "scripts/prove-pre-push-fails-closed.ps1",
+      "observedFailure": {
+        "date": "2026-08-16",
+        "command": "git -C <preserved-scratch> push --dry-run <local-bare> HEAD:refs/heads/gate-proof",
+        "reason": "After asserting the hook body hash changed, a scratch core.hooksPath=.husky pre-push hook emitted 'intentional gate rejection'; Git rejected the dry-run push at exit 1.",
+        "restoredPass": "The original passing hook body was restored with the exact baseline SHA-256 and the same dry-run push exited 0; the scratch repository and receipt were preserved."
+      }
+    },
+    {
+      "id": "dev-pr-ci-trigger",
+      "path": ".github/workflows/pr.yml",
+      "description": "Runs PR CI for master and dev, never on push:dev, scans only the unmasked exact PR commit range, and actively executes the deterministic gate regressions without conditional or shell-masked passes.",
+      "negativeFixture": "scripts/check-pr-workflow-trigger.test.mjs",
+      "observedFailure": {
+        "date": "2026-08-16",
+        "command": "node scripts/check-pr-workflow-trigger.mjs (from a preserved scratch copy with exactly one dev branch entry removed)",
+        "reason": "One real scratch CLI exited 1 and named 'pull_request.branches is missing dev'. A second changed a required step opener to '- if: false'; the real CLI exited 1 naming the missing active validation. The broader fixture also rejected push keys and every nested conditional, custom-shell, continue-on-error, compact-operator, or removed-command masking form.",
+        "restoredPass": "The workflow was restored and the real CLI exited 0; the repaired policy matrix passed 12/12. PR #78 heads 5cf55ae1 and b6e8ae07 each launched the complete PR matrix: policy, secret scan, typecheck/registry, build, five general-server shards, two workspace shards, five serialized-suite shards, three e2e shards plus aggregate, canary, and verify all succeeded. The merged gate content then completed exact-head hosted readback: the PR #66 head aeea981d2 passed 24 checks plus the expected security-review neutral before merging as 90bd179dd, and the PR #69 heads bbb37f640 and 670447a38 each completed the full matrix green before merging as 987700f91; receipt doc/evidence/prepush-authoritative-dev-baseline/2026-08-18-pr69-receipt.json."
+      }
+    },
+    {
+      "id": "pr-workflow-trigger-policy",
+      "path": "scripts/check-pr-workflow-trigger.mjs",
+      "description": "Statically prevents the dev CI trigger from being removed, prevents push-triggered Actions spend, and requires active unmasked secret-range and gate-regression commands.",
+      "negativeFixture": "scripts/check-pr-workflow-trigger.test.mjs",
+      "observedFailure": {
+        "date": "2026-08-17",
+        "command": "node --test scripts/check-pr-workflow-trigger.test.mjs; node scripts/check-pr-workflow-trigger.mjs",
+        "reason": "The missing-dev, missing stable-runner regression, plain/quoted/escaped/duplicate event key, duplicate required-job key, altered policy dependency, removed-validator, commented-command, sequence-opener if/continue-on-error/shell, conditional-step, job/global env or defaults, job container/services, self-hosted runner, custom-shell/working-directory, and compact-operator fixtures each asserted a distinct policy failure. The real CLI exited 1 specifically when the stable-runner path was replaced.",
+        "restoredPass": "The restored workflow passed the real CLI and the policy matrix passed 12/12 with no skips inside the final repaired-snapshot bundle (121/121); earlier caller-exact missing-dev evidence remains unchanged."
+      }
+    },
+    {
+      "id": "pr-workflow-negative-fixture-gate",
+      "path": "scripts/check-pr-workflow-trigger.test.mjs",
+      "description": "Workflow-executed negative fixture that proves trigger, dependency, runner, execution-context, and exact-command policy cannot be weakened while retaining a green policy job.",
+      "negativeFixture": "scripts/check-pr-workflow-trigger.test.mjs",
+      "observedFailure": {
+        "date": "2026-08-17",
+        "command": "node --test scripts/check-pr-workflow-trigger.test.mjs",
+        "reason": "Missing dev coverage, a removed stable-runner regression, push events, encoded or duplicate keys, a duplicate required-job key, altered policy dependency, hostile execution context, self-hosted runners, masked steps, and removed exact commands each asserted its attributable policy failure.",
+        "restoredPass": "The real workflow and restored fixtures passed 12/12 with no skips, and the real checker exited 0."
+      }
+    },
+    {
+      "id": "gitleaks-exact-pr-range",
+      "path": "scripts/verify-gitleaks.mjs",
+      "description": "Runs pinned Gitleaks in exactly one declared mode and accepts only full-object-id PR ranges, preventing known historical fixtures from making every dev PR red.",
+      "negativeFixture": "scripts/verify-gitleaks.test.mjs",
+      "observedFailure": {
+        "date": "2026-08-16",
+        "command": "node --test scripts/verify-gitleaks.test.mjs",
+        "reason": "A symbolic dev..topic range exited 3 before the fake pinned binary started and named the full-object-id requirement; findings exit 2 remained distinct from tool/runtime exit 3.",
+        "restoredPass": "Full 40-character base and head IDs were passed as one exact --log-opts argument to the pinned fake binary; 7/7 verifier proofs passed."
+      }
+    },
+    {
+      "id": "pre-push-secret-range-planner",
+      "path": "scripts/scan-pre-push-secrets.mjs",
+      "description": "Builds one exact Gitleaks range per non-deletion update, using the destination's advertised dev object for new branches and rejecting unsafe or mismatched remote identity.",
+      "negativeFixture": "scripts/scan-pre-push-secrets.test.mjs",
+      "observedFailure": {
+        "date": "2026-08-16",
+        "command": "node --test scripts/scan-pre-push-secrets.test.mjs",
+        "reason": "Non-string, unsafe, or mismatched remote identity and option-shaped missing CLI values were rejected before any scan. Verifier spawn errors, signal termination, and non-zero status were attributed instead of flattened to success; new-branch divergence was distinguished from Git infrastructure failure.",
+        "restoredPass": "The exact existing base..head and authoritative dev..head ranges passed after the fake verifier returned 0; 7/7 proofs passed."
+      }
+    },
+    {
+      "id": "no-git-push-negative-fixture-gate",
+      "path": "scripts/check-no-git-push.test.mjs",
+      "description": "Workflow-executed negative fixture that makes the scanner observe missing, unreadable, linked, tracked-generated, unsupported, and forbidden-command inputs before accepting restored inputs.",
+      "negativeFixture": "scripts/check-no-git-push.test.mjs",
+      "observedFailure": {
+        "date": "2026-08-16",
+        "command": "node --test scripts/check-no-git-push-source.test.mjs scripts/git-push-scan-integrity.test.mjs scripts/check-no-git-push.test.mjs",
+        "reason": "The fixture asserted exit 2 with the exact path/reason for integrity breaks and exit 1 with file/line for forbidden commands; direct scratch callers independently rejected an undeclared runtime type, a status-clean in-place byte substitution hidden by skip-worktree, executable substitutions inside a PowerShell here-string plus a shell heredoc, two Bash-valid nested arithmetic substitutions with misleading comment or quote parentheses, Bash's legacy square-bracket arithmetic expansion, double- and single-quoted indexed-array arithmetic forms whose false heredoc classifications previously hid a real push, and a false delimiter whose exact text was the executable push line. The restored scanner keeps every heredoc body and terminator line scan-visible regardless of delimiter quoting.",
+        "restoredPass": "Every fixture restored a readable declared tree, paired tracked/index manifest, normal index state, or safe source and observed exit 0; 46/46 scanner proofs passed with no skips."
+      }
+    },
+    {
+      "id": "gitleaks-negative-fixture-gate",
+      "path": "scripts/verify-gitleaks.test.mjs",
+      "description": "Workflow-executed negative fixture that proves exact range validation, pinned-version enforcement, and distinct finding versus infrastructure exits.",
+      "negativeFixture": "scripts/verify-gitleaks.test.mjs",
+      "observedFailure": {
+        "date": "2026-08-16",
+        "command": "node --test scripts/verify-gitleaks.test.mjs",
+        "reason": "The fixture observed symbolic range and version failures at exit 3, secret findings at exit 2, and asserted each exact reason before allowing a pass.",
+        "restoredPass": "A pinned fake 8.30.1 binary received the exact full-object-id range as one argument and exited 0; 7/7 proofs passed."
+      }
+    },
+    {
+      "id": "fork-dependency-review-workflow",
+      "path": ".github/workflows/commitperclip-review.yml",
+      "description": "Fork PR dependency-bearing changes fail unless a trusted maintainer applies the dependency-review-approved label.",
+      "negativeFixture": ".github/scripts/tests/check-fork-dependency-policy.test.mjs",
+      "observedFailure": {
+        "date": "2026-08-13",
+        "command": "PR_FILES_JSON=[{package.json modified}] PR_LABELS_JSON=[] node .github/scripts/check-fork-dependency-policy.mjs",
+        "reason": "Exited 1 and reported that dependency-bearing files changed without the trusted dependency-review-approved label.",
+        "restoredPass": "With only README.md modified, the same gate exited 0 and emitted passed=true."
+      }
+    },
+    {
+      "id": "fork-dependency-change-policy",
+      "path": ".github/scripts/check-fork-dependency-policy.mjs",
+      "description": "Classifies dependency-bearing PR files and enforces explicit trusted-label approval on fork repositories.",
+      "negativeFixture": ".github/scripts/tests/check-fork-dependency-policy.test.mjs",
+      "observedFailure": {
+        "date": "2026-08-13",
+        "command": "PR_FILES_JSON=[{package.json modified}] PR_LABELS_JSON=[] node .github/scripts/check-fork-dependency-policy.mjs",
+        "reason": "Exited 1 for the deliberately unapproved package.json change and named the missing trusted label as the cause.",
+        "restoredPass": "With only README.md modified, the script exited 0 and emitted passed=true."
+      }
+    },
+    {
+      "id": "paperclip-react-doctor-local-resolver",
+      "path": "scripts/run-react-doctor.js",
+      "description": "Runs only an exact local React Doctor package and emits a normalized receipt.",
+      "negativeFixture": "scripts/run-react-doctor.test.mjs",
+      "observedFailure": {
+        "date": "2026-08-13",
+        "command": "node <temp-negative-checkout>/scripts/run-react-doctor.js",
+        "reason": "The temporary checkout had no node_modules/react-doctor. The runner returned exit 2 and JSON error pinned-package-missing with outcome=incomplete; no npx or package-manager fallback was available.",
+        "restoredPass": "The test creates a temporary exact 0.7.8 package whose local analyzer returns JSON; the runner exits 0 with outcome=passed and 64-character package/output hashes."
+      }
+    },
+    {
+      "id": "paperclip-react-doctor-exit-propagation",
+      "path": ".husky/pre-commit",
+      "description": "Stops on pre-commit checker failure and preserves real analyzer failures while allowing only the explicit unconfigured state.",
+      "negativeFixture": "scripts/run-react-doctor.test.mjs",
+      "observedFailure": {
+        "date": "2026-08-13",
+        "command": "node --test scripts/run-react-doctor.test.mjs --test-name-pattern=\"preserves a real analyzer failure exit code\"",
+        "reason": "The temporary exact 0.7.8 analyzer emits valid JSON and exits 23; the runner receipt is outcome=failed, error=analyzer-reported-failure, exitCode=23. The hook allows only exit 2 for missing configuration and exits for any other nonzero status.",
+        "restoredPass": "The paired local-analyzer test exits 0 with outcome=passed, while the missing-package case remains the explicit disabled receipt path rather than a false quality pass."
+      }
+    },
+    {
+      "id": "coordination-company-scope",
+      "path": "server/src/services/coordination.ts",
+      "description": "Keeps the company-scoped loader private and requires the authorized root company predicate on every coordination-detail query so a permitted caller cannot receive another company's children, participants, leases, control intents, agent instances, or hosts before pure view projection.",
+      "negativeFixture": "server/src/__tests__/coordination-service-isolation.test.ts",
+      "observedFailure": {
+        "date": "2026-08-21",
+        "command": "node scripts/run-vitest-stable.mjs --files server/src/__tests__/coordination-service-isolation.test.ts",
+        "reason": "With final isolation fixture SHA-256 bf1589604ae56e79f134b086509f842d7fe67613cb028ac8e1a96e23158ffe88, removal of only the child-issue company predicate produced source SHA-256 5ba3699def681cf314b2781b6f5747a89b21d51b4efc43e90b7585cbd7847557. The exact caller exited 1 with 2 passed and exactly 2 failed: both the direct-service and real-HTTP assertions received the deliberately crossed-company child ID, while the foreign-root denial and new root-reassignment controls passed.",
+        "restoredPass": "The source was restored byte-for-byte to SHA-256 164bfbd19b693d0d91cab6b53b646a0655c8ac95de03e24d7610d7642a540159 and the identical caller exited 0 with 4/4 tests. The final projector, route, and isolation caller passed 42/42, and server typecheck exited 0.",
+        "artifactPath": "doc/evidence/coordination-loader-projector/2026-08-21-issue82-receipt.json",
+        "previousProofArtifact": "https://github.com/iMelki/paperclip/issues/52#issuecomment-5359087390"
+      }
+    },
+    {
+      "id": "coordination-heartbeat-max-selection",
+      "path": "server/src/services/coordination-projection.ts",
+      "description": "Selects the maximum participant lastSeenAt independently of row order, falling back to the root timestamp only when no newer participant heartbeat exists.",
+      "negativeFixture": "server/src/services/coordination-projection.test.ts",
+      "observedFailure": {
+        "date": "2026-08-21",
+        "command": "node scripts/run-vitest-stable.mjs --files server/src/services/coordination-projection.test.ts",
+        "reason": "With final fixture SHA-256 000420c85851f0af77f33813ee3d159f94878fa12c9633533cfa48e35228a611, a deliberate last-participant implementation produced source SHA-256 8c9f8e5635b9bd1fc80196e1fb0210c60533b623fe4b4b4214c60e8277a643ac. The exact caller exited 1 with 30 passed and only the maximum-heartbeat regression failed, reporting 40 seconds instead of 5.",
+        "restoredPass": "The projector was restored byte-for-byte to SHA-256 b33d74d8a4a9a351db6c304bc00f9f0bd66eff2cef310128d85bc64038885130. The identical exact caller exited 0 with 31/31 tests.",
+        "artifactPath": "doc/evidence/coordination-loader-projector/2026-08-21-issue82-receipt.json"
+      }
+    },
+    {
+      "id": "automated-review-provider-governance",
+      "path": ".github/scripts/tests/run-quality-gates.test.mjs",
+      "description": "Keeps CodeRabbit as the primary automated review lane, permits exact-head Cursor review only as its explicit fallback, and prevents an unavailable Greptile integration from being represented as a mandatory or satisfied 5/5 gate.",
+      "negativeFixture": "CONTRIBUTING.md",
+      "observedFailure": {
+        "date": "2026-09-01",
+        "command": "node --test .github/scripts/tests/run-quality-gates.test.mjs",
+        "breakApplied": "Readback confirmed CONTRIBUTING.md contained the deliberately restored legacy sentence 'Greptile is 5/5 with no open P2s, recommendations, or follow-ups.' while the surrounding policy still declared Greptile optional.",
+        "reason": "The exact Node test caller exited 1 with 3 passed and only the provider-governance test failed, naming /Greptile(?: score)? is 5\\/5/i and the deliberately broken sentence.",
+        "restoredPass": "After removing only the legacy sentence, the identical caller exited 0 with 4/4 tests. The generated review comment names CodeRabbit, the exact-head Cursor fallback, maintainer approval, and no Greptile claim."
+      }
+    },
+    {
+      "id": "onboarding-persisted-adapter-readback",
+      "path": "ui/src/components/OnboardingWizard.tsx",
+      "description": "Persists an existing onboarding agent without replacing hidden same-adapter settings, tests the effective merged configuration before PATCH, drops stale adapter-specific state only on adapter changes, and keeps dashboard launch disabled until an authoritative saved-agent readback matches the server-normalized configuration.",
+      "negativeFixture": "ui/src/components/OnboardingWizard.config-persistence.test.tsx",
+      "observedFailure": {
+        "date": "2026-09-01",
+        "command": "pnpm exec vitest run ui/src/lib/onboarding-agent-config.test.ts ui/src/components/OnboardingWizard.config-persistence.test.tsx ui/src/components/OnboardingConfigurationReview.test.tsx",
+        "breakApplied": "Separate source controls bypassed the launch/readback gate, restored destructive same-adapter replacement, and passed the Wizard draft rather than the effective preserved configuration to the environment probe. Final baselines are onboarding-agent-config.ts SHA-256 c6ae1558948f7303332da7f87d6aa1cfac6a3412ee48f0bd767f56f7eff825aa and usePersistOnboardingAgentConfig.ts SHA-256 5d76a0a6c5e022d51d740a93e6c6c746eed44776bc15d90c424f87d2ebffac87.",
+        "reason": "The launch bypass failed the mismatch and readback-error controls. Destructive replacement failed exact cwd/command/args/url custody. Testing the draft failed 2/7 Wizard tests because hidden command/cwd/env fields did not reach the environment probe and a failing effective configuration could proceed toward PATCH.",
+        "restoredPass": "Exact byte restoration passed 3 files and 21/21 tests, including server-normalized private-field readback without localStorage or rendered exposure, fail-closed reload, effective preserved-config testing before PATCH, and a failing environment result that prevents PATCH. Final task-owned UI typecheck receipt c6dfeccede894d5a873e12f1f4df34e7 exited 0 in 93,545 ms with peak job memory 2,650,513,408 bytes, maximum S: free-space drop 190,259,200 bytes, and zero surviving Job members. Two real Playwright journeys then preserved the submitted Claude adapter/config, disabled only automatic wakes, read back Saved configuration as Verified / Claude Code / Adapter default, and proved Get started enabled; receipt 6600231310d349a48a00b54e2a2a3268 passed 2/2 with zero surviving Job members. The final independent stable-diff review found no P0/P1 runtime, security, Windows, approval, UI, SSH, E2E-helper, or test-selection defect after the named evidence repairs; real hooks, hosted CI, and exact-head automated review remain separate pending gates."
+      },
+      "maintainabilityReceipt": "doc/evidence/delivery-2026-09-01-maintainability.md"
+    },
+    {
+      "id": "onboarding-hire-route-payload-preservation",
+      "path": "tests/e2e/onboarding-hire-route.ts",
+      "description": "Forwards the original onboarding hire payload through Playwright and changes only heartbeat.enabled and heartbeat.wakeOnDemand to false, so E2E safety no longer replaces the selected adapter or configuration.",
+      "negativeFixture": "tests/e2e/onboarding-hire-route.spec.ts",
+      "observedFailure": {
+        "date": "2026-09-01",
+        "command": "pnpm exec playwright test --config tests/e2e/playwright.config.ts tests/e2e/onboarding-hire-route.spec.ts; node --test scripts/pre-push-test-selection.test.mjs",
+        "breakApplied": "Readback changed the helper back to an inert HTTP-adapter replacement. A separate selector control removed the declared helper-to-contract mapping.",
+        "reason": "The registered Playwright contract failed because adapterType, adapterConfig, runtimeConfig, and metadata were replaced instead of forwarded. The selector then failed because a helper-only production change no longer selected its exact registered contract.",
+        "restoredPass": "Exact restoration passed the registered contract 2/2 and selector 19/19. Negative/restored receipts: 3d85e30cca804fca904a028a2eeb7281 / 8a0e08fbf3c74d4dbd0028d06eebb9b0 and fd0f482b4c294789973259e2472e34b0 / 9658f6fade1544759b066c2a3c3ff0df. Both onboarding browser journeys passed 2/2 under receipt 6600231310d349a48a00b54e2a2a3268."
+      },
+      "maintainabilityReceipt": "doc/evidence/delivery-2026-09-01-maintainability.md"
+    },
+    {
+      "id": "ssh-command-lookup-shell-free-ratchet",
+      "path": "packages/adapter-utils/scripts/ssh-command-lookup-gate.mjs",
+      "description": "Rejects shell-executed command-v/which executable discovery in the SSH adapter while preserving shell-free PATH/PATHEXT resolution and passive text.",
+      "negativeFixture": "tests/fixtures/ssh-command-lookup/unsafe-ssh-command-lookup.ts.txt",
+      "observedFailure": {
+        "date": "2026-09-01",
+        "command": "pnpm --filter @paperclipai/adapter-utils check:ssh-command-lookup --source ../../tests/fixtures/ssh-command-lookup/unsafe-ssh-command-lookup.ts.txt; repeat with unsafe-import-aliased-ssh-command-lookup.ts.txt; then run the package caller with no --source",
+        "breakApplied": "Readback asserted the production default src/ssh.ts contained a deliberate call through its existing spawn import to /bin/sh with interpolated command-v argv. Its baseline SHA-256 was 8a45668251f70ffdb9d51586877ed6cb894f3e2b7686d5491c3e205acd08ac69. Separate fixtures asserted the aliased-argv and named-import `spawn as run` forms plus zsh -ec around an interpolated which lookup.",
+        "reason": "The exact no-argument package typecheck caller exited 1 before tsc and named the production ssh.ts /bin/sh interpolation at line 23. Fixture callers independently exited 1 for /bin/sh, /usr/bin/bash alias, and /usr/bin/zsh composite-flag/which forms. An attempted pnpm form with an extra literal `--` failed at usage exit 2, so the receipt records the verified `--source` forwarding contract instead of mislabeling a CLI error as a safety finding.",
+        "restoredPass": "Removing only the deliberate production break restored ssh.ts exactly to SHA-256 8a45668251f70ffdb9d51586877ed6cb894f3e2b7686d5491c3e205acd08ac69; the no-argument default gate then exited 0 with SSH_COMMAND_LOOKUP_SAFE. The passive fixture also passed and the broadened command-path/ratchet suites passed 17/17. The identical full typecheck pass, real pre-push, hosted CI, and exact-head review remain pending."
+      }
+    },
+    {
+      "id": "remote-managed-runtime-shared-shell-quote",
+      "path": "packages/adapter-utils/src/remote-managed-runtime.ts",
+      "description": "Requires SSH command construction in the remote managed runtime to import the reviewed shared shellQuote primitive and rejects a new private shellQuote copy.",
+      "negativeFixture": "packages/adapter-utils/src/remote-managed-runtime.test.ts",
+      "observedFailure": {
+        "date": "2026-09-01",
+        "command": "pnpm --filter @paperclipai/adapter-utils exec vitest run src/remote-managed-runtime.test.ts src/ssh-fixture.test.ts",
+        "breakApplied": "Readback restored the removed private shellQuote function and removed the shared shellQuote import while leaving behavior otherwise unchanged.",
+        "reason": "The exact focused caller exited 1 and the structural assertion named both the missing shared import and forbidden private function. The same controlled run also proved the separate missing-ps preflight fixture.",
+        "restoredPass": "Restoring the shared import and deleting the private copy passed 22/22 focused assertions. The complete #63 focused set passed 39/39, and adapter-utils typecheck receipt 6a052428a5d64f52ab89b413d3c36d45 exited 0. Negative/restored receipts: cb6b083bbcff4882b8373c99e9ccbf53 and de13e4b5c9fd4e938caca7757417a463."
+      },
+      "maintainabilityReceipt": "doc/evidence/delivery-2026-09-01-maintainability.md"
+    },
+    {
+      "id": "ssh-env-lab-required-command-preflight",
+      "path": "packages/adapter-utils/src/ssh.ts",
+      "description": "Keeps the local ssh env-lab support probe synchronized with every executable used by fixture ownership, including ps for descendant discovery.",
+      "negativeFixture": "packages/adapter-utils/src/ssh-fixture.test.ts",
+      "observedFailure": {
+        "date": "2026-09-01",
+        "command": "pnpm --filter @paperclipai/adapter-utils exec vitest run src/remote-managed-runtime.test.ts src/ssh-fixture.test.ts",
+        "breakApplied": "Readback removed ps from the exported required-command list while the fixture still uses ps to inspect and own descendants.",
+        "reason": "The exact focused caller exited 1 and the required-command assertion reported the absent ps entry. The same controlled run also proved the separate shared-quoter structural gate.",
+        "restoredPass": "Restoring ps passed 22/22 focused assertions. The complete #63 focused set passed 39/39, and adapter-utils typecheck receipt 6a052428a5d64f52ab89b413d3c36d45 exited 0. Negative/restored receipts: cb6b083bbcff4882b8373c99e9ccbf53 and de13e4b5c9fd4e938caca7757417a463."
+      },
+      "maintainabilityReceipt": "doc/evidence/delivery-2026-09-01-maintainability.md"
+    },
+    {
+      "id": "ssh-spawn-option-and-environment-boundaries",
+      "path": "packages/adapter-utils/src/ssh.ts",
+      "description": "Routes all six SSH destination call sites through one builder that terminates option parsing before the destination and applies the same strict environment-key validation to direct, spawn-target, and managed-runtime execution.",
+      "negativeFixture": "packages/adapter-utils/src/ssh-security.test.ts",
+      "observedFailure": {
+        "date": "2026-09-01",
+        "command": "pnpm --filter @paperclipai/adapter-utils exec vitest run src/ssh-security.test.ts src/remote-managed-runtime.test.ts src/ssh-fixture.test.ts",
+        "breakApplied": "Separate readback controls removed managed-runner environment-key validation and the end-of-options marker before an option-shaped SSH destination.",
+        "reason": "The managed runner accepted BAD KEY and the destination builder exposed -oProxyCommand=malicious as an option-shaped argument. The combined negative run named both controls among its intended failures.",
+        "restoredPass": "The final independent focused adapter-utils run passed 41/41, and task-owned adapter-utils typecheck receipt 6a052428a5d64f52ab89b413d3c36d45 exited 0 with zero survivors. Combined negative receipt: a2ae22e5e432460d9811e02dcab5f79b."
+      },
+      "maintainabilityReceipt": "doc/evidence/delivery-2026-09-01-maintainability.md"
+    },
+    {
+      "id": "hire-approval-secret-custody-and-atomic-resolution",
+      "path": "server/src/services/hire-approval-payload.ts",
+      "description": "Preserves only exact-empty plain adapter bindings, fails closed on unrecoverable redactions, applies every approved standalone-agent field without permission broadening, status-guards revision transitions, redacts ambiguous and camelCase credential keys from HTTP logs, and resolves approval, activation, reconciliation, and budget writes in one transaction before notification.",
+      "negativeFixture": "server/src/__tests__/hire-approval-payload.test.ts",
+      "observedFailure": {
+        "date": "2026-09-01",
+        "command": "node scripts/run-vitest-stable.mjs --files server/src/__tests__/hire-approval-payload.test.ts server/src/__tests__/approvals-service.test.ts server/src/__tests__/agents-pending-approval-config.test.ts server/src/__tests__/approval-routes-idempotency.test.ts server/src/__tests__/error-handler.test.ts server/src/__tests__/redact-sensitive.test.ts server/src/__tests__/http-log-redaction.test.ts",
+        "breakApplied": "The custody fixture passes the same exact-empty Codex binding through the legacy generic redactor and asserts that the resulting sentinel is rejected by persistence normalization. A database fixture deliberately raises `forced hire budget failure`. Additional controls removed standalone permission forwarding, the resubmit status predicate, bare-token redaction, and camelCase boundary normalization. The final redact-sensitive.ts baseline SHA-256 is 650b2e2ec54b09e50090aa4e7949055f9c659eaa7c297f5d3fb3e1c4c3ff2d54.",
+        "reason": "The legacy-redacted value rejects instead of becoming usable configuration, and the forced final-write failure rolls back approval plus activation plus budget state. Permission and stale-writer controls failed for their exact privilege/race reasons. The final HTTP boundary negative control produced eight exact failures: parsed query/params leakage, missing response-time failure context, case-sensitive route omission, board-claim path-token leakage, credential-code aliases, nonempty plain bindings, and camelCase URL/URI fields.",
+        "restoredPass": "Exact restoration passed the final HTTP policy/redaction/logger set 34/34 under receipt 7162e45e10ef4e2c87aeaae9b579859a after negative receipt 471e809e531d467ca51902aa71872dfb failed 8/34 for the named reasons. The final independent server run passed 109/109 and task-owned server typecheck receipt 209d47d2c3564372ad47affe160ee169 exited 0 in 25,521 ms with peak job memory 3,199,627,264 bytes and zero survivors. The final independent stable-diff review found no P0/P1 defect after evidence repair; real hooks, hosted CI, and exact-head automated review remain separate pending gates."
+      },
+      "maintainabilityReceipt": "doc/evidence/delivery-2026-09-01-maintainability.md"
+    },
+    {
+      "id": "http-log-query-secret-elision",
+      "path": "server/src/middleware/http-logger.ts",
+      "description": "Removes parsed query/params and query strings from serialized requests and messages; emits failure diagnostics only at response time; omits sensitive-route bodies; redacts board-claim path tokens and URL-bearing headers; and structurally redacts ordinary-route bodies.",
+      "negativeFixture": "server/src/__tests__/http-log-redaction.test.ts",
+      "observedFailure": {
+        "date": "2026-09-01",
+        "command": "pnpm --filter @paperclipai/server exec vitest run src/__tests__/http-log-policy.test.ts src/__tests__/http-log-redaction.test.ts src/__tests__/redact-sensitive.test.ts",
+        "breakApplied": "Readback asserted deliberate removals of query/params omission, response-time diagnostic attachment, case-insensitive sensitive-route matching, board-claim path-token redaction, credential-code aliases, nonempty plain-binding redaction, and camelCase URL/URI recognition. Final baselines: http-log-policy.ts 56cc7528cb0ac19c65583ab4c4ebe27addb60187d4489eea003ec50ea6b307e4; http-logger.ts e8c7d43961325c3c0a66672262330dd4531d209fca28eeeebb64aa8a38f97d73; redact-sensitive.ts 650b2e2ec54b09e50090aa4e7949055f9c659eaa7c297f5d3fb3e1c4c3ff2d54.",
+        "reason": "The exact caller exited 1 with 8 failed / 26 passed. The failures were: removes query secrets from success and error request logs; does not emit supported camelCase adapter credentials on a rejected request; omits rejected credential and secret-write bodies plus claim path credentials; redacts bounded credential-code aliases while preserving ordinary fields; redacts provider-prefixed secrets and every nonempty plain binding; strips credentials and query values from camelCase URL and URI fields; omits the complete request body for the mixed-case SECRETS route; and removes claim query and path credentials from the log path.",
+        "restoredPass": "Exact byte restoration passed 34/34. Negative/restored receipts: 471e809e531d467ca51902aa71872dfb and 7162e45e10ef4e2c87aeaae9b579859a. The restored run completed in 3,455 ms, used 534,839,296 bytes peak job memory, dropped at most 155,648 bytes of monitored free space, and proved zero survivors."
+      },
+      "maintainabilityReceipt": "doc/evidence/delivery-2026-09-01-maintainability.md"
+    },
+    {
+      "id": "connection-string-log-redaction",
+      "path": "server/src/middleware/redact-sensitive.ts",
+      "description": "Redacts camelCase, snake_case, and kebab-case connection-string keys at the structured logging boundary.",
+      "negativeFixture": "server/src/__tests__/redact-sensitive.test.ts",
+      "observedFailure": {
+        "date": "2026-09-01",
+        "command": "pnpm --filter @paperclipai/server exec vitest run src/__tests__/redact-sensitive.test.ts",
+        "breakApplied": "Readback restored the undelimited connectionstring-only segment matcher while the fixture supplied connectionString and connection_string canaries.",
+        "reason": "The exact unit caller exited 1 because both connection-string variants remained plaintext instead of becoming [REDACTED].",
+        "restoredPass": "Restoring the separator-aware matcher passed its focused assertions. The final three-file HTTP security caller passed 34/34 with redact-sensitive.ts SHA-256 650b2e2ec54b09e50090aa4e7949055f9c659eaa7c297f5d3fb3e1c4c3ff2d54. Specific negative receipt 67f46f9450bc4547a39f6c5f879fbe2d; final restored receipt 7162e45e10ef4e2c87aeaae9b579859a."
+      },
+      "maintainabilityReceipt": "doc/evidence/delivery-2026-09-01-maintainability.md"
+    },
+    {
+      "id": "hire-approval-metadata-record-boundary",
+      "path": "server/src/services/approvals.ts",
+      "description": "Accepts standalone-hire metadata only as a non-array object record; arrays and other malformed shapes become null before agent creation.",
+      "negativeFixture": "server/src/__tests__/approvals-service.test.ts",
+      "observedFailure": {
+        "date": "2026-09-01",
+        "command": "pnpm --filter @paperclipai/server exec vitest run src/__tests__/approvals-service.test.ts -t 'creates the agent from payload'",
+        "breakApplied": "Readback removed only the Array.isArray rejection from the metadata boundary.",
+        "reason": "The focused caller exited 1 with exactly one failed and 22 skipped tests because the array crossed into agentService.create instead of normalizing to null.",
+        "restoredPass": "Restoring the array rejection passed the focused assertion and the combined server review set passed 72/72. Negative/restored receipts: 43cfbf22c8a84a749c97168f02dd1b77 and f78d6096df5b433fb79dd6e2270c022d."
+      },
+      "maintainabilityReceipt": "doc/evidence/delivery-2026-09-01-maintainability.md"
+    },
+    {
+      "id": "hire-approval-budget-transaction-source",
+      "path": "server/src/services/approvals.ts",
+      "description": "Proves budget policy persistence receives the active Drizzle transaction source rather than the outer database handle.",
+      "negativeFixture": "server/src/__tests__/approvals-service.test.ts",
+      "observedFailure": {
+        "date": "2026-09-01",
+        "command": "pnpm --filter @paperclipai/server exec vitest run src/__tests__/approvals-service.test.ts",
+        "breakApplied": "Readback changed only budgetService(source) to budgetService(db) while the fixture used distinct transaction and outer handles plus a positive budget.",
+        "reason": "The caller exited 1 with exactly the transaction-source assertion failing: the factory received the outer handle containing transaction instead of the callback source.",
+        "restoredPass": "Restoring budgetService(source) passed 23/23 and the combined server review set passed 72/72. Negative/restored receipts: 194885be05544b369d0b90f0b99ef1df and a4eb8a1773434156a131300cf7ad0dd3."
+      },
+      "maintainabilityReceipt": "doc/evidence/delivery-2026-09-01-maintainability.md"
+    },
+    {
+      "id": "hire-resubmit-guarded-payload-forwarding",
+      "path": "server/src/routes/approvals.ts",
+      "description": "Requires hire resubmission to forward the exact payload returned by the centralized persistence guard instead of the raw request body.",
+      "negativeFixture": "server/src/__tests__/approval-routes-idempotency.test.ts",
+      "observedFailure": {
+        "date": "2026-09-01",
+        "command": "pnpm --filter @paperclipai/server exec vitest run src/__tests__/approval-routes-idempotency.test.ts -t 'routes hire resubmission'",
+        "breakApplied": "Readback changed only the resubmit argument from normalizedPayload to req.body.payload; raw and guarded fixtures use distinct secret values and object identities.",
+        "reason": "The focused caller exited 1 with exactly one failed and 12 skipped tests because the raw secret canary reached svc.resubmit instead of the redacted guarded object.",
+        "restoredPass": "Restoring normalizedPayload passed the focused assertion, the complete route file passed 13/13, and the combined server review set passed 72/72. Negative/restored receipts: c2b249b6b4a04e36b1fc460fe9e522aa and d3d56ab8f1c0425a97e47dab2f992137."
+      },
+      "maintainabilityReceipt": "doc/evidence/delivery-2026-09-01-maintainability.md"
+    },
+    {
+      "id": "pr45-no-loss-disposition-evidence",
+      "path": "scripts/generate-pr45-disposition-manifest.mjs",
+      "description": "Fails closed with exact setup guidance when the local preservation branch, remote-tracking preservation ref, or full merge-base history is unavailable; then pins the four preserved PR #45 commits, merge base, and both refs, owns every historical path and hunk, requires identical landed/current blobs plus an exact named-commit hunk before calling work landed, conservatively routes all remerge material to semantic review, and rejects stale generated custody evidence.",
+      "negativeFixture": "doc/evidence/pr45-disposition/2026-09-01-pr45-no-loss-disposition.md",
+      "observedFailure": {
+        "date": "2026-09-01",
+        "command": "node scripts/generate-pr45-disposition-manifest.mjs --check",
+        "breakApplied": "Readback first confirmed the generated summary contained the deliberate marker `DELIBERATELY STALE NEGATIVE-PROOF INPUT.` while its post-review baseline SHA-256 was preserved as 43623b2bdc16d2aa8b4e183c0f98517d57841b9c6782f7e33c7ec57b9e6fc90d. Later caller-shaped controls changed SOURCE_REF to a deliberately missing name and restored the recovery text's old forced local-branch fetch after asserting each break.",
+        "reason": "The stale-output check named the exact generated summary. The missing-ref check named absent local/remote-tracking refs and full history. The safe-recovery check then failed because the proposed fetch force-updated the protected local WIP branch instead of fetching only the remote-tracking ref and creating a missing local preservation branch separately without force.",
+        "restoredPass": "The final generator SHA-256 is 7880a56d250f64d2aaef9d0a9a9740940be29a4ac17b51bdfb227c7d150d4ec6. The restored Node suite passed 5/5, including the always-run checked-in manifest validation and the protected-branch recovery contract; the full census still reports 130 net PR paths, 131 historical paths, 3,032 hunks, zero unowned rows, and zero unknown dispositions. Safe-recovery negative receipt: 9efc73fe34134bc49be9d0cf127fba8f. No merge, cherry-pick, stash mutation, local/remote WIP branch overwrite, deletion, or evidence retirement is authorized."
+      }
+    },
+    {
+      "id": "managed-clone-windows-path-rejection",
+      "path": "server/src/services/heartbeat.ts",
+      "description": "Rejects Windows absolute and drive-relative paths before URL parsing so C:repo and C:workspace\\repo cannot be misclassified as repository URLs or clone names.",
+      "negativeFixture": "server/src/__tests__/heartbeat-managed-clone-credentials.test.ts",
+      "observedFailure": {
+        "date": "2026-09-01",
+        "command": "pnpm --filter @paperclipai/server exec vitest run src/__tests__/heartbeat-managed-clone-credentials.test.ts",
+        "breakApplied": "Readback restored the narrower drive-letter-plus-slash check while the table retained C:repo and C:workspace\\repo.",
+        "reason": "The exact focused assertion accepted the drive-relative value as a URL scheme instead of returning null and preserving managed-workspace fallback behavior.",
+        "restoredPass": "Restoring the all-drive-letter-prefix rejection passed the focused test and the final independent server suite passed 109/109. Combined negative receipt: a2ae22e5e432460d9811e02dcab5f79b."
+      },
+      "maintainabilityReceipt": "doc/evidence/delivery-2026-09-01-maintainability.md"
+    },
+    {
+      "id": "repo-doctor-genome-source-set-references",
+      "path": "doctor.genome.json",
+      "description": "Requires the observe-only on_demand gate to reference only declared bounded source sets before Repo Doctor can resolve a plan.",
+      "negativeFixture": "doctor.genome.json",
+      "observedFailure": {
+        "date": "2026-08-25",
+        "command": "pwsh -NoLogo -NoProfile -File S:/source/CCAI/Assistants/tools/git-toolkit/hooks/Resolve-RepoDoctorGenome.ps1 -RepoPath S:/source/CCAI/Assistants/tools/paperclip-factory-dev -Gate on_demand -Json after adding missing-source-set to the gate",
+        "breakApplied": "Readback confirmed the on_demand sourceSets array contained missing-source-set while no source-set declaration used that ID.",
+        "reason": "The exact resolver exited 2 with status=invalid, plan=null, and named only that gate on_demand selected missing-source-set without an exact declaration.",
+        "restoredPass": "After removing the undeclared ID, the exact resolver exited 0 with status=resolved and the shared adapter exited 0 with diagnosticCode=plan-resolved. Both selected 3,246 authored files, excluded the two declared generated files, retained profile=observe and mutationIntent=none, and ran no analyzer."
+      }
+    },
+    {
+      "id": "coordination-v2-fail-closed-evidence",
+      "path": "server/src/services/coordination-v2.ts",
+      "description": "Keeps the additive coordination v2 projection fail-closed: exact schema bytes are pinned, persisted generation is positive, process/output claims remain false without independent evidence, and placements are limited to board or assigned/participating agents.",
+      "negativeFixture": "server/src/services/coordination-v2.test.ts",
+      "observedFailure": {
+        "date": "2026-09-06",
+        "command": "node scripts/run-vitest-stable.mjs --files server/src/services/coordination-v2.test.ts",
+        "breakApplied": "Four caller-shaped breaks were applied and read back one at a time: widened placement audience, fabricated process evidence, relaxed positive-generation guard, and a deliberately stale schema digest.",
+        "reason": "The exact test caller exited 1 for each break: assigned-agent placement disappeared, processEvidence became true, Ajv rejected generation 0 with a minimum violation, and module import rejected the schema SHA mismatch. Receipts: doc/evidence/coordination-v2/2026-09-06-negative-audience.log, 2026-09-06-negative-health.log, 2026-09-06-negative-generation.log, and 2026-09-06-negative-schema-drift.log.",
+        "restoredPass": "All four source changes were restored byte-for-byte. The identical exact caller exited 0 with 5/5 tests; the restored receipt is doc/evidence/coordination-v2/2026-09-06-restored.log.",
+        "artifactPath": "doc/evidence/coordination-v2/2026-09-06-issue53-receipt.json"
+      },
+      "maintainabilityReceipt": "doc/evidence/coordination-v2/2026-09-06-maintainability.md"
+    }
+  ]
+}

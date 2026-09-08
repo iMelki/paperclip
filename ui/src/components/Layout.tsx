@@ -59,7 +59,16 @@ function getCompanyPathSegments(pathname: string, companyPrefix: string | undefi
   return segments.slice(1);
 }
 
-const RESERVED_APP_SUBPATHS = new Set(["browse", "connect", "review", "attention", "gateways", "advanced", "app"]);
+const RESERVED_APP_SUBPATHS = new Set([
+  "browse",
+  "connections",
+  "connect",
+  "review",
+  "attention",
+  "gateways",
+  "advanced",
+  "app",
+]);
 
 function isSkillsStoreRoute(pathname: string, companyPrefix: string | undefined) {
   const segments = pathname.split("/").filter(Boolean);
@@ -203,11 +212,14 @@ export function Layout() {
   useEffect(() => {
     if (companiesLoading || onboardingTriggered.current) return;
     if (health?.deploymentMode === "authenticated") return;
+    // Cloud provisions the single company for a stack, and POST /companies is a
+    // 403 floor there — auto-opening the wizard could only dead-end.
+    if (health?.cloud) return;
     if (companies.length === 0) {
       onboardingTriggered.current = true;
       openOnboarding();
     }
-  }, [companies, companiesLoading, openOnboarding, health?.deploymentMode]);
+  }, [companies, companiesLoading, openOnboarding, health?.cloud, health?.deploymentMode]);
 
   useEffect(() => {
     if (!companyPrefix || companiesLoading || companies.length === 0) return;
@@ -631,7 +643,7 @@ export function Layout() {
                 // changes (e.g. switching skill-detail tabs) don't widen/shift
                 // when the vertical scrollbar appears or disappears (PAP-10907).
                 isMobile
-                  ? "overflow-visible pb-(--sz-calc-14)"
+                  ? "min-w-0 overflow-x-clip pb-(--sz-calc-14)"
                   : "overflow-auto [scrollbar-gutter:stable]",
               )}
             >

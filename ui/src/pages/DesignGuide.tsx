@@ -23,6 +23,7 @@ import {
   Zap,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { useConfirmDialog } from "@/hooks/useConfirmDialog";
 import { Badge } from "@/components/ui/badge";
 import { InlineBanner } from "@/components/InlineBanner";
 import { BuiltInLifecycleChip } from "@/components/BuiltInAgentBadges";
@@ -125,6 +126,7 @@ import { StatusIcon } from "@/components/StatusIcon";
 import { EnforcementBanner } from "@/components/EnforcementBanner";
 import { ActionCard, ActionCardMobile, BindingsTable } from "@/components/actions/ActionCard";
 import { PriorityIcon } from "@/components/PriorityIcon";
+import { SHOW_TASK_PRIORITY_UI } from "@/lib/ui-flags";
 import { agentStatusDot, agentStatusDotDefault } from "@/lib/status-colors";
 import { EntityRow } from "@/components/EntityRow";
 import { EmptyState } from "@/components/EmptyState";
@@ -168,9 +170,9 @@ function sampleOutput(
   attachmentId: string,
   contentType: string,
   filename: string,
-  opts: { byteSize: number; isPrimary?: boolean; createdAt: string },
+  opts: { byteSize: number; isPrimary?: boolean; createdAt: string; contentPath?: string },
 ): IssueWorkProduct {
-  const contentPath = `/api/attachments/${attachmentId}/content`;
+  const contentPath = opts.contentPath ?? `/api/attachments/${attachmentId}/content`;
   return {
     id,
     companyId: "demo-company",
@@ -204,10 +206,11 @@ function sampleOutput(
 }
 
 const DESIGN_GUIDE_OUTPUTS: IssueWorkProduct[] = [
-  sampleOutput("wp-vid", "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "video/mp4", "q3-summary.mp4", {
-    byteSize: 19_293_798,
+  sampleOutput("wp-art", "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "image/svg+xml", "thinking-icon.svg", {
+    byteSize: 4_096,
     isPrimary: true,
     createdAt: "2026-05-30T12:00:00Z",
+    contentPath: "/paperclip-thinking.svg",
   }),
   sampleOutput("wp-pdf", "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", "application/pdf", "talking-points.pdf", {
     byteSize: 421_888,
@@ -254,6 +257,98 @@ function SubSection({ title, children }: { title: string; children: React.ReactN
 
 // Onboarding seam (design §6 + §12.5): the TeamCard tile in its "Pick a starter
 // team" 3-col grid, with the first defaultInstall tile selected.
+function ActionReviewDialogDemo() {
+  const { confirm, confirmDialog } = useConfirmDialog();
+  const [lastResult, setLastResult] = useState<string | null>(null);
+
+  const run = (label: string, promise: Promise<boolean>) => {
+    void promise.then((confirmed) =>
+      setLastResult(`${label}: ${confirmed ? "confirmed" : "cancelled"}`),
+    );
+  };
+
+  return (
+    <div className="space-y-3">
+      <div className="flex flex-wrap items-center gap-2">
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={() =>
+            run(
+              "standard",
+              confirm({
+                title: "Duplicate Support Agent?",
+                confirmLabel: "Duplicate",
+                consequences: {
+                  immediateEffect: "A new agent named Support Agent (copy) is created.",
+                  confirmedEffect: "The copy is saved on the server, paused until reviewed.",
+                  resultLocation: "The new agent's dashboard; a toast confirms.",
+                  willNotHappen: "The original agent is not modified.",
+                },
+              }),
+            )
+          }
+        >
+          Standard review
+        </Button>
+        <Button
+          variant="destructive"
+          size="sm"
+          onClick={() =>
+            run(
+              "destructive",
+              confirm({
+                title: "Archive company?",
+                tone: "destructive",
+                confirmLabel: "Archive company",
+                consequences: {
+                  immediateEffect: "The company is hidden from the sidebar.",
+                  confirmedEffect: "Its status is set to archived in the database.",
+                  resultLocation:
+                    "You switch to the next active company when one remains; otherwise no company is selected.",
+                  willNotHappen: "No agents, issues, or data are deleted.",
+                },
+              }),
+            )
+          }
+        >
+          Destructive tone
+        </Button>
+        <Button
+          variant="destructive"
+          size="sm"
+          onClick={() =>
+            run(
+              "typed gate",
+              confirm({
+                title: "Delete this agent?",
+                description: "This cannot be undone.",
+                tone: "destructive",
+                confirmLabel: "Delete agent",
+                typedConfirmation: "Support Agent",
+                consequences: {
+                  immediateEffect: "The agent is permanently deleted.",
+                  confirmedEffect: "The server removes the agent record.",
+                  resultLocation: "You return to the Agents list.",
+                  willNotHappen: "Other agents and issues are not affected.",
+                },
+              }),
+            )
+          }
+        >
+          Typed gate (irreversible)
+        </Button>
+      </div>
+      {lastResult ? (
+        <p className="text-xs text-muted-foreground">
+          Last review result: <span className="font-mono">{lastResult}</span>
+        </p>
+      ) : null}
+      {confirmDialog}
+    </div>
+  );
+}
+
 function TeamCardShowcase() {
   const [selectedId, setSelectedId] = useState(onboardingTeams[0]?.id ?? null);
   return (
@@ -384,7 +479,10 @@ export function DesignGuide() {
   );
   const [filters, setFilters] = useState<FilterValue[]>([
     { key: "status", label: "Status", value: "Active" },
-    { key: "priority", label: "Priority", value: "High" },
+    // PAP-411: priority filter demo row suppressed while SHOW_TASK_PRIORITY_UI is off.
+    ...(SHOW_TASK_PRIORITY_UI
+      ? [{ key: "priority", label: "Priority", value: "High" } as FilterValue]
+      : []),
   ]);
   const [allowExternal, setAllowExternal] = useState(false);
   const [allowUnpinned, setAllowUnpinned] = useState(false);
@@ -637,6 +735,8 @@ export function DesignGuide() {
           </div>
         </SubSection>
 
+        {/* PAP-411: PriorityIcon showcase gated behind SHOW_TASK_PRIORITY_UI per board decision. */}
+        {SHOW_TASK_PRIORITY_UI && (
         <SubSection title="PriorityIcon (interactive)">
           <div className="flex items-center gap-3 flex-wrap">
             {["critical", "high", "medium", "low"].map((p) => (
@@ -651,6 +751,7 @@ export function DesignGuide() {
             <span className="text-sm">Click the icon to change (current: {priority})</span>
           </div>
         </SubSection>
+        )}
 
         <SubSection title="Agent status dots">
           <div className="flex items-center gap-4 flex-wrap">
@@ -967,6 +1068,22 @@ export function DesignGuide() {
       </Section>
 
       {/* ============================================================ */}
+      {/*  ACTION REVIEW DIALOG                                         */}
+      {/* ============================================================ */}
+      <Section title="Action Review Dialog">
+        <p className="text-sm text-muted-foreground mb-3">
+          Accessible replacement for native <code className="font-mono text-xs">window.confirm()</code> on
+          consequential actions (#48 / EUX-09). Every review answers four questions: what happens now, what
+          runs after confirm, where the result appears, and what will not happen. Use{" "}
+          <code className="font-mono text-xs">useConfirmDialog()</code> for promise-based call sites; reserve
+          the destructive tone for deletes/kills and the typed gate for irreversible actions.
+        </p>
+        <SubSection title="Tones and typed gate">
+          <ActionReviewDialogDemo />
+        </SubSection>
+      </Section>
+
+      {/* ============================================================ */}
       {/*  SCROLL AREA                                                  */}
       {/* ============================================================ */}
       <Section title="Scroll Area">
@@ -1123,7 +1240,8 @@ export function DesignGuide() {
             leading={
               <>
                 <StatusIcon status="in_progress" />
-                <PriorityIcon priority="high" />
+                {/* PAP-411: PriorityIcon hidden behind SHOW_TASK_PRIORITY_UI. */}
+                {SHOW_TASK_PRIORITY_UI && <PriorityIcon priority="high" />}
               </>
             }
             identifier="PAP-001"
@@ -1136,7 +1254,7 @@ export function DesignGuide() {
             leading={
               <>
                 <StatusIcon status="done" />
-                <PriorityIcon priority="medium" />
+                {SHOW_TASK_PRIORITY_UI && <PriorityIcon priority="medium" />}
               </>
             }
             identifier="PAP-002"
@@ -1149,7 +1267,7 @@ export function DesignGuide() {
             leading={
               <>
                 <StatusIcon status="todo" />
-                <PriorityIcon priority="low" />
+                {SHOW_TASK_PRIORITY_UI && <PriorityIcon priority="low" />}
               </>
             }
             identifier="PAP-003"
@@ -1161,7 +1279,7 @@ export function DesignGuide() {
             leading={
               <>
                 <StatusIcon status="blocked" />
-                <PriorityIcon priority="critical" />
+                {SHOW_TASK_PRIORITY_UI && <PriorityIcon priority="critical" />}
               </>
             }
             identifier="PAP-004"
@@ -1249,7 +1367,10 @@ export function DesignGuide() {
             onClick={() =>
               setFilters([
                 { key: "status", label: "Status", value: "Active" },
-                { key: "priority", label: "Priority", value: "High" },
+                // PAP-411: priority filter demo row suppressed while SHOW_TASK_PRIORITY_UI is off.
+                ...(SHOW_TASK_PRIORITY_UI
+                  ? [{ key: "priority", label: "Priority", value: "High" } as FilterValue]
+                  : []),
               ])
             }
           >
@@ -1429,10 +1550,13 @@ export function DesignGuide() {
             <span className="text-xs text-muted-foreground">Status</span>
             <StatusBadge status="active" />
           </div>
-          <div className="flex items-center justify-between py-1.5">
-            <span className="text-xs text-muted-foreground">Priority</span>
-            <PriorityIcon priority="high" />
-          </div>
+          {/* PAP-411: priority metadata row hidden behind SHOW_TASK_PRIORITY_UI. */}
+          {SHOW_TASK_PRIORITY_UI && (
+            <div className="flex items-center justify-between py-1.5">
+              <span className="text-xs text-muted-foreground">Priority</span>
+              <PriorityIcon priority="high" />
+            </div>
+          )}
           <div className="flex items-center justify-between py-1.5">
             <span className="text-xs text-muted-foreground">Responsible</span>
             <div className="flex items-center gap-1.5">
@@ -1500,14 +1624,15 @@ export function DesignGuide() {
             <span className="text-xs text-muted-foreground ml-1">2</span>
           </div>
           <div className="border border-border rounded-b-md">
+            {/* PAP-411: leading PriorityIcon hidden behind SHOW_TASK_PRIORITY_UI. */}
             <EntityRow
-              leading={<PriorityIcon priority="high" />}
+              leading={SHOW_TASK_PRIORITY_UI ? <PriorityIcon priority="high" /> : undefined}
               identifier="PAP-101"
               title="Build agent heartbeat system"
               onClick={() => {}}
             />
             <EntityRow
-              leading={<PriorityIcon priority="medium" />}
+              leading={SHOW_TASK_PRIORITY_UI ? <PriorityIcon priority="medium" /> : undefined}
               identifier="PAP-102"
               title="Add cost tracking dashboard"
               onClick={() => {}}
@@ -1766,7 +1891,7 @@ export function DesignGuide() {
       </Section>
 
       <Section title="Issue Output Surface">
-        <SubSection title="Multiple outputs (primary video + 'Also produced')">
+        <SubSection title="Multiple outputs (primary public SVG + 'Also produced')">
           <IssueOutputSection workProducts={DESIGN_GUIDE_OUTPUTS} />
         </SubSection>
         <SubSection title="Degraded output (invalid / failed attachment metadata)">

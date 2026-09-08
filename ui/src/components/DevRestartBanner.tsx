@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { AlertTriangle, RotateCcw, TimerReset } from "lucide-react";
 import { healthApi, type DevServerHealthStatus } from "../api/health";
 import { Badge } from "@/components/ui/badge";
+import { useConfirmDialog } from "@/hooks/useConfirmDialog";
 
 const RESTART_PENDING_RESET_MS = 30_000;
 
@@ -32,6 +33,7 @@ function describeReason(devServer: DevServerHealthStatus): string {
 
 export function DevRestartBanner({ devServer }: { devServer?: DevServerHealthStatus }) {
   const [restartPending, setRestartPending] = useState(false);
+  const { confirm, confirmDialog } = useConfirmDialog();
   useEffect(() => {
     if (!restartPending) return;
     const timeout = window.setTimeout(() => {
@@ -50,11 +52,23 @@ export function DevRestartBanner({ devServer }: { devServer?: DevServerHealthSta
   }`;
 
   async function requestRestartNow() {
-    const warning =
-      currentDevServer.activeRunCount > 0
-        ? `Restart Paperclip now? This may interrupt ${activeRunLabel}.`
-        : "Restart Paperclip now?";
-    if (!window.confirm(warning)) return;
+    const hasLiveRuns = currentDevServer.activeRunCount > 0;
+    const confirmed = await confirm({
+      title: "Restart Paperclip now?",
+      description: hasLiveRuns ? `This may interrupt ${activeRunLabel}.` : undefined,
+      tone: hasLiveRuns ? "destructive" : "default",
+      confirmLabel: "Restart now",
+      consequences: {
+        immediateEffect: "A restart request is sent right away.",
+        confirmedEffect: "The dev server restarts and picks up the changed backend files.",
+        resultLocation:
+          "The button shows Restart requested for up to 30 seconds; this banner clears when refreshed server health no longer reports a restart.",
+        willNotHappen: hasLiveRuns
+          ? "No data is deleted, but interrupted runs are not resumed automatically."
+          : "No data is deleted and no runs are interrupted.",
+      },
+    });
+    if (!confirmed) return;
 
     setRestartPending(true);
     try {
@@ -128,6 +142,7 @@ export function DevRestartBanner({ devServer }: { devServer?: DevServerHealthSta
           </button>
         </div>
       </div>
+      {confirmDialog}
     </div>
   );
 }

@@ -1,0 +1,27 @@
+
+[test:run] exact pre-push selection: server/src/services/coordination-v2.test.ts
+
+ RUN  v4.1.10 <repo-root>
+
+ ❯ |@paperclipai/server| src/services/coordination-v2.test.ts (0 test)
+
+⎯⎯⎯⎯⎯⎯ Failed Suites 1 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  |@paperclipai/server| src/services/coordination-v2.test.ts [ server/src/services/coordination-v2.test.ts ]
+Error: task-coordination.v2 schema hash mismatch: expected 0000000000000000000000000000000000000000000000000000000000000000, got 3f47037b1f7b5e1705e719e4b087be88223abac19590521024d2f8960823b258
+ ❯ src/services/coordination-v2.ts:20:9
+     18| const schemaSha256 = createHash("sha256").update(schemaBytes).digest("…
+     19| if (schemaSha256 !== TASK_COORDINATION_V2_SCHEMA_SHA256) {
+     20|   throw new Error(
+       |         ^
+     21|     `task-coordination.v2 schema hash mismatch: expected ${TASK_COORDI…
+     22|   );
+ ❯ src/services/coordination-v2.test.ts:4:1
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  no tests
+   Start at  05:42:05
+     Duration  2.35s (transform 1.32s, setup 148ms, import 0ms, tests 0ms, environment 0ms)

@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { shouldSilenceHttpSuccessLog } from "../middleware/http-log-policy.js";
+import {
+  requestPathForHttpLog,
+  shouldOmitHttpRequestBody,
+  shouldSilenceHttpSuccessLog,
+} from "../middleware/http-log-policy.js";
 
 describe("shouldSilenceHttpSuccessLog", () => {
   it("silences cached 304 responses", () => {
@@ -69,5 +73,31 @@ describe("shouldSilenceHttpSuccessLog", () => {
   it("keeps failing requests visible", () => {
     expect(shouldSilenceHttpSuccessLog("GET", "/api/health", 500)).toBe(false);
     expect(shouldSilenceHttpSuccessLog("GET", "/@fs/Users/dotta/paperclip/ui/src/main.tsx", 404)).toBe(false);
+  });
+});
+
+describe("HTTP sensitive request logging policy", () => {
+  it.each([
+    "/api/auth/sign-in/email",
+    "/api/board-claim/challenge-secret/claim",
+    "/api/cli-auth/challenges/challenge-id/approve",
+    "/api/agents/me/secrets/API_KEY/value",
+    "/api/companies/company-id/me/user-secrets",
+    "/api/companies/company-id/secret-provider-configs",
+    "/api/companies/company-id/secret-proposals/proposal-id/approve",
+    "/API/companies/company-id/SECRETS",
+  ])("omits the complete request body for credential route %s", (url) => {
+    expect(shouldOmitHttpRequestBody(url)).toBe(true);
+  });
+
+  it("keeps ordinary application request bodies eligible for structural redaction", () => {
+    expect(shouldOmitHttpRequestBody("/api/issues/issue-id")).toBe(false);
+  });
+
+  it("removes claim query and path credentials from the log path", () => {
+    expect(requestPathForHttpLog("/api/board-claim/challenge-secret/claim?code=123456"))
+      .toBe("/api/board-claim/[REDACTED]/claim");
+    expect(requestPathForHttpLog("/API/Board-Claim/challenge-secret/claim"))
+      .toBe("/API/Board-Claim/[REDACTED]/claim");
   });
 });

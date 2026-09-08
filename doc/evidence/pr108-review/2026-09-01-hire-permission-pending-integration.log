@@ -1,0 +1,13 @@
+
+[test:run] exact pre-push selection: server/src/__tests__/agents-pending-approval-config.test.ts
+
+ RUN  v4.1.10 S:/source/CCAI/Assistants/tools/paperclip
+
+ ✓ |@paperclipai/server| src/__tests__/agents-pending-approval-config.test.ts (11 tests) 12870ms
+     ✓ preserves the empty Codex API key and reapplies the frozen approval snapshot  469ms
+
+ Test Files  1 passed (1)
+      Tests  11 passed (11)
+   Start at  16:33:47
+   Duration  27.96s (transform 5.69s, setup 122ms, import 14.78s, tests 12.87s, environment 0ms)
+

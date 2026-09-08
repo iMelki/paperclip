@@ -2,7 +2,6 @@ import { useMemo } from "react";
 import type { CostByProviderModel, CostWindowSpendRow, QuotaWindow } from "@paperclipai/shared";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
-import { QuotaBar } from "./QuotaBar";
 import { ClaudeSubscriptionPanel } from "./ClaudeSubscriptionPanel";
 import { CodexSubscriptionPanel } from "./CodexSubscriptionPanel";
 import {
@@ -19,15 +18,10 @@ const ROLLING_WINDOWS = ["5h", "24h", "7d"] as const;
 interface ProviderQuotaCardProps {
   provider: string;
   rows: CostByProviderModel[];
-  /** company monthly budget in cents (0 means unlimited) */
-  budgetMonthlyCents: number;
-  /** total company spend in this period in cents, all providers */
-  totalCompanySpendCents: number;
   /** spend in the current calendar week in cents, this provider only */
   weekSpendCents: number;
   /** rolling window rows for this provider: 5h, 24h, 7d */
   windowRows: CostWindowSpendRow[];
-  showDeficitNotch: boolean;
   /** live subscription quota windows from the provider's own api */
   quotaWindows?: QuotaWindow[];
   quotaError?: string | null;
@@ -38,11 +32,8 @@ interface ProviderQuotaCardProps {
 export function ProviderQuotaCard({
   provider,
   rows,
-  budgetMonthlyCents,
-  totalCompanySpendCents,
   weekSpendCents,
   windowRows,
-  showDeficitNotch,
   quotaWindows = [],
   quotaError = null,
   quotaSource = null,
@@ -94,26 +85,6 @@ export function ProviderQuotaCard({
     subSharePct,
   } = totals;
 
-  // budget bars: use this provider's own spend vs its pro-rata share of budget
-  // pro-rata: if a provider is 40% of total spend, it gets 40% of the budget allocated.
-  // falls back to raw provider spend vs total budget when totalCompanySpend is 0.
-  const providerBudgetShare =
-    budgetMonthlyCents > 0 && totalCompanySpendCents > 0
-      ? (totalCostCents / totalCompanySpendCents) * budgetMonthlyCents
-      : budgetMonthlyCents;
-
-  const budgetPct =
-    providerBudgetShare > 0
-      ? Math.min(100, (totalCostCents / providerBudgetShare) * 100)
-      : 0;
-
-  // 4.33 = average weeks per calendar month (52 / 12)
-  const weeklyBudgetShare = providerBudgetShare > 0 ? providerBudgetShare / 4.33 : 0;
-  const weekPct =
-    weeklyBudgetShare > 0 ? Math.min(100, (weekSpendCents / weeklyBudgetShare) * 100) : 0;
-
-  const hasBudget = budgetMonthlyCents > 0;
-
   // memoized so the Map and max are not reconstructed on every parent render tick
   const windowMap = useMemo(
     () => new Map(windowRows.map((r) => [r.window, r])),
@@ -159,24 +130,11 @@ export function ProviderQuotaCard({
       </CardHeader>
 
       <CardContent className="px-4 pb-4 pt-3 space-y-4">
-        {hasBudget && (
-          <div className="space-y-3">
-            <QuotaBar
-              label="Period spend"
-              percentUsed={budgetPct}
-              leftLabel={formatCents(totalCostCents)}
-              rightLabel={`${Math.round(budgetPct)}% of allocation`}
-              showDeficitNotch={showDeficitNotch}
-            />
-            <QuotaBar
-              label="This week"
-              percentUsed={weekPct}
-              leftLabel={formatCents(weekSpendCents)}
-              rightLabel={`~${formatCents(Math.round(weeklyBudgetShare))} / wk`}
-              showDeficitNotch={weekPct >= 100}
-            />
-          </div>
-        )}
+        <div className="space-y-1 text-xs text-muted-foreground">
+          <p>Recorded spend this week: <span className="font-mono">{formatCents(weekSpendCents)}</span></p>
+          <p>Provider budget: Unallocated</p>
+          <p>The company budget does not define a provider allowance. Subscription quota is reported separately.</p>
+        </div>
 
         {/* rolling window consumption — always shown when data is available */}
         {windowRows.length > 0 && (

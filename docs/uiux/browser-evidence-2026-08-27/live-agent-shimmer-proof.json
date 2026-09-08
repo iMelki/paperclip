@@ -1,0 +1,33 @@
+{
+  "capturedAt": "2026-08-27T08:56:30.000Z",
+  "surface": "live issue chat (not UX lab)",
+  "base": "http://127.0.0.1:5113",
+  "issue": {
+    "identifier": "ASS-28",
+    "id": "3d051d3a-32f2-435b-bc5a-280808c69bf1",
+    "title": "UIUX live shimmer proof (one-shot)"
+  },
+  "agent": {
+    "name": "Factory Builder",
+    "id": "db12b115-3820-4a59-8166-1aca7fdff5e7",
+    "adapterType": "codex_local",
+    "statusAtCapture": "running"
+  },
+  "executionRunId": "ce51505b-1639-42cd-bcb1-374acf8974f4",
+  "counts": {
+    "shimmerText": 1,
+    "shimmerMuted": 0,
+    "thinkingIcon": 0
+  },
+  "animation": {
+    "animationName": "shimmer-text-slide",
+    "animationDuration": "2.5s"
+  },
+  "visibleText": "Working",
+  "screenshot": "live-ASS-28-shimmer-working.png",
+  "notes": [
+    "First ASS-7 wake failed: workspace S:\\source\\CCAI\\Assistants has no .git metadata for codex_local.",
+    "ASS-28 created on agent-settings git workspace; Builder run showed live .shimmer-text on real issue chat.",
+    "Summarizer was briefly resumed for a parallel attempt (agent detail had no shimmer); re-pause after proof."
+  ]
+}

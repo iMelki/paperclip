@@ -1,0 +1,49 @@
+{
+  "recordedAt": "2026-08-25T04:49:54.349Z",
+  "capturedBy": "docs/uiux/browser-evidence-2026-08-25/capture.mjs",
+  "server": {
+    "base": "http://127.0.0.1:3197",
+    "deploymentMode": "local_trusted",
+    "deploymentExposure": "private",
+    "serverVersion": "2026.722.0+424.git.bd8fcd0b4",
+    "processStartedAt": "2026-08-25T04:12:47.034Z",
+    "serves": "the production ui/dist bundle (no vite dev middleware)",
+    "seed": "isolated instance seeded with a fictional company; NOT the operator instance",
+    "database": "embedded PostgreSQL, throwaway PAPERCLIP_HOME"
+  },
+  "code": {
+    "remoteTip": "6d796afbe2b9f8e74fa85887d45ce5e1597eedaf",
+    "remoteTipSubject": "chore(governance): enroll Paperclip in Repo Doctor",
+    "remoteTipCommittedAt": "2026-08-25T07:08:22+03:00",
+    "note": "The local branch pointer in this shared checkout is not a reliable identity for the code under test - another session moved it during this run. origin/dev is the identity used here, and the ui/ tree is proven identical to it below."
+  },
+  "buildCurrency": {
+    "uiDistBuiltAt": "2026-08-25T01:39:02.589Z",
+    "uiCommitsAfterBuild": [],
+    "uiWorktreeDirty": [],
+    "uiTreeIdenticalToRemoteTip": true,
+    "verdict": "CURRENT: no commit and no working-tree change touched ui/ after the bundle was built, and the ui/ tree is byte-identical to origin/dev. The captured bundle is the code at origin/dev."
+  },
+  "bundle": {
+    "jsFileCount": 181,
+    "jsTotalBytes": 11430814,
+    "largestJsChunk": {
+      "file": "index-DzIP8KoY.js",
+      "bytes": 6779424
+    },
+    "cssChunks": [
+      {
+        "file": "index-DXVSAHJz.css",
+        "bytes": 456116
+      }
+    ],
+    "selfHostedFonts": [
+      "InterVariable-Italic.woff2",
+      "InterVariable.woff2"
+    ]
+  },
+  "tooling": {
+    "playwright": "playwright 1.62.1, chromium_headless_shell (repo node_modules)",
+    "routeDerivation": "react-router-adapter.mjs against ui/src/App.tsx"
+  }
+}

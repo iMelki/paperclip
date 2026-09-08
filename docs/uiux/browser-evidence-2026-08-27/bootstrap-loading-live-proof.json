@@ -1,0 +1,17 @@
+{
+  "capturedAt": "2026-08-27T14:32:51.243Z",
+  "surface": "factory :5113 unprefixed board redirect (held /api/companies)",
+  "base": "http://127.0.0.1:5113",
+  "route": "/dashboard",
+  "healthCommit": "43f9c0b92c837ab493334794b93ce23d66a3cd20",
+  "title": "Paperclip",
+  "path": "/dashboard",
+  "counts": {
+    "thinkingIcon": 0,
+    "thinkingPath": 0,
+    "shimmer": 0
+  },
+  "animation": null,
+  "screenshot": "15-bootstrap-loading-live-1440.png",
+  "pass": false
+}

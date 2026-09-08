@@ -15,6 +15,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { CheckCircle2, ChevronRight, Sparkles } from "lucide-react";
 import type { ApprovalComment } from "@paperclipai/shared";
 import { MarkdownBody } from "../components/MarkdownBody";
+import { useConfirmDialog } from "@/hooks/useConfirmDialog";
 
 export function ApprovalDetail() {
   const { approvalId } = useParams<{ approvalId: string }>();
@@ -26,6 +27,7 @@ export function ApprovalDetail() {
   const [commentBody, setCommentBody] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [showRawPayload, setShowRawPayload] = useState(false);
+  const { confirm, confirmDialog } = useConfirmDialog();
 
   const { data: approval, isLoading } = useQuery({
     queryKey: queryKeys.approvals.detail(approvalId!),
@@ -312,8 +314,30 @@ export function ApprovalDetail() {
               variant="outline"
               className="text-destructive border-destructive/40"
               onClick={() => {
-                if (!window.confirm("Delete this disapproved agent? This cannot be undone.")) return;
-                deleteAgentMutation.mutate(linkedAgentId);
+                const agentName = agentNameById.get(linkedAgentId);
+                if (!agentName) {
+                  setError(
+                    "Agent details are still loading. Wait for the agent name before deleting."
+                  );
+                  return;
+                }
+                void (async () => {
+                  const confirmed = await confirm({
+                    title: "Delete this disapproved agent?",
+                    description: "This cannot be undone.",
+                    tone: "destructive",
+                    confirmLabel: "Delete agent",
+                    typedConfirmation: agentName,
+                    consequences: {
+                      immediateEffect: `${agentName} is permanently deleted.`,
+                      confirmedEffect: "The server removes the agent record and its configuration.",
+                      resultLocation: "You return to the Approvals list; this approval stays as history.",
+                      willNotHappen: "Other agents, issues, and this approval's comments are not affected.",
+                    },
+                  });
+                  if (!confirmed) return;
+                  deleteAgentMutation.mutate(linkedAgentId);
+                })();
               }}
               disabled={deleteAgentMutation.isPending}
             >
@@ -363,6 +387,7 @@ export function ApprovalDetail() {
           </Button>
         </div>
       </div>
+      {confirmDialog}
     </div>
   );
 }

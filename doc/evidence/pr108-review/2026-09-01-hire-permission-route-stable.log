@@ -1,0 +1,13 @@
+
+[test:run] exact pre-push selection: server/src/__tests__/approval-routes-idempotency.test.ts
+
+ RUN  v4.1.10 S:/source/CCAI/Assistants/tools/paperclip
+
+ ✓ |@paperclipai/server| src/__tests__/approval-routes-idempotency.test.ts (14 tests) 8706ms
+     ✓ does not emit duplicate approval side effects when approve is already resolved  5838ms
+
+ Test Files  1 passed (1)
+      Tests  14 passed (14)
+   Start at  16:32:57
+   Duration  9.23s (transform 5.15s, setup 138ms, import 166ms, tests 8.71s, environment 0ms)
+

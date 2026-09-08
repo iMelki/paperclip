@@ -1,0 +1,6 @@
+declare function describeCommand(command: string, args: string[]): void;
+declare const command: string;
+
+const shellAlias = "/bin/sh";
+const argvAlias = ["-lc", `command -v ${command}`];
+describeCommand(shellAlias, argvAlias);

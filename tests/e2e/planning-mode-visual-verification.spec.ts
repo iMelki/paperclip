@@ -1,5 +1,7 @@
 import { expect, test } from "@playwright/test";
 
+import { installOnboardingHireHeartbeatSuppression } from "./onboarding-hire-route";
+
 const AGENT_NAME = "Chief of staff";
 const TASK_TITLE = "Hire your first engineer and create a hiring plan";
 
@@ -15,30 +17,7 @@ test("captures planning mode UI for desktop and mobile", async ({ page }) => {
     }),
   );
 
-  await page.route("**/agent-hires", async (route) => {
-    const req = route.request();
-    const body = JSON.parse(req.postData() || "{}");
-    const auth = req.headers().authorization;
-    const real = await fetch(new URL(req.url()).toString(), {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        ...(auth ? { Authorization: auth } : {}),
-      },
-      body: JSON.stringify({
-        name: body.name,
-        role: body.role,
-        adapterType: "http",
-        adapterConfig: { url: "http://127.0.0.1:1/dead" },
-        runtimeConfig: { heartbeat: { enabled: false } },
-      }),
-    });
-    await route.fulfill({
-      status: real.status,
-      contentType: "application/json",
-      body: await real.text(),
-    });
-  });
+  await installOnboardingHireHeartbeatSuppression(page);
 
   await page.goto("/onboarding");
   const startBtn = page.getByRole("button", { name: /Start Onboarding|New Company|Add Agent/ });
@@ -65,7 +44,16 @@ test("captures planning mode UI for desktop and mobile", async ({ page }) => {
   await page.getByRole("button", { name: /Give it a heartbeat/ }).click();
 
   await expect(page.getByRole("heading", { name: "Review" })).toBeVisible({ timeout: 30_000 });
-  await page.getByRole("button", { name: /Get started/ }).click();
+  const savedConfiguration = page
+    .getByText("Saved configuration", { exact: true })
+    .locator("..")
+    .locator("..");
+  await expect(savedConfiguration).toContainText("Verified", { timeout: 20_000 });
+  await expect(savedConfiguration).toContainText("Claude Code");
+  await expect(savedConfiguration).toContainText("Adapter default");
+  const getStarted = page.getByRole("button", { name: /Get started/ });
+  await expect(getStarted).toBeEnabled();
+  await getStarted.click();
   await expect(page).toHaveURL(/\/dashboard$/, { timeout: 30_000 });
 
   const baseOrigin = new URL(page.url()).origin;

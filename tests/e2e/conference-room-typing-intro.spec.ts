@@ -1,5 +1,7 @@
 import { test, expect } from "@playwright/test";
 
+import { installOnboardingHireHeartbeatSuppression } from "./onboarding-hire-route";
+
 /**
  * E2E: post-wizard onboarding launch.
  *
@@ -13,10 +15,7 @@ const MISSION = "Verify the dashboard launch survives the wizard handoff.";
 const FIRST_TASK_TITLE = "Hire your first engineer and create a hiring plan";
 
 test.describe("Dashboard launch after onboarding wizard", () => {
-  test("creates the first task and opens the dashboard", async ({
-    page,
-    baseURL,
-  }) => {
+  test("creates the first task and opens the dashboard", async ({ page }) => {
     // Intercept env-test → instant pass (avoid running a real CLI check).
     await page.route("**/test-environment", (route) =>
       route.fulfill({
@@ -25,32 +24,7 @@ test.describe("Dashboard launch after onboarding wizard", () => {
       }),
     );
 
-    // Intercept hire → perform a REAL hire server-side with an inert http
-    // adapter so no real agent process spawns.
-    await page.route("**/agent-hires", async (route) => {
-      const req = route.request();
-      const body = JSON.parse(req.postData() || "{}");
-      const auth = req.headers().authorization;
-      const real = await fetch(new URL(req.url(), baseURL).toString(), {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          ...(auth ? { Authorization: auth } : {}),
-        },
-        body: JSON.stringify({
-          name: body.name,
-          role: body.role,
-          adapterType: "http",
-          adapterConfig: { url: "http://127.0.0.1:1/dead" },
-          runtimeConfig: { heartbeat: { enabled: false } },
-        }),
-      });
-      await route.fulfill({
-        status: real.status,
-        contentType: "application/json",
-        body: await real.text(),
-      });
-    });
+    await installOnboardingHireHeartbeatSuppression(page);
 
     await page.goto("/onboarding");
 
@@ -82,9 +56,19 @@ test.describe("Dashboard launch after onboarding wizard", () => {
     // Step 4: adapter (claude_local default); heartbeat is intercepted.
     await page.getByRole("button", { name: /Give it a heartbeat/ }).click();
 
-    // Step 5: review → Get started creates the first task and opens dashboard.
+    // Step 5: Review proves the authoritative saved adapter/model before
+    // Get started creates the first task and opens the dashboard.
+    const savedConfiguration = page
+      .getByText("Saved configuration", { exact: true })
+      .locator("..")
+      .locator("..");
+    await expect(savedConfiguration).toContainText("Verified", {
+      timeout: 20_000,
+    });
+    await expect(savedConfiguration).toContainText("Claude Code");
+    await expect(savedConfiguration).toContainText("Adapter default");
     const getStarted = page.getByRole("button", { name: /Get started/ });
-    await getStarted.waitFor({ timeout: 20_000 });
+    await expect(getStarted).toBeEnabled();
     await getStarted.click();
 
     await expect(page).toHaveURL(/\/dashboard$/, { timeout: 30_000 });

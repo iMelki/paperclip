@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import path from "node:path";
@@ -22,6 +21,12 @@ import { companySkillService } from "./company-skills.js";
 import { routineService } from "./routines.js";
 import { accessService } from "./access.js";
 import { listAdapterModels } from "../adapters/registry.js";
+import {
+  resourceStatus,
+  stableJson,
+  stockHash,
+  type ManagedResourceStockStatus,
+} from "./managed-resource-drift.js";
 
 export type BuiltInAgentStatus = "not_provisioned" | "pending_approval" | "needs_setup" | "ready" | "paused";
 
@@ -72,11 +77,7 @@ export interface BuiltInAgentProvisionResult {
 }
 
 export type BuiltInManagedResourceKind = "instructions" | "skill" | "routine";
-export type BuiltInManagedResourceStockStatus =
-  | "missing"
-  | "stock_current"
-  | "stock_update_available"
-  | "operator_modified";
+export type BuiltInManagedResourceStockStatus = ManagedResourceStockStatus;
 
 export interface BuiltInManagedResourceState {
   resourceKind: BuiltInManagedResourceKind;
@@ -495,40 +496,11 @@ function uniqueNonEmptyStrings(values: string[]) {
   return result;
 }
 
-function stableJson(value: unknown): string {
-  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
-  if (value && typeof value === "object") {
-    return `{${Object.entries(value as Record<string, unknown>)
-      .sort(([left], [right]) => left.localeCompare(right))
-      .map(([key, entry]) => `${JSON.stringify(key)}:${stableJson(entry)}`)
-      .join(",")}}`;
-  }
-  return JSON.stringify(value);
-}
-
-function stockHash(value: unknown) {
-  return `sha256:${createHash("sha256").update(stableJson(value)).digest("hex")}`;
-}
-
 function changedFileList(currentFiles: Record<string, string | null>, stockFiles: Record<string, string>) {
   const paths = new Set([...Object.keys(currentFiles), ...Object.keys(stockFiles)]);
   return [...paths]
     .filter((filePath) => (currentFiles[filePath] ?? null) !== (stockFiles[filePath] ?? null))
     .sort((left, right) => left.localeCompare(right));
-}
-
-function resourceStatus(input: {
-  resourceId: string | null;
-  currentHash: string | null;
-  bindingStockHash: string | null;
-  latestStockHash: string;
-}): BuiltInManagedResourceStockStatus {
-  if (!input.resourceId || !input.currentHash) return "missing";
-  if (input.currentHash === input.latestStockHash) return "stock_current";
-  if (input.bindingStockHash && input.currentHash === input.bindingStockHash) {
-    return "stock_update_available";
-  }
-  return "operator_modified";
 }
 
 function stockState(input: {
@@ -1811,28 +1783,29 @@ export function builtInAgentService(db: Db) {
       throw error;
     }
 
+    const approvalPayload = await approvalSvc.prepareHirePayloadForPersistence(companyId, {
+      name: pending.name,
+      role: pending.role,
+      title: pending.title,
+      icon: pending.icon,
+      reportsTo: pending.reportsTo,
+      capabilities: pending.capabilities,
+      adapterType: pending.adapterType,
+      adapterConfig: pending.adapterConfig,
+      runtimeConfig: pending.runtimeConfig,
+      permissions: pending.permissions,
+      budgetMonthlyCents: pending.budgetMonthlyCents,
+      metadata: pending.metadata,
+      agentId: pending.id,
+      sourceBuiltInAgentKey: definition.key,
+      featureKeys: definition.featureKeys,
+    });
     const approval = await approvalSvc.create(companyId, {
       type: "hire_agent",
       requestedByAgentId: actor.requestedByAgentId ?? null,
       requestedByUserId: actor.requestedByUserId ?? null,
       status: "pending",
-      payload: {
-        name: pending.name,
-        role: pending.role,
-        title: pending.title,
-        icon: pending.icon,
-        reportsTo: pending.reportsTo,
-        capabilities: pending.capabilities,
-        adapterType: pending.adapterType,
-        adapterConfig: pending.adapterConfig,
-        runtimeConfig: pending.runtimeConfig,
-        permissions: pending.permissions,
-        budgetMonthlyCents: pending.budgetMonthlyCents,
-        metadata: pending.metadata,
-        agentId: pending.id,
-        sourceBuiltInAgentKey: definition.key,
-        featureKeys: definition.featureKeys,
-      },
+      payload: approvalPayload,
       decisionNote: null,
       decidedByUserId: null,
       decidedAt: null,

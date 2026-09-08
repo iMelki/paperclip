@@ -17,6 +17,69 @@ export interface NotifyHireApprovedInput {
   approvedAt?: Date;
 }
 
+const MAX_DELIVERY_ATTEMPTS = 5;
+const BASE_RETRY_DELAY_MS = 1000;
+
+interface PendingNotificationJob {
+  input: NotifyHireApprovedInput;
+  attempts: number;
+  nextAttemptAt: number;
+}
+
+const pendingNotificationQueue: PendingNotificationJob[] = [];
+let queueProcessing = false;
+
+export function queueDurableHireNotification(input: NotifyHireApprovedInput): void {
+  pendingNotificationQueue.push({
+    input,
+    attempts: 0,
+    nextAttemptAt: Date.now(),
+  });
+}
+
+export async function processPendingHireNotifications(db: Db): Promise<{ processed: number; succeeded: number; failed: number }> {
+  if (queueProcessing) return { processed: 0, succeeded: 0, failed: 0 };
+  queueProcessing = true;
+  let processed = 0;
+  let succeeded = 0;
+  let failed = 0;
+
+  try {
+    const now = Date.now();
+    for (let i = pendingNotificationQueue.length - 1; i >= 0; i--) {
+      const job = pendingNotificationQueue[i];
+      if (job.nextAttemptAt > now) continue;
+
+      processed++;
+      job.attempts++;
+      try {
+        await notifyHireApproved(db, job.input);
+        succeeded++;
+        pendingNotificationQueue.splice(i, 1);
+      } catch (err) {
+        failed++;
+        if (job.attempts >= MAX_DELIVERY_ATTEMPTS) {
+          logger.error(
+            { err, input: job.input, attempts: job.attempts },
+            "hire hook: notification dropped after maximum retry attempts",
+          );
+          pendingNotificationQueue.splice(i, 1);
+        } else {
+          job.nextAttemptAt = Date.now() + BASE_RETRY_DELAY_MS * Math.pow(2, job.attempts);
+        }
+      }
+    }
+  } finally {
+    queueProcessing = false;
+  }
+
+  return { processed, succeeded, failed };
+}
+
+export function getPendingNotificationQueueSize(): number {
+  return pendingNotificationQueue.length;
+}
+
 /**
  * Invokes the adapter's onHireApproved hook when an agent is approved (join-request or hire_agent approval).
  * Failures are non-fatal: we log and write to activity, never throw.

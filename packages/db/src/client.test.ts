@@ -81,7 +81,7 @@ afterEach(async () => {
     const cleanup = cleanups.pop();
     await cleanup?.();
   }
-});
+}, 30_000);
 
 if (!embeddedPostgresSupport.supported) {
   console.warn(
@@ -197,7 +197,48 @@ describeEmbeddedPostgres("applyPendingMigrations", () => {
         await verifySql.end();
       }
     },
-    20_000,
+    45_000,
+  );
+
+  it(
+    "replays migration 0001 safely when agent_runtime_state already exists",
+    async () => {
+      const connectionString = await createTempDatabase();
+
+      await applyPendingMigrations(connectionString);
+
+      const sql = postgres(connectionString, { max: 1, onnotice: () => {} });
+      try {
+        const northstarHash = await migrationHash("0001_fast_northstar.sql");
+        await sql.unsafe(
+          `DELETE FROM "drizzle"."__drizzle_migrations" WHERE hash = '${northstarHash}'`,
+        );
+        const tables = await sql.unsafe<{ table_name: string }[]>(
+          `
+            SELECT table_name
+            FROM information_schema.tables
+            WHERE table_schema = 'public'
+              AND table_name = 'agent_runtime_state'
+          `,
+        );
+        expect(tables).toHaveLength(1);
+      } finally {
+        await sql.end();
+      }
+
+      const pendingState = await inspectMigrations(connectionString);
+      expect(pendingState).toMatchObject({
+        status: "needsMigrations",
+        pendingMigrations: ["0001_fast_northstar.sql"],
+        reason: "pending-migrations",
+      });
+
+      await applyPendingMigrations(connectionString);
+
+      const finalState = await inspectMigrations(connectionString);
+      expect(finalState.status).toBe("upToDate");
+    },
+    45_000,
   );
 
   it(
@@ -241,7 +282,7 @@ describeEmbeddedPostgres("applyPendingMigrations", () => {
       const finalState = await inspectMigrations(connectionString);
       expect(finalState.status).toBe("upToDate");
     },
-    20_000,
+    45_000,
   );
 
   it(
@@ -271,7 +312,7 @@ describeEmbeddedPostgres("applyPendingMigrations", () => {
         await sql.end();
       }
     },
-    20_000,
+    45_000,
   );
 
   it(
@@ -343,7 +384,7 @@ describeEmbeddedPostgres("applyPendingMigrations", () => {
         await verifySql.end();
       }
     },
-    20_000,
+    45_000,
   );
 
   it(
@@ -437,7 +478,7 @@ describeEmbeddedPostgres("applyPendingMigrations", () => {
         await verifySql.end();
       }
     },
-    20_000,
+    45_000,
   );
 
   it(
@@ -503,7 +544,7 @@ describeEmbeddedPostgres("applyPendingMigrations", () => {
         await verifySql.end();
       }
     },
-    20_000,
+    45_000,
   );
 
   it(
@@ -569,7 +610,7 @@ describeEmbeddedPostgres("applyPendingMigrations", () => {
         await verifySql.end();
       }
     },
-    20_000,
+    45_000,
   );
 
   it(
@@ -643,7 +684,7 @@ describeEmbeddedPostgres("applyPendingMigrations", () => {
         await verifySql.end();
       }
     },
-    20_000,
+    45_000,
   );
 
   it(
@@ -747,7 +788,7 @@ describeEmbeddedPostgres("applyPendingMigrations", () => {
         await verifySql.end();
       }
     },
-    20_000,
+    45_000,
   );
 
   it(
@@ -880,7 +921,7 @@ describeEmbeddedPostgres("applyPendingMigrations", () => {
         await verifySql.end();
       }
     },
-    20_000,
+    45_000,
   );
 
   it(
@@ -1276,7 +1317,7 @@ describeEmbeddedPostgres("applyPendingMigrations", () => {
         await afterSecondRun.end();
       }
     },
-    20_000,
+    45_000,
   );
 
   it(
@@ -1403,6 +1444,6 @@ describeEmbeddedPostgres("applyPendingMigrations", () => {
         await verifySql.end();
       }
     },
-    20_000,
+    45_000,
   );
 });

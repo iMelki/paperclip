@@ -85,4 +85,128 @@ describe("ApprovalPayloadRenderer", () => {
       root.unmount();
     });
   });
+
+  it("shows effective hire permissions and elevated-authority consequences", () => {
+    const root = createRoot(container);
+
+    act(() => {
+      root.render(
+        <ApprovalPayloadRenderer
+          type="hire_agent"
+          payload={{
+            name: "Delegated Engineer",
+            role: "engineer",
+            permissions: {
+              canCreateAgents: true,
+              canCreateSkills: false,
+              trustPreset: "standard",
+            },
+          }}
+        />,
+      );
+    });
+
+    expect(container.textContent).toContain("Permissions & trust");
+    expect(container.textContent).toContain("Hire agentsAllowed");
+    expect(container.textContent).toContain("Create/import skillsNot allowed");
+    expect(container.textContent).toContain("TrustStandard");
+    expect(container.textContent).toContain("Agent creation also grants task-assignment authority.");
+
+    act(() => {
+      root.unmount();
+    });
+  });
+
+  it("shows role defaults, restrictive overrides, and low-trust containment", () => {
+    const root = createRoot(container);
+
+    act(() => {
+      root.render(
+        <ApprovalPayloadRenderer
+          type="hire_agent"
+          payload={{
+            name: "Restricted CEO",
+            role: "ceo",
+            permissions: {
+              canCreateAgents: false,
+              trustPreset: "low_trust_review",
+              authorizationPolicy: {
+                trustBoundary: {
+                  mode: "low_trust_review",
+                  projectIds: ["00000000-0000-4000-8000-000000000123"],
+                },
+              },
+            },
+          }}
+        />,
+      );
+    });
+
+    expect(container.textContent).toContain("Hire agentsNot allowed");
+    expect(container.textContent).toContain("Create/import skillsAllowed");
+    expect(container.textContent).toContain("TrustLow-trust review");
+    expect(container.textContent).toContain("ContainmentProject 00000000");
+    expect(container.textContent).toContain("Additional policyLow-trust policy included");
+    expect(container.querySelector('section[aria-label="Permissions and trust"] dl')).not.toBeNull();
+
+    act(() => {
+      root.unmount();
+    });
+  });
+
+  it("states when low-trust containment is not configured", () => {
+    const root = createRoot(container);
+
+    act(() => {
+      root.render(
+        <ApprovalPayloadRenderer
+          type="hire_agent"
+          payload={{
+            name: "Review Agent",
+            role: "engineer",
+            permissions: { trustPreset: "low_trust_review" },
+          }}
+        />,
+      );
+    });
+
+    expect(container.textContent).toContain("Hire agentsNot allowed");
+    expect(container.textContent).toContain("ContainmentNot configured");
+
+    act(() => {
+      root.unmount();
+    });
+  });
+
+  it("summarizes nested low-trust and unknown fields without exposing their names", () => {
+    const root = createRoot(container);
+
+    act(() => {
+      root.render(
+        <ApprovalPayloadRenderer
+          type="hire_agent"
+          payload={{
+            name: "Contained Agent",
+            role: "engineer",
+            permissions: {
+              privateExtensionSecretName: true,
+              authorizationPolicy: {
+                trustBoundary: { mode: "low_trust_review" },
+                privatePolicyField: true,
+              },
+            },
+          }}
+        />,
+      );
+    });
+
+    expect(container.textContent).toContain("TrustLow-trust review");
+    expect(container.textContent).toContain("2 additional permission or policy fields preserved");
+    expect(container.textContent).not.toContain("privateExtensionSecretName");
+    expect(container.textContent).not.toContain("privatePolicyField");
+
+    act(() => {
+      root.unmount();
+    });
+  });
 });

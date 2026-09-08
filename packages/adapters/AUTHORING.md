@@ -38,6 +38,18 @@ How to apply:
   `workspace_finalize=failed` on the execution workspace, which gates
   dependent issue wakes until the next successful finalize. Do not swallow
   restore errors.
+- A transported workspace copy *may* carry the local workspace's `origin`
+  remote URL so that branches in the copy stay publishable by the agent or an
+  operator who holds credentials — the transport helpers copy the URL as
+  metadata only. The copy is allowlist-based and fails closed
+  (`sanitizeGitRemoteUrl`): http(s) URLs are stripped of userinfo, query, and
+  fragment; `ssh:`/`git:` scheme URLs are stripped of password and query;
+  scp-like `user@host:path` passes through (the syntax has no password slot);
+  every other shape — filesystem paths, unknown schemes — is dropped rather
+  than risk persisting an embedded secret. This does not weaken the contract:
+  sync-back through the local cwd remains the only cross-run persistence
+  path, the helpers never fetch from or push to that remote, and a workspace
+  without an `origin` transports exactly as before.
 
 The invariant is pinned by the `no-remote-git contract` case in
 [`packages/adapter-utils/src/ssh-fixture.test.ts`](../adapter-utils/src/ssh-fixture.test.ts),
@@ -51,8 +63,14 @@ adapter and runtime source (`packages/adapters/`, `packages/adapter-utils/`,
 `server/src/`, `cli/src/`) and fails the `policy` CI job if any unapproved
 `git push` invocation is added. If you are building an operator-configured
 path that legitimately must push, add a
-`// paperclip:allow-git-push: <reason>` comment on the line (or the line
-above) so the opt-in shows up in code review.
+standalone `// paperclip:allow-git-push: <reason>` comment immediately above
+the one invocation it exempts (`# paperclip:allow-git-push: <reason>` in POSIX
+shell) so the opt-in is syntactically visible in code review. Python,
+PowerShell, batch, JSON, YAML, and TOML do not accept exemptions because their
+multiline data/string forms make a preceding marker ambiguous. A trailing marker
+or a marker inside a string does not exempt a command. JavaScript/TypeScript regex
+literals containing a command-shaped token are conservatively review-gated and
+need the same explicit preceding marker when they are intentionally harmless.
 
 For the architecture-level write-up of cross-run persistence, see
 [`docs/guides/board-operator/execution-workspaces-and-runtime-services.md`](../../docs/guides/board-operator/execution-workspaces-and-runtime-services.md#cross-run-persistence-no-remote-git-contract).

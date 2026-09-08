@@ -39,8 +39,9 @@
   ],
   "scripts": {
     "build": "tsc",
+    "check:ssh-command-lookup": "node ./scripts/ssh-command-lookup-gate.mjs",
     "clean": "rm -rf dist",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "node ./scripts/ssh-command-lookup-gate.mjs && tsc --noEmit"
   },
   "dependencies": {
     "acpx": "0.12.0",

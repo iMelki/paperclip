@@ -6,11 +6,17 @@ import {
   checkConfiguration,
   findUnpublishableWorkspaceEdges,
   getReleasePackages,
+  toManifestDir,
 } from "./release-package-map.mjs";
 
 function pkg(name, { publishFromCi, ...deps } = {}) {
   return { name, dir: name, publishFromCi, pkg: { name, ...deps } };
 }
+
+test("release package directories use manifest separators on every host", () => {
+  assert.equal(toManifestDir("packages\\adapters\\codex-local"), "packages/adapters/codex-local");
+  assert.equal(toManifestDir("packages/adapters/codex-local"), "packages/adapters/codex-local");
+});
 
 test("release package manifest covers all public packages with explicit CI enrollment", () => {
   const packages = buildReleasePackagePlan();
@@ -22,6 +28,33 @@ test("release package list only contains CI-enrolled packages", () => {
   const enabledPackages = getReleasePackages();
   assert.ok(enabledPackages.length > 0);
   assert.ok(enabledPackages.every((pkg) => pkg.publishFromCi === true));
+});
+
+test("release package list publishes the installable channel entrypoint last", () => {
+  const enabledPackages = getReleasePackages();
+
+  assert.equal(enabledPackages.at(-1)?.name, "paperclipai");
+  assert.ok(enabledPackages.slice(0, -1).some((pkg) => pkg.name === "@paperclipai/server"));
+});
+
+test("release package list keeps runtime workspace dependencies ahead of consumers", () => {
+  const enabledPackages = getReleasePackages();
+  const publishIndexByName = new Map(enabledPackages.map((pkg, index) => [pkg.name, index]));
+
+  for (const pkg of enabledPackages) {
+    for (const section of ["dependencies", "optionalDependencies", "peerDependencies"]) {
+      for (const [dependencyName, spec] of Object.entries(pkg.pkg[section] ?? {})) {
+        if (typeof spec !== "string" || !spec.startsWith("workspace:")) continue;
+        const dependencyIndex = publishIndexByName.get(dependencyName);
+        if (dependencyIndex === undefined) continue;
+
+        assert.ok(
+          dependencyIndex < publishIndexByName.get(pkg.name),
+          `${dependencyName} must publish before ${pkg.name}`,
+        );
+      }
+    }
+  }
 });
 
 test("Hermes release surface publishes the unified built-in package and keeps gateway as a shim", () => {
