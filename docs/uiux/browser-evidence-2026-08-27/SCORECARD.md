@@ -143,3 +143,9 @@ were the blank race (`mainTextLen: 0`, Times New Roman).
 
 Receipt: `gauntlet-run10-f7a0160fc.json`. Issues #48 / #94 / #89 stay open;
 this receipt only closes the 20/21 gauntlet hold.
+
+## Historical stash preservation (2026-09-08)
+
+Earlier screenshots, unsettled receipts and logs are preserved with exact hashes
+in the [historical archive index](HISTORICAL-ARCHIVE-2026-09-08.md). This retains
+prior-run evidence without replacing the current images or run-10 receipt.

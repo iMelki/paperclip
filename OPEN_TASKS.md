@@ -1,5 +1,7 @@
 # Paperclip Open Tasks
 
+- #48 / #94 / #89 Historical gauntlet stash evidence preserved with a verified private archive; [dated provenance](docs/uiux/browser-evidence-2026-08-27/HISTORICAL-ARCHIVE-2026-09-08.md).
+
 Last updated: 2026-09-07
 
 - [#114 — Replay-safe cost imports](https://github.com/iMelki/paperclip/issues/114):

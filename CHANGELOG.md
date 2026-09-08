@@ -1,5 +1,7 @@
 # Changelog
 
+- Preserve historical browser proof variants in a verified private archive and dated index without replacing current gauntlet images or receipts.
+
 All notable changes to this repository should be recorded here.
 
 ## Unreleased
