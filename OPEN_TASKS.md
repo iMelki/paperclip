@@ -1,5 +1,17 @@
 # Paperclip Open Tasks
 
+- [#35 — embedded-postgres fails under an elevated Windows token](https://github.com/iMelki/paperclip/issues/35):
+  2026-09-10, [PR #117](https://github.com/iMelki/paperclip/pull/117) patches
+  embedded-postgres's start()/stop() to route through pg_ctl on Windows
+  (CreateRestrictedProcess drops the Administrators SID before exec'ing
+  postgres — the same mechanism zonkyio/embedded-postgres#66 independently
+  traced for the identical failure). Verified live end-to-end unelevated
+  (initialise/start/createDatabase/stop, full pass, pg_ctl-routed). The
+  elevated-token scenario itself — the actual acceptance criterion — is
+  NOT yet verified from this session; watch for a data-directory-ACL
+  failure in server.log if it still fails elevated (initialise() still
+  spawns initdb directly under the elevated token).
+
 - #48 / #94 / #89 Historical gauntlet stash evidence preserved with a verified private archive; [dated provenance](docs/uiux/browser-evidence-2026-08-27/HISTORICAL-ARCHIVE-2026-09-08.md).
 
 Last updated: 2026-09-07
