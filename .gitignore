@@ -78,3 +78,5 @@ tests/storybook-visual/playwright-report/
 # command-center, mission-control-kanban). Untracked logs here break pre-push
 # pristine-worktree checks and can exceed Repo Doctor per-file size limits.
 /.local-logs/
+# Local scratch/receipt dirs (not source, not review artifacts)
+.tmp-validation/

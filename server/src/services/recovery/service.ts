@@ -99,6 +99,14 @@ const STALE_ACTIVE_RUN_EVALUATION_ORIGIN_KIND = RECOVERY_ORIGIN_KINDS.staleActiv
 const DEFERRED_WAKE_CONTEXT_KEY = "_paperclipWakeContext";
 const EXECUTION_REVIEW_PARTICIPANT_RECOVERY_REASON = "execution_review_participant_recovery";
 const RESOLVED_DEPENDENCY_WAKE_BACKSTOP_CANDIDATE_LIMIT = 500;
+function isProcessSessionLaunchReplayFencedRun(run: {
+  errorCode?: string | null;
+  resultJson?: unknown;
+}): boolean {
+  if (run.errorCode === ACP_PROCESS_SESSION_LAUNCH_AMBIGUOUS) return true;
+  const launch = parseObject(parseObject(run.resultJson).processSessionLaunch);
+  return launch.status === "launching" || launch.status === "accepted" || launch.status === "needs_human";
+}
 const SESSIONED_LOCAL_ADAPTERS = new Set([
   "claude_local",
   "codex_local",
@@ -171,6 +179,7 @@ type StrandedRecoveryCause =
   | "codex_output_inactivity_monitor"
   | "workspace_validation_failed"
   | "configuration_incomplete"
+  | "execution_configuration_fenced"
   | "execution_review_participant_recovery"
   | typeof SUCCESSFUL_RUN_MISSING_STATE_REASON;
 
@@ -351,7 +360,9 @@ const TRANSIENT_INFRA_CONTINUATION_ERROR_CODES = new Set<string>([
   "timeout",
 ]);
 
+const ACP_PROCESS_SESSION_LAUNCH_AMBIGUOUS = "ACP_PROCESS_SESSION_LAUNCH_AMBIGUOUS";
 const NON_RETRYABLE_CONTINUATION_ERROR_CODES = new Set<string>([
+  ACP_PROCESS_SESSION_LAUNCH_AMBIGUOUS,
   "agent_not_invokable",
   "agent_not_found",
   "budget_blocked",
@@ -1594,11 +1605,22 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
     const running = runningProcesses.get(input.run.id);
     const pid = running?.child.pid ?? input.run.processPid ?? null;
     const processGroupId = running?.processGroupId ?? input.run.processGroupId ?? null;
+    // Numeric PID/PGID absence cannot prove tree exit on either platform. A
+    // wrapper may leave detached descendants and identifiers can be reused;
+    // only launch-time pidfd/cgroup/namespace or Windows Job custody can issue
+    // a release-authorizing tree receipt.
     if (typeof pid !== "number" && typeof processGroupId !== "number") {
       return {
         attempted: false,
-        outcome: "no_process_metadata",
+        outcome: "termination_unverified_needs_human",
+        terminationOutcome: "untrusted_identity",
+        needsHuman: true,
         adapterType: input.runningAgent.adapterType,
+        pid,
+        processGroupId,
+        error: process.platform === "win32"
+          ? "Missing Windows process metadata does not prove tree exit without Job Object custody."
+          : "Missing POSIX process metadata does not prove tree exit without pidfd, cgroup, or namespace custody.",
       };
     }
 
@@ -1606,13 +1628,17 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
       (typeof pid === "number" && isPidAlive(pid)) ||
       (typeof processGroupId === "number" && isProcessGroupAlive(processGroupId));
     if (!wasAlive) {
-      runningProcesses.delete(input.run.id);
       return {
         attempted: false,
-        outcome: "not_running",
+        outcome: "termination_unverified_needs_human",
+        terminationOutcome: "untrusted_identity",
+        needsHuman: true,
         adapterType: input.runningAgent.adapterType,
         pid,
         processGroupId,
+        error: process.platform === "win32"
+          ? "A dead Windows wrapper does not prove that its process tree is stopped without Job Object evidence."
+          : "Negative POSIX PID/process-group probes do not prove tree exit without pidfd, cgroup, or namespace custody.",
       };
     }
 
@@ -1620,6 +1646,18 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
       const runningChildIsLive = running
         ? (running.child.exitCode == null && running.child.signalCode == null)
         : false;
+      if (!runningChildIsLive) {
+        return {
+          attempted: false,
+          outcome: "termination_unverified_needs_human",
+          terminationOutcome: "untrusted_identity",
+          needsHuman: true,
+          adapterType: input.runningAgent.adapterType,
+          pid,
+          processGroupId,
+          error: "A live PID or process group reconstructed from persisted state is observation-only without a live ChildProcess handle.",
+        };
+      }
       const termination = await terminateLocalService(
         {
           pid: typeof pid === "number" && Number.isInteger(pid) && pid > 0
@@ -1629,14 +1667,12 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
             ? processGroupId
             : null,
         },
-        running
-          ? {
-              forceAfterMs: Math.max(1, running.graceSec) * 1000,
-              ...(runningChildIsLive ? { trustedPid: true, trustedProcessGroup: true } : {}),
-            }
-          : {
-              expectedStartedAt: input.run.processStartedAt,
-            },
+        {
+          forceAfterMs: Math.max(1, running!.graceSec) * 1000,
+          trustedPid: true,
+          trustedProcessGroup: true,
+          childProcess: running!.child,
+        },
       );
       if (termination.confirmedStopped) {
         runningProcesses.delete(input.run.id);
@@ -1695,6 +1731,26 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
     now: Date;
   }) {
     if (!input.evidence) return { kind: "skipped" as const };
+    if (isProcessSessionLaunchReplayFencedRun(input.run)) {
+      // Same-run issue terminal evidence proves only the board transition. It
+      // does not prove the detached remote wrapper/child terminal, especially
+      // when this host has no local PID metadata. Preserve the run and issue
+      // execution lock until the launch-specific durable receipt is reconciled.
+      await appendRecoveryRunEvent(input.run, {
+        level: "warn",
+        message: "Source issue is terminal, but remote ACP launch reconciliation still fences this run",
+        payload: {
+          errorCode: ACP_PROCESS_SESSION_LAUNCH_AMBIGUOUS,
+          needsHuman: true,
+          sourceIssueId: input.sourceIssue.id,
+          sourceIssueStatus: input.sourceIssue.status,
+        },
+      });
+      return {
+        kind: "needs_human" as const,
+        evaluationIssueId: input.existingEvaluation?.id ?? null,
+      };
+    }
     const cleanup = await cleanupSourceResolvedRunProcess({ run: input.run, runningAgent: input.runningAgent });
     if (cleanup.outcome === "termination_unverified_needs_human" || cleanup.outcome === "failed") {
       const message = [
@@ -2855,7 +2911,7 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
       ? "missing_disposition" as const
       : cause === "workspace_validation_failed"
         ? "workspace_validation" as const
-      : cause === "configuration_incomplete"
+      : cause === "configuration_incomplete" || cause === "execution_configuration_fenced"
         ? "configuration_validation" as const
       : "stranded_assigned_issue" as const;
   }
@@ -2973,6 +3029,8 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
               : "Repair the source issue workspace link, project workspace cwd, or git checkout before resuming adapter execution."
         : recoveryCause === "configuration_incomplete"
           ? "Bind the missing secret(s) named in the run failure to the agent/project/routine env before resuming adapter execution."
+        : recoveryCause === "execution_configuration_fenced"
+          ? "Resolve the stable callback-disabled or invalid-target configuration fence, then resume explicitly; do not retry automatically."
         : recoveryCause === "execution_review_participant_recovery"
           ? "Repair the failed review participant path, restore the source issue to in_review with a live reviewer, or record an intentional manual resolution."
         : "Restore a live execution path, fix the runtime/adapter failure, or record an intentional manual resolution.",
@@ -2981,7 +3039,7 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
           type: "monitor_only",
           reason: recoveryCause,
         }
-        : recoveryCause === "configuration_incomplete"
+        : recoveryCause === "configuration_incomplete" || recoveryCause === "execution_configuration_fenced"
         ? {
           type: "manual_repair_required",
           reason: recoveryCause,
@@ -3015,6 +3073,7 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
   }) {
     if (input.recoveryCause === "provider_quota" && !input.action.ownerAgentId) return;
     if (input.recoveryCause === "configuration_incomplete") return;
+    if (input.recoveryCause === "execution_configuration_fenced") return;
     if (!input.action.ownerAgentId) return;
     await deps.enqueueWakeup(input.action.ownerAgentId, {
       source: "assignment",
@@ -3452,7 +3511,8 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
     const shouldPostEscalationComment =
       recoveryAction.attemptCount === 1 ||
       input.recoveryCause === "workspace_validation_failed" ||
-      input.recoveryCause === "configuration_incomplete";
+      input.recoveryCause === "configuration_incomplete" ||
+      input.recoveryCause === "execution_configuration_fenced";
     if (shouldPostEscalationComment) {
       const escalationCommentMarker = `Recovery action: \`${recoveryAction.id}\``;
 
@@ -3510,6 +3570,8 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
             ? "recovery.reconcile_workspace_validation_failed"
           : input.recoveryCause === "configuration_incomplete"
             ? "recovery.reconcile_configuration_incomplete"
+          : input.recoveryCause === "execution_configuration_fenced"
+            ? "recovery.reconcile_execution_configuration_fenced"
           : input.recoveryCause === "execution_review_participant_recovery"
             ? "recovery.reconcile_execution_review_participant"
           : "recovery.reconcile_stranded_assigned_issue",

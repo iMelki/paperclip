@@ -328,12 +328,16 @@ function selectSerializedSuites(routeTests, shardIndex, shardCount) {
   return routeTests.filter((_, index) => index % shardCount === shardIndex);
 }
 
+const isolatedTempEnvironmentVariableNames = ["TEMP", "TMP", "TMPDIR"];
+
 function runVitest(args, label, { serverExcludes = [], subcommand = "run" } = {}) {
   console.log(`\n[test:run] ${label}`);
   invocationIndex += 1;
   const tempRootParent = process.platform === "win32" ? os.tmpdir() : "/tmp";
   const testRoot = mkdtempSync(path.join(tempRootParent, `pcvt-${process.pid}-${invocationIndex}-`));
+  const testTempDir = path.join(testRoot, "t");
   // Keep per-run paths compact so Unix socket fixtures stay under macOS path limits.
+  // Set TEMP/TMP/TMPDIR together so Windows Node and native tools share the same sandbox.
   const env = sanitizeGitLocalEnvironment({
     ...process.env,
     NODE_ENV: "test",
@@ -341,11 +345,13 @@ function runVitest(args, label, { serverExcludes = [], subcommand = "run" } = {}
     PAPERCLIP_INSTANCE_ID: `vt-${process.pid}-${invocationIndex}`,
     PAPERCLIP_ENV_LIVE_SSH_NO_AUTO_FIXTURE:
       process.env.PAPERCLIP_ENV_LIVE_SSH_NO_AUTO_FIXTURE ?? "true",
-    TMPDIR: path.join(testRoot, "t"),
+    ...Object.fromEntries(
+      isolatedTempEnvironmentVariableNames.map((name) => [name, testTempDir]),
+    ),
   }, gitLocalEnvironmentVariableNames);
   delete env.PAPERCLIP_VITEST_EXCLUDE_FILE;
   mkdirSync(env.PAPERCLIP_HOME, { recursive: true });
-  mkdirSync(env.TMPDIR, { recursive: true });
+  mkdirSync(testTempDir, { recursive: true });
   if (serverExcludes.length > 0) {
     const excludeFile = path.join(testRoot, "server-excludes.json");
     writeFileSync(excludeFile, `${JSON.stringify(serverExcludes)}\n`, "utf8");

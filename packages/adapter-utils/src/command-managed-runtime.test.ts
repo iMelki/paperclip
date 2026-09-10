@@ -6,6 +6,7 @@ import { promisify } from "node:util";
 import { afterEach, describe, expect, it } from "vitest";
 
 import {
+  assertPostUploadCommandsConfined,
   createCommandManagedRuntimeClient,
   prepareCommandManagedRuntime,
   type CommandManagedRuntimeRunner,
@@ -20,10 +21,6 @@ const execFile = promisify(execFileCallback);
 interface SpawnRunnerHandle {
   runner: CommandManagedRuntimeRunner;
   calls: Array<{ command: string; args?: string[]; cwd?: string; stdin?: string }>;
-}
-
-function resolveLocalTestCommand(command: string): string {
-  return command === "sh" || command === "bash" ? resolveTestShellCommand(command) : command;
 }
 
 // A runner that actually executes the shell scripts (piping stdin through a real
@@ -45,7 +42,7 @@ function makeSpawnRunner(options: {
           stdin: input.stdin,
         });
         const startedAt = new Date().toISOString();
-        const command = resolveLocalTestCommand(input.command);
+        const command = resolveTestShellCommand(input.command);
         const child = spawn(command, input.args ?? [], {
           cwd: input.cwd,
           env: { ...process.env, ...input.env },
@@ -173,7 +170,7 @@ describe("command managed runtime", () => {
           ...process.env,
           ...input.env,
         };
-        const command = resolveLocalTestCommand(input.command);
+        const command = resolveTestShellCommand(input.command);
         const args = [...(input.args ?? [])];
         if (
           input.stdin != null &&
@@ -290,9 +287,7 @@ describe("command managed runtime", () => {
     });
 
     expect(prepared.workspaceRemoteDir).toBe(remoteWorkspaceDir);
-    expect(prepared.assetDirs.home).toBe(
-      path.posix.join(remoteWorkspaceDir, ".paperclip-runtime", "codex", "home"),
-    );
+    expect(prepared.assetDirs.home).toBe(path.join(remoteWorkspaceDir, ".paperclip-runtime", "codex", "home"));
     await expect(readFile(path.join(remoteWorkspaceDir, "README.md"), "utf8")).resolves.toBe(
       "authoritative workspace\n",
     );
@@ -307,59 +302,6 @@ describe("command managed runtime", () => {
     await expect(readFile(path.join(localWorkspaceDir, "README.md"), "utf8")).resolves.toBe(
       "local workspace\n",
     );
-  });
-
-  it("stages each additional project into an isolated dir on the base64/tar transport, one failure skipped", async () => {
-    const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-command-runtime-additional-"));
-    cleanupDirs.push(rootDir);
-
-    const localWorkspaceDir = path.join(rootDir, "local-workspace");
-    const remoteWorkspaceDir = path.join(rootDir, "remote-workspace");
-    await mkdir(localWorkspaceDir, { recursive: true });
-    await mkdir(remoteWorkspaceDir, { recursive: true });
-    await writeFile(path.join(localWorkspaceDir, "README.md"), "anchor\n", "utf8");
-
-    const goodOne = path.join(rootDir, "src-one");
-    const goodTwo = path.join(rootDir, "src-two");
-    await mkdir(goodOne, { recursive: true });
-    await mkdir(path.join(goodTwo, "nested"), { recursive: true });
-    await writeFile(path.join(goodOne, "one.txt"), "one body\n", "utf8");
-    await writeFile(path.join(goodTwo, "nested", "two.txt"), "two body\n", "utf8");
-
-    // The `makeSpawnRunner` runner exposes no native syncIn, so staging rides the
-    // base64/tar fallback. The middle source points at a missing directory, so
-    // its tar build fails; failure isolation skips only it.
-    const { runner } = makeSpawnRunner();
-    const prepared = await prepareCommandManagedRuntime({
-      runner,
-      spec: {
-        remoteCwd: remoteWorkspaceDir,
-        timeoutMs: 30_000,
-      },
-      adapterKey: "claude",
-      workspaceLocalDir: localWorkspaceDir,
-      additionalSources: [
-        { localPath: goodOne, projectId: "one" },
-        { localPath: path.join(rootDir, "missing"), projectId: "broken" },
-        { localPath: goodTwo, projectId: "two" },
-      ],
-    });
-
-    const runtimeRootDir = path.posix.join(remoteWorkspaceDir, ".paperclip-runtime", "claude");
-    expect(Object.keys(prepared.additionalSourceDirs).sort()).toEqual(["one", "two"]);
-    expect(prepared.additionalSourceDirs.one).toBe(path.posix.join(runtimeRootDir, "project-one"));
-    expect(prepared.additionalSourceDirs.two).toBe(path.posix.join(runtimeRootDir, "project-two"));
-    expect(prepared.additionalSourceDirs.broken).toBeUndefined();
-
-    // Each healthy project's tree materialized in its OWN dir (nested files kept).
-    await expect(readFile(path.join(prepared.additionalSourceDirs.one, "one.txt"), "utf8")).resolves.toBe("one body\n");
-    await expect(readFile(path.join(prepared.additionalSourceDirs.two, "nested", "two.txt"), "utf8")).resolves.toBe(
-      "two body\n",
-    );
-    // The broken project's dir was never created.
-    await expect(readFile(path.join(runtimeRootDir, "project-broken"), "utf8")).rejects.toMatchObject({
-      code: "ENOENT",
-    });
   });
 
   it("keeps adapter detection on the profile-backed shell path", async () => {
@@ -694,19 +636,18 @@ describe("command managed runtime", () => {
 
     expect(await readFile(targetFile, "utf8")).toBe("payload\n");
     const scripts = calls.map((call) => (call.args ?? []).join(" "));
-    const shellTargetFile = toShellPath(targetFile);
     expect(scripts).toHaveLength(5);
-    expect(scripts[0]).toContain(shellTargetFile + ".paperclip-syncin.");
+    expect(scripts[0]).toContain(toShellPath(targetFile) + ".paperclip-syncin.");
     expect(scripts[0]).toContain(".paperclip-upload.");
     expect(scripts[1]).toContain("rm -rf");
     expect(scripts[1]).toContain(".paperclip-upload.");
     expect(scripts[2]).toContain("chmod 640");
-    expect(scripts[2]).toContain(shellTargetFile + ".paperclip-syncin.");
+    expect(scripts[2]).toContain(toShellPath(targetFile) + ".paperclip-syncin.");
     expect(scripts[3]).toContain("mv -f");
-    expect(scripts[3]).toContain(shellTargetFile + ".paperclip-syncin.");
-    expect(scripts[3]).toContain(shellTargetFile);
+    expect(scripts[3]).toContain(toShellPath(targetFile) + ".paperclip-syncin.");
+    expect(scripts[3]).toContain(toShellPath(targetFile));
     expect(scripts[4]).toContain("rm -rf");
-    expect(scripts[4]).toContain(shellTargetFile + ".paperclip-syncin.");
+    expect(scripts[4]).toContain(toShellPath(targetFile) + ".paperclip-syncin.");
   });
 
   it("fallback syncIn cleans up a staged file when chmod fails before rename", async () => {
@@ -778,6 +719,24 @@ describe("command managed runtime", () => {
     expect(executed).toContain(verbatim);
   });
 
+  it("converts UNC paths before emitting POSIX shell commands", async () => {
+    const scripts: string[] = [];
+    const runner: CommandManagedRuntimeRunner = {
+      execute: async (input) => {
+        scripts.push(input.args?.[1] ?? "");
+        return { exitCode: 0, signal: null, timedOut: false, stdout: "", stderr: "", pid: null, startedAt: "" };
+      },
+    };
+    const client = createCommandManagedRuntimeClient({ runner, commandCwd: "/", timeoutMs: 1 });
+    const uncPath = "\\\\build-server\\agent-share\\runtime folder\\artifact's";
+
+    expect(toShellPath(uncPath)).toBe("//build-server/agent-share/runtime folder/artifact's");
+    await client.makeDir(uncPath);
+
+    expect(scripts).toEqual(["mkdir -p '//build-server/agent-share/runtime folder/artifact'\"'\"'s'"]);
+    expect(scripts[0]).not.toContain("\\");
+  });
+
   it("test_post_upload_command_cwd_escaping_target_root_is_rejected (C2)", async () => {
     // A `cwd` that escapes the operation's target root — via `..` or an absolute
     // path outside the target — is rejected BEFORE any handoff (no execute).
@@ -798,6 +757,15 @@ describe("command managed runtime", () => {
       },
     ];
     await expect(client.syncIn!(traversal)).rejects.toThrow(/confined absolute POSIX path|escapes/);
+
+    const traversalThatNormalizesInside: SandboxSyncOperation[] = [
+      {
+        operationId: "op-link-traversal",
+        files: [{ sourcePath: "/host/a", targetPath: "/remote/a", kind: "directory" }],
+        postUploadCommands: [{ command: "echo x", cwd: "/remote/a/link/../nested" }],
+      },
+    ];
+    await expect(client.syncIn!(traversalThatNormalizesInside)).rejects.toThrow(/'\.\.' segments are forbidden/);
 
     const absoluteEscape: SandboxSyncOperation[] = [
       {
@@ -830,6 +798,54 @@ describe("command managed runtime", () => {
 
     // Confinement rejected before any exec for the escape cases.
     expect(executeCalls).toBe(0);
+  });
+
+  it("confines native Windows and UNC post-upload paths without prefix-collision escapes", () => {
+    expect(() => assertPostUploadCommandsConfined([{
+      operationId: "op-windows-confined",
+      files: [{ sourcePath: "C:\\host\\a", targetPath: "C:\\sandbox\\workspace", kind: "directory" }],
+      postUploadCommands: [{ command: "echo x", cwd: "C:\\sandbox\\workspace\\nested" }],
+    }])).not.toThrow();
+
+    expect(() => assertPostUploadCommandsConfined([{
+      operationId: "op-windows-prefix-escape",
+      files: [{ sourcePath: "C:\\host\\a", targetPath: "C:\\sandbox\\workspace", kind: "directory" }],
+      postUploadCommands: [{ command: "echo x", cwd: "C:\\sandbox\\workspace-escape" }],
+    }])).toThrow(/escapes the operation's target root/);
+
+    expect(() => assertPostUploadCommandsConfined([{
+      operationId: "op-unc-confined",
+      files: [{
+        sourcePath: "\\\\build-server\\host-share\\a",
+        targetPath: "\\\\build-server\\agent-share\\workspace",
+        kind: "directory",
+      }],
+      postUploadCommands: [{
+        command: "echo x",
+        cwd: "\\\\build-server\\agent-share\\workspace\\nested",
+      }],
+    }])).not.toThrow();
+
+    expect(() => assertPostUploadCommandsConfined([{
+      operationId: "op-unc-prefix-escape",
+      files: [{
+        sourcePath: "\\\\build-server\\host-share\\a",
+        targetPath: "\\\\build-server\\agent-share\\workspace",
+        kind: "directory",
+      }],
+      postUploadCommands: [{
+        command: "echo x",
+        cwd: "\\\\build-server\\agent-share\\workspace-escape",
+      }],
+    }])).toThrow(/escapes the operation's target root/);
+  });
+
+  it("rejects raw traversal segments in otherwise confined Windows paths", () => {
+    expect(() => assertPostUploadCommandsConfined([{
+      operationId: "op-windows-link-traversal",
+      files: [{ sourcePath: "C:\\host\\a", targetPath: "C:\\sandbox\\workspace", kind: "directory" }],
+      postUploadCommands: [{ command: "echo x", cwd: "C:\\sandbox\\workspace\\junction\\..\\nested" }],
+    }])).toThrow(/'\.\.' segments are forbidden/);
   });
 
   it("test_fallback_syncIn_aborts_and_rejects_on_first_nonzero_exit (C4 fail-fast)", async () => {
@@ -987,6 +1003,48 @@ describe("command managed runtime", () => {
     }
     expect(progress.every((entry) => entry.total === payload.length)).toBe(true);
     expect(progress.at(-1)?.done).toBe(payload.length);
+  });
+
+  it("preserves ENOENT when a command-managed remote file is absent", async () => {
+    const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-command-read-missing-"));
+    cleanupDirs.push(rootDir);
+    const remotePath = path.join(rootDir, "missing-auth.json");
+    const { runner, calls } = makeSpawnRunner();
+    const client = createCommandManagedRuntimeClient({ runner, commandCwd: "/", timeoutMs: 30_000 });
+
+    await expect(client.readFile(remotePath)).rejects.toMatchObject({
+      code: "ENOENT",
+      path: remotePath,
+      syscall: "readFile",
+    });
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.args?.join(" ")).toContain("wc -c");
+  });
+
+  it("does not suppress an unproved exit-44 transport or permission failure", async () => {
+    const remotePath = "/remote/private/auth.json";
+    const runner: CommandManagedRuntimeRunner = {
+      execute: async () => ({
+        exitCode: 44,
+        signal: null,
+        timedOut: false,
+        stdout: "",
+        stderr: "transport returned permission denied",
+        pid: null,
+        startedAt: new Date().toISOString(),
+      }),
+    };
+    const client = createCommandManagedRuntimeClient({ runner, commandCwd: "/", timeoutMs: 30_000 });
+
+    const error = await client.readFile(remotePath).then(
+      () => null,
+      (caught: unknown) => caught,
+    );
+
+    expect(error).toBeInstanceOf(Error);
+    expect(error).not.toMatchObject({ code: "ENOENT" });
+    expect(String(error)).toContain("permission denied");
   });
 
   it("includes stdout diagnostics when a managed runtime command fails", async () => {

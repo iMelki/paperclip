@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -11,6 +11,7 @@ const {
   restoreWorkspaceFromSshExecution,
   runSshCommand,
   syncDirectoryToSsh,
+  assertPaperclipCallbackBridgeEnabled,
   startAdapterExecutionTargetPaperclipBridge,
 } = vi.hoisted(() => ({
   runChildProcess: vi.fn(async () => ({
@@ -28,6 +29,7 @@ const {
   restoreWorkspaceFromSshExecution: vi.fn(async () => undefined),
   runSshCommand: vi.fn(async () => ({ stdout: Buffer.from("{}").toString("base64"), stderr: "" })),
   syncDirectoryToSsh: vi.fn(async () => undefined),
+  assertPaperclipCallbackBridgeEnabled: vi.fn(() => undefined),
   startAdapterExecutionTargetPaperclipBridge: vi.fn(async () => ({
     env: {
       PAPERCLIP_API_URL: "http://127.0.0.1:4310",
@@ -69,21 +71,187 @@ vi.mock("@paperclipai/adapter-utils/execution-target", async () => {
   );
   return {
     ...actual,
+    assertPaperclipCallbackBridgeEnabled,
     startAdapterExecutionTargetPaperclipBridge,
   };
 });
 
-import { execute } from "./execute.js";
+import { execute as executeAdapter } from "./execute.js";
+import {
+  PAPERCLIP_CALLBACK_BRIDGE_DISABLED,
+  PAPERCLIP_EXECUTION_TARGET_INVALID,
+} from "@paperclipai/adapter-utils/execution-target";
+
+async function execute(ctx: Parameters<typeof executeAdapter>[0]) {
+  return await executeAdapter({
+    ...ctx,
+    onEvent: ctx.onEvent ?? (async () => undefined),
+  });
+}
 
 describe("codex remote execution", () => {
   const cleanupDirs: string[] = [];
 
   afterEach(async () => {
+    vi.unstubAllEnvs();
     vi.clearAllMocks();
     while (cleanupDirs.length > 0) {
       const dir = cleanupDirs.pop();
       if (!dir) continue;
       await rm(dir, { recursive: true, force: true }).catch(() => undefined);
+    }
+  });
+
+  it.each(["ssh", "sandbox"] as const)(
+    "fails closed for a valid %s callback target before any adapter side effect",
+    async (transport) => {
+      const onLog = vi.fn(async () => undefined);
+      const onMeta = vi.fn(async () => undefined);
+      const onEvent = vi.fn(async () => undefined);
+      const onSpawn = vi.fn(async () => undefined);
+      const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-codex-denial-"));
+      cleanupDirs.push(rootDir);
+      const sideEffectPath = path.join(rootDir, "must-not-exist");
+      const runnerExecute = vi.fn();
+      const executionTarget = transport === "ssh"
+        ? {
+            kind: "remote",
+            transport: "ssh",
+            remoteCwd: "/remote/workspace",
+            spec: {
+              host: "127.0.0.1",
+              port: 2222,
+              username: "fixture",
+              remoteCwd: "/remote/workspace",
+            },
+          }
+        : {
+            kind: "remote",
+            transport: "sandbox",
+            providerKey: "fixture",
+            remoteCwd: "/remote/workspace",
+            runner: { execute: runnerExecute },
+          };
+      assertPaperclipCallbackBridgeEnabled.mockImplementationOnce(() => {
+        throw Object.assign(new Error("callback bridge disabled"), {
+          code: PAPERCLIP_CALLBACK_BRIDGE_DISABLED,
+          retryable: false,
+          needsHuman: true,
+        });
+      });
+
+      await expect(execute({
+        executionTarget,
+        config: { cwd: sideEffectPath },
+        context: { paperclipWorkspace: { cwd: sideEffectPath, source: "project_primary" } },
+        onLog,
+        onMeta,
+        onEvent,
+        onSpawn,
+      } as never)).rejects.toMatchObject({
+        code: PAPERCLIP_CALLBACK_BRIDGE_DISABLED,
+        retryable: false,
+        needsHuman: true,
+      });
+
+      expect(onLog).not.toHaveBeenCalled();
+      expect(onMeta).not.toHaveBeenCalled();
+      expect(onEvent).not.toHaveBeenCalled();
+      expect(onSpawn).not.toHaveBeenCalled();
+      await expect(access(sideEffectPath)).rejects.toMatchObject({ code: "ENOENT" });
+      expect(runnerExecute).not.toHaveBeenCalled();
+      expect(ensureCommandResolvable).not.toHaveBeenCalled();
+      expect(resolveCommandForLogs).not.toHaveBeenCalled();
+      expect(runChildProcess).not.toHaveBeenCalled();
+      expect(prepareWorkspaceForSshExecution).not.toHaveBeenCalled();
+      expect(restoreWorkspaceFromSshExecution).not.toHaveBeenCalled();
+      expect(runSshCommand).not.toHaveBeenCalled();
+      expect(syncDirectoryToSsh).not.toHaveBeenCalled();
+      expect(startAdapterExecutionTargetPaperclipBridge).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    ["non-object direct", { executionTarget: "remote" }],
+    ["misspelled direct kind", { executionTarget: { kind: "remtoe" } }],
+    ["malformed legacy", { executionTransport: { remoteExecution: { host: "127.0.0.1" } } }],
+    [
+      "invalid direct cannot hide behind valid legacy",
+      {
+        executionTarget: { kind: "remote", transport: "sandbox", remoteCwd: "" },
+        executionTransport: {
+          remoteExecution: {
+            host: "127.0.0.1",
+            port: 2222,
+            username: "fixture",
+            remoteCwd: "/remote/workspace",
+          },
+        },
+      },
+    ],
+  ] as const)("rejects %s target input without local fallback", async (_label, targetInput) => {
+    const onLog = vi.fn(async () => undefined);
+    const onMeta = vi.fn(async () => undefined);
+    const onEvent = vi.fn(async () => undefined);
+    const onSpawn = vi.fn(async () => undefined);
+    const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-codex-invalid-"));
+    cleanupDirs.push(rootDir);
+    const sideEffectPath = path.join(rootDir, "must-not-exist");
+
+    await expect(execute({
+      ...targetInput,
+      config: { cwd: sideEffectPath },
+      context: { paperclipWorkspace: { cwd: sideEffectPath, source: "project_primary" } },
+      onLog,
+      onMeta,
+      onEvent,
+      onSpawn,
+    } as never)).rejects.toMatchObject({
+      code: PAPERCLIP_EXECUTION_TARGET_INVALID,
+      retryable: false,
+      needsHuman: true,
+    });
+
+    expect(assertPaperclipCallbackBridgeEnabled).not.toHaveBeenCalled();
+    expect(onLog).not.toHaveBeenCalled();
+    expect(onMeta).not.toHaveBeenCalled();
+    expect(onEvent).not.toHaveBeenCalled();
+    expect(onSpawn).not.toHaveBeenCalled();
+    await expect(access(sideEffectPath)).rejects.toMatchObject({ code: "ENOENT" });
+    expect(ensureCommandResolvable).not.toHaveBeenCalled();
+    expect(resolveCommandForLogs).not.toHaveBeenCalled();
+    expect(runChildProcess).not.toHaveBeenCalled();
+    expect(prepareWorkspaceForSshExecution).not.toHaveBeenCalled();
+    expect(restoreWorkspaceFromSshExecution).not.toHaveBeenCalled();
+    expect(runSshCommand).not.toHaveBeenCalled();
+    expect(syncDirectoryToSsh).not.toHaveBeenCalled();
+    expect(startAdapterExecutionTargetPaperclipBridge).not.toHaveBeenCalled();
+  });
+
+  it("leaves explicit local execution unaffected by the remote callback gate", async () => {
+    const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-codex-local-gate-"));
+    cleanupDirs.push(rootDir);
+    const workspaceDir = path.join(rootDir, "workspace");
+    await mkdir(workspaceDir, { recursive: true });
+    assertPaperclipCallbackBridgeEnabled.mockImplementation(() => {
+      throw Object.assign(new Error("unexpected remote gate"), {
+        code: PAPERCLIP_CALLBACK_BRIDGE_DISABLED,
+      });
+    });
+    try {
+      await expect(execute({
+        runId: "run-local-gate",
+        agent: { id: "agent-1", companyId: "company-1", name: "Codex", adapterType: "codex_local", adapterConfig: {} },
+        runtime: { sessionId: null, sessionParams: null, sessionDisplayId: null, taskKey: null },
+        config: { engine: "cli", command: "codex" },
+        context: { paperclipWorkspace: { cwd: workspaceDir, source: "project_primary" } },
+        executionTarget: { kind: "local" },
+        onLog: async () => undefined,
+      } as never)).resolves.toHaveProperty("exitCode");
+      expect(assertPaperclipCallbackBridgeEnabled).not.toHaveBeenCalled();
+      expect(runChildProcess).toHaveBeenCalled();
+    } finally {
+      assertPaperclipCallbackBridgeEnabled.mockImplementation(() => undefined);
     }
   });
 

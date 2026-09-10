@@ -28,6 +28,13 @@ export {
   type WindowsTestProcessIdentity,
 } from "./test-windows-process-tree.js";
 export {
+  acquireWindowsTestJobCustody,
+  shutdownWindowsTestJobWardenForTests,
+  type WindowsJobObjectTerminationReceipt,
+  type WindowsTestJobCustody,
+  type WindowsTestJobCustodyTerminationResult,
+} from "./windows-test-job-warden.js";
+export {
   runDatabaseBackup,
   runDatabaseRestore,
   formatDatabaseBackupResult,

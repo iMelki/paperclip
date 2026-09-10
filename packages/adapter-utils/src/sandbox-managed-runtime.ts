@@ -6,7 +6,6 @@ import path from "node:path";
 import { promisify } from "node:util";
 import {
   buildRemoteGitDeltaBundleScript,
-  isMissingGitPrerequisiteError,
   createImportedGitRef,
   createRemoteGitExportRef,
   deleteLocalGitRef,
@@ -27,10 +26,11 @@ import {
   type RuntimeStatusSink,
 } from "./runtime-progress.js";
 import { isRelativePathOrDescendant, shouldExcludePath } from "./exclude-patterns.js";
-import type { RuntimeSpanRunner } from "./acpx-engine/startup-timing.js";
 import {
   dirnamePortablePath,
   isWindowsAbsolutePath,
+  joinPortablePath,
+  shellQuote,
   shellQuotePath,
 } from "./shell-path.js";
 
@@ -63,12 +63,10 @@ export interface SandboxRemoteExecutionSpec {
 }
 
 /**
- * Remote paths handed to an asset's `provision.postUploadCommand`.
- * `assetTarPath` is the uploaded asset tarball, `assetDir` is where the asset
- * should be materialized, and `runtimeRootDir` is the directory any
- * `stageFiles` were written into. Production sandboxes normally provide POSIX
- * paths, but host-native test/runtime providers may supply Windows paths; use
- * {@link quoteSandboxProvisionPath} for every path embedded in a command.
+ * Remote paths handed to an asset's `provision.postUploadCommand`. All are POSIX
+ * paths inside the sandbox: `assetTarPath` is the uploaded asset tarball,
+ * `assetDir` is where the asset should be materialized, and `runtimeRootDir`
+ * is the directory any `stageFiles` were written into.
  */
 export interface SandboxManagedRuntimeAssetProvisionContext {
   assetTarPath: string;
@@ -101,8 +99,7 @@ export interface SandboxManagedRuntimeAssetProvision {
    * uploaded asset tar into `assetDir`, run as the operation's ordered
    * post-upload command after every mapping has landed. Defaults to a plain
    * destroy-then-replace `tar -xf` extraction when omitted. Any path embedded in
-   * the command MUST be built from already-confined paths and shell-quoted with
-   * {@link quoteSandboxProvisionPath} (C3).
+   * the command MUST be built from already-confined paths and shell-quoted (C3).
    */
   postUploadCommand?: (ctx: SandboxManagedRuntimeAssetProvisionContext) => string;
 }
@@ -132,22 +129,6 @@ export interface SandboxManagedRuntimeAsset {
 }
 
 /**
- * A referenced (additional) project to stage into the run sandbox as a plain,
- * read-only tree. `localPath` is the host checkout directory. Upstream code
- * already authorized and realized this directory (`project:read`); this layer
- * adds no authorization logic. `projectId` names the isolated remote
- * subdirectory (`project-<projectId>` under the runtime root) the tree lands in.
- *
- * Additional sources are plain trees only. They never carry the anchor
- * workspace's git-history, overlay, or `.paperclip-runtime` preservation
- * semantics — those stay anchor-only.
- */
-export interface SandboxAdditionalSource {
-  localPath: string;
-  projectId: string;
-}
-
-/**
  * Per-call byte-level progress hook. `transferredBytes`/`totalBytes` are decoded
  * file bytes (not the base64 wire size). `totalBytes` is null when the size is
  * not known up front. The transport is the source of truth for byte counts; the
@@ -171,24 +152,6 @@ export interface SandboxSyncFileMapping {
   mode?: number;
   exclude?: string[];
   followSymlinks?: boolean;
-  /**
-   * Advisory read-write intent for the sandbox target. `"rw"` marks a target the
-   * agent may change and keep; `"ro"` marks a read-only tree. An absent value
-   * defaults to `"ro"` (read-only is the safe default for an advisory signal).
-   * The field is advisory metadata for an optional sandbox feedback wrapper. It
-   * does not change the transfer and adds no security.
-   */
-  access?: "rw" | "ro";
-  /**
-   * The sandbox directory that becomes read-write when `access` is `"rw"` and a
-   * post-upload command extracts `targetPath` into a different directory. A tar
-   * mapping uploads an archive under the runtime root, so its `targetPath` is the
-   * staging archive, not the directory the extract command fills. This field
-   * names that final destination directory. When absent, the read-write
-   * destination is the parent directory of `targetPath`. Advisory; ignored when
-   * `access` is not `"rw"`.
-   */
-  writablePath?: string;
 }
 
 /**
@@ -263,33 +226,42 @@ export interface SandboxManagedRuntimeClient {
   syncOut?(operations: SandboxSyncOperation[]): Promise<SandboxSyncResult>;
 }
 
+function isConfinedAbsolutePath(candidate: string, allowedRoots: string[]): boolean {
+  const candidateUsesWindowsPaths = isWindowsAbsolutePath(candidate);
+  const pathApi = candidateUsesWindowsPaths ? path.win32 : path.posix;
+  if (!pathApi.isAbsolute(candidate)) return false;
+
+  const normalizedCandidate = pathApi.normalize(candidate);
+  return allowedRoots.some((root) => {
+    if (isWindowsAbsolutePath(root) !== candidateUsesWindowsPaths || !pathApi.isAbsolute(root)) {
+      return false;
+    }
+    const normalizedRoot = pathApi.normalize(root);
+    const relative = pathApi.relative(normalizedRoot, normalizedCandidate);
+    return relative === "" || (
+      relative !== ".." &&
+      !relative.startsWith(`..${pathApi.sep}`) &&
+      !pathApi.isAbsolute(relative)
+    );
+  });
+}
+
 /**
  * Host-side complete-mediation guard for native sync operations. The orchestrator
  * authors every `targetPath`, but the native transport crosses the host↔sandbox
  * trust boundary, so we canonicalize and confine each mapping's source and target
  * to an orchestrator-owned root before handing the operation to a provider.
- * Absolute escapes and `..` traversal are rejected fail-closed. Sandbox and host
- * paths on the server are POSIX.
+ * Absolute escapes and `..` traversal are rejected fail-closed. Host paths retain
+ * their native Windows or POSIX syntax; sandbox paths support either syntax so a
+ * local Windows provider can be exercised without weakening confinement.
  */
 export function assertSyncOperationsConfined(
   operations: SandboxSyncOperation[],
   roots: { sourceRoots: string[]; targetRoots: string[] },
 ): void {
   const confine = (candidate: string, allowed: string[], label: string): void => {
-    const windowsPaths = isWindowsAbsolutePath(candidate) || allowed.some(isWindowsAbsolutePath);
-    const pathApi = windowsPaths ? path.win32 : path.posix;
-    const normalized = pathApi.normalize(candidate);
-    if (!pathApi.isAbsolute(normalized) || normalized === ".." || normalized.includes(windowsPaths ? "\\..\\" : "/../") || normalized.endsWith(windowsPaths ? "\\.." : "/..")) {
+    if (!isConfinedAbsolutePath(candidate, allowed)) {
       throw new Error(`sync operation ${label} path is not a confined absolute path: ${candidate}`);
-    }
-    const within = allowed.some((root) => {
-      const normalizedRoot = pathApi.normalize(root);
-      const separator = windowsPaths ? "\\" : "/";
-      const prefix = normalizedRoot.endsWith(separator) ? normalizedRoot : `${normalizedRoot}${separator}`;
-      return normalized === normalizedRoot || normalized.startsWith(prefix);
-    });
-    if (!within) {
-      throw new Error(`sync operation ${label} path escapes its confinement root: ${candidate}`);
     }
   };
   for (const operation of operations) {
@@ -306,28 +278,7 @@ export interface PreparedSandboxManagedRuntime {
   workspaceRemoteDir: string;
   runtimeRootDir: string;
   assetDirs: Record<string, string>;
-  /**
-   * Remote directory of each additional (referenced) project that staged
-   * successfully, keyed by `projectId`. A project whose staging failed is
-   * absent (per-project failure isolation). Empty when no additional sources
-   * were requested.
-   */
-  additionalSourceDirs: Record<string, string>;
-  /**
-   * Each additional (referenced) project whose staging failed, paired with the
-   * failure message. Per-project failure isolation keeps one project's failure
-   * from aborting the run, so a failed project is absent from
-   * `additionalSourceDirs` and present here. Empty when every requested project
-   * staged, or when no additional sources were requested.
-   */
-  additionalSourceFailures: AdditionalSourceStagingFailure[];
   restoreWorkspace(onProgress?: RuntimeProgressSink): Promise<void>;
-}
-
-/** One additional (referenced) project that failed to stage into the sandbox. */
-export interface AdditionalSourceStagingFailure {
-  projectId: string;
-  error: string;
 }
 
 function asObject(value: unknown): Record<string, unknown> {
@@ -344,27 +295,14 @@ function asNumber(value: unknown): number {
   return typeof value === "number" ? value : Number(value);
 }
 
-function shellQuote(value: string) {
-  // Remote commands execute inside a POSIX shell even when the host is
-  // Windows. Convert drive-letter paths before quoting so `C:\\tmp\\x` is
-  // treated as `/c/tmp/x`, never as a tar host selector.
-  return shellQuotePath(value);
-}
-
-export function quoteSandboxProvisionPath(value: string): string {
-  return shellQuotePath(value);
-}
-
-export function buildSandboxRuntimeAssetExtractCommand(input: {
-  assetDir: string;
-  assetTarPath: string;
+function buildDefaultExtractRuntimeAssetCommand(input: {
+  remoteAssetDir: string;
+  remoteAssetTar: string;
 }): string {
-  const assetDir = quoteSandboxProvisionPath(input.assetDir);
-  const assetTarPath = quoteSandboxProvisionPath(input.assetTarPath);
-  return `rm -rf ${assetDir} && ` +
-    `mkdir -p ${assetDir} && ` +
-    `tar -xf ${assetTarPath} -C ${assetDir} && ` +
-    `rm -f ${assetTarPath}`;
+  return `rm -rf ${shellQuotePath(input.remoteAssetDir)} && ` +
+    `mkdir -p ${shellQuotePath(input.remoteAssetDir)} && ` +
+    `tar -xf ${shellQuotePath(input.remoteAssetTar)} -C ${shellQuotePath(input.remoteAssetDir)} && ` +
+    `rm -f ${shellQuotePath(input.remoteAssetTar)}`;
 }
 
 // Named builder (Security Condition C3): extract an uploaded workspace tarball
@@ -379,13 +317,13 @@ function buildWorkspaceTarExtractCommand(input: {
   wipeExceptNames: string[] | null;
 }): string {
   const wipe = input.wipeExceptNames
-    ? ` && find ${shellQuote(input.workspaceRemoteDir)} -mindepth 1 -maxdepth 1 ` +
+    ? ` && find ${shellQuotePath(input.workspaceRemoteDir)} -mindepth 1 -maxdepth 1 ` +
       `${preserveFindArgs(input.wipeExceptNames)} -exec rm -rf -- {} +`
     : "";
   return (
-    `mkdir -p ${shellQuote(input.workspaceRemoteDir)}${wipe} && ` +
-    `tar -xf ${shellQuote(input.remoteTar)} -C ${shellQuote(input.workspaceRemoteDir)} && ` +
-    `rm -f ${shellQuote(input.remoteTar)}`
+    `mkdir -p ${shellQuotePath(input.workspaceRemoteDir)}${wipe} && ` +
+    `tar -xf ${shellQuotePath(input.remoteTar)} -C ${shellQuotePath(input.workspaceRemoteDir)} && ` +
+    `rm -f ${shellQuotePath(input.remoteTar)}`
   );
 }
 
@@ -396,8 +334,8 @@ function buildRemoveDeletedPathsCommand(input: {
   remoteDir: string;
   deletedPaths: string[];
 }): string {
-  const quotedPaths = input.deletedPaths.map((entry) => shellQuote(entry)).join(" ");
-  return `cd ${shellQuote(input.remoteDir)} && rm -rf -- ${quotedPaths}`;
+  const quotedPaths = input.deletedPaths.map((entry) => shellQuotePath(entry)).join(" ");
+  return `cd ${shellQuotePath(input.remoteDir)} && rm -rf -- ${quotedPaths}`;
 }
 
 function buildUniqueStagingPath(input: { targetPath: string; suffix: string }): string {
@@ -464,27 +402,19 @@ async function withTempDir<T>(prefix: string, fn: (dir: string) => Promise<T>): 
   }
 }
 
-export function resolveHostTarCommand(
-  {
-    platform = process.platform,
-    systemRoot = process.env.SystemRoot ?? process.env.WINDIR ?? "C:\\Windows",
-  }: {
-    platform?: NodeJS.Platform;
-    systemRoot?: string;
-  } = {},
-): string {
-  if (platform !== "win32") return "tar";
-  if (!path.win32.isAbsolute(systemRoot)) {
-    throw new Error(`Windows SystemRoot must be absolute to resolve host tar: "${systemRoot}"`);
+async function execTar(args: string[], options: { cwd?: string } = {}): Promise<void> {
+  let tarCommand = "tar";
+  if (process.platform === "win32") {
+    const nativeTar = path.join(process.env.SystemRoot ?? "C:\\Windows", "System32", "tar.exe");
+    try {
+      await fs.access(nativeTar);
+      tarCommand = nativeTar;
+    } catch {
+      // Older Windows hosts may not provide the inbox bsdtar executable.
+    }
   }
-  // Husky launches through Git for Windows, whose /usr/bin/tar shadows the
-  // native bsdtar and interprets `C:\\...` archive paths as `host:path` remote
-  // archives. Bind Windows archive work to the host OS binary instead of PATH.
-  return path.win32.join(systemRoot, "System32", "tar.exe");
-}
-
-async function execTar(args: string[]): Promise<void> {
-  await execFile(resolveHostTarCommand(), args, {
+  await execFile(tarCommand, args, {
+    cwd: options.cwd,
     env: {
       ...process.env,
       COPYFILE_DISABLE: "1",
@@ -516,6 +446,8 @@ export async function createTarballFromDirectory(input: {
     await fs.writeFile(input.archivePath, Buffer.alloc(1024));
     return;
   }
+  const archiveDir = path.dirname(input.archivePath);
+  const archiveName = path.basename(input.archivePath);
   await execTar([
     "-c",
     // Prevent macOS bsdtar from embedding LIBARCHIVE.xattr.* PAX extended
@@ -527,13 +459,13 @@ export async function createTarballFromDirectory(input: {
     "--no-xattrs",
     ...(input.followSymlinks ? ["-h"] : []),
     "-f",
-    input.archivePath,
+    archiveName,
     "-C",
     input.localDir,
     ...excludeArgs,
     "--",
     ...entries,
-  ]);
+  ], { cwd: archiveDir });
 }
 
 async function extractTarballToDirectory(input: {
@@ -541,7 +473,9 @@ async function extractTarballToDirectory(input: {
   localDir: string;
 }): Promise<void> {
   await fs.mkdir(input.localDir, { recursive: true });
-  await execTar(["-xf", input.archivePath, "-C", input.localDir]);
+  const archiveDir = path.dirname(input.archivePath);
+  const archiveName = path.basename(input.archivePath);
+  await execTar(["-xf", archiveName, "-C", input.localDir], { cwd: archiveDir });
 }
 
 async function walkDirectory(root: string, relative = ""): Promise<string[]> {
@@ -648,7 +582,7 @@ function createRemoteTarballFromDirectoryCommand(input: {
   // does not include a "." self-entry that it later tries to chmod/utime.
   return [
     `mkdir -p ${shellQuotePath(dirnamePortablePath(input.archivePath))}`,
-    `cd ${shellQuote(input.remoteDir)}`,
+    `cd ${shellQuotePath(input.remoteDir)}`,
     "set -- *",
     `if [ "$#" -eq 1 ] && [ "$1" = "*" ] && [ ! -e "$1" ] && [ ! -L "$1" ]; then set --; fi`,
     `for entry in .[!.]* ..?*; do [ -e "$entry" ] || [ -L "$entry" ] || continue; set -- "$@" "$entry"; done`,
@@ -733,25 +667,13 @@ export async function prepareSandboxManagedRuntime(input: {
   workspaceExclude?: string[];
   preserveAbsentOnRestore?: string[];
   assets?: SandboxManagedRuntimeAsset[];
-  /**
-   * Referenced (additional) projects to stage into the sandbox as plain,
-   * read-only trees, each in its own isolated `project-<projectId>` directory.
-   * Defaults to none, so a legacy/anchor-only call is behavior-identical.
-   */
-  additionalSources?: SandboxAdditionalSource[];
   // Upload progress sink. Threaded for the byte-counting transport rewrite; the
   // child task wires it into writeFile/readFile.
   onProgress?: RuntimeProgressSink;
   onRuntimeProgress?: RuntimeStatusSink;
-  // Optional host span runner for the workspace tarball build. When present, the
-  // host builds both workspace tarballs inside one span named `pack`, so the
-  // host pack time is visible under the `stage.sync` step. The default is a
-  // no-op that keeps the current behavior and control flow. A throwing runner
-  // never changes control flow (see `createRuntimeSpanRunner`).
-  runtimeSpan?: RuntimeSpanRunner;
 }): Promise<PreparedSandboxManagedRuntime> {
   const workspaceRemoteDir = input.workspaceRemoteDir ?? input.spec.remoteCwd;
-  const runtimeRootDir = path.posix.join(workspaceRemoteDir, ".paperclip-runtime", input.adapterKey);
+  const runtimeRootDir = joinPortablePath(workspaceRemoteDir, ".paperclip-runtime", input.adapterKey);
   const syncWorkspace = input.syncWorkspace !== false;
   const gitSnapshot = syncWorkspace ? await readGitWorkspaceSnapshot(input.workspaceLocalDir) : null;
   const gitIgnoredExcludes = gitSnapshot?.ignoredPaths;
@@ -794,18 +716,6 @@ export async function prepareSandboxManagedRuntime(input: {
   // Opaque, ordered, non-sensitive operation tokens — never a caller/asset id.
   const nextSyncOperationId = () => `sync-op-${++syncOperationSeq}`;
 
-  // Remote directory of each additional (referenced) project that stages
-  // successfully, keyed by projectId. A project that fails to stage is absent.
-  const additionalSourceDirs: Record<string, string> = {};
-  // Each additional (referenced) project whose staging failed, paired with the
-  // failure message. Per-project failure isolation keeps the run and the other
-  // projects going; this list makes each failure a first-class, reported outcome.
-  const additionalSourceFailures: AdditionalSourceStagingFailure[] = [];
-  // Additional projects stage as plain trees. Drop the heavy build/cache dirs a
-  // reference tree does not need, and `.git` — additional sources never carry
-  // git-history semantics (anchor-only).
-  const additionalSourceExclude = mergeExcludes(SANDBOX_WORKSPACE_HEAVY_DIR_EXCLUDES, [".git"]);
-
   // Every delegated post-upload command (extract/wipe/remove-deleted/asset merge)
   // must run under the run-specific timeout (`spec.timeoutMs`), not the provider
   // sync client's default timeout — the two can differ, and before staging was
@@ -829,155 +739,118 @@ export async function prepareSandboxManagedRuntime(input: {
       ...(input.preserveAbsentOnRestore ?? []),
     ]);
 
-    // Stage one source directory into an isolated remote subdirectory through the
-    // unified `syncIn` seam. Both the workspace/asset tar path and the additional
-    // (referenced) project path use it: build one `SandboxSyncOperation` from the
-    // caller's `files` mappings (a host tarball as a single `file` mapping, or a
-    // whole `directory` mapping), carry any extract/wipe/merge steps as ordered
-    // `postUploadCommands`, confine the operation's source and target to their
-    // own roots (fail-closed), and delegate to `syncIn` (native transfer, or the
-    // base64-tar fallback). `finish` emits the terminal progress line.
-    const stageConfinedSyncIn = async (params: {
-      files: SandboxSyncFileMapping[];
-      postUploadCommands?: SandboxPostUploadCommand[];
-      sourceRoots: string[];
-      targetRoots: string[];
+    // Build one `SandboxSyncOperation` uploading a host tarball as a single file
+    // mapping (rides native `uploadFiles`, or the base64-tar fallback) with the
+    // extract/wipe/merge steps carried as ordered `postUploadCommands`, confine
+    // it, and delegate to `syncIn`. `finish` emits the terminal progress line.
+    const stageTarball = async (input2: {
+      tarPath: string;
+      remoteTar: string;
+      postUploadCommands: SandboxPostUploadCommand[];
       progressLabel: string;
       statusPhase: RuntimeStatusPhase;
-      progressBytes: number;
     }): Promise<void> => {
+      const tarSize = (await fs.stat(input2.tarPath)).size;
       const operations: SandboxSyncOperation[] = [{
         operationId: nextSyncOperationId(),
-        files: params.files,
-        ...(params.postUploadCommands
-          ? { postUploadCommands: withRunTimeout(params.postUploadCommands) }
-          : {}),
+        files: [{ sourcePath: input2.tarPath, targetPath: input2.remoteTar, kind: "file" }],
+        postUploadCommands: withRunTimeout(input2.postUploadCommands),
       }];
       assertSyncOperationsConfined(operations, {
-        sourceRoots: params.sourceRoots,
-        targetRoots: params.targetRoots,
+        sourceRoots: [tempDir],
+        targetRoots: [runtimeRootDir],
       });
       const upload = makeTransferProgress(
         input.onProgress,
         "Syncing",
         "to",
-        params.progressLabel,
-        { sink: input.onRuntimeProgress, phase: params.statusPhase },
+        input2.progressLabel,
+        { sink: input.onRuntimeProgress, phase: input2.statusPhase },
       );
       await syncIn(operations);
-      await upload.finish(params.progressBytes, params.progressBytes);
+      await upload.finish(tarSize, tarSize);
     };
 
-    if (syncWorkspace) {
-      // A git-backed workspace and a plain workspace both stage through ONE
-      // confined `syncIn` operation. A git-backed workspace carries TWO host tars —
-      // the git-history clone and the working-tree overlay — as two `file` mappings
-      // on the SAME operation, with their extract commands as ordered
-      // `postUploadCommands`. One operation shares one mkdir, one confine guard, one
-      // `uploadFiles`, and one rename exec, so the second `syncIn` round trip is
-      // removed. Build the whole merged file set and command list BEFORE the confine
-      // guard runs (inside `stageConfinedSyncIn`); never append a mapping after it.
-      const workspaceFiles: SandboxSyncFileMapping[] = [];
-      const workspacePostUploadCommands: SandboxPostUploadCommand[] = [];
-      let workspaceUploadBytes = 0;
-
-      // Build both host tarballs (the git-history tar and the workspace-overlay
-      // tar) inside one host span named `pack`. This span makes the host pack
-      // time visible under the `stage.sync` step, where it is otherwise a hidden
-      // gap with no span. The transfer (`stageConfinedSyncIn`) runs after this
-      // span, so `pack` measures only the host tar-build cost. The runner
-      // defaults to a no-op, so a caller with no injected runner keeps the
-      // current behavior and control flow.
-      const runPackSpan = <T>(work: () => Promise<T>): Promise<T> =>
-        input.runtimeSpan ? input.runtimeSpan("pack", work) : work();
-      await runPackSpan(async () => {
-        // 1. git-history tar (git-backed workspace only). Both tar targets live under
-        //    `runtimeRootDir` (`.paperclip-runtime/<adapterKey>`). The git extract
-        //    wipes the target tree EXCEPT `.paperclip-runtime`, so the overlay tar,
-        //    which sits under `.paperclip-runtime`, survives to run its own extract.
-        if (gitSnapshot) {
-          await emitRuntimeStatus(input.onRuntimeProgress, "git_sync", "Syncing git history to sandbox");
-          const gitTarPath = path.join(tempDir, "git-workspace.tar");
-          const remoteGitTar = path.posix.join(runtimeRootDir, "git-workspace-upload.tar");
-          await withShallowGitWorkspaceClone({
-            localDir: input.workspaceLocalDir,
-            snapshot: gitSnapshot,
-          }, async (cloneDir) => {
-            await createTarballFromDirectory({
-              localDir: cloneDir,
-              archivePath: gitTarPath,
-              exclude: [".paperclip-runtime"],
-            });
-          });
-          workspaceFiles.push({ sourcePath: gitTarPath, targetPath: remoteGitTar, kind: "file", access: "rw", writablePath: workspaceRemoteDir });
-          workspacePostUploadCommands.push({
+    if (syncWorkspace && gitSnapshot) {
+      await emitRuntimeStatus(input.onRuntimeProgress, "git_sync", "Syncing git history to sandbox");
+      await withShallowGitWorkspaceClone({
+        localDir: input.workspaceLocalDir,
+        snapshot: gitSnapshot,
+      }, async (cloneDir) => {
+        // git-workspace preserves `.paperclip-runtime` on the target and the
+        // workspace overlay merges on top rather than replacing — expressed as
+        // the operation's ordered post-upload commands, not a plain replace.
+        const gitTarPath = path.join(tempDir, "git-workspace.tar");
+        await createTarballFromDirectory({
+          localDir: cloneDir,
+          archivePath: gitTarPath,
+          exclude: [".paperclip-runtime"],
+        });
+        const remoteGitTar = joinPortablePath(runtimeRootDir, "git-workspace-upload.tar");
+        await stageTarball({
+          tarPath: gitTarPath,
+          remoteTar: remoteGitTar,
+          postUploadCommands: [{
             command: buildWorkspaceTarExtractCommand({
               workspaceRemoteDir,
               remoteTar: remoteGitTar,
               wipeExceptNames: [".paperclip-runtime"],
             }),
-          });
-          workspaceUploadBytes += (await fs.stat(gitTarPath)).size;
-        }
-
-        // 2. workspace-overlay tar. A git-backed overlay merges on top of the just
-        //    extracted git tree (no wipe); a plain workspace wipes every child except
-        //    the preserved names first. The extract runs AFTER the git extract.
-        await emitRuntimeStatus(input.onRuntimeProgress, "config_sync", "Syncing workspace to sandbox");
-        const workspaceTarPath = path.join(tempDir, "workspace.tar");
-        const workspaceArchiveDir = gitSnapshot ? path.join(tempDir, "workspace-overlay") : input.workspaceLocalDir;
-        if (gitSnapshot) {
-          await copySelectedWorkspaceEntries({
-            sourceDir: input.workspaceLocalDir,
-            targetDir: workspaceArchiveDir,
-            relativePaths: gitSnapshot.overlayPaths,
-            exclude: workspaceArchiveExclude,
-          });
-        }
-        await createTarballFromDirectory({
-          localDir: workspaceArchiveDir,
-          archivePath: workspaceTarPath,
-          exclude: gitSnapshot ? undefined : workspaceArchiveExclude,
+          }],
+          progressLabel: "git history",
+          statusPhase: "git_sync",
         });
-        const remoteWorkspaceTar = path.posix.join(runtimeRootDir, "workspace-upload.tar");
-        workspaceFiles.push({ sourcePath: workspaceTarPath, targetPath: remoteWorkspaceTar, kind: "file", access: "rw", writablePath: workspaceRemoteDir });
+      });
+    }
+
+    if (syncWorkspace) {
+      const workspaceTarPath = path.join(tempDir, "workspace.tar");
+      const workspaceArchiveDir = gitSnapshot ? path.join(tempDir, "workspace-overlay") : input.workspaceLocalDir;
+      await emitRuntimeStatus(input.onRuntimeProgress, "config_sync", "Syncing workspace to sandbox");
+      if (gitSnapshot) {
+        await copySelectedWorkspaceEntries({
+          sourceDir: input.workspaceLocalDir,
+          targetDir: workspaceArchiveDir,
+          relativePaths: gitSnapshot.overlayPaths,
+          exclude: workspaceArchiveExclude,
+        });
+      }
+      await createTarballFromDirectory({
+        localDir: workspaceArchiveDir,
+        archivePath: workspaceTarPath,
+        exclude: gitSnapshot ? undefined : workspaceArchiveExclude,
+      });
+      const remoteWorkspaceTar = joinPortablePath(runtimeRootDir, "workspace-upload.tar");
+      // git overlay merges on top of the just-extracted git tree (no wipe);
+      // non-git workspace wipes every child except the preserved names first.
+      const workspacePostUploadCommands: SandboxPostUploadCommand[] = [{
+        command: buildWorkspaceTarExtractCommand({
+          workspaceRemoteDir,
+          remoteTar: remoteWorkspaceTar,
+          wipeExceptNames: gitSnapshot ? null : [...preservedNames],
+        }),
+      }];
+      if (gitSnapshot && gitSnapshot.deletedPaths.length > 0) {
         workspacePostUploadCommands.push({
-          command: buildWorkspaceTarExtractCommand({
-            workspaceRemoteDir,
-            remoteTar: remoteWorkspaceTar,
-            wipeExceptNames: gitSnapshot ? null : [...preservedNames],
+          command: buildRemoveDeletedPathsCommand({
+            remoteDir: workspaceRemoteDir,
+            deletedPaths: gitSnapshot.deletedPaths,
           }),
         });
-        // 3. Optional remove-deleted-paths command runs LAST, after both extracts.
-        if (gitSnapshot && gitSnapshot.deletedPaths.length > 0) {
-          workspacePostUploadCommands.push({
-            command: buildRemoveDeletedPathsCommand({
-              remoteDir: workspaceRemoteDir,
-              deletedPaths: gitSnapshot.deletedPaths,
-            }),
-          });
-        }
-        workspaceUploadBytes += (await fs.stat(workspaceTarPath)).size;
-      });
-
-      // One confined `syncIn` for the whole merged workspace file set. The confine
-      // guard covers every mapping BEFORE any bytes upload (fail-closed): a source
-      // or target escape in EITHER tar mapping stops the upload of both.
-      await stageConfinedSyncIn({
-        files: workspaceFiles,
+      }
+      await stageTarball({
+        tarPath: workspaceTarPath,
+        remoteTar: remoteWorkspaceTar,
         postUploadCommands: workspacePostUploadCommands,
-        sourceRoots: [tempDir],
-        targetRoots: [runtimeRootDir],
         progressLabel: "workspace",
         statusPhase: "config_sync",
-        progressBytes: workspaceUploadBytes,
       });
     }
 
     for (const asset of input.assets ?? []) {
       await emitRuntimeStatus(input.onRuntimeProgress, "config_sync", "Syncing runtime assets to sandbox");
-      const remoteAssetDir = path.posix.join(runtimeRootDir, asset.key);
-      const remoteAssetTar = path.posix.join(runtimeRootDir, `${asset.key}-upload.tar`);
+      const remoteAssetDir = joinPortablePath(runtimeRootDir, asset.key);
+      const remoteAssetTar = joinPortablePath(runtimeRootDir, `${asset.key}-upload.tar`);
       // Every asset — default OR custom-provisioned (e.g. an adapter credential
       // merge) — rides one `syncIn` operation: the asset tar plus any staged
       // helper files as `files` mappings, and the extract/merge command as the
@@ -992,7 +865,7 @@ export async function prepareSandboxManagedRuntime(input: {
         exclude: asset.exclude,
       });
       const files: SandboxSyncFileMapping[] = [
-        { sourcePath: assetTarPath, targetPath: remoteAssetTar, kind: "file", access: "rw", writablePath: remoteAssetDir },
+        { sourcePath: assetTarPath, targetPath: remoteAssetTar, kind: "file" },
       ];
       // Stage provision helper files (e.g. the merge scripts) into the temp dir
       // and map them alongside the asset tar so they ride the same native upload.
@@ -1006,91 +879,41 @@ export async function prepareSandboxManagedRuntime(input: {
           : stageFile.contents;
         const stageHostPath = path.join(tempDir, `${asset.key}.stage.${safeName}`);
         await fs.writeFile(stageHostPath, stageBytes);
-        // A stage helper file (for example a merge script) is a read-only input
-        // that the provision command reads; the agent does not change it and does
-        // not keep it. So it is `access: "ro"` and never joins the writable set.
         files.push({
           sourcePath: stageHostPath,
-          targetPath: path.posix.join(runtimeRootDir, safeName),
+          targetPath: joinPortablePath(runtimeRootDir, safeName),
           kind: "file",
-          access: "ro",
         });
       }
       const postUploadCommand = asset.provision?.postUploadCommand?.({
         assetTarPath: remoteAssetTar,
         assetDir: remoteAssetDir,
         runtimeRootDir,
-      }) ?? buildSandboxRuntimeAssetExtractCommand({
-        assetDir: remoteAssetDir,
-        assetTarPath: remoteAssetTar,
-      });
-      const assetTarSize = (await fs.stat(assetTarPath)).size;
-      await stageConfinedSyncIn({
+      }) ?? buildDefaultExtractRuntimeAssetCommand({ remoteAssetDir, remoteAssetTar });
+      const operations: SandboxSyncOperation[] = [{
+        operationId: nextSyncOperationId(),
         files,
-        postUploadCommands: [{ command: postUploadCommand }],
+        postUploadCommands: withRunTimeout([{ command: postUploadCommand }]),
+      }];
+      assertSyncOperationsConfined(operations, {
         sourceRoots: [tempDir],
         targetRoots: [runtimeRootDir],
-        progressLabel: asset.key,
-        statusPhase: "config_sync",
-        progressBytes: assetTarSize,
       });
-    }
-
-    // Stage each referenced (additional) project as a plain, read-only tree in
-    // its OWN isolated remote directory (`project-<projectId>`). An additional
-    // project rides one confined `syncIn` directory mapping — a native directory
-    // transfer, or the base64-tar fallback — with source and target confined to
-    // their own roots. No workspace, git-history, or `.paperclip-runtime`
-    // semantics apply; those stay anchor-only. Per-project failure isolation: one
-    // project's confinement or sync failure logs a warning and is skipped, and
-    // the run plus the other projects continue. Only a project that stages
-    // successfully appears in `additionalSourceDirs`.
-    for (const source of input.additionalSources ?? []) {
-      const { localPath, projectId } = source;
-      const label = `project-${projectId}`;
-      try {
-        if (!path.posix.isAbsolute(localPath) && !isWindowsAbsolutePath(localPath)) {
-          throw new Error(`additional source localPath is not an absolute path: ${localPath}`);
-        }
-        if (
-          projectId.length === 0 ||
-          projectId.includes("/") ||
-          projectId.includes("\\") ||
-          projectId.includes("..")
-        ) {
-          throw new Error(`additional source projectId is not a simple path segment: ${projectId}`);
-        }
-        const remoteProjectDir = path.posix.join(runtimeRootDir, label);
-        await emitRuntimeStatus(input.onRuntimeProgress, "config_sync", "Syncing referenced project to sandbox");
-        await stageConfinedSyncIn({
-          files: [{
-            sourcePath: localPath,
-            targetPath: remoteProjectDir,
-            kind: "directory",
-            exclude: additionalSourceExclude,
-            access: "ro",
-          }],
-          sourceRoots: [localPath],
-          targetRoots: [remoteProjectDir],
-          progressLabel: label,
-          statusPhase: "config_sync",
-          progressBytes: 0,
-        });
-        additionalSourceDirs[projectId] = remoteProjectDir;
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        console.warn(
-          `[paperclip] Failed to stage referenced project ${projectId}; skipping it. ${message}`,
-        );
-        // Record the failure as a first-class per-project outcome so the run can count it in the
-        // requested-vs-synced accounting instead of losing it to a warning line.
-        additionalSourceFailures.push({ projectId, error: message });
-      }
+      const assetTarSize = (await fs.stat(assetTarPath)).size;
+      const assetUpload = makeTransferProgress(
+        input.onProgress,
+        "Syncing",
+        "to",
+        asset.key,
+        { sink: input.onRuntimeProgress, phase: "config_sync" },
+      );
+      await syncIn(operations);
+      await assetUpload.finish(assetTarSize, assetTarSize);
     }
   });
 
   const assetDirs = Object.fromEntries(
-    (input.assets ?? []).map((asset) => [asset.key, path.posix.join(runtimeRootDir, asset.key)]),
+    (input.assets ?? []).map((asset) => [asset.key, joinPortablePath(runtimeRootDir, asset.key)]),
   );
 
   return {
@@ -1099,15 +922,13 @@ export async function prepareSandboxManagedRuntime(input: {
     workspaceRemoteDir,
     runtimeRootDir,
     assetDirs,
-    additionalSourceDirs,
-    additionalSourceFailures,
     restoreWorkspace: async (onProgress?: RuntimeProgressSink) => {
       const restoreSink = onProgress ?? input.onProgress;
       if (!syncWorkspace) {
         for (const asset of input.assets ?? []) {
           if (!asset.restore) continue;
           await asset.restore({
-            assetDir: path.posix.join(runtimeRootDir, asset.key),
+            assetDir: joinPortablePath(runtimeRootDir, asset.key),
             readFile: async (remotePath) => toBuffer(await input.client.readFile(remotePath)),
           });
         }
@@ -1121,63 +942,44 @@ export async function prepareSandboxManagedRuntime(input: {
           if (gitSnapshot) {
             await emitRuntimeStatus(input.onRuntimeProgress, "export", "Exporting git changes from sandbox");
             importedRef = createImportedGitRef("sandbox");
-            const remoteGitBundle = path.posix.join(runtimeRootDir, "git-delta.bundle");
-            const remoteWorkspaceStatusPath = path.posix.join(runtimeRootDir, "workspace-status.txt");
+            const remoteGitBundle = joinPortablePath(runtimeRootDir, "git-delta.bundle");
+            const remoteWorkspaceStatusPath = joinPortablePath(runtimeRootDir, "workspace-status.txt");
             const exportRef = createRemoteGitExportRef("sandbox");
-            const localBundlePath = path.join(tempDir, "git-delta.bundle");
-
-            // Export the sandbox history and import it into the host workspace.
-            // The delta bundle assumes the host holds the bundle's boundary
-            // commit; when the host has been reset far enough that it does not,
-            // the import fails on a missing prerequisite. In that case re-export
-            // a full, self-contained bundle from the still-live sandbox rather
-            // than discard the completed run.
-            const exportAndImport = async (forceFullBundle: boolean): Promise<string> => {
-              await input.client.run(
-                `sh -c ${shellQuote(buildRemoteGitDeltaBundleScript({
-                  remoteDir: workspaceRemoteDir,
-                  baseSha: gitSnapshot.headCommit,
-                  exportRef,
-                  bundlePath: remoteGitBundle,
-                  statusPath: forceFullBundle ? undefined : remoteWorkspaceStatusPath,
-                  forceFullBundle,
-                }))}`,
-                { timeoutMs: input.spec.timeoutMs },
-              );
-              const gitExport = makeTransferProgress(
-                restoreSink,
-                "Exporting git history",
-                "from",
-                undefined,
-                { sink: input.onRuntimeProgress, phase: "export" },
-              );
-              const bundleBytes = await input.client.readFile(remoteGitBundle, gitExport.options);
-              const bundleBuffer = toBuffer(bundleBytes);
-              await gitExport.finish(bundleBuffer.byteLength, bundleBuffer.byteLength);
-              await input.client.remove(remoteGitBundle).catch(() => undefined);
-              if (!forceFullBundle) {
-                remoteWorkspaceStatus = await input.client.readFile(remoteWorkspaceStatusPath)
-                  .then((bytes) => toBuffer(bytes).toString("utf8").trim())
-                  .catch(() => "dirty");
-                remoteWorkspaceStatus = remoteWorkspaceStatus === "clean" ? "clean" : "dirty";
-                await input.client.remove(remoteWorkspaceStatusPath).catch(() => undefined);
-              }
-              await fs.writeFile(localBundlePath, bundleBuffer);
-              return fetchGitBundleIntoLocalRef({
-                localDir: input.workspaceLocalDir,
-                bundlePath: localBundlePath,
-                exportRef,
-                importedRef: importedRef!,
+            await input.client.run(
+              `sh -c ${shellQuote(buildRemoteGitDeltaBundleScript({
+                remoteDir: workspaceRemoteDir,
                 baseSha: gitSnapshot.headCommit,
-              });
-            };
-
-            try {
-              importedHead = await exportAndImport(false);
-            } catch (error) {
-              if (!isMissingGitPrerequisiteError(error)) throw error;
-              importedHead = await exportAndImport(true);
-            }
+                exportRef,
+                bundlePath: remoteGitBundle,
+                statusPath: remoteWorkspaceStatusPath,
+              }))}`,
+              { timeoutMs: input.spec.timeoutMs },
+            );
+            const gitExport = makeTransferProgress(
+              restoreSink,
+              "Exporting git history",
+              "from",
+              undefined,
+              { sink: input.onRuntimeProgress, phase: "export" },
+            );
+            const bundleBytes = await input.client.readFile(remoteGitBundle, gitExport.options);
+            const bundleBuffer = toBuffer(bundleBytes);
+            await gitExport.finish(bundleBuffer.byteLength, bundleBuffer.byteLength);
+            await input.client.remove(remoteGitBundle).catch(() => undefined);
+            remoteWorkspaceStatus = await input.client.readFile(remoteWorkspaceStatusPath)
+              .then((bytes) => toBuffer(bytes).toString("utf8").trim())
+              .catch(() => "dirty");
+            remoteWorkspaceStatus = remoteWorkspaceStatus === "clean" ? "clean" : "dirty";
+            await input.client.remove(remoteWorkspaceStatusPath).catch(() => undefined);
+            const bundlePath = path.join(tempDir, "git-delta.bundle");
+            await fs.writeFile(bundlePath, bundleBuffer);
+            importedHead = await fetchGitBundleIntoLocalRef({
+              localDir: input.workspaceLocalDir,
+              bundlePath,
+              exportRef,
+              importedRef,
+              baseSha: gitSnapshot.headCommit,
+            });
           }
 
           await emitRuntimeStatus(input.onRuntimeProgress, "restore", "Restoring workspace from sandbox");
@@ -1212,7 +1014,7 @@ export async function prepareSandboxManagedRuntime(input: {
             await input.client.syncOut!(operations);
             await workspaceRestore.finish(0, 0);
           } else {
-            const remoteWorkspaceTar = path.posix.join(runtimeRootDir, "workspace-download.tar");
+            const remoteWorkspaceTar = joinPortablePath(runtimeRootDir, "workspace-download.tar");
             await input.client.run(
               `sh -c ${shellQuote(createRemoteTarballFromDirectoryCommand({
                 remoteDir: workspaceRemoteDir,
@@ -1268,7 +1070,7 @@ export async function prepareSandboxManagedRuntime(input: {
           for (const asset of input.assets ?? []) {
             if (!asset.restore) continue;
             await asset.restore({
-              assetDir: path.posix.join(runtimeRootDir, asset.key),
+              assetDir: joinPortablePath(runtimeRootDir, asset.key),
               readFile: async (remotePath) => toBuffer(await input.client.readFile(remotePath)),
             });
           }

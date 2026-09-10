@@ -128,8 +128,11 @@ describe("same-machine MCP isolation", () => {
     const version = await commandVersion("claude");
     if (!version) return;
     const claudeVersionMatch = version.match(/^2\.1\.(\d+) \(Claude Code\)$/);
-    expect(claudeVersionMatch).not.toBeNull();
-    expect(Number(claudeVersionMatch?.[1])).toBeGreaterThanOrEqual(207);
+    const claudePatch = Number(claudeVersionMatch?.[1]);
+    if (!claudeVersionMatch || !Number.isFinite(claudePatch) || claudePatch < 207) {
+      console.warn(`Skipping strict Claude MCP isolation: Claude Code 2.1.207+ is required; found ${version}.`);
+      return;
+    }
 
     const root = await createMcpIsolationRoot("paperclip-claude-mcp-isolation-");
     cleanupRoots.push(root);

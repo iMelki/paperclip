@@ -51,7 +51,7 @@ export async function runLocalGit(
   return await new Promise<GitCommandResult>((resolve, reject) => {
     execFile(
       "git",
-      ["-C", localDir, ...args],
+      ["-c", "core.autocrlf=false", "-C", localDir, ...args],
       {
         env: isolatedGitEnv(),
         timeout: options.timeout ?? 15_000,

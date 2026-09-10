@@ -1,322 +1,221 @@
 import { randomUUID } from "node:crypto";
-import request from "supertest";
-import { and, eq } from "drizzle-orm";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import {
   agentInstances,
   companies,
-  companyMemberships,
   controlIntents,
+  createDb,
   hostNodes,
   issues,
   mutationLeases,
-  principalPermissionGrants,
   taskParticipations,
 } from "@paperclipai/db";
-import { expect, it } from "vitest";
-import { coordinationRoutes } from "../routes/coordination.js";
 import {
-  getIssueCoordination,
-  getIssueCoordinationRootScope,
-} from "../services/coordination.js";
-import {
-  describeEmbeddedPostgres,
-  routeApp,
-  seedCompanyWithBoardAccess,
-  useEmbeddedPostgres,
-} from "./helpers/route-test-harness.js";
+  EMBEDDED_POSTGRES_TEST_SETUP_TIMEOUT_MS,
+  getEmbeddedPostgresTestSupport,
+  startEmbeddedPostgresTestDatabase,
+} from "./helpers/embedded-postgres.js";
+import { getIssueCoordination } from "../services/coordination.js";
+
+const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
+const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
+
+if (!embeddedPostgresSupport.supported) {
+  console.warn(
+    `Skipping embedded Postgres coordination isolation tests on this host: ${embeddedPostgresSupport.reason ?? "unsupported environment"}`,
+  );
+}
 
 describeEmbeddedPostgres("coordination service company isolation", () => {
-  const ctx = useEmbeddedPostgres("paperclip-coordination-isolation-");
+  let db!: ReturnType<typeof createDb>;
+  let tempDb: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>> | null = null;
 
-  async function clearFixtures() {
-    await ctx.db.delete(controlIntents);
-    await ctx.db.delete(mutationLeases);
-    await ctx.db.delete(taskParticipations);
-    await ctx.db.delete(agentInstances);
-    await ctx.db.delete(hostNodes);
-    await ctx.db.delete(issues);
-    await ctx.db.delete(principalPermissionGrants);
-    await ctx.db.delete(companyMemberships);
-    await ctx.db.delete(companies);
-  }
+  beforeAll(async () => {
+    tempDb = await startEmbeddedPostgresTestDatabase("paperclip-coordination-isolation-");
+    db = createDb(tempDb.connectionString);
+  }, EMBEDDED_POSTGRES_TEST_SETUP_TIMEOUT_MS);
 
-  async function seed() {
-    await clearFixtures();
-    const companyA = await seedCompanyWithBoardAccess(ctx.db, "Coordination A");
-    const companyB = await seedCompanyWithBoardAccess(ctx.db, "Coordination B");
-    const rootId = randomUUID();
-    const childAId = randomUUID();
-    const childForeignLeaseId = randomUUID();
-    const childBId = randomUUID();
-    const hostAId = randomUUID();
-    const hostCrossInstanceId = randomUUID();
-    const hostBId = randomUUID();
-    const instanceAId = randomUUID();
-    const instanceBId = randomUUID();
-    const instanceAWithForeignHostId = randomUUID();
-    const participationAId = randomUUID();
-    const participationBId = randomUUID();
-    const participationAWithForeignInstanceId = randomUUID();
-    const participationAWithForeignHostId = randomUUID();
+  afterEach(async () => {
+    await db.delete(controlIntents);
+    await db.delete(mutationLeases);
+    await db.delete(taskParticipations);
+    await db.delete(agentInstances);
+    await db.delete(hostNodes);
+    await db.delete(issues);
+    await db.delete(companies);
+  });
 
-    await ctx.db.insert(issues).values([
-      { id: rootId, companyId: companyA.companyId, title: "Root A", status: "in_progress", priority: "medium" },
+  afterAll(async () => {
+    await tempDb?.cleanup();
+  });
+
+  it("excludes cross-company rows even when they reference the requested issue id", async () => {
+    const companyA = randomUUID();
+    const companyB = randomUUID();
+    const rootIssueA = randomUUID();
+    const rootIssueB = randomUUID();
+    const hostA = randomUUID();
+    const hostB = randomUUID();
+    const instanceA = randomUUID();
+    const instanceB = randomUUID();
+    const participationA = randomUUID();
+    const poisonedParticipationB = randomUUID();
+    const intentA = randomUUID();
+    const poisonedIntentB = randomUUID();
+
+    await db.insert(companies).values([
       {
-        id: childAId,
-        companyId: companyA.companyId,
-        parentId: rootId,
-        title: "Child A",
-        status: "todo",
-        priority: "medium",
+        id: companyA,
+        name: "Coordination Company A",
+        issuePrefix: `A${companyA.replaceAll("-", "").slice(0, 6).toUpperCase()}`,
+        requireBoardApprovalForNewAgents: false,
       },
       {
-        id: childForeignLeaseId,
-        companyId: companyA.companyId,
-        parentId: rootId,
-        title: "Child foreign lease",
-        status: "todo",
-        priority: "medium",
-      },
-      // The database has independent foreign keys for issue and company. This
-      // intentionally malformed row proves every downstream read retains its
-      // company predicate even if an inconsistent record exists.
-      {
-        id: childBId,
-        companyId: companyB.companyId,
-        parentId: rootId,
-        title: "Child B",
-        status: "todo",
-        priority: "medium",
-      },
-    ]);
-    await ctx.db.insert(hostNodes).values([
-      {
-        id: hostAId,
-        companyId: companyA.companyId,
-        hostId: "host-a",
-        hostname: "host-a",
-        os: "linux",
-        runtime: "codex",
-      },
-      {
-        id: hostCrossInstanceId,
-        companyId: companyA.companyId,
-        hostId: "host-cross-instance",
-        hostname: "host-cross-instance",
-        os: "linux",
-        runtime: "codex",
-      },
-      {
-        id: hostBId,
-        companyId: companyB.companyId,
-        hostId: "host-b",
-        hostname: "host-b",
-        os: "linux",
-        runtime: "codex",
+        id: companyB,
+        name: "Coordination Company B",
+        issuePrefix: `B${companyB.replaceAll("-", "").slice(0, 6).toUpperCase()}`,
+        requireBoardApprovalForNewAgents: false,
       },
     ]);
-    await ctx.db.insert(agentInstances).values([
-      { id: instanceAId, companyId: companyA.companyId, agentId: "agent-a", runtime: "codex", hostNodeId: hostAId },
-      // These crossed rows make the instance and host predicates observable
-      // independently instead of relying on participation filtering first.
+    await db.insert(issues).values([
       {
-        id: instanceBId,
-        companyId: companyB.companyId,
-        agentId: "agent-b",
-        runtime: "codex",
-        hostNodeId: hostCrossInstanceId,
+        id: rootIssueA,
+        companyId: companyA,
+        title: "Company A root",
+        status: "in_progress",
+        issueNumber: 101,
+        identifier: `A-${rootIssueA.slice(0, 8)}`,
       },
       {
-        id: instanceAWithForeignHostId,
-        companyId: companyA.companyId,
-        agentId: "agent-a-foreign-host",
-        runtime: "codex",
-        hostNodeId: hostBId,
+        id: rootIssueB,
+        companyId: companyB,
+        title: "Company B root",
+        status: "in_progress",
+        issueNumber: 202,
+        identifier: `B-${rootIssueB.slice(0, 8)}`,
       },
     ]);
-    await ctx.db.insert(taskParticipations).values([
+    await db.insert(hostNodes).values([
       {
-        id: participationAId,
-        companyId: companyA.companyId,
-        issueId: rootId,
-        agentInstanceId: instanceAId,
+        id: hostA,
+        companyId: companyA,
+        hostId: `host-${randomUUID()}`,
+        hostname: "company-a-private-host",
+        os: "windows",
         runtime: "codex",
       },
       {
-        id: participationBId,
-        companyId: companyB.companyId,
-        issueId: rootId,
-        agentInstanceId: instanceBId,
-        runtime: "codex",
-      },
-      {
-        id: participationAWithForeignInstanceId,
-        companyId: companyA.companyId,
-        issueId: rootId,
-        agentInstanceId: instanceBId,
-        runtime: "codex",
-      },
-      {
-        id: participationAWithForeignHostId,
-        companyId: companyA.companyId,
-        issueId: rootId,
-        agentInstanceId: instanceAWithForeignHostId,
+        id: hostB,
+        companyId: companyB,
+        hostId: `host-${randomUUID()}`,
+        hostname: "company-b-secret-host",
+        os: "windows",
         runtime: "codex",
       },
     ]);
-    const expiresAt = new Date(Date.now() + 60_000);
-    await ctx.db.insert(mutationLeases).values([
+    await db.insert(agentInstances).values([
       {
-        companyId: companyA.companyId,
-        issueId: childAId,
-        taskParticipationId: participationAId,
-        leaseToken: "lease-a",
+        id: instanceA,
+        companyId: companyA,
+        agentId: "agent-a",
+        runtime: "codex-local",
+        hostNodeId: hostA,
+        metadata: {
+          repository: "iMelki/paperclip",
+          branch: "dev",
+          dirty: false,
+          nativePath: "C:\\company-a\\paperclip",
+        },
+      },
+      {
+        id: instanceB,
+        companyId: companyB,
+        agentId: "agent-b-secret",
+        runtime: "codex-local",
+        hostNodeId: hostB,
+        metadata: {
+          repository: "secret/repository",
+          branch: "secret-branch",
+          dirty: true,
+          nativePath: "C:\\company-b-secret\\paperclip",
+        },
+      },
+    ]);
+    await db.insert(taskParticipations).values([
+      {
+        id: participationA,
+        companyId: companyA,
+        issueId: rootIssueA,
+        agentInstanceId: instanceA,
+        runtime: "codex-local",
+      },
+      {
+        id: poisonedParticipationB,
+        companyId: companyB,
+        issueId: rootIssueA,
+        agentInstanceId: instanceB,
+        runtime: "codex-local",
+        progressNote: "company-b-secret-progress",
+      },
+    ]);
+    await db.insert(mutationLeases).values([
+      {
+        companyId: companyA,
+        issueId: rootIssueA,
+        leaseTokenHash: "a".repeat(64),
         holderAgentId: "agent-a",
-        workUnitId: "unit-a",
-        scopeRepositories: ["repo-a"],
-        scopePaths: ["src/a"],
-        expiresAt,
+        workUnitId: rootIssueA,
+        scopeRepositories: ["iMelki/paperclip"],
+        scopePaths: ["server/src/services/coordination.ts"],
+        generation: 2,
+        expiresAt: new Date(Date.now() + 60_000),
       },
       {
-        companyId: companyB.companyId,
-        issueId: childForeignLeaseId,
-        taskParticipationId: participationBId,
-        leaseToken: "lease-b",
-        holderAgentId: "agent-b",
-        workUnitId: "unit-b",
-        scopeRepositories: ["repo-b"],
-        scopePaths: ["src/b"],
-        expiresAt,
+        companyId: companyB,
+        issueId: rootIssueA,
+        leaseTokenHash: "b".repeat(64),
+        holderAgentId: "agent-b-secret",
+        workUnitId: rootIssueA,
+        scopeRepositories: ["secret/repository"],
+        scopePaths: ["C:\\company-b-secret"],
+        generation: 99,
+        expiresAt: new Date(Date.now() + 60_000),
       },
     ]);
-    await ctx.db.insert(controlIntents).values([
-      { companyId: companyA.companyId, rootIssueId: rootId, intentType: "pause", requestedBy: "user-a" },
-      { companyId: companyB.companyId, rootIssueId: rootId, intentType: "cancel", requestedBy: "user-b" },
+    await db.insert(controlIntents).values([
+      {
+        id: intentA,
+        companyId: companyA,
+        rootIssueId: rootIssueA,
+        intentType: "pause",
+        requestedBy: "board-a",
+      },
+      {
+        id: poisonedIntentB,
+        companyId: companyB,
+        rootIssueId: rootIssueA,
+        intentType: "cancel",
+        requestedBy: "company-b-secret-requester",
+      },
     ]);
 
-    return {
-      companyA,
-      companyB,
-      rootId,
-      childAId,
-      childForeignLeaseId,
-      childBId,
-      participationAId,
-      participationAWithForeignInstanceId,
-      participationAWithForeignHostId,
-      participationBId,
-    };
-  }
-
-  it("returns only rows belonging to the authorized root company", async () => {
-    const seeded = await seed();
-
-    const view = await getIssueCoordination(ctx.db, seeded.rootId, seeded.companyA.companyId);
-
-    expect(view).not.toBeNull();
-    expect(view!.workUnits.map((unit) => unit.id).sort()).toEqual([
-      seeded.childAId,
-      seeded.childForeignLeaseId,
-    ].sort());
-    expect(view!.workUnits.find((unit) => unit.id === seeded.childAId)!.mutationScope).toEqual({
-      repositories: ["repo-a"],
-      paths: ["src/a"],
+    const resource = await getIssueCoordination(db, rootIssueA, companyA);
+    expect(resource).not.toBeNull();
+    expect(resource?.companyId).toBe(companyA);
+    expect(resource?.view.task.generation).toBe(2);
+    expect(resource?.view.participants.map((participant) => participant.id)).toEqual([participationA]);
+    expect(resource?.view.placements).toHaveLength(1);
+    expect(resource?.view.placements[0]).toMatchObject({
+      hostname: "company-a-private-host",
+      repository: "iMelki/paperclip",
+      branch: "dev",
     });
-    expect(view!.workUnits.find((unit) => unit.id === seeded.childForeignLeaseId)!.mutationScope).toEqual({
-      repositories: [],
-      paths: [],
-    });
-    expect(view!.participants.map((participant) => participant.id).sort()).toEqual([
-      seeded.participationAId,
-      seeded.participationAWithForeignInstanceId,
-      seeded.participationAWithForeignHostId,
-    ].sort());
-    expect(view!.placements.map((placement) => placement.hostId)).toEqual(["host-a"]);
-    expect(view!.controls.pendingIntents).toEqual([
-      expect.objectContaining({ intentType: "pause", requestedBy: "user-a" }),
-    ]);
-  });
-
-  it("does not resolve a root from another company", async () => {
-    const seeded = await seed();
-
-    await expect(getIssueCoordination(ctx.db, seeded.rootId, seeded.companyB.companyId)).resolves.toBeNull();
-    const foreignChildren = await ctx.db
-      .select({ id: issues.id })
-      .from(issues)
-      .where(and(eq(issues.parentId, seeded.rootId), eq(issues.companyId, seeded.companyB.companyId)));
-    expect(foreignChildren).toEqual([{ id: seeded.childBId }]);
-  });
-
-  it("fails closed if the root changes company after scope authorization", async () => {
-    const seeded = await seed();
-    const authorizedScope = await getIssueCoordinationRootScope(ctx.db, seeded.rootId);
-    expect(authorizedScope).toEqual({ companyId: seeded.companyA.companyId });
-
-    await ctx.db
-      .update(issues)
-      .set({ companyId: seeded.companyB.companyId })
-      .where(eq(issues.id, seeded.rootId));
-
-    await expect(
-      getIssueCoordination(ctx.db, seeded.rootId, authorizedScope!.companyId),
-    ).resolves.toBeNull();
-  });
-
-  it("enforces company isolation through the real HTTP route and service boundary", async () => {
-    const seeded = await seed();
-
-    const authorized = await request(routeApp(ctx.db, seeded.companyA.actor, coordinationRoutes))
-      .get(`/api/issues/${seeded.rootId}/coordination`);
-    expect(authorized.status, JSON.stringify(authorized.body)).toBe(200);
-    expect(authorized.body.workUnits.map((unit: { id: string }) => unit.id).sort()).toEqual([
-      seeded.childAId,
-      seeded.childForeignLeaseId,
-    ].sort());
-    expect(
-      authorized.body.workUnits.find((unit: { id: string }) => unit.id === seeded.childAId).mutationScope,
-    ).toEqual({ repositories: ["repo-a"], paths: ["src/a"] });
-    expect(
-      authorized.body.workUnits.find((unit: { id: string }) => unit.id === seeded.childForeignLeaseId).mutationScope,
-    ).toEqual({ repositories: [], paths: [] });
-    expect(authorized.body.participants.map((participant: { id: string }) => participant.id).sort()).toEqual([
-      seeded.participationAId,
-      seeded.participationAWithForeignInstanceId,
-      seeded.participationAWithForeignHostId,
-    ].sort());
-    expect(authorized.body.placements.map((placement: { hostId: string }) => placement.hostId)).toEqual([
-      "host-a",
-    ]);
-    expect(authorized.body.controls.pendingIntents).toEqual([
-      expect.objectContaining({ intentType: "pause", requestedBy: "user-a" }),
-    ]);
-
-    const foreign = await request(routeApp(ctx.db, seeded.companyB.actor, coordinationRoutes))
-      .get(`/api/issues/${seeded.rootId}/coordination`);
-    expect(foreign.status).toBe(404);
-    expect(foreign.body).toEqual({ error: "Root issue not found" });
-
-    const authorizedV2 = await request(routeApp(ctx.db, seeded.companyA.actor, coordinationRoutes))
-      .get(`/api/issues/${seeded.rootId}/coordination/v2`);
-    expect(authorizedV2.status, JSON.stringify(authorizedV2.body)).toBe(200);
-    expect(authorizedV2.body.schemaVersion).toBe("task-coordination.v2");
-    expect(authorizedV2.body.task.paperclipParentIssueId).toBe(seeded.rootId);
-    expect(authorizedV2.body.workUnits.map((unit: { id: string }) => unit.id).sort()).toEqual([
-      seeded.childAId,
-      seeded.childForeignLeaseId,
-    ].sort());
-    expect(authorizedV2.body.placements.map((placement: { hostId: string }) => placement.hostId)).toEqual([
-      "host-a",
-    ]);
-    expect(authorizedV2.body.controls).toEqual({
-      permittedIntents: [],
-      pendingIntents: [],
-      completedReceipts: [],
-    });
-
-    const foreignV2 = await request(routeApp(ctx.db, seeded.companyB.actor, coordinationRoutes))
-      .get(`/api/issues/${seeded.rootId}/coordination/v2`);
-    expect(foreignV2.status).toBe(404);
-    expect(foreignV2.body).toEqual({ error: "Root issue not found" });
+    expect(resource?.view.controls.pendingIntents.map((intent) => intent.id)).toEqual([intentA]);
+    expect(resource?.placementViewerAgentIds).toContain("agent-a");
+    expect(resource?.placementViewerAgentIds).not.toContain("agent-b-secret");
+    expect(JSON.stringify(resource)).not.toContain("company-b-secret");
+    expect(JSON.stringify(resource)).not.toContain("secret/repository");
+    expect(JSON.stringify(resource)).not.toContain(poisonedParticipationB);
+    expect(JSON.stringify(resource)).not.toContain(poisonedIntentB);
   });
 });

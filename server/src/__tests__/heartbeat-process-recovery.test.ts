@@ -10,7 +10,6 @@ import {
   agents,
   agentRuntimeState,
   agentWakeupRequests,
-  authUsers,
   budgetPolicies,
   companySecretBindings,
   companySecrets,
@@ -51,6 +50,24 @@ import { runningProcesses } from "../adapters/index.ts";
 const mockTelemetryClient = vi.hoisted(() => ({ track: vi.fn() }));
 const mockTrackAgentFirstHeartbeat = vi.hoisted(() => vi.fn());
 const mockTerminateLocalService = vi.hoisted(() => vi.fn());
+const mockReconcileAndReleaseAcpLaunch = vi.hoisted(() =>
+  vi.fn(async () => ({
+    found: false,
+    terminal: false,
+    treeCustodyVerified: false,
+    cleanupComplete: false,
+    released: false,
+  })),
+);
+const mockRequestStopAndWaitAcpLaunch = vi.hoisted(() =>
+  vi.fn(async () => ({
+    found: false,
+    terminal: false,
+    treeCustodyVerified: false,
+    cleanupComplete: false,
+    released: false,
+  })),
+);
 const mockAdapterExecute = vi.hoisted(() =>
   vi.fn(async () => ({
     exitCode: 0,
@@ -88,6 +105,17 @@ vi.mock("@paperclipai/shared/telemetry", async () => {
   };
 });
 
+vi.mock("@paperclipai/adapter-utils/acpx-engine", async () => {
+  const actual = await vi.importActual<typeof import("@paperclipai/adapter-utils/acpx-engine")>(
+    "@paperclipai/adapter-utils/acpx-engine",
+  );
+  return {
+    ...actual,
+    reconcileAndReleaseAcpxProcessSessionLaunchResources: mockReconcileAndReleaseAcpLaunch,
+    requestStopAndWaitAcpxProcessSessionLaunch: mockRequestStopAndWaitAcpLaunch,
+  };
+});
+
 vi.mock("../adapters/index.ts", async () => {
   const actual = await vi.importActual<typeof import("../adapters/index.ts")>("../adapters/index.ts");
   return {
@@ -116,12 +144,13 @@ import {
   SUCCESSFUL_RUN_HANDOFF_EXHAUSTED_NOTICE_BODY,
   SUCCESSFUL_RUN_HANDOFF_REQUIRED_NOTICE_BODY,
   SUCCESSFUL_RUN_MISSING_STATE_REASON,
-  noticeMetadataReferencesRecoveryAction,
 } from "../services/recovery/index.ts";
 import {
-  UNMANAGED_BACKGROUND_TASK_LIVENESS_REASON,
-  UNMANAGED_BACKGROUND_TASK_STOP_REASON,
 } from "@paperclipai/adapter-utils/server-utils";
+import {
+  PAPERCLIP_CALLBACK_BRIDGE_DISABLED,
+  PAPERCLIP_EXECUTION_TARGET_INVALID,
+} from "@paperclipai/adapter-utils/execution-target";
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
 
@@ -129,11 +158,6 @@ if (!embeddedPostgresSupport.supported) {
   console.warn(
     `Skipping embedded Postgres heartbeat recovery tests on this host: ${embeddedPostgresSupport.reason ?? "unsupported environment"}`,
   );
-}
-
-function commentMetadataRows(comment: { metadata?: unknown } | null | undefined) {
-  const metadata = comment?.metadata as { sections?: Array<{ rows?: unknown[] }> } | null | undefined;
-  return (metadata?.sections ?? []).flatMap((section) => section.rows ?? []) as Array<Record<string, unknown>>;
 }
 
 function spawnAliveProcess() {
@@ -194,6 +218,7 @@ async function waitForHeartbeatIdle(
   timeoutMs = 3_000,
 ) {
   const deadline = Date.now() + timeoutMs;
+  let consecutiveIdlePolls = 0;
   while (Date.now() < deadline) {
     const runs = await db
       .select({
@@ -201,7 +226,10 @@ async function waitForHeartbeatIdle(
       })
       .from(heartbeatRuns);
     if (!runs.some((run) => run.status === "queued" || run.status === "running")) {
-      return;
+      consecutiveIdlePolls += 1;
+      if (consecutiveIdlePolls >= 3) return;
+    } else {
+      consecutiveIdlePolls = 0;
     }
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
@@ -269,7 +297,7 @@ async function spawnOrphanedProcessGroup() {
       "-e",
       [
         "const { spawn } = require('node:child_process');",
-        "const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { detached: true, stdio: 'ignore' }); child.unref();",
+        "const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { detached: process.platform === 'win32', stdio: 'ignore' });",
         "process.stdout.write(String(child.pid));",
         "setTimeout(() => process.exit(0), 25);",
       ].join(" "),
@@ -297,7 +325,45 @@ async function spawnOrphanedProcessGroup() {
 
   return {
     processPid: leader.pid ?? null,
-    processGroupId: descendantPid,
+    processGroupId: leader.pid ?? null,
+    descendantPid,
+  };
+}
+
+async function spawnEscapedDescendant() {
+  const leader = spawn(
+    process.execPath,
+    [
+      "-e",
+      [
+        "const { spawn } = require('node:child_process');",
+        "const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { detached: true, stdio: 'ignore' });",
+        "child.unref();",
+        "process.stdout.write(String(child.pid));",
+        "setTimeout(() => process.exit(0), 25);",
+      ].join(" "),
+    ],
+    {
+      detached: true,
+      stdio: ["ignore", "pipe", "ignore"],
+    },
+  );
+
+  let stdout = "";
+  leader.stdout?.on("data", (chunk) => {
+    stdout += String(chunk);
+  });
+  await new Promise<void>((resolve, reject) => {
+    leader.once("error", reject);
+    leader.once("exit", () => resolve());
+  });
+  const descendantPid = Number.parseInt(stdout.trim(), 10);
+  if (!Number.isInteger(descendantPid) || descendantPid <= 0) {
+    throw new Error(`Failed to capture escaped descendant pid: ${stdout}`);
+  }
+  return {
+    processPid: leader.pid ?? null,
+    processGroupId: leader.pid ?? null,
     descendantPid,
   };
 }
@@ -311,15 +377,6 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
   beforeAll(async () => {
     tempDb = await startEmbeddedPostgresTestDatabase("paperclip-heartbeat-recovery-");
     db = createDb(tempDb.connectionString);
-    const now = new Date();
-    await db.insert(authUsers).values({
-      id: "responsible-user",
-      name: "Responsible User",
-      email: "responsible-user@example.test",
-      emailVerified: true,
-      createdAt: now,
-      updatedAt: now,
-    });
   }, EMBEDDED_POSTGRES_TEST_SETUP_TIMEOUT_MS);
 
   afterEach(async () => {
@@ -342,7 +399,8 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
       child.kill("SIGKILL");
     }
     childProcesses.clear();
-    for (const pid of cleanupPids) {
+    const ownedCleanupPids = [...cleanupPids];
+    for (const pid of ownedCleanupPids) {
       try {
         process.kill(pid, "SIGKILL");
       } catch {
@@ -350,6 +408,11 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
       }
     }
     cleanupPids.clear();
+    for (const pid of ownedCleanupPids) {
+      if (!(await waitForPidExit(pid, 5_000))) {
+        throw new Error(`Test-owned cleanup pid ${pid} survived heartbeat recovery teardown`);
+      }
+    }
     await cancelActiveRunsForCleanup(db, 5_000);
     let idlePolls = 0;
     for (let attempt = 0; attempt < 100; attempt += 1) {
@@ -573,19 +636,26 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     issueId: string;
     provider?: string;
   }) {
-    const environmentId = randomUUID();
+    const existingEnvironment = await db
+      .select({ id: environments.id })
+      .from(environments)
+      .where(eq(environments.driver, "local"))
+      .then((rows) => rows[0] ?? null);
+    const environmentId = existingEnvironment?.id ?? randomUUID();
     const leaseId = randomUUID();
     const now = new Date("2026-03-19T00:00:00.000Z");
 
-    await db.insert(environments).values({
-      id: environmentId,
-      companyId: input.companyId,
-      name: "Local test environment",
-      driver: "local",
-      status: "active",
-      config: {},
-      metadata: null,
-    });
+    if (!existingEnvironment) {
+      await db.insert(environments).values({
+        id: environmentId,
+        companyId: input.companyId,
+        name: "Local test environment",
+        driver: "local",
+        status: "active",
+        config: {},
+        metadata: null,
+      });
+    }
 
     await db.insert(environmentLeases).values({
       id: leaseId,
@@ -1229,6 +1299,62 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     expect(wakeup?.status).toBe("claimed");
   });
 
+  it("keeps a prelaunch-fenced remote ACP run and lease intact when restart cannot reach its provider", async () => {
+    const { companyId, agentId, runId, issueId } = await seedRunFixture({
+      agentStatus: "running",
+      processPid: null,
+      processGroupId: null,
+      runErrorCode: "ACP_PROCESS_SESSION_LAUNCH_AMBIGUOUS",
+      runError: "Remote provider is unavailable; launch acceptance requires reconciliation.",
+    });
+    const { leaseId } = await seedEnvironmentLeaseFixture({
+      companyId,
+      runId,
+      issueId,
+      provider: "lost-provider",
+    });
+    await db
+      .update(heartbeatRuns)
+      .set({
+        resultJson: {
+          processSessionLaunch: {
+            status: "accepted",
+            acceptedStart: "accepted",
+            retryable: false,
+            needsHuman: true,
+            launchId: "launch-provider-loss-1",
+            sessionId: "session-provider-loss-1",
+            providerKey: "lost-provider",
+            environmentId: "environment-1",
+            leaseId,
+            remoteCwd: "/workspace",
+            sessionDir: "/workspace/.paperclip-runtime/acpx/process-sessions/session-provider-loss-1",
+          },
+        },
+      })
+      .where(eq(heartbeatRuns.id, runId));
+    const heartbeat = heartbeatService(db);
+
+    const result = await heartbeat.reapOrphanedRuns();
+
+    expect(result).toEqual({ reaped: 0, runIds: [] });
+    await expect(heartbeat.getRun(runId)).resolves.toMatchObject({
+      status: "running",
+      errorCode: "ACP_PROCESS_SESSION_LAUNCH_AMBIGUOUS",
+    });
+    const retries = await db
+      .select({ id: heartbeatRuns.id })
+      .from(heartbeatRuns)
+      .where(and(eq(heartbeatRuns.agentId, agentId), eq(heartbeatRuns.retryOfRunId, runId)));
+    expect(retries).toHaveLength(0);
+    const lease = await db
+      .select()
+      .from(environmentLeases)
+      .where(eq(environmentLeases.id, leaseId))
+      .then((rows) => rows[0] ?? null);
+    expect(lease?.status).toBe("active");
+  });
+
   it("skips generic timer wakes without invoking an adapter when no assigned work is actionable", async () => {
     const { companyId, agentId } = await seedIdleTimerAgentFixture();
     const heartbeat = heartbeatService(db);
@@ -1269,7 +1395,7 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     expect(runs).toHaveLength(0);
   });
 
-  it("queues exactly one retry when the recorded local pid is dead", async () => {
+  it.skipIf(process.platform === "win32")("queues exactly one retry when the recorded local pid is provably dead", async () => {
     const { agentId, runId, issueId } = await seedRunFixture({
       agentStatus: "idle",
       processPid: 999_999_999,
@@ -1454,10 +1580,6 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
       agentStatus: "running",
       processPid: child.pid ?? null,
       processGroupId: null,
-      contextSnapshot: {
-        executionEngine: "cli",
-        processTopology: "detached",
-      },
     });
 
     await withTempPaperclipHome(async () => {
@@ -1518,10 +1640,6 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
       agentStatus: "running",
       processPid: child.pid ?? null,
       processGroupId: null,
-      contextSnapshot: {
-        executionEngine: "cli",
-        processTopology: "detached",
-      },
     });
 
     await withTempPaperclipHome(async (home) => {
@@ -1590,10 +1708,6 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
       agentStatus: "running",
       processPid: orphan.processPid,
       processGroupId: orphan.processGroupId,
-      contextSnapshot: {
-        executionEngine: "cli",
-        processTopology: "detached",
-      },
     });
 
     await withTempPaperclipHome(async () => {
@@ -1637,6 +1751,251 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
         },
       });
     });
+  });
+
+  it.skipIf(process.platform !== "win32")("retains the production Windows null-group child-tree shape and its lease across hot restart and reaping", async () => {
+    const orphan = await spawnOrphanedProcessGroup();
+    cleanupPids.add(orphan.descendantPid);
+    expect(isPidAlive(orphan.processPid)).toBe(false);
+    expect(isPidAlive(orphan.descendantPid)).toBe(true);
+    const { companyId, runId, issueId } = await seedRunFixture({
+      agentStatus: "running",
+      processPid: orphan.processPid,
+      // Production adapter-utils cannot currently derive a Windows process
+      // group, even though the dead wrapper may have left this descendant.
+      processGroupId: null,
+    });
+    const { leaseId } = await seedEnvironmentLeaseFixture({
+      companyId,
+      runId,
+      issueId,
+    });
+
+    await withTempPaperclipHome(async () => {
+      const heartbeat = heartbeatService(db);
+      await writeHotRestartIntent({
+        previousServerPid: process.pid,
+        previousServerVersion: "old-version",
+        requestedAt: new Date("2026-03-19T00:05:00.000Z"),
+      });
+      await heartbeat.prepareHotRestartShutdown(
+        "SIGTERM",
+        new Date("2026-03-19T00:06:00.000Z"),
+      );
+
+      const adoption = await heartbeat.reconcileHotRestartAdoption(
+        new Date("2026-03-19T00:07:00.000Z"),
+      );
+      expect(adoption).toMatchObject({
+        mode: "reported",
+        adoptedRunIds: [],
+        finalizedWhileDownRunIds: [],
+        lostRunIds: [],
+        skippedRunIds: [runId],
+      });
+
+      const afterAdoption = await heartbeat.getRun(runId);
+      expect(afterAdoption).toMatchObject({
+        status: "running",
+        errorCode: "process_termination_unverified_needs_human",
+      });
+      expect(afterAdoption?.error).toContain("untrusted_identity");
+
+      const reap = await heartbeat.reapOrphanedRuns();
+      expect(reap).toEqual({ reaped: 0, runIds: [] });
+      expect(isPidAlive(orphan.descendantPid)).toBe(true);
+
+      const retainedIssue = await db
+        .select()
+        .from(issues)
+        .where(eq(issues.id, issueId))
+        .then((rows) => rows[0] ?? null);
+      expect(retainedIssue?.executionRunId).toBe(runId);
+      const retainedLease = await db
+        .select()
+        .from(environmentLeases)
+        .where(eq(environmentLeases.id, leaseId))
+        .then((rows) => rows[0] ?? null);
+      expect(retainedLease).toMatchObject({ status: "active", releasedAt: null });
+    });
+  });
+
+  it("retains missing local process metadata, issue custody, and lease across hot restart and reaping", async () => {
+    const { companyId, runId, issueId } = await seedRunFixture({
+      agentStatus: "running",
+      processPid: null,
+      processGroupId: null,
+    });
+    const { leaseId } = await seedEnvironmentLeaseFixture({ companyId, runId, issueId });
+
+    await withTempPaperclipHome(async () => {
+      const heartbeat = heartbeatService(db);
+      await writeHotRestartIntent({
+        previousServerPid: process.pid,
+        previousServerVersion: "old-version",
+        requestedAt: new Date("2026-03-19T00:05:00.000Z"),
+      });
+      await heartbeat.prepareHotRestartShutdown(
+        "SIGTERM",
+        new Date("2026-03-19T00:06:00.000Z"),
+      );
+
+      const adoption = await heartbeat.reconcileHotRestartAdoption(
+        new Date("2026-03-19T00:07:00.000Z"),
+      );
+      expect(adoption).toMatchObject({
+        mode: "reported",
+        adoptedRunIds: [],
+        lostRunIds: [],
+        skippedRunIds: [runId],
+      });
+      await expect(heartbeat.getRun(runId)).resolves.toMatchObject({
+        status: "running",
+        errorCode: "process_termination_unverified_needs_human",
+        processPid: null,
+        processGroupId: null,
+      });
+
+      await expect(heartbeat.reapOrphanedRuns()).resolves.toEqual({ reaped: 0, runIds: [] });
+      const retainedIssue = await db
+        .select()
+        .from(issues)
+        .where(eq(issues.id, issueId))
+        .then((rows) => rows[0] ?? null);
+      expect(retainedIssue?.executionRunId).toBe(runId);
+      const retainedLease = await db
+        .select()
+        .from(environmentLeases)
+        .where(eq(environmentLeases.id, leaseId))
+        .then((rows) => rows[0] ?? null);
+      expect(retainedLease).toMatchObject({ status: "active", releasedAt: null });
+    });
+  });
+
+  it.skipIf(process.platform === "win32")(
+    "retains dead persisted POSIX PID/PGID custody when an escaped descendant can still be alive",
+    async () => {
+      const escaped = await spawnEscapedDescendant();
+      cleanupPids.add(escaped.descendantPid);
+      expect(isPidAlive(escaped.processPid)).toBe(false);
+      expect(isPidAlive(escaped.descendantPid)).toBe(true);
+      const { companyId, runId, issueId } = await seedRunFixture({
+        agentStatus: "idle",
+        processPid: escaped.processPid,
+        processGroupId: escaped.processGroupId,
+      });
+      const { leaseId } = await seedEnvironmentLeaseFixture({ companyId, runId, issueId });
+      const heartbeat = heartbeatService(db);
+
+      await expect(heartbeat.reapOrphanedRuns()).resolves.toEqual({ reaped: 0, runIds: [] });
+      expect(isPidAlive(escaped.descendantPid)).toBe(true);
+      await expect(heartbeat.getRun(runId)).resolves.toMatchObject({
+        status: "running",
+        errorCode: "process_termination_unverified_needs_human",
+      });
+      const retainedIssue = await db
+        .select()
+        .from(issues)
+        .where(eq(issues.id, issueId))
+        .then((rows) => rows[0] ?? null);
+      expect(retainedIssue?.executionRunId).toBe(runId);
+      const retainedLease = await db
+        .select()
+        .from(environmentLeases)
+        .where(eq(environmentLeases.id, leaseId))
+        .then((rows) => rows[0] ?? null);
+      expect(retainedLease).toMatchObject({ status: "active", releasedAt: null });
+    },
+  );
+
+  it("preserves a fenced remote ACP launch and lease during graceful shutdown instead of replaying it", async () => {
+    const { companyId, agentId, runId, issueId, wakeupRequestId } = await seedRunFixture({
+      agentStatus: "running",
+      runErrorCode: "ACP_PROCESS_SESSION_LAUNCH_AMBIGUOUS",
+      runError: "Remote ACP launch is accepted and fenced.",
+    });
+    const { leaseId } = await seedEnvironmentLeaseFixture({ companyId, runId, issueId });
+    const heartbeat = heartbeatService(db);
+
+    const result = await heartbeat.drainRunningRunsForShutdown(
+      "SIGTERM",
+      new Date("2026-03-19T00:06:00.000Z"),
+    );
+
+    expect(result).toEqual({
+      interrupted: 0,
+      interruptedRunIds: [],
+      retryRunIds: [],
+      needsHumanRunIds: [runId],
+    });
+    await expect(heartbeat.getRun(runId)).resolves.toMatchObject({
+      status: "running",
+      errorCode: "ACP_PROCESS_SESSION_LAUNCH_AMBIGUOUS",
+    });
+    const retries = await db
+      .select({ id: heartbeatRuns.id })
+      .from(heartbeatRuns)
+      .where(and(eq(heartbeatRuns.agentId, agentId), eq(heartbeatRuns.retryOfRunId, runId)));
+    expect(retries).toHaveLength(0);
+    const wakeup = await db
+      .select()
+      .from(agentWakeupRequests)
+      .where(eq(agentWakeupRequests.id, wakeupRequestId))
+      .then((rows) => rows[0] ?? null);
+    expect(wakeup?.status).toBe("claimed");
+    const issue = await db
+      .select()
+      .from(issues)
+      .where(eq(issues.id, issueId))
+      .then((rows) => rows[0] ?? null);
+    expect(issue).toMatchObject({ checkoutRunId: runId, executionRunId: runId });
+    const lease = await db
+      .select()
+      .from(environmentLeases)
+      .where(eq(environmentLeases.id, leaseId))
+      .then((rows) => rows[0] ?? null);
+    expect(lease).toMatchObject({ status: "active", releasedAt: null });
+  });
+
+  it("retains a local no-metadata run, issue lock, and lease during graceful shutdown", async () => {
+    const { companyId, agentId, runId, issueId } = await seedRunFixture({
+      agentStatus: "running",
+      processPid: null,
+      processGroupId: null,
+    });
+    const { leaseId } = await seedEnvironmentLeaseFixture({ companyId, runId, issueId });
+    const heartbeat = heartbeatService(db);
+
+    const result = await heartbeat.drainRunningRunsForShutdown(
+      "SIGTERM",
+      new Date("2026-03-19T00:06:00.000Z"),
+    );
+
+    expect(result).toEqual({
+      interrupted: 0,
+      interruptedRunIds: [],
+      retryRunIds: [],
+      needsHumanRunIds: [runId],
+    });
+    await expect(heartbeat.getRun(runId)).resolves.toMatchObject({
+      status: "running",
+      errorCode: "process_termination_unverified_needs_human",
+      processPid: null,
+      processGroupId: null,
+    });
+    const retries = await db
+      .select()
+      .from(heartbeatRuns)
+      .where(and(eq(heartbeatRuns.agentId, agentId), eq(heartbeatRuns.retryOfRunId, runId)));
+    expect(retries).toHaveLength(0);
+    const issue = await db.select().from(issues).where(eq(issues.id, issueId)).then((rows) => rows[0] ?? null);
+    expect(issue).toMatchObject({ checkoutRunId: runId, executionRunId: runId });
+    const lease = await db
+      .select()
+      .from(environmentLeases)
+      .where(eq(environmentLeases.id, leaseId))
+      .then((rows) => rows[0] ?? null);
+    expect(lease).toMatchObject({ status: "active", releasedAt: null });
   });
 
   it("interrupts running runs on graceful shutdown and queues restart recovery without recording a failure", async () => {
@@ -1848,7 +2207,9 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
 
   it("releases active environment leases when an orphaned run is reaped", async () => {
     const { runId, issueId, companyId } = await seedRunFixture({
-      processPid: 999_999_999,
+      // This test exercises terminal lease release, not persisted process-tree
+      // authority. Missing process metadata is an unambiguous no-child fixture.
+      processPid: null,
     });
     const { leaseId } = await seedEnvironmentLeaseFixture({
       companyId,
@@ -1870,58 +2231,43 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     expect(lease?.releasedAt).toBeTruthy();
   });
 
-  it.skipIf(process.platform === "win32")("reaps orphaned descendant process groups when the parent pid is already gone", async () => {
+  it.skipIf(process.platform === "win32")("retains orphaned descendant process groups when only persisted identity remains", async () => {
     const orphan = await spawnOrphanedProcessGroup();
     cleanupPids.add(orphan.descendantPid);
     expect(isPidAlive(orphan.descendantPid)).toBe(true);
 
     const { agentId, runId, issueId } = await seedRunFixture({
       agentStatus: "idle",
-      // The leader has exited before the fixture is persisted. Keep only the
-      // process-group identity so a recycled PID cannot make the test treat a
-      // different process as the original parent.
-      processPid: null,
+      processPid: orphan.processPid,
       processGroupId: orphan.processGroupId,
     });
     const heartbeat = heartbeatService(db);
 
     const result = await heartbeat.reapOrphanedRuns();
-    expect(result.reaped).toBe(1);
-    expect(result.runIds).toEqual([runId]);
+    expect(result).toEqual({ reaped: 0, runIds: [] });
 
-    expect(await waitForPidExit(orphan.descendantPid, 2_000)).toBe(true);
+    expect(isPidAlive(orphan.descendantPid)).toBe(true);
 
     const runs = await db
       .select()
       .from(heartbeatRuns)
       .where(eq(heartbeatRuns.agentId, agentId));
-    expect(runs).toHaveLength(2);
+    expect(runs).toHaveLength(1);
 
-    const failedRun = runs.find((row) => row.id === runId);
-    expect(failedRun?.status).toBe("failed");
-    expect(failedRun?.errorCode).toBe("process_lost");
-    expect(failedRun?.error).toContain("descendant process group");
-    expect(failedRun?.resultJson).toMatchObject({
-      stopReason: UNMANAGED_BACKGROUND_TASK_STOP_REASON,
-      unmanagedBackgroundTask: {
-        kind: "orphaned_process_group_cleanup",
-        stopped: true,
-        stopReason: UNMANAGED_BACKGROUND_TASK_STOP_REASON,
-        reason: UNMANAGED_BACKGROUND_TASK_LIVENESS_REASON,
-        processPid: null,
-        processGroupId: orphan.processGroupId,
-      },
+    const retainedRun = runs[0];
+    expect(retainedRun).toMatchObject({
+      id: runId,
+      status: "running",
+      errorCode: "process_termination_unverified_needs_human",
     });
-
-    const retryRun = runs.find((row) => row.id !== runId);
-    expect(["queued", "running"]).toContain(retryRun?.status);
+    expect(retainedRun?.error).toContain("untrusted_identity");
 
     const issue = await db
       .select()
       .from(issues)
       .where(eq(issues.id, issueId))
       .then((rows) => rows[0] ?? null);
-    expect(issue?.executionRunId).toBe(retryRun?.id ?? null);
+    expect(issue?.executionRunId).toBe(runId);
   });
 
   it("blocks the issue when process-loss retry is exhausted and the immediate continuation recovery also fails", async () => {
@@ -1929,7 +2275,7 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
 
     const { companyId, agentId, runId, issueId } = await seedRunFixture({
       agentStatus: "idle",
-      processPid: 999_999_999,
+      processPid: null,
       processLossRetryCount: 1,
     });
     const resolvedBlockerId = randomUUID();
@@ -1995,18 +2341,15 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     });
     expect(comments).toHaveLength(1);
     expect(comments[0]?.body).toContain("retried continuation");
-    expect(comments[0]?.presentation).toMatchObject({ kind: "system_notice", tone: "danger" });
-    expect(noticeMetadataReferencesRecoveryAction(comments[0]?.metadata, recoveryAction.id)).toBe(true);
-    expect(commentMetadataRows(comments[0]).some((row) =>
-      row.type === "agent_link" && row.label === "Recovery owner" && row.name === "CodexCoder",
-    )).toBe(true);
+    expect(comments[0]?.body).toContain(`Recovery action: \`${recoveryAction.id}\``);
+    expect(comments[0]?.body).toContain("Recovery owner: [CodexCoder]");
   });
 
   it("blocks failed recovery work in place during immediate terminal-run cleanup", async () => {
     const sourceIssueId = randomUUID();
     const { companyId, agentId, runId, issueId } = await seedRunFixture({
       agentStatus: "idle",
-      processPid: 999_999_999,
+      processPid: null,
       processLossRetryCount: 1,
       runErrorCode: "process_lost",
       runError: "Authorization: Bearer sk-test-recovery-secret",
@@ -2074,14 +2417,13 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     expect(comments[0]?.body).toContain("recovery issues do not create nested `stranded_issue_recovery` issues");
     expect(comments[0]?.body).toContain("Latest retry failure details were withheld from the issue thread");
     expect(comments[0]?.body).not.toContain("sk-test-recovery-secret");
-    expect(JSON.stringify(comments[0]?.metadata)).not.toContain("sk-test-recovery-secret");
     await expect(sourceBlockerIssueIds(companyId, sourceIssueId)).resolves.toEqual([issueId]);
   });
 
   it("does not block paused-tree work when immediate continuation recovery is suppressed by the hold", async () => {
     const { companyId, agentId, runId, issueId } = await seedRunFixture({
       agentStatus: "idle",
-      processPid: 999_999_999,
+      processPid: null,
       processLossRetryCount: 1,
     });
     await db.insert(issueTreeHolds).values({
@@ -2174,6 +2516,237 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
 
     const comments = await db.select().from(issueComments).where(eq(issueComments.issueId, issueId));
     expect(comments).toHaveLength(0);
+  });
+
+  it.each([
+    {
+      label: "cross-realm callback bridge disabled",
+      code: PAPERCLIP_CALLBACK_BRIDGE_DISABLED,
+      projectionKey: "paperclipBridgeLaunch",
+      projection: { status: "disabled", retryable: false, needsHuman: true },
+    },
+    {
+      label: "cross-realm invalid execution target",
+      code: PAPERCLIP_EXECUTION_TARGET_INVALID,
+      projectionKey: "executionTarget",
+      projection: { status: "invalid", retryable: false, needsHuman: true },
+    },
+  ])("persists $label adapter throws as terminal configuration fences without retry", async ({
+    code,
+    projectionKey,
+    projection,
+  }) => {
+    mockAdapterExecute.mockRejectedValueOnce(Object.assign(new Error(code), {
+      code,
+      retryable: false,
+      needsHuman: true,
+    }));
+    const { agentId, runId, issueId } = await seedQueuedIssueRunFixture();
+    const heartbeat = heartbeatService(db);
+
+    await heartbeat.resumeQueuedRuns();
+    const settled = await waitForRunToSettle(heartbeat, runId, 5_000);
+    await waitForHeartbeatIdle(db, 5_000);
+
+    expect(settled).toMatchObject({ status: "failed", errorCode: code });
+    expect(settled?.resultJson).toMatchObject({ [projectionKey]: projection });
+    await expect(heartbeat.scheduleBoundedRetry(runId, {
+      retryReason: "test_configuration_fence",
+      wakeReason: "test_configuration_fence",
+    })).resolves.toBeNull();
+    const runs = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.agentId, agentId));
+    expect(runs).toHaveLength(1);
+    expect(runs[0]?.scheduledRetryReason).toBeNull();
+    const retryRuns = await db
+      .select()
+      .from(heartbeatRuns)
+      .where(eq(heartbeatRuns.retryOfRunId, runId));
+    expect(retryRuns).toHaveLength(0);
+    const wakeups = await db
+      .select()
+      .from(agentWakeupRequests)
+      .where(eq(agentWakeupRequests.agentId, agentId));
+    expect(wakeups).toHaveLength(1);
+    const issue = await db
+      .select()
+      .from(issues)
+      .where(eq(issues.id, issueId))
+      .then((rows) => rows[0] ?? null);
+    expect(issue).toMatchObject({ status: "blocked", executionRunId: null });
+    const comments = await db.select().from(issueComments).where(eq(issueComments.issueId, issueId));
+    expect(comments.some((comment) => comment.body.includes("Automatic retry cannot repair this configuration fence")))
+      .toBe(true);
+    const recoveryAction = await db
+      .select()
+      .from(issueRecoveryActions)
+      .where(eq(issueRecoveryActions.sourceIssueId, issueId))
+      .then((rows) => rows[0] ?? null);
+    expect(recoveryAction).toMatchObject({
+      kind: "configuration_validation",
+      cause: "execution_configuration_fenced",
+      wakePolicy: {
+        type: "manual_repair_required",
+        reason: "execution_configuration_fenced",
+      },
+      nextAction: expect.stringContaining("do not retry automatically"),
+    });
+  });
+
+  it("persists an ACPX callback-disabled result as terminal configuration state without retry", async () => {
+    mockAdapterExecute.mockResolvedValueOnce({
+      exitCode: 1,
+      signal: null,
+      timedOut: false,
+      errorMessage: "remote callback execution is disabled",
+      errorCode: PAPERCLIP_CALLBACK_BRIDGE_DISABLED,
+      errorMeta: {
+        category: "configuration",
+        retryable: false,
+        needsHuman: true,
+      },
+      resultJson: {
+        phase: "preflight",
+        paperclipBridgeLaunch: {
+          status: "disabled",
+          retryable: false,
+          needsHuman: true,
+        },
+      },
+    });
+    const { agentId, runId, issueId } = await seedQueuedIssueRunFixture();
+    const heartbeat = heartbeatService(db);
+
+    await heartbeat.resumeQueuedRuns();
+    const settled = await waitForRunToSettle(heartbeat, runId, 5_000);
+    await waitForHeartbeatIdle(db, 5_000);
+
+    expect(settled).toMatchObject({
+      status: "failed",
+      errorCode: PAPERCLIP_CALLBACK_BRIDGE_DISABLED,
+      resultJson: {
+        phase: "preflight",
+        paperclipBridgeLaunch: { status: "disabled", retryable: false, needsHuman: true },
+      },
+    });
+    await expect(heartbeat.scheduleBoundedRetry(runId, {
+      retryReason: "test_configuration_fence",
+      wakeReason: "test_configuration_fence",
+    })).resolves.toBeNull();
+    const runs = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.agentId, agentId));
+    expect(runs).toHaveLength(1);
+    expect(runs[0]?.scheduledRetryReason).toBeNull();
+    const retryRuns = await db
+      .select()
+      .from(heartbeatRuns)
+      .where(eq(heartbeatRuns.retryOfRunId, runId));
+    expect(retryRuns).toHaveLength(0);
+    const wakeups = await db
+      .select()
+      .from(agentWakeupRequests)
+      .where(eq(agentWakeupRequests.agentId, agentId));
+    expect(wakeups).toHaveLength(1);
+    const issue = await db
+      .select()
+      .from(issues)
+      .where(eq(issues.id, issueId))
+      .then((rows) => rows[0] ?? null);
+    expect(issue).toMatchObject({ status: "blocked", executionRunId: null });
+    const comments = await db.select().from(issueComments).where(eq(issueComments.issueId, issueId));
+    expect(comments.some((comment) => comment.body.includes("Automatic retry cannot repair this configuration fence")))
+      .toBe(true);
+    const recoveryAction = await db
+      .select()
+      .from(issueRecoveryActions)
+      .where(eq(issueRecoveryActions.sourceIssueId, issueId))
+      .then((rows) => rows[0] ?? null);
+    expect(recoveryAction).toMatchObject({
+      kind: "configuration_validation",
+      cause: "execution_configuration_fenced",
+      wakePolicy: {
+        type: "manual_repair_required",
+        reason: "execution_configuration_fenced",
+      },
+      nextAction: expect.stringContaining("do not retry automatically"),
+    });
+  });
+
+  it("blocks a reviewer callback configuration fence when the source assignee differs", async () => {
+    mockAdapterExecute.mockRejectedValueOnce(Object.assign(
+      new Error(PAPERCLIP_CALLBACK_BRIDGE_DISABLED),
+      {
+        code: PAPERCLIP_CALLBACK_BRIDGE_DISABLED,
+        retryable: false,
+        needsHuman: true,
+      },
+    ));
+    const { companyId, agentId, runId, issueId } = await seedQueuedIssueRunFixture();
+    const sourceAssigneeAgentId = randomUUID();
+    const stageId = randomUUID();
+    await db.insert(agents).values({
+      id: sourceAssigneeAgentId,
+      companyId,
+      name: "CodexImplementor",
+      role: "engineer",
+      status: "idle",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+    await db.update(issues).set({
+      status: "in_review",
+      assigneeAgentId: sourceAssigneeAgentId,
+      executionState: {
+        status: "pending",
+        currentStageId: stageId,
+        currentStageIndex: 0,
+        currentStageType: "review",
+        currentParticipant: { type: "agent", agentId, userId: null },
+        returnAssignee: { type: "agent", agentId: sourceAssigneeAgentId, userId: null },
+        reviewRequest: null,
+        completedStageIds: [],
+        lastDecisionId: null,
+        lastDecisionOutcome: null,
+      },
+    }).where(eq(issues.id, issueId));
+    const heartbeat = heartbeatService(db);
+
+    await heartbeat.resumeQueuedRuns();
+    const settled = await waitForRunToSettle(heartbeat, runId, 5_000);
+    await waitForHeartbeatIdle(db, 5_000);
+
+    expect(settled).toMatchObject({
+      status: "failed",
+      errorCode: PAPERCLIP_CALLBACK_BRIDGE_DISABLED,
+    });
+    expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.agentId, agentId)))
+      .toHaveLength(1);
+    expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.retryOfRunId, runId)))
+      .toHaveLength(0);
+    expect(await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.agentId, agentId)))
+      .toHaveLength(1);
+    const issue = await db
+      .select()
+      .from(issues)
+      .where(eq(issues.id, issueId))
+      .then((rows) => rows[0] ?? null);
+    expect(issue).toMatchObject({
+      status: "blocked",
+      executionRunId: null,
+      assigneeAgentId: agentId,
+    });
+    const recoveryAction = await db
+      .select()
+      .from(issueRecoveryActions)
+      .where(eq(issueRecoveryActions.sourceIssueId, issueId))
+      .then((rows) => rows[0] ?? null);
+    expect(recoveryAction).toMatchObject({
+      cause: "execution_configuration_fenced",
+      ownerAgentId: agentId,
+      previousOwnerAgentId: sourceAssigneeAgentId,
+      returnOwnerAgentId: sourceAssigneeAgentId,
+      wakePolicy: { type: "manual_repair_required" },
+    });
   });
 
   it("schedules bounded retries for failed accepted interaction continuation wakes", async () => {
@@ -2440,7 +3013,7 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
       authorType: "system",
       body: expect.stringContaining("Agent failed to resume after approval: `adapter_failed` — needs attention"),
     });
-    expect(commentMetadataRows(comments[0]).some((row) => row.label === "Recovery action")).toBe(true);
+    expect(comments[0]?.body).toContain("Recovery action:");
 
     const interaction = await db
       .select({ result: issueThreadInteractions.result })
@@ -3037,6 +3610,194 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     expect(recoveryIssues).toHaveLength(0);
   });
 
+  it("persists the remote ACP replay fence before provider dispatch and clears it only at terminal persistence", async () => {
+    const { runId } = await seedQueuedIssueRunFixture();
+    let fencedDuringAdapter: typeof heartbeatRuns.$inferSelect | null = null;
+    mockAdapterExecute.mockImplementationOnce(async (ctx: {
+      onEvent?: (event: {
+        eventType: string;
+        stream?: "system" | "stdout" | "stderr";
+        level?: "info" | "warn" | "error";
+        message?: string;
+        payload?: Record<string, unknown>;
+      }) => Promise<void>;
+    }) => {
+      await ctx.onEvent?.({
+        eventType: "acp.process_session.launch",
+        stream: "system",
+        level: "warn",
+        message: "prelaunch fence",
+        payload: {
+          status: "launching",
+          acceptedStart: "unknown",
+          retryable: false,
+          needsHuman: true,
+          launchId: "launch-pre-dispatch-1",
+          sessionId: "session-pre-dispatch-1",
+          runId,
+          adapterKey: "codex_local",
+          transport: "sandbox",
+          providerKey: "provider-lost-after-acceptance",
+          environmentId: "environment-1",
+          leaseId: "lease-1",
+          remoteCwd: "/workspace",
+          sessionDir: "/workspace/.paperclip-runtime/acpx/process-sessions/session-pre-dispatch-1",
+          eventsDir: "/workspace/.paperclip-runtime/acpx/process-sessions/session-pre-dispatch-1/events",
+        },
+      });
+      fencedDuringAdapter = await db
+        .select()
+        .from(heartbeatRuns)
+        .where(eq(heartbeatRuns.id, runId))
+        .then((rows) => rows[0] ?? null);
+      await ctx.onEvent?.({
+        eventType: "acp.process_session.launch",
+        stream: "system",
+        level: "info",
+        message: "launch was durably proven not started",
+        payload: {
+          status: "not_started",
+          launchId: "launch-pre-dispatch-1",
+          sessionId: "session-pre-dispatch-1",
+          sessionDir: "/workspace/.paperclip-runtime/acpx/process-sessions/session-pre-dispatch-1",
+        },
+      });
+      return {
+        exitCode: 0,
+        signal: null,
+        timedOut: false,
+        errorMessage: null,
+        summary: "Remote ACP launch completed normally.",
+        provider: "test",
+        model: "test-model",
+      };
+    });
+    const heartbeat = heartbeatService(db);
+
+    await heartbeat.resumeQueuedRuns();
+    const settled = await waitForRunToSettle(heartbeat, runId, 5_000);
+
+    expect(fencedDuringAdapter).toMatchObject({
+      status: "running",
+      errorCode: null,
+      error: null,
+      resultJson: {
+        processSessionLaunch: {
+          status: "launching",
+          acceptedStart: "unknown",
+          retryable: false,
+          launchId: "launch-pre-dispatch-1",
+          sessionId: "session-pre-dispatch-1",
+          providerKey: "provider-lost-after-acceptance",
+          environmentId: "environment-1",
+          leaseId: "lease-1",
+        },
+      },
+    });
+    expect(settled).toMatchObject({ status: "succeeded", errorCode: null });
+  }, 30_000);
+
+  it("persists ambiguous remote ACP launch acceptance and never creates a continuation retry", async () => {
+    const { companyId, agentId, runId, issueId, wakeupRequestId } = await seedQueuedIssueRunFixture();
+    const { leaseId } = await seedEnvironmentLeaseFixture({ companyId, runId, issueId });
+    const launchIdentity = {
+      launchId: "launch-needs-human-1",
+      sessionId: "session-needs-human-1",
+      sessionDir: "/workspace/.paperclip-runtime/acpx/process-sessions/session-needs-human-1",
+      launchIdentityPath: "/workspace/.paperclip-runtime/acpx/process-sessions/session-needs-human-1/launch.identity.json",
+      launcherPidPath: "/workspace/.paperclip-runtime/acpx/process-sessions/session-needs-human-1/launcher.pid",
+      wrapperPidPath: "/workspace/.paperclip-runtime/acpx/process-sessions/session-needs-human-1/wrapper.pid",
+      launchAcceptedPath: "/workspace/.paperclip-runtime/acpx/process-sessions/session-needs-human-1/launch.accepted.json",
+    };
+    mockAdapterExecute.mockResolvedValueOnce({
+      exitCode: 1,
+      signal: null,
+      timedOut: false,
+      errorMessage: "Remote ACP launch acceptance could not be reconciled; do not retry.",
+      errorCode: "ACP_PROCESS_SESSION_LAUNCH_AMBIGUOUS",
+      errorMeta: {
+        retryable: false,
+        needsHuman: true,
+        acceptedStart: "unknown",
+        launchIdentity,
+      },
+      resultJson: {
+        phase: "setup",
+        processSessionLaunch: {
+          status: "needs_human",
+          acceptedStart: "unknown",
+          retryable: false,
+          ...launchIdentity,
+        },
+      },
+      summary: "Remote ACP launch acceptance needs human reconciliation.",
+      provider: "test",
+      model: "test-model",
+      clearSession: true,
+    });
+    const heartbeat = heartbeatService(db);
+
+    await heartbeat.resumeQueuedRuns();
+    const retained = await waitForValue(async () => {
+      const current = await heartbeat.getRun(runId);
+      return current?.errorCode === "ACP_PROCESS_SESSION_LAUNCH_AMBIGUOUS" ? current : null;
+    }, 5_000);
+    expect(retained).toMatchObject({
+      status: "running",
+      errorCode: "ACP_PROCESS_SESSION_LAUNCH_AMBIGUOUS",
+      resultJson: {
+        processSessionLaunch: {
+          status: "needs_human",
+          acceptedStart: "unknown",
+          retryable: false,
+          launchId: launchIdentity.launchId,
+          sessionId: launchIdentity.sessionId,
+        },
+      },
+    });
+
+    await heartbeat.reconcileStrandedAssignedIssues();
+    const retries = await db
+      .select({ id: heartbeatRuns.id })
+      .from(heartbeatRuns)
+      .where(eq(heartbeatRuns.retryOfRunId, runId));
+    expect(retries).toHaveLength(0);
+    const issue = await db
+      .select()
+      .from(issues)
+      .where(eq(issues.id, issueId))
+      .then((rows) => rows[0] ?? null);
+    expect(issue).toMatchObject({ checkoutRunId: runId, executionRunId: runId });
+    const lease = await db
+      .select()
+      .from(environmentLeases)
+      .where(eq(environmentLeases.id, leaseId))
+      .then((rows) => rows[0] ?? null);
+    expect(lease).toMatchObject({ status: "active", releasedAt: null });
+    const sourceWake = await db
+      .select()
+      .from(agentWakeupRequests)
+      .where(eq(agentWakeupRequests.id, wakeupRequestId))
+      .then((rows) => rows[0] ?? null);
+    expect(sourceWake?.status).toBe("claimed");
+    const promotedWakes = await db
+      .select({ id: agentWakeupRequests.id })
+      .from(agentWakeupRequests)
+      .where(and(
+        eq(agentWakeupRequests.agentId, agentId),
+        inArray(agentWakeupRequests.status, ["queued", "deferred_issue_execution"]),
+      ));
+    expect(promotedWakes).toHaveLength(0);
+    const finalizeOperations = await db
+      .select({ status: workspaceOperations.status })
+      .from(workspaceOperations)
+      .where(and(
+        eq(workspaceOperations.heartbeatRunId, runId),
+        eq(workspaceOperations.phase, "workspace_finalize"),
+      ));
+    expect(finalizeOperations).toHaveLength(0);
+  });
+
   it("redacts secret-bearing successful-run detected progress before handoff disclosure", async () => {
     const { agentId, runId, issueId } = await seedQueuedIssueRunFixture();
     const bearerSecret = "live-bearer-token-value";
@@ -3459,13 +4220,18 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
   });
 
   it("terminates the in-memory process before persisting cancellation status", async () => {
+    const child = spawn(process.execPath, ["-e", "setInterval(() => undefined, 1000)"], {
+      stdio: "ignore",
+    });
+    childProcesses.add(child);
+    await expect.poll(() => isPidAlive(child.pid!), { timeout: 5_000 }).toBe(true);
     const { runId } = await seedRunFixture({
       agentStatus: "running",
       includeIssue: false,
     });
     const heartbeat = heartbeatService(db);
     runningProcesses.set(runId, {
-      child: { pid: 12345 } as ChildProcess,
+      child,
       graceSec: 1,
       processGroupId: null,
     });
@@ -3478,17 +4244,398 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     try {
       await expect(heartbeat.cancelRun(runId)).rejects.toThrow("db update unavailable");
       expect(mockTerminateLocalService).toHaveBeenCalledWith(
-        expect.objectContaining({ pid: 12345, processGroupId: null }),
+        expect.objectContaining({ pid: child.pid, processGroupId: null }),
         {
           forceAfterMs: 1000,
           trustedPid: true,
           trustedProcessGroup: true,
+          childProcess: child,
         },
       );
       expect(runningProcesses.has(runId)).toBe(false);
     } finally {
       updateSpy.mockRestore();
+      child.kill("SIGKILL");
+      childProcesses.delete(child);
     }
+  });
+
+  it("refuses to cancel a live persisted PID after the in-memory child handle is lost", async () => {
+    const child = spawn(process.execPath, ["-e", "setInterval(() => undefined, 1000)"], {
+      stdio: "ignore",
+    });
+    childProcesses.add(child);
+    expect(child.pid).toBeTypeOf("number");
+    try {
+      await expect.poll(() => isPidAlive(child.pid!), { timeout: 5_000 }).toBe(true);
+      const { runId } = await seedRunFixture({
+        agentStatus: "running",
+        includeIssue: false,
+        processPid: child.pid,
+      });
+      const heartbeat = heartbeatService(db);
+
+      await expect(heartbeat.cancelRun(runId)).rejects.toMatchObject({
+        status: 409,
+      });
+      expect(isPidAlive(child.pid!)).toBe(true);
+      expect(mockTerminateLocalService).not.toHaveBeenCalled();
+
+      const retained = await heartbeat.getRun(runId);
+      expect(retained).toMatchObject({
+        status: "running",
+        errorCode: "process_termination_unverified_needs_human",
+      });
+      expect(retained?.error).toContain("untrusted_identity");
+    } finally {
+      child.kill("SIGKILL");
+      childProcesses.delete(child);
+    }
+  });
+
+  it("refuses explicit cancellation of a local no-metadata run and retains issue/lease custody", async () => {
+    const { companyId, runId, issueId } = await seedRunFixture({
+      agentStatus: "running",
+      processPid: null,
+      processGroupId: null,
+    });
+    const { leaseId } = await seedEnvironmentLeaseFixture({ companyId, runId, issueId });
+    const heartbeat = heartbeatService(db);
+
+    await expect(heartbeat.cancelRun(runId)).rejects.toMatchObject({ status: 409 });
+    await expect(heartbeat.getRun(runId)).resolves.toMatchObject({
+      status: "running",
+      errorCode: "process_termination_unverified_needs_human",
+    });
+    const issue = await db.select().from(issues).where(eq(issues.id, issueId)).then((rows) => rows[0] ?? null);
+    expect(issue).toMatchObject({ checkoutRunId: runId, executionRunId: runId });
+    const lease = await db
+      .select()
+      .from(environmentLeases)
+      .where(eq(environmentLeases.id, leaseId))
+      .then((rows) => rows[0] ?? null);
+    expect(lease).toMatchObject({ status: "active", releasedAt: null });
+  });
+
+  it("refuses explicit cancellation while a remote ACP launch remains fenced", async () => {
+    const { companyId, runId, issueId, wakeupRequestId } = await seedRunFixture({
+      agentStatus: "running",
+      runErrorCode: "ACP_PROCESS_SESSION_LAUNCH_AMBIGUOUS",
+      runError: "Remote ACP launch acceptance needs human reconciliation",
+    });
+    const { leaseId } = await seedEnvironmentLeaseFixture({ companyId, runId, issueId });
+    const heartbeat = heartbeatService(db);
+
+    await expect(heartbeat.cancelRun(runId)).rejects.toMatchObject({ status: 409 });
+    expect(mockTerminateLocalService).not.toHaveBeenCalled();
+
+    const retained = await heartbeat.getRun(runId);
+    expect(retained).toMatchObject({
+      status: "running",
+      errorCode: "ACP_PROCESS_SESSION_LAUNCH_AMBIGUOUS",
+    });
+    const issue = await db.select().from(issues).where(eq(issues.id, issueId)).then((rows) => rows[0] ?? null);
+    expect(issue).toMatchObject({ checkoutRunId: runId, executionRunId: runId });
+    const lease = await db
+      .select()
+      .from(environmentLeases)
+      .where(eq(environmentLeases.id, leaseId))
+      .then((rows) => rows[0] ?? null);
+    expect(lease).toMatchObject({ status: "active", releasedAt: null });
+    const wake = await db
+      .select()
+      .from(agentWakeupRequests)
+      .where(eq(agentWakeupRequests.id, wakeupRequestId))
+      .then((rows) => rows[0] ?? null);
+    expect(wake?.status).toBe("claimed");
+  });
+
+  it("allows authenticated cancellation only after exact remote ACP terminal reconciliation", async () => {
+    const { runId, issueId } = await seedRunFixture({
+      agentStatus: "running",
+      runErrorCode: "ACP_PROCESS_SESSION_LAUNCH_AMBIGUOUS",
+      runError: "Remote ACP launch acceptance needs human reconciliation",
+    });
+    await db
+      .update(heartbeatRuns)
+      .set({
+        resultJson: {
+          processSessionLaunch: {
+            launchId: "launch-terminal-reconciled-1",
+            sessionId: "session-terminal-reconciled-1",
+            runId,
+            adapterKey: "codex_local",
+            transport: "sandbox",
+            providerKey: "provider-1",
+            environmentId: "environment-1",
+            leaseId: "lease-1",
+            remoteCwd: "/workspace",
+            sessionDir: "/workspace/.paperclip-runtime/acpx/process-sessions/session-terminal-reconciled-1",
+            eventsDir: "/workspace/.paperclip-runtime/acpx/process-sessions/session-terminal-reconciled-1/events",
+            launchIdentityPath: "/workspace/.paperclip-runtime/acpx/process-sessions/session-terminal-reconciled-1/launch.identity.json",
+            launcherPidPath: "/workspace/.paperclip-runtime/acpx/process-sessions/session-terminal-reconciled-1/launcher.pid",
+            wrapperPidPath: "/workspace/.paperclip-runtime/acpx/process-sessions/session-terminal-reconciled-1/wrapper.pid",
+            launchAcceptedPath: "/workspace/.paperclip-runtime/acpx/process-sessions/session-terminal-reconciled-1/launch.accepted.json",
+            terminalReceiptPath: "/workspace/.paperclip-runtime/acpx/process-sessions/session-terminal-reconciled-1/terminal.receipt.json",
+            childClosedPath: "/workspace/.paperclip-runtime/acpx/process-sessions/session-terminal-reconciled-1/child.closed",
+            wrapperDonePath: "/workspace/.paperclip-runtime/acpx/process-sessions/session-terminal-reconciled-1/wrapper.done",
+            status: "needs_human",
+          },
+        },
+      })
+      .where(eq(heartbeatRuns.id, runId));
+    mockReconcileAndReleaseAcpLaunch.mockResolvedValueOnce({
+      found: true,
+      terminal: true,
+      treeCustodyVerified: true,
+      cleanupComplete: true,
+      released: true,
+    });
+    const heartbeat = heartbeatService(db);
+
+    const cancelled = await heartbeat.cancelRun(runId);
+
+    expect(mockReconcileAndReleaseAcpLaunch).toHaveBeenCalledWith({
+      runId,
+      launchId: "launch-terminal-reconciled-1",
+    });
+    expect(cancelled).toMatchObject({ status: "cancelled", errorCode: "cancelled" });
+    const issue = await db.select().from(issues).where(eq(issues.id, issueId)).then((rows) => rows[0] ?? null);
+    expect(issue?.checkoutRunId).toBeNull();
+    expect(issue?.executionRunId).not.toBe(runId);
+  });
+
+  it("refuses active-launch cancellation until the registered controller verifies tree custody and cleanup", async () => {
+    const { agentId, runId, issueId } = await seedRunFixture({ agentStatus: "running" });
+    const sessionDir = "/workspace/.paperclip-runtime/acpx/process-sessions/session-active-cancel-1";
+    await db.update(heartbeatRuns).set({
+      resultJson: {
+        processSessionLaunch: {
+          status: "accepted",
+          launchId: "launch-active-cancel-1",
+          sessionId: "session-active-cancel-1",
+          runId,
+          adapterKey: "acpx",
+          transport: "sandbox",
+          providerKey: "provider-1",
+          environmentId: "environment-1",
+          leaseId: "lease-1",
+          remoteCwd: "/workspace",
+          sessionDir,
+          eventsDir: `${sessionDir}/events`,
+          launchIdentityPath: `${sessionDir}/launch.identity.json`,
+          launcherPidPath: `${sessionDir}/launcher.pid`,
+          wrapperPidPath: `${sessionDir}/wrapper.pid`,
+          launchAcceptedPath: `${sessionDir}/launch.accepted.json`,
+          terminalReceiptPath: `${sessionDir}/terminal.receipt.json`,
+          childClosedPath: `${sessionDir}/child.closed`,
+          wrapperDonePath: `${sessionDir}/wrapper.done`,
+        },
+      },
+    }).where(eq(heartbeatRuns.id, runId));
+    mockRequestStopAndWaitAcpLaunch.mockResolvedValueOnce({
+      found: true,
+      terminal: true,
+      treeCustodyVerified: false,
+      cleanupComplete: false,
+      released: false,
+    });
+    const heartbeat = heartbeatService(db);
+
+    await expect(heartbeat.cancelRun(runId)).rejects.toMatchObject({ status: 409 });
+    expect(mockRequestStopAndWaitAcpLaunch).toHaveBeenCalledWith({
+      runId,
+      launchId: "launch-active-cancel-1",
+    });
+    const retained = await heartbeat.getRun(runId);
+    expect(retained).toMatchObject({ status: "running", errorCode: null });
+    const issue = await db.select().from(issues).where(eq(issues.id, issueId)).then((rows) => rows[0] ?? null);
+    expect(issue?.executionRunId).toBe(runId);
+
+    mockRequestStopAndWaitAcpLaunch.mockResolvedValueOnce({
+      found: true,
+      terminal: true,
+      treeCustodyVerified: true,
+      cleanupComplete: true,
+      released: true,
+    });
+    await expect(heartbeat.cancelActiveForAgent(agentId)).resolves.toBe(1);
+    const cancelled = await heartbeat.getRun(runId);
+    expect(cancelled).toMatchObject({ status: "cancelled", errorCode: "agent_paused" });
+  });
+
+  it("retains an active launch during agent pause until controller cleanup is fully verified", async () => {
+    const { agentId, runId, issueId } = await seedRunFixture({ agentStatus: "paused" });
+    const sessionDir = "/workspace/.paperclip-runtime/acpx/process-sessions/session-active-pause-1";
+    await db.update(heartbeatRuns).set({
+      resultJson: {
+        processSessionLaunch: {
+          status: "accepted",
+          launchId: "launch-active-pause-1",
+          sessionId: "session-active-pause-1",
+          runId,
+          adapterKey: "acpx",
+          transport: "sandbox",
+          providerKey: "provider-1",
+          environmentId: "environment-1",
+          leaseId: "lease-1",
+          remoteCwd: "/workspace",
+          sessionDir,
+          eventsDir: `${sessionDir}/events`,
+          launchIdentityPath: `${sessionDir}/launch.identity.json`,
+          launcherPidPath: `${sessionDir}/launcher.pid`,
+          wrapperPidPath: `${sessionDir}/wrapper.pid`,
+          launchAcceptedPath: `${sessionDir}/launch.accepted.json`,
+          terminalReceiptPath: `${sessionDir}/terminal.receipt.json`,
+          childClosedPath: `${sessionDir}/child.closed`,
+          wrapperDonePath: `${sessionDir}/wrapper.done`,
+        },
+      },
+    }).where(eq(heartbeatRuns.id, runId));
+    mockRequestStopAndWaitAcpLaunch.mockResolvedValueOnce({
+      found: true,
+      terminal: true,
+      treeCustodyVerified: false,
+      cleanupComplete: false,
+      released: false,
+    });
+    const heartbeat = heartbeatService(db);
+
+    await expect(heartbeat.cancelActiveForAgent(agentId)).resolves.toBe(0);
+    expect(mockRequestStopAndWaitAcpLaunch).toHaveBeenCalledWith({
+      runId,
+      launchId: "launch-active-pause-1",
+    });
+    const retained = await heartbeat.getRun(runId);
+    expect(retained).toMatchObject({ status: "running", errorCode: null });
+    const issue = await db.select().from(issues).where(eq(issues.id, issueId)).then((rows) => rows[0] ?? null);
+    expect(issue?.executionRunId).toBe(runId);
+
+    mockRequestStopAndWaitAcpLaunch.mockResolvedValueOnce({
+      found: true,
+      terminal: true,
+      treeCustodyVerified: true,
+      cleanupComplete: true,
+      released: true,
+    });
+    await expect(heartbeat.cancelActiveForAgent(agentId)).resolves.toBe(1);
+    const cancelled = await heartbeat.getRun(runId);
+    expect(cancelled).toMatchObject({ status: "cancelled", errorCode: "agent_paused" });
+  });
+
+  it("retains a fenced remote ACP launch when its agent is paused", async () => {
+    const { companyId, agentId, runId, issueId, wakeupRequestId } = await seedRunFixture({
+      agentStatus: "paused",
+      runErrorCode: "ACP_PROCESS_SESSION_LAUNCH_AMBIGUOUS",
+      runError: "Remote ACP launch acceptance needs human reconciliation",
+    });
+    const { leaseId } = await seedEnvironmentLeaseFixture({ companyId, runId, issueId });
+    const heartbeat = heartbeatService(db);
+
+    await expect(heartbeat.cancelActiveForAgent(agentId)).resolves.toBe(0);
+    expect(mockTerminateLocalService).not.toHaveBeenCalled();
+
+    const retained = await heartbeat.getRun(runId);
+    expect(retained).toMatchObject({
+      status: "running",
+      errorCode: "ACP_PROCESS_SESSION_LAUNCH_AMBIGUOUS",
+    });
+    const issue = await db.select().from(issues).where(eq(issues.id, issueId)).then((rows) => rows[0] ?? null);
+    expect(issue).toMatchObject({ checkoutRunId: runId, executionRunId: runId });
+    const lease = await db
+      .select()
+      .from(environmentLeases)
+      .where(eq(environmentLeases.id, leaseId))
+      .then((rows) => rows[0] ?? null);
+    expect(lease).toMatchObject({ status: "active", releasedAt: null });
+    const wake = await db
+      .select()
+      .from(agentWakeupRequests)
+      .where(eq(agentWakeupRequests.id, wakeupRequestId))
+      .then((rows) => rows[0] ?? null);
+    expect(wake?.status).toBe("claimed");
+  });
+
+  it("retains a local no-metadata run and issue lock when its agent is paused", async () => {
+    const { companyId, agentId, runId, issueId } = await seedRunFixture({
+      agentStatus: "paused",
+      processPid: null,
+      processGroupId: null,
+    });
+    const { leaseId } = await seedEnvironmentLeaseFixture({ companyId, runId, issueId });
+    const heartbeat = heartbeatService(db);
+
+    await expect(heartbeat.cancelActiveForAgent(agentId)).resolves.toBe(0);
+    await expect(heartbeat.getRun(runId)).resolves.toMatchObject({
+      status: "running",
+      errorCode: "process_termination_unverified_needs_human",
+    });
+    const issue = await db.select().from(issues).where(eq(issues.id, issueId)).then((rows) => rows[0] ?? null);
+    expect(issue).toMatchObject({ checkoutRunId: runId, executionRunId: runId });
+    const lease = await db
+      .select()
+      .from(environmentLeases)
+      .where(eq(environmentLeases.id, leaseId))
+      .then((rows) => rows[0] ?? null);
+    expect(lease).toMatchObject({ status: "active", releasedAt: null });
+  });
+
+  it.skipIf(process.platform !== "win32")("refuses to cancel a dead Windows wrapper with unprobeable persisted group evidence", async () => {
+    const deadPid = 999_999_999;
+    expect(isPidAlive(deadPid)).toBe(false);
+    const { runId, issueId } = await seedRunFixture({
+      agentStatus: "running",
+      processPid: deadPid,
+      processGroupId: deadPid,
+    });
+    const heartbeat = heartbeatService(db);
+
+    await expect(heartbeat.cancelRun(runId)).rejects.toMatchObject({
+      status: 409,
+    });
+    expect(mockTerminateLocalService).not.toHaveBeenCalled();
+
+    const retained = await heartbeat.getRun(runId);
+    expect(retained).toMatchObject({
+      status: "running",
+      errorCode: "process_termination_unverified_needs_human",
+    });
+    expect(retained?.error).toContain("untrusted_identity");
+    const retainedIssue = await db
+      .select()
+      .from(issues)
+      .where(eq(issues.id, issueId))
+      .then((rows) => rows[0] ?? null);
+    expect(retainedIssue?.executionRunId).toBe(runId);
+  });
+
+  it.skipIf(process.platform !== "win32")("refuses to cancel the production Windows null-group shape after its wrapper exits", async () => {
+    const deadPid = 999_999_998;
+    expect(isPidAlive(deadPid)).toBe(false);
+    const { runId, issueId } = await seedRunFixture({
+      agentStatus: "running",
+      processPid: deadPid,
+      processGroupId: null,
+    });
+    const heartbeat = heartbeatService(db);
+
+    await expect(heartbeat.cancelRun(runId)).rejects.toMatchObject({
+      status: 409,
+    });
+    expect(mockTerminateLocalService).not.toHaveBeenCalled();
+
+    const retained = await heartbeat.getRun(runId);
+    expect(retained).toMatchObject({
+      status: "running",
+      errorCode: "process_termination_unverified_needs_human",
+    });
+    expect(retained?.error).toContain("untrusted_identity");
+    const retainedIssue = await db
+      .select()
+      .from(issues)
+      .where(eq(issues.id, issueId))
+      .then((rows) => rows[0] ?? null);
+    expect(retainedIssue?.executionRunId).toBe(runId);
   });
 
   it("records manual cancellation stop metadata", async () => {
@@ -4101,7 +5248,7 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     const comments = await db.select().from(issueComments).where(eq(issueComments.issueId, issueId));
     const recoveryComment = comments.find((comment) =>
       comment.body.includes("pending execution-review participant once") &&
-        noticeMetadataReferencesRecoveryAction(comment.metadata, recoveryAction.id),
+        comment.body.includes(`Recovery action: \`${recoveryAction.id}\``),
     );
     expect(recoveryComment).toBeTruthy();
 
@@ -4913,18 +6060,9 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     const comments = await db.select().from(issueComments).where(eq(issueComments.issueId, issueId));
     expect(comments).toHaveLength(1);
     expect(comments[0]?.body).toContain("retried dispatch");
-    expect(comments[0]?.body).not.toContain("sk-test-recovery-secret");
-    expect(JSON.stringify(comments[0]?.metadata)).not.toContain("sk-test-recovery-secret");
-    const failureSummary = commentMetadataRows(comments[0]).find((row) =>
-      row.type === "key_value" && row.label === "Failure summary",
-    );
-    expect(failureSummary).toMatchObject({ type: "key_value", label: "Failure summary" });
-    expect(failureSummary?.type === "key_value" ? failureSummary.value : "").toContain("Authorization");
-    expect(comments[0]?.presentation).toMatchObject({ kind: "system_notice", tone: "danger" });
-    expect(noticeMetadataReferencesRecoveryAction(comments[0]?.metadata, recoveryAction.id)).toBe(true);
-    expect(commentMetadataRows(comments[0]).some((row) =>
-      row.type === "agent_link" && row.label === "Recovery owner" && row.name === "CodexCoder",
-    )).toBe(true);
+    expect(comments[0]?.body).toContain("Latest retry failure details were withheld from the issue thread");
+    expect(comments[0]?.body).toContain(`Recovery action: \`${recoveryAction.id}\``);
+    expect(comments[0]?.body).toContain("Recovery owner: [CodexCoder]");
   });
 
   it("blocks an already stranded recovery issue without creating a recovery child", async () => {
@@ -5321,11 +6459,9 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     const comments = await db.select().from(issueComments).where(eq(issueComments.issueId, issueId));
     expect(comments).toHaveLength(1);
     expect(comments[0]?.body).toContain("retried continuation");
-    expect(comments[0]?.presentation).toMatchObject({ kind: "system_notice", tone: "danger" });
-    expect(noticeMetadataReferencesRecoveryAction(comments[0]?.metadata, recoveryAction.id)).toBe(true);
-    expect(commentMetadataRows(comments[0]).some((row) =>
-      row.type === "agent_link" && row.label === "Recovery owner" && row.name === "CodexCoder",
-    )).toBe(true);
+    expect(comments[0]?.body).toContain("Latest retry failure details were withheld from the issue thread");
+    expect(comments[0]?.body).toContain(`Recovery action: \`${recoveryAction.id}\``);
+    expect(comments[0]?.body).toContain("Recovery owner: [CodexCoder]");
   });
 
   it("redacts error-code-only stranded recovery failures in issue copy", async () => {
@@ -5356,13 +6492,8 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
 
     const comments = await db.select().from(issueComments).where(eq(issueComments.issueId, issueId));
     expect(comments).toHaveLength(1);
-    expect(comments[0]?.body).not.toContain("adapter_exit_code");
+    expect(comments[0]?.body).toContain("Latest retry failure details were withheld from the issue thread");
     expect(comments[0]?.body).not.toContain("- Failure: none recorded");
-    expect(commentMetadataRows(comments[0])).toContainEqual({
-      type: "key_value",
-      label: "Failure code",
-      value: "adapter_exit_code",
-    });
   });
 
   it("keeps retrying transient adapter_failed continuation runs before the cap", async () => {
@@ -5455,11 +6586,7 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     expect(comments).toHaveLength(1);
     expect(comments[0]?.body).toContain("retried continuation");
     expect(comments[0]?.body).toContain("3× attempts");
-    expect(commentMetadataRows(comments[0])).toContainEqual({
-      type: "key_value",
-      label: "Failure code",
-      value: "adapter_failed",
-    });
+    expect(comments[0]?.body).toContain("Latest cause: `adapter_failed`");
   });
 
   it("does not count mixed-cause continuation failures toward the transient cap", async () => {
@@ -6086,11 +7213,8 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     expect(comments).toHaveLength(1);
     expect(comments[0]?.body).toContain("automatically retried continuation");
     expect(comments[0]?.body).toContain("still has no live execution path");
-    expect(comments[0]?.presentation).toMatchObject({ kind: "system_notice", tone: "danger" });
-    expect(noticeMetadataReferencesRecoveryAction(comments[0]?.metadata, recoveryAction.id)).toBe(true);
-    expect(commentMetadataRows(comments[0]).some((row) =>
-      row.type === "agent_link" && row.label === "Recovery owner" && row.name === "CodexCoder",
-    )).toBe(true);
+    expect(comments[0]?.body).toContain(`Recovery action: \`${recoveryAction.id}\``);
+    expect(comments[0]?.body).toContain("Recovery owner: [CodexCoder]");
   });
 
   it("allows one productive-terminal recovery after regular continuation recovery made progress", async () => {

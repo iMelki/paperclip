@@ -67,7 +67,7 @@ const {
       // minimal-home copy step (auth.json/config.toml) has something to read.
       const dir = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-managed-codex-home-"));
       await fs.writeFile(`${dir}/auth.json`, JSON.stringify({ OPENAI_API_KEY: "sk-managed" }));
-      await fs.writeFile(`${dir}/config.toml`, "model = \"gpt-5\"\n");
+      await fs.writeFile(path.join(dir, "config.toml"), "model = \"gpt-5\"\n");
       return dir;
     }),
     restoreWorkspace,
@@ -227,7 +227,7 @@ describe("codex remote environment diagnostics", () => {
     prepareManagedCodexHome.mockImplementationOnce(async () => {
       const dir = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-managed-codex-home-noauth-"));
       // No auth.json — only a config file.
-      await fs.writeFile(`${dir}/config.toml`, "model = \"gpt-5\"\n");
+      await fs.writeFile(path.join(dir, "config.toml"), "model = \"gpt-5\"\n");
       return dir;
     });
 

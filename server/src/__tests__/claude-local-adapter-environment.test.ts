@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { runChildProcess } from "@paperclipai/adapter-utils/server-utils";
 import { toShellPath } from "@paperclipai/adapter-utils/shell-path";
+import { resolveTestShellCommand } from "@paperclipai/adapter-utils/test-shell";
 import { resetClaudeCliCapabilitiesCacheForTests, testEnvironment } from "@paperclipai/adapter-claude-local/server";
 
 const ORIGINAL_ANTHROPIC = process.env.ANTHROPIC_API_KEY;
@@ -90,7 +91,7 @@ function createLocalSandboxRunner(pathMapping?: { remoteRoot: string; localRoot:
       const shellCommand = commandBasename === "sh" || commandBasename === "bash";
       return runChildProcess(
         `claude-envtest-sandbox-${counter}`,
-        mapValue(input.command, false),
+        resolveTestShellCommand(mapValue(input.command, false)),
         (input.args ?? []).map((arg) => mapValue(arg, shellCommand)),
         {
           cwd: mapValue(input.cwd ?? process.cwd(), false),

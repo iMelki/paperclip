@@ -20,6 +20,10 @@ import { heartbeatService } from "../services/heartbeat.ts";
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
 
+// These fixtures exercise DB lock finalization, not local child cleanup.
+// Sessioned local adapters without authoritative process custody must fail closed.
+const NON_LOCAL_CANCELLATION_TEST_ADAPTER = "openclaw_gateway";
+
 if (!embeddedPostgresSupport.supported) {
   console.warn(
     `Skipping execution-lock orphan-cleanup tests on this host: ${embeddedPostgresSupport.reason ?? "unsupported environment"}`,
@@ -68,7 +72,7 @@ describeEmbeddedPostgres("execution lock orphan cleanup", () => {
       name,
       role: "engineer",
       status: "running",
-      adapterType: "codex_local",
+      adapterType: NON_LOCAL_CANCELLATION_TEST_ADAPTER,
       adapterConfig: {},
       runtimeConfig: {},
       permissions: {},

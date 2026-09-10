@@ -344,7 +344,10 @@ async function defaultGeminiAcpFallbackReason(
     executionTarget: input.executionTarget,
     legacyRemoteExecution: input.executionTransport?.remoteExecution,
   });
-  if (target?.kind === "remote" && !sandboxTargetHasProcessSessionBridge(target)) {
+  if (target?.kind === "remote") {
+    if (sandboxTargetHasProcessSessionBridge(target)) {
+      return "Remote Gemini ACP process sessions are disabled until Paperclip #22 provides durable launch-bound process-tree custody and restart-safe cleanup reconstruction.";
+    }
     if (target.transport === "sandbox") {
       return "Gemini ACP requires a bidirectional remote process target; this sandbox exposes only one-shot command execution.";
     }
@@ -387,10 +390,10 @@ export async function testGeminiAcpEnvironment(
 
   if (targetIsRemote) {
     checks.push({
-      code: "gemini_acp_remote_target",
-      level: "info",
-      message: "Gemini ACP will run against the remote execution environment.",
-      hint: "Remote ACP requires a bidirectional process target such as SSH or Paperclip's sandbox process-session bridge.",
+      code: "gemini_acp_remote_target_disabled",
+      level: "error",
+      message: "Remote Gemini ACP is disabled pending Paperclip #22 launch-custody and restart-safe cleanup work.",
+      hint: "Use engine=cli for remote runs. An explicit engine=acp request remains fail-closed before staging or launch.",
     });
   }
 

@@ -1,9 +1,9 @@
 import fs from "node:fs/promises";
 import path from "node:path";
-import { execFile as execFileCallback } from "node:child_process";
+import { execFile as execFileCallback, type ChildProcess } from "node:child_process";
 import { promisify } from "node:util";
 import { createHash, randomUUID } from "node:crypto";
-import { and, asc, desc, eq, getTableColumns, gt, gte, inArray, isNull, lt, lte, ne, notInArray, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, getTableColumns, gt, gte, inArray, isNull, lt, lte, notInArray, or, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
   AGENT_DEFAULT_MAX_CONCURRENT_RUNS,
@@ -15,6 +15,7 @@ import {
   type BillingType,
   type CostStatus,
   type EnvironmentLeaseStatus,
+  type EnvironmentLease,
   type ExecutionWorkspace,
   type ExecutionWorkspaceConfig,
   type HeartbeatRunStatusPhase,
@@ -44,6 +45,8 @@ import {
   documentAnnotationComments,
   documentAnnotationThreads,
   documentRevisions,
+  environmentLeases,
+  environments,
   issueDocuments,
   executionWorkspaces,
   heartbeatRunEvents,
@@ -67,17 +70,7 @@ import {
   workspaceOperations,
 } from "@paperclipai/db";
 import { conflict, HttpError, notFound } from "../errors.js";
-import { getStartupTraceContext } from "../instrumentation.js";
 import { logger } from "../middleware/logger.js";
-import {
-  createGitRemoteAuthProvider,
-  describeGitAuthFailure,
-  scrubGitCredentialText,
-  type GitRemoteAuthProvider,
-} from "./git-credentials.js";
-// Re-exported because heartbeat's workspace surface exposed the scrubber before the
-// git-credentials module became its canonical home; existing importers keep working.
-export { scrubGitCredentialText };
 import { publishLiveEvent } from "./live-events.js";
 import { normalizeResponsibleUserDenialCode } from "./responsible-user-denial-run-outcomes.js";
 import { getRunLogStore, type RunLogHandle } from "./run-log-store.js";
@@ -128,8 +121,6 @@ import {
 import { logActivity, publishPluginDomainEvent, type LogActivityInput } from "./activity-log.js";
 import {
   buildWorkspaceReadyComment,
-  buildWorkspaceReadyMetadata,
-  buildWorkspaceReadyPresentation,
   cleanupExecutionWorkspaceArtifacts,
   ensureGitWorktreeBranchCoherent,
   ensurePersistedExecutionWorkspaceAvailable,
@@ -141,13 +132,8 @@ import {
   releaseRuntimeServicesForRun,
   type ExecutionWorkspaceInput,
   type RealizedExecutionWorkspace,
-  type RuntimeServiceRef,
   sanitizeRuntimeServiceBaseEnv,
 } from "./workspace-runtime.js";
-import {
-  readManagedWorktreeInstanceOwnership,
-  WORKTREE_INSTANCE_ROOT_METADATA_KEY,
-} from "./workspace-instance-cleanup.js";
 import { issueService } from "./issues.js";
 import { projectService } from "./projects.js";
 import { authorizationService, type AuthorizationActor } from "./authorization.js";
@@ -200,7 +186,6 @@ import {
   resolveEffectiveWorkspaceStrategyType,
   resolveExecutionWorkspaceEnvironmentId,
   resolveExecutionWorkspaceMode,
-  resolveSharedWorkspaceConcurrency,
   selectEnvironmentExecutionWorkspaceSettings,
   WORKSPACE_WORKTREE_REQUIRES_PROJECT_CODE,
   WORKSPACE_WORKTREE_REQUIRES_PROJECT_MESSAGE,
@@ -232,24 +217,10 @@ import {
 } from "./recovery/index.js";
 import { isAutomaticRecoverySuppressedByPauseHold } from "./recovery/pause-hold-guard.js";
 import {
-  buildConfigurationIncompleteRecoveryNoticeSeed,
-  buildExecutionReviewParticipantRecoveryNoticeSeed,
-  buildImmediateExecutionPathRecoveryNoticeSeed,
-  buildWorkspaceValidationRecoveryNoticeSeed,
-} from "./recovery/stranded-notice.js";
-import {
   recoveryAssigneeAdapterOverrides,
   withRecoveryModelProfileHint,
 } from "./recovery/model-profile-hint.js";
-import { ACTIVE_RUN_OUTPUT_SUSPICION_THRESHOLD_MS as RECOVERY_ACTIVE_RUN_OUTPUT_SUSPICION_THRESHOLD_MS, recoveryService } from "./recovery/service.js";
-import {
-  buildIssueReviewPathLostIdempotencyKey,
-  decideIssueReviewPathRecovery,
-  ISSUE_REVIEW_PATH_LOST_WAKE_REASON,
-  isReviewPathRecoveryIdempotencyConflict,
-  REVIEW_PATH_RECOVERY_INSTRUCTION,
-  reviewPathConsumedRefFromRun,
-} from "./recovery/review-path-recovery.js";
+import { recoveryService } from "./recovery/service.js";
 import { productivityReviewService } from "./productivity-review.js";
 import { resolveRequiredSuccessfulRunHandoffOnValidPath } from "./successful-run-handoff-state.js";
 import { taskWatchdogService } from "./task-watchdogs.js";
@@ -271,13 +242,28 @@ import {
   type CurrentUserRedactionOptions,
 } from "../log-redaction.js";
 import { redactEventPayload, redactSensitiveText } from "../redaction.js";
-import { createRunSecretRedactionRegistry } from "./run-secret-redaction.js";
 import {
   hasSessionCompactionThresholds,
   resolveSessionCompactionPolicy,
   type RuntimeStatusUpdate,
   type SessionCompactionPolicy,
 } from "@paperclipai/adapter-utils";
+import {
+  reconcileAndReleaseAcpxProcessSessionLaunchResources,
+  requestStopAndWaitAcpxProcessSessionLaunch,
+} from "@paperclipai/adapter-utils/acpx-engine";
+import {
+  PAPERCLIP_CALLBACK_BRIDGE_LAUNCH_AMBIGUOUS,
+  PAPERCLIP_CALLBACK_BRIDGE_DISABLED,
+  PAPERCLIP_CALLBACK_BRIDGE_LAUNCH_EVENT,
+  PAPERCLIP_EXECUTION_TARGET_INVALID,
+  isPaperclipCallbackBridgeDisabledError,
+  isPaperclipExecutionTargetInvalidError,
+  reconcileAndReleaseAdapterExecutionTargetPaperclipBridgeLaunch,
+  reconcileAdapterExecutionTargetProcessSessionLaunchTerminal,
+  type AdapterExecutionTargetPaperclipBridgeLaunchIdentity,
+  type AdapterExecutionTargetProcessSessionLaunchIdentity,
+} from "@paperclipai/adapter-utils/execution-target";
 import {
   readPaperclipSkillSyncPreference,
   UNMANAGED_BACKGROUND_TASK_LIVENESS_REASON,
@@ -291,6 +277,7 @@ import { parseExecutionPolicyBootstrapEnv } from "./execution-policy-bootstrap.j
 import { environmentRuntimeService } from "./environment-runtime.js";
 import { skillVersionSelectionMap } from "./runtime-skill-selections.js";
 import { environmentRunOrchestrator } from "./environment-run-orchestrator.js";
+import { resolveEnvironmentExecutionTarget } from "./environment-execution-target.js";
 import { isUnsafeSessionWorkspaceCwd } from "./session-workspace-cwd.js";
 import {
   clearHeartbeatRunRuntimeStatus,
@@ -302,7 +289,6 @@ import {
   touchHeartbeatRunRuntimeStatus,
 } from "./heartbeat-run-runtime-status.js";
 import {
-  findMissingHotRestartSnapshotRunIds,
   readHotRestartIntent,
   removeHotRestartIntent,
   shouldHonorHotRestartIntentForProcess,
@@ -401,6 +387,9 @@ const WORKSPACE_VALIDATION_FAILURE_CODE = "workspace_validation_failed";
 const WORKSPACE_VALIDATION_RECOVERY_CAUSE = "workspace_validation_failed";
 const CONFIGURATION_INCOMPLETE_FAILURE_CODE = "configuration_incomplete";
 const CONFIGURATION_INCOMPLETE_RECOVERY_CAUSE = "configuration_incomplete";
+const PAPERCLIP_EXECUTION_CONFIGURATION_RECOVERY_CAUSE = "execution_configuration_fenced";
+const ACP_PROCESS_SESSION_LAUNCH_AMBIGUOUS = "ACP_PROCESS_SESSION_LAUNCH_AMBIGUOUS";
+const ACP_PROCESS_SESSION_LAUNCH_EVENT = "acp.process_session.launch";
 const EXECUTION_REVIEW_PARTICIPANT_RECOVERY_RETRY_REASON = "execution_review_participant_recovery";
 const EXECUTION_REVIEW_PARTICIPANT_RECOVERY_WAKE_REASON = "execution_review_participant_recovery";
 const EXECUTION_REVIEW_PARTICIPANT_RECOVERY_CAUSE = "execution_review_participant_recovery";
@@ -425,27 +414,6 @@ const MAX_TURN_CONTINUATION_MAX_ATTEMPTS_CAP = 10;
 const MAX_TURN_CONTINUATION_DEFAULT_DELAY_MS = 1_000;
 const MAX_TURN_CONTINUATION_MAX_DELAY_MS = 5 * 60 * 1000;
 const MAX_TURN_CONTINUATION_LIVE_RUN_STATUSES = ["scheduled_retry", "queued", "running"] as const;
-export const WORKSPACE_BUSY_RETRY_REASON = "workspace_busy";
-export const WORKSPACE_BUSY_RETRY_WAKE_REASON = "workspace_busy_retry";
-export const WORKSPACE_BUSY_ERROR_CODE = "workspace_busy";
-export const WORKSPACE_BUSY_RETRY_BASE_DELAY_MS = 60 * 1000;
-export const WORKSPACE_BUSY_RETRY_JITTER_MS = 60 * 1000;
-// A running run stops counting as a shared-workspace holder once it has been
-// silent this long. This is recovery's own "suspicious silence" bar for active
-// runs (scanSilentActiveRuns escalates such runs), so a zombie holder cannot
-// park other work on the workspace forever: it stops blocking here at the same
-// moment the recovery machinery starts treating it as stuck. A LIVE holder, in
-// contrast, never gets overtaken — a deferred run keeps rescheduling until the
-// workspace frees, because dispatching alongside a live holder is exactly the
-// concurrent-mutation failure this gate exists to prevent.
-export const WORKSPACE_BUSY_HOLDER_STALE_AFTER_MS = RECOVERY_ACTIVE_RUN_OUTPUT_SUSPICION_THRESHOLD_MS;
-// Issue-level executionWorkspaceSettings.mode values that unambiguously opt an
-// issue's runs out of the shared project workspace, and therefore out of
-// shared-workspace serialization ("isolated" is the legacy alias
-// parseIssueExecutionWorkspaceSettings normalizes to isolated_workspace). Any
-// other value — including agent_default and an absent mode — may still resolve
-// to the shared workspace and counts as a holder.
-const ISOLATED_EXECUTION_WORKSPACE_MODES = ["isolated_workspace", "operator_branch", "isolated"] as const;
 type CodexTransientFallbackMode =
   | "same_session"
   | "safer_invocation"
@@ -481,68 +449,6 @@ export class ConfigurationIncompleteFailure extends Error {
     this.name = "ConfigurationIncompleteFailure";
     this.resultJson = resultJson;
   }
-}
-
-export interface SharedWorkspaceHolder {
-  runId: string;
-  agentId: string;
-  issueId: string;
-  issueIdentifier: string | null;
-}
-
-// Pre-dispatch gate outcome: another running run currently holds the issue's
-// shared project workspace. Not a failure — the run is parked as a bounded
-// scheduled retry and re-attempted once the holder finishes, so two agents
-// never mutate the same working tree concurrently.
-export class WorkspaceBusyDeferral extends Error {
-  code = WORKSPACE_BUSY_ERROR_CODE;
-  holder: SharedWorkspaceHolder;
-  projectWorkspaceId: string;
-  deferralAttempt: number;
-  wasIssueAssignee: boolean;
-
-  constructor(input: {
-    holder: SharedWorkspaceHolder;
-    projectWorkspaceId: string;
-    deferralAttempt: number;
-    wasIssueAssignee: boolean;
-  }) {
-    super(
-      `Shared project workspace is busy: run ${input.holder.runId} (issue ${
-        input.holder.issueIdentifier ?? input.holder.issueId
-      }) is still running`,
-    );
-    this.name = "WorkspaceBusyDeferral";
-    this.holder = input.holder;
-    this.projectWorkspaceId = input.projectWorkspaceId;
-    this.deferralAttempt = input.deferralAttempt;
-    this.wasIssueAssignee = input.wasIssueAssignee;
-  }
-}
-
-function isWorkspaceBusyDeferral(error: unknown): error is WorkspaceBusyDeferral {
-  return error instanceof WorkspaceBusyDeferral;
-}
-
-export function computeWorkspaceBusyRetryDelayMs(random: () => number = Math.random) {
-  const jitter = Math.min(Math.max(random(), 0), 1);
-  return WORKSPACE_BUSY_RETRY_BASE_DELAY_MS + Math.floor(jitter * WORKSPACE_BUSY_RETRY_JITTER_MS);
-}
-
-// True for the retry of a workspace-busy deferral whose original run did NOT
-// execute under assignee-ship (a comment or review-participant wake). For such
-// a retry an assignee mismatch is the expected state, so the reassignment
-// protections in the promotion gate and the claim-time staleness check must
-// not cancel it — cancelling would silently drop the wake the deferral
-// promised to replay.
-export function isNonAssigneeWorkspaceBusyRetry(
-  retryReason: string | null | undefined,
-  contextSnapshot: Record<string, unknown>,
-) {
-  return (
-    retryReason === WORKSPACE_BUSY_RETRY_REASON &&
-    contextSnapshot.workspaceBusyDeferredWhileAssignee === false
-  );
 }
 
 function resolveCodexTransientFallbackMode(attempt: number): CodexTransientFallbackMode {
@@ -667,7 +573,6 @@ function mergeAdapterRecoveryMetadata(input: {
 const RUNNING_ISSUE_WAKE_REASONS_REQUIRING_FOLLOWUP = new Set([
   "approval_approved",
   ISSUE_BLOCKERS_RESOLVED_WAKE_REASON,
-  "issue_recovery_action_restored",
 ]);
 const ISSUE_RESPONSIBLE_USER_WAKE_REASONS = new Set([
   "issue_assigned",
@@ -715,6 +620,7 @@ const activeRunExecutionPromises = new Set<Promise<void>>();
 // down a shared database (a test afterEach) then cannot race a late wake.
 const activeWakeupPromises = new Set<Promise<unknown>>();
 const INLINE_BASE64_IMAGE_DATA_RE = /("type":"image","source":\{"type":"base64","data":")([A-Za-z0-9+/=]{1024,})(")/g;
+
 type RuntimeConfigSecretResolver = Pick<
   ReturnType<typeof secretService>,
   | "resolveAdapterConfigForRuntime"
@@ -824,7 +730,6 @@ export async function resolveExecutionRunAdapterConfig(input: {
   responsibleUserId?: string | null;
   environmentId?: string | null;
   environmentEnv?: unknown;
-  environmentDriver?: string | null;
   projectId?: string | null;
   routineId?: string | null;
   executionRunConfig: Record<string, unknown>;
@@ -1099,13 +1004,7 @@ export async function resolveExecutionRunAdapterConfig(input: {
   // resolution so a per-agent OPENAI_API_KEY (plain or resolved secret) counts
   // as satisfying the credential. It shares the exact readiness predicate the
   // adapter uses at execute time, so the two cannot drift.
-  //
-  // Sandbox-destined runs are exempt: the sandbox image may carry its own
-  // Codex login (`~/.codex/auth.json` baked in at image setup), which only the
-  // adapter can probe once the sandbox is up — and on managed cloud hosts a
-  // host-side login never exists at all. The adapter's execute-time gate
-  // remains the authority there; it probes the sandbox before failing.
-  if ((input.adapterType ?? null) === "codex_local" && (input.environmentDriver ?? null) !== "sandbox") {
+  if ((input.adapterType ?? null) === "codex_local") {
     const resolvedEnv = parseObject(resolvedConfig.env);
     const readiness = await evaluateCodexCredentialReadiness({
       env: process.env,
@@ -1289,8 +1188,6 @@ export function applyPersistedExecutionWorkspaceConfig(input: {
     const nextStrategy = parseObject(nextConfig.workspaceStrategy);
     if (input.workspaceConfig.provisionCommand === null) delete nextStrategy.provisionCommand;
     else nextStrategy.provisionCommand = input.workspaceConfig.provisionCommand;
-    if (input.workspaceConfig.runtimeProvisionCommand === null) delete nextStrategy.runtimeProvisionCommand;
-    else nextStrategy.runtimeProvisionCommand = input.workspaceConfig.runtimeProvisionCommand;
     if (input.workspaceConfig.teardownCommand === null) delete nextStrategy.teardownCommand;
     else nextStrategy.teardownCommand = input.workspaceConfig.teardownCommand;
     nextConfig.workspaceStrategy = nextStrategy;
@@ -1366,8 +1263,6 @@ function buildExecutionWorkspaceConfigSnapshot(
 
   if ("workspaceStrategy" in config) {
     snapshot.provisionCommand = typeof strategy.provisionCommand === "string" ? strategy.provisionCommand : null;
-    snapshot.runtimeProvisionCommand =
-      typeof strategy.runtimeProvisionCommand === "string" ? strategy.runtimeProvisionCommand : null;
     snapshot.teardownCommand = typeof strategy.teardownCommand === "string" ? strategy.teardownCommand : null;
   }
 
@@ -1409,14 +1304,10 @@ export function stripHostWorkspaceProvisionForLowTrustSandbox(input: {
   if (input.selectedEnvironmentDriver !== "sandbox") return input.config;
 
   const workspaceStrategy = parseObject(input.config.workspaceStrategy);
-  if (
-    typeof workspaceStrategy.provisionCommand !== "string"
-    && typeof workspaceStrategy.runtimeProvisionCommand !== "string"
-  ) return input.config;
+  if (typeof workspaceStrategy.provisionCommand !== "string") return input.config;
 
   const nextWorkspaceStrategy = { ...workspaceStrategy };
   delete nextWorkspaceStrategy.provisionCommand;
-  delete nextWorkspaceStrategy.runtimeProvisionCommand;
 
   return {
     ...input.config,
@@ -1477,12 +1368,9 @@ export async function resolveWorkspaceAfterLowTrustPreflight<TWorkspace>(input: 
   };
 }
 
-export function deriveRepoNameFromRepoUrl(repoUrl: string | null): string | null {
+function deriveRepoNameFromRepoUrl(repoUrl: string | null): string | null {
   const trimmed = repoUrl?.trim() ?? "";
   if (!trimmed) return null;
-  // `new URL("C:\\workspace\\repo")` accepts `c:` as a scheme. A host path is
-  // not a clone URL and must preserve the managed-workspace fallback instead.
-  if (/^[A-Za-z]:/.test(trimmed) || trimmed.includes("\\")) return null;
   try {
     const parsed = new URL(trimmed);
     const cleanedPath = parsed.pathname.replace(/\/+$/, "");
@@ -1493,42 +1381,16 @@ export function deriveRepoNameFromRepoUrl(repoUrl: string | null): string | null
   }
 }
 
-/**
- * In-flight managed-checkout materializations keyed by target cwd. Two issues on the same
- * project can wake within seconds of each other; without this, both runs raced the same
- * clone target — the loser saw "destination path already exists" and its failure cleanup
- * deleted the winner's in-progress clone, so both runs failed every round.
- */
-const managedCheckoutMaterializations = new Map<string, Promise<{ cwd: string; warning: string | null }>>();
-
-export async function ensureManagedProjectWorkspace(input: {
+async function ensureManagedProjectWorkspace(input: {
   companyId: string;
   projectId: string;
   repoUrl: string | null;
-  /** Optional git credential source for cloning private repos; null/absent preserves ambient behavior. */
-  resolveGitAuth?: GitRemoteAuthProvider | null;
 }): Promise<{ cwd: string; warning: string | null }> {
   const cwd = resolveManagedProjectWorkspaceDir({
     companyId: input.companyId,
     projectId: input.projectId,
     repoName: deriveRepoNameFromRepoUrl(input.repoUrl),
   });
-  const inFlight = managedCheckoutMaterializations.get(cwd);
-  if (inFlight) return inFlight;
-  const attempt = materializeManagedProjectWorkspace(cwd, input).finally(() => {
-    managedCheckoutMaterializations.delete(cwd);
-  });
-  managedCheckoutMaterializations.set(cwd, attempt);
-  return attempt;
-}
-
-async function materializeManagedProjectWorkspace(
-  cwd: string,
-  input: {
-    repoUrl: string | null;
-    resolveGitAuth?: GitRemoteAuthProvider | null;
-  },
-): Promise<{ cwd: string; warning: string | null }> {
   await fs.mkdir(path.dirname(cwd), { recursive: true });
   const stats = await fs.stat(cwd).catch(() => null);
 
@@ -1539,12 +1401,11 @@ async function materializeManagedProjectWorkspace(
     return { cwd, warning: null };
   }
 
-  const hasAdoptableGitDir = () =>
-    fs
-      .stat(path.resolve(cwd, ".git"))
-      .then((entry) => entry.isDirectory())
-      .catch(() => false);
-  if (await hasAdoptableGitDir()) {
+  const gitDirExists = await fs
+    .stat(path.resolve(cwd, ".git"))
+    .then((entry) => entry.isDirectory())
+    .catch(() => false);
+  if (gitDirExists) {
     return { cwd, warning: null };
   }
 
@@ -1559,50 +1420,16 @@ async function materializeManagedProjectWorkspace(
     await fs.rm(cwd, { recursive: true, force: true });
   }
 
-  // Clone into a temp sibling, then move into place atomically. The shared target directory
-  // is never created in a partial state and never removed on failure, so a concurrent
-  // materialization (another process, or a run racing this one) can neither adopt a broken
-  // checkout nor lose its own completed one.
-  const auth = input.resolveGitAuth ? await input.resolveGitAuth(input.repoUrl) : null;
-  const cloneTmpDir = await fs.mkdtemp(`${cwd}.clone-`);
   try {
-    await execFile("git", [...(auth?.configArgs ?? []), "clone", input.repoUrl, cloneTmpDir], {
-      env: {
-        // Spread order matters: the sanitizer strips PAPERCLIP_*, which would remove the
-        // credential-helper token env if it came first. GIT_TERMINAL_PROMPT=0 fails a
-        // credential-less private clone immediately instead of hanging on a prompt until
-        // the clone timeout.
-        ...sanitizeRuntimeServiceBaseEnv(process.env),
-        GIT_TERMINAL_PROMPT: "0",
-        ...(auth?.env ?? {}),
-      },
+    await execFile("git", ["clone", input.repoUrl, cwd], {
+      env: sanitizeRuntimeServiceBaseEnv(process.env),
       timeout: MANAGED_WORKSPACE_GIT_CLONE_TIMEOUT_MS,
     });
+    return { cwd, warning: null };
   } catch (error) {
-    await fs.rm(cloneTmpDir, { recursive: true, force: true }).catch(() => undefined);
     const reason = error instanceof Error ? error.message : String(error);
-    const authNote = describeGitAuthFailure({
-      error: reason,
-      used: auth ? { source: auth.source, secretName: auth.secretName } : null,
-    });
-    throw new Error(scrubGitCredentialText(
-      `Failed to prepare managed checkout for "${input.repoUrl}" at "${cwd}": ${reason}${authNote ? ` ${authNote}` : ""}`,
-    ));
+    throw new Error(`Failed to prepare managed checkout for "${input.repoUrl}" at "${cwd}": ${reason}`);
   }
-
-  try {
-    await fs.rename(cloneTmpDir, cwd);
-  } catch (renameError) {
-    await fs.rm(cloneTmpDir, { recursive: true, force: true }).catch(() => undefined);
-    // The target appearing between the emptiness check and the rename means another
-    // materialization won the race; adopt its checkout instead of failing the run.
-    if (await hasAdoptableGitDir()) {
-      return { cwd, warning: null };
-    }
-    const reason = renameError instanceof Error ? renameError.message : String(renameError);
-    throw new Error(`Failed to move managed checkout into place at "${cwd}": ${reason}`);
-  }
-  return { cwd, warning: null };
 }
 
 /**
@@ -1616,7 +1443,6 @@ async function resolveConfiguredOrManagedProjectCwd(input: {
   projectId: string;
   cwd: string | null;
   repoUrl: string | null;
-  resolveGitAuth?: GitRemoteAuthProvider | null;
 }): Promise<{ cwd: string; warning: string | null }> {
   const configuredCwd = readNonEmptyString(input.cwd);
   if (configuredCwd && configuredCwd !== REPO_ONLY_CWD_SENTINEL) {
@@ -1626,7 +1452,6 @@ async function resolveConfiguredOrManagedProjectCwd(input: {
     companyId: input.companyId,
     projectId: input.projectId,
     repoUrl: readNonEmptyString(input.repoUrl),
-    resolveGitAuth: input.resolveGitAuth ?? null,
   });
 }
 
@@ -1654,16 +1479,8 @@ function defaultAdditionalProjectWorkspaceDeps(db: Db): ResolveAdditionalProject
         .from(projectWorkspaces)
         .where(and(eq(projectWorkspaces.companyId, companyId), eq(projectWorkspaces.projectId, projectId)))
         .orderBy(asc(projectWorkspaces.createdAt), asc(projectWorkspaces.id)),
-    resolveConfiguredOrManagedProjectCwd: (input) =>
-      resolveConfiguredOrManagedProjectCwd({
-        ...input,
-        resolveGitAuth: input.resolveGitAuth ?? createGitRemoteAuthProvider(db, input.companyId),
-      }),
-    ensureManagedProjectWorkspace: (input) =>
-      ensureManagedProjectWorkspace({
-        ...input,
-        resolveGitAuth: input.resolveGitAuth ?? createGitRemoteAuthProvider(db, input.companyId),
-      }),
+    resolveConfiguredOrManagedProjectCwd,
+    ensureManagedProjectWorkspace,
     // A realized workspace must hold real content. An empty directory gives the agent an empty
     // referenced workspace, so treat an empty directory the same as a missing one.
     directoryHasContents: async (cwd) => {
@@ -1756,6 +1573,23 @@ type WorkspaceValidationFailureLike = WorkspaceValidationFailure | {
   resultJson: Record<string, unknown>;
 };
 
+type ProcessSessionLaunchAmbiguousFailureLike = Error & {
+  code: typeof ACP_PROCESS_SESSION_LAUNCH_AMBIGUOUS;
+  retryable: false;
+  needsHuman: true;
+  acceptedStart: "unknown" | "accepted";
+  launchIdentity: Record<string, unknown>;
+};
+
+type PaperclipBridgeLaunchAmbiguousFailureLike = Error & {
+  code: typeof PAPERCLIP_CALLBACK_BRIDGE_LAUNCH_AMBIGUOUS;
+  retryable: false;
+  needsHuman: true;
+  acceptedStart: "unknown" | "accepted";
+  launchIdentity: AdapterExecutionTargetPaperclipBridgeLaunchIdentity;
+  processIdentity: Record<string, unknown> | null;
+};
+
 function isWorkspaceValidationFailure(error: unknown): error is WorkspaceValidationFailureLike {
   if (error instanceof WorkspaceValidationFailure) return true;
   const maybe = error as { code?: unknown; resultJson?: unknown } | null;
@@ -1768,10 +1602,238 @@ function isWorkspaceValidationFailure(error: unknown): error is WorkspaceValidat
   );
 }
 
+function isProcessSessionLaunchAmbiguousFailure(
+  error: unknown,
+): error is ProcessSessionLaunchAmbiguousFailureLike {
+  const candidate = error as Partial<ProcessSessionLaunchAmbiguousFailureLike> | null;
+  return Boolean(
+    candidate &&
+      candidate.code === ACP_PROCESS_SESSION_LAUNCH_AMBIGUOUS &&
+      candidate.retryable === false &&
+      candidate.needsHuman === true &&
+      (candidate.acceptedStart === "unknown" || candidate.acceptedStart === "accepted") &&
+      candidate.launchIdentity &&
+      typeof candidate.launchIdentity === "object",
+  );
+}
+
+function isPaperclipBridgeLaunchAmbiguousFailure(
+  error: unknown,
+): error is PaperclipBridgeLaunchAmbiguousFailureLike {
+  const candidate = error as Partial<PaperclipBridgeLaunchAmbiguousFailureLike> | null;
+  return Boolean(
+    candidate &&
+      candidate.code === PAPERCLIP_CALLBACK_BRIDGE_LAUNCH_AMBIGUOUS &&
+      candidate.retryable === false &&
+      candidate.needsHuman === true &&
+      (candidate.acceptedStart === "unknown" || candidate.acceptedStart === "accepted") &&
+      candidate.launchIdentity &&
+      typeof candidate.launchIdentity === "object",
+  );
+}
+
+function isPaperclipExecutionConfigurationFencedRun(
+  run: { errorCode?: string | null } | null | undefined,
+): boolean {
+  return (
+    run?.errorCode === PAPERCLIP_CALLBACK_BRIDGE_DISABLED ||
+    run?.errorCode === PAPERCLIP_EXECUTION_TARGET_INVALID
+  );
+}
+
+function processSessionLaunchAmbiguousResultJson(
+  error: ProcessSessionLaunchAmbiguousFailureLike,
+): Record<string, unknown> {
+  return {
+    processSessionLaunch: {
+      status: "needs_human",
+      acceptedStart: error.acceptedStart,
+      retryable: error.retryable,
+      ...parseObject(error.launchIdentity),
+    },
+  };
+}
+
+function paperclipBridgeLaunchAmbiguousResultJson(
+  error: PaperclipBridgeLaunchAmbiguousFailureLike,
+): Record<string, unknown> {
+  return {
+    paperclipBridgeLaunch: {
+      status: "needs_human",
+      acceptedStart: error.acceptedStart,
+      retryable: false,
+      needsHuman: true,
+      ...error.launchIdentity,
+      processIdentity: error.processIdentity,
+    },
+  };
+}
+
+function readProcessSessionLaunchFencePayload(event: AdapterRuntimeEvent): Record<string, unknown> | null {
+  if (event.eventType.trim() !== ACP_PROCESS_SESSION_LAUNCH_EVENT) return null;
+  const payload = parseObject(event.payload);
+  const status = readNonEmptyString(payload.status);
+  const runId = readNonEmptyString(payload.runId);
+  const launchId = readNonEmptyString(payload.launchId);
+  const sessionId = readNonEmptyString(payload.sessionId);
+  const sessionDir = readNonEmptyString(payload.sessionDir);
+  if (
+    (status !== "launching" && status !== "accepted" && status !== "not_started") ||
+    !runId ||
+    !launchId ||
+    !sessionId ||
+    !sessionDir
+  ) {
+    throw new Error("Remote ACP process-session launch event is missing its durable launch identity.");
+  }
+  return {
+    ...payload,
+    status,
+    runId,
+    launchId,
+    sessionId,
+    sessionDir,
+    acceptedStart: status === "accepted" ? "accepted" : "unknown",
+    retryable: status === "not_started",
+    needsHuman: false,
+  };
+}
+
+function readPaperclipBridgeLaunchFencePayload(event: AdapterRuntimeEvent): Record<string, unknown> | null {
+  if (event.eventType.trim() !== PAPERCLIP_CALLBACK_BRIDGE_LAUNCH_EVENT) return null;
+  const payload = parseObject(event.payload);
+  const status = readNonEmptyString(payload.status);
+  const runId = readNonEmptyString(payload.runId);
+  const adapterKey = readNonEmptyString(payload.adapterKey);
+  const instanceId = readNonEmptyString(payload.instanceId);
+  const instanceNonce = readNonEmptyString(payload.instanceNonce);
+  const instanceDir = readNonEmptyString(payload.instanceDir);
+  const queueDir = readNonEmptyString(payload.queueDir);
+  const manifestPath = readNonEmptyString(payload.manifestPath);
+  if (
+    !["launching", "accepted", "not_started", "released", "needs_human"].includes(status ?? "") ||
+    !runId || !adapterKey || !instanceId || instanceNonce !== instanceId ||
+    !instanceDir || !queueDir || !manifestPath
+  ) {
+    throw new Error("Paperclip callback bridge launch event is missing its durable run/instance identity.");
+  }
+  return {
+    ...payload,
+    status,
+    runId,
+    adapterKey,
+    instanceId,
+    instanceNonce,
+    instanceDir,
+    queueDir,
+    manifestPath,
+    acceptedStart: payload.acceptedStart === "accepted" ? "accepted" : "unknown",
+    retryable: status === "not_started" || status === "released",
+    needsHuman: status === "needs_human",
+  };
+}
+
 function isWorkspaceValidationFailedRun(
   run: Pick<typeof heartbeatRuns.$inferSelect, "errorCode"> | null | undefined,
 ) {
   return run?.errorCode === WORKSPACE_VALIDATION_FAILURE_CODE;
+}
+
+function isProcessSessionLaunchAmbiguousRun(
+  run: { errorCode?: string | null } | null | undefined,
+) {
+  return run?.errorCode === ACP_PROCESS_SESSION_LAUNCH_AMBIGUOUS;
+}
+
+function isProcessSessionLaunchActiveFenceRun(
+  run: { status?: unknown; resultJson?: unknown } | null | undefined,
+): boolean {
+  if (run?.status !== "running") return false;
+  const launch = parseObject(parseObject(run.resultJson).processSessionLaunch);
+  return launch.status === "launching" || launch.status === "accepted";
+}
+
+function isProcessSessionLaunchReplayFencedRun(
+  run: { status?: unknown; errorCode?: string | null; resultJson?: unknown } | null | undefined,
+): boolean {
+  return isProcessSessionLaunchAmbiguousRun(run) || isProcessSessionLaunchActiveFenceRun(run);
+}
+
+function isPaperclipBridgeLaunchReplayFencedRun(
+  run: { errorCode?: string | null; resultJson?: unknown } | null | undefined,
+): boolean {
+  if (run?.errorCode === PAPERCLIP_CALLBACK_BRIDGE_LAUNCH_AMBIGUOUS) return true;
+  const status = readNonEmptyString(parseObject(parseObject(run?.resultJson).paperclipBridgeLaunch).status);
+  return status === "launching" || status === "accepted" || status === "needs_human";
+}
+
+function isRemoteLaunchReplayFencedRun(
+  run: { status?: unknown; errorCode?: string | null; resultJson?: unknown } | null | undefined,
+): boolean {
+  return isProcessSessionLaunchReplayFencedRun(run) || isPaperclipBridgeLaunchReplayFencedRun(run);
+}
+
+function readPaperclipBridgeLaunchIdentityFromRun(
+  run: { id: string; resultJson?: unknown } | null | undefined,
+): AdapterExecutionTargetPaperclipBridgeLaunchIdentity | null {
+  if (!run) return null;
+  const launch = parseObject(parseObject(run?.resultJson).paperclipBridgeLaunch);
+  const required = [
+    "runId", "adapterKey", "instanceId", "instanceNonce", "transport", "remoteCwd",
+    "instanceDir", "queueDir", "assetRemoteDir", "manifestPath",
+  ] as const;
+  if (required.some((key) => !readNonEmptyString(launch[key]))) return null;
+  const transport = readNonEmptyString(launch.transport);
+  if (transport !== "ssh" && transport !== "sandbox") return null;
+  if (readNonEmptyString(launch.runId) !== run.id) return null;
+  const instanceId = readNonEmptyString(launch.instanceId)!;
+  if (readNonEmptyString(launch.instanceNonce) !== instanceId) return null;
+  return {
+    runId: readNonEmptyString(launch.runId)!,
+    adapterKey: readNonEmptyString(launch.adapterKey)!,
+    instanceId,
+    instanceNonce: instanceId,
+    transport,
+    providerKey: readNonEmptyString(launch.providerKey),
+    environmentId: readNonEmptyString(launch.environmentId),
+    leaseId: readNonEmptyString(launch.leaseId),
+    remoteCwd: readNonEmptyString(launch.remoteCwd)!,
+    instanceDir: readNonEmptyString(launch.instanceDir)!,
+    queueDir: readNonEmptyString(launch.queueDir)!,
+    assetRemoteDir: readNonEmptyString(launch.assetRemoteDir)!,
+    manifestPath: readNonEmptyString(launch.manifestPath)!,
+  };
+}
+
+function readProcessSessionLaunchIdentityFromRun(
+  run: { id: string; resultJson: unknown },
+): AdapterExecutionTargetProcessSessionLaunchIdentity | null {
+  const launch = parseObject(parseObject(run.resultJson).processSessionLaunch);
+  const required = {
+    launchId: readNonEmptyString(launch.launchId),
+    sessionId: readNonEmptyString(launch.sessionId),
+    runId: readNonEmptyString(launch.runId),
+    adapterKey: readNonEmptyString(launch.adapterKey),
+    remoteCwd: readNonEmptyString(launch.remoteCwd),
+    sessionDir: readNonEmptyString(launch.sessionDir),
+    eventsDir: readNonEmptyString(launch.eventsDir),
+    launchIdentityPath: readNonEmptyString(launch.launchIdentityPath),
+    launcherPidPath: readNonEmptyString(launch.launcherPidPath),
+    wrapperPidPath: readNonEmptyString(launch.wrapperPidPath),
+    launchAcceptedPath: readNonEmptyString(launch.launchAcceptedPath),
+    terminalReceiptPath: readNonEmptyString(launch.terminalReceiptPath),
+    childClosedPath: readNonEmptyString(launch.childClosedPath),
+    wrapperDonePath: readNonEmptyString(launch.wrapperDonePath),
+  };
+  if (launch.transport !== "sandbox" || Object.values(required).some((value) => !value)) return null;
+  if (required.runId !== run.id) return null;
+  return {
+    ...(required as Record<keyof typeof required, string>),
+    transport: "sandbox",
+    providerKey: readNonEmptyString(launch.providerKey),
+    environmentId: readNonEmptyString(launch.environmentId),
+    leaseId: readNonEmptyString(launch.leaseId),
+  };
 }
 
 function readWorkspaceValidationPayloadFromRun(
@@ -1879,15 +1941,6 @@ export async function assertGitWorktreeBaseWorkspaceReady(input: {
     executionWorkspacePreference?: string | null;
   } | null;
   base: ExecutionWorkspaceInput;
-  /**
-   * Anchor-resolution facts that `base` alone cannot express: whether the base cwd is the
-   * agent-home fallback despite the project having workspaces, and which materialization
-   * attempts failed on the way there. Absent means "not a fallback" (legacy callers).
-   */
-  anchor?: {
-    baseCwdFallback?: boolean;
-    materializationFailures?: WorkspaceMaterializationFailure[];
-  } | null;
 }) {
   if (!input.issue) return;
   if (
@@ -1933,38 +1986,10 @@ export async function assertGitWorktreeBaseWorkspaceReady(input: {
     );
   }
 
-  // Checked before isGitCheckout: when materialization failed and the base cwd is the
-  // agent-home fallback, a git checkout at that path would be an unrelated repository —
-  // proceeding would build worktrees off the wrong repo, and failing on the checkout probe
-  // would mask the real cause (for example a clone that could not authenticate). The reason
-  // is reserved for genuine materialization failures; a fallback with no failed attempt
-  // (a configured path that is simply unavailable) keeps its accurate reporting below.
-  const materializationFailures = input.anchor?.materializationFailures ?? [];
-  if (input.anchor?.baseCwdFallback && materializationFailures.length > 0) {
-    const failureDetail = `: ${materializationFailures[0].error.replace(/\s+/g, " ")}`;
-    fail(
-      "git_worktree_base_materialization_failed",
-      `Issue ${issueLabel} requested ${input.requestedExecutionWorkspaceMode} with git_worktree, but the project workspace checkout could not be prepared${failureDetail}. Repair the project workspace repository URL, clone access, or configured local cwd, then retry.`,
-      { baseCwdFallback: true, materializationFailures },
-    );
-  }
-
   if (!await isGitCheckout(input.base.baseCwd)) {
     fail(
       "git_worktree_base_not_git_checkout",
       `Issue ${issueLabel} requested ${input.requestedExecutionWorkspaceMode} with git_worktree, but base workspace "${input.base.baseCwd}" is not a git checkout. ${remediation}`,
-    );
-  }
-
-  // A fallback cwd that happens to be a git checkout is still not the configured project
-  // workspace — building worktrees there would target an unrelated repository. No
-  // materialization attempt failed here (that case failed above); the configured path is
-  // simply unavailable, so the message points at the path rather than clone access.
-  if (input.anchor?.baseCwdFallback) {
-    fail(
-      "git_worktree_base_fallback_not_project_workspace",
-      `Issue ${issueLabel} requested ${input.requestedExecutionWorkspaceMode} with git_worktree, but the configured project workspace path is not available and the fallback cwd "${input.base.baseCwd}" is not the project workspace checkout. Make the configured project workspace path available on this host, or repair the project workspace configuration, then retry.`,
-      { baseCwdFallback: true, materializationFailures },
     );
   }
 }
@@ -1993,26 +2018,6 @@ export async function assertPushCapabilityCheckoutValid(input: {
       },
     },
   );
-}
-
-/**
- * Reconcile the `projectWorkspaceId` for a reused execution workspace.
- *
- * A `reuse_existing` workspace can have been persisted with a null
- * `projectWorkspaceId` (e.g. it was created before its project had a primary
- * project workspace). When we later restore it for a run whose issue now
- * expects a concrete project workspace, backfill the column so the launch
- * guard (`persisted_workspace_missing_project_workspace_id`) stops rejecting
- * it on every requeue — otherwise `reuse_existing` re-binds the same stale
- * record forever and the run crash-loops. Prefer the existing binding when
- * present so we never null out a good value or silently rebind a genuine
- * mismatch (which the guard still surfaces).
- */
-export function reconcileReusedExecutionWorkspaceProjectWorkspaceId(
-  existingProjectWorkspaceId: string | null | undefined,
-  resolvedProjectWorkspaceId: string | null | undefined,
-): string | null {
-  return existingProjectWorkspaceId ?? resolvedProjectWorkspaceId ?? null;
 }
 
 export async function assertGitSensitiveAdapterWorkspaceValid(input: {
@@ -2521,19 +2526,6 @@ export type ResolvedAdditionalWorkspace = {
   repoRef: string | null;
 };
 
-/**
- * One project-workspace materialization attempt that failed during anchor resolution — for
- * example a managed `git clone` that could not authenticate against a private repository.
- * Carried on {@link ResolvedWorkspaceForRun} so downstream validation can report the real
- * cause instead of the fallback cwd's symptoms. `repoUrl` and `error` are scrubbed of URL
- * userinfo credentials before they are stored.
- */
-export type WorkspaceMaterializationFailure = {
-  projectWorkspaceId: string | null;
-  repoUrl: string | null;
-  error: string;
-};
-
 export type ResolvedWorkspaceForRun = {
   cwd: string;
   source: "project_primary" | "task_session" | "agent_home";
@@ -2549,75 +2541,16 @@ export type ResolvedWorkspaceForRun = {
   }>;
   warnings: string[];
   /**
-   * True when project workspaces exist for the run but none could be used, so `cwd` is the
-   * agent-home fallback rather than a configured or materialized project workspace path. The
-   * `source` stays `project_primary` in that case (session migration depends on it), so this
-   * flag is the only reliable fallback signal.
-   */
-  baseCwdFallback: boolean;
-  /** Failed materialization attempts behind {@link baseCwdFallback}; empty when every candidate resolved or none was attempted. */
-  materializationFailures: WorkspaceMaterializationFailure[];
-  /**
    * Read-only referenced (mentioned) project workspaces for this run, one per authorized
    * additional project. The array is empty unless the multi-project workspace-sync flag is on
    * ({@link isMultiProjectWorkspaceSyncEnabled}); with the flag off the run resolves the anchor
    * workspace only, exactly as before.
    */
   additionalWorkspaces: ResolvedAdditionalWorkspace[];
-  /**
-   * Structured record of every referenced project that the run dropped or failed, paired with the
-   * layer that dropped it. Run preparation reads this to emit the requested-vs-synced observability
-   * log. The human-readable form of each drop already rides {@link ResolvedWorkspaceForRun.warnings}.
-   */
-  referencedProjectFailures: ReferencedProjectFailure[];
 };
 
 /** The anchor workspace shape, before the additional referenced workspaces are attached. */
-type ResolvedAnchorWorkspaceForRun = Omit<
-  ResolvedWorkspaceForRun,
-  "additionalWorkspaces" | "referencedProjectFailures"
->;
-
-/**
- * Assemble the run warnings for the agent-home fallback when a project has workspaces but none
- * produced a usable cwd. Materialization failures (for example a failed managed clone) take
- * priority over the generic "no local cwd configured" note, which previously masked them.
- */
-export function buildAnchorFallbackWorkspaceNotes(input: {
-  fallbackCwd: string;
-  preferredWorkspaceWarning: string | null;
-  materializationFailures: WorkspaceMaterializationFailure[];
-  missingProjectCwds: string[];
-  hasConfiguredProjectCwd: boolean;
-}): string[] {
-  const warnings: string[] = [];
-  if (input.preferredWorkspaceWarning) {
-    warnings.push(input.preferredWorkspaceWarning);
-  }
-  if (input.materializationFailures.length > 0) {
-    const first = input.materializationFailures[0];
-    const extraFailureCount = input.materializationFailures.length - 1;
-    warnings.push(
-      extraFailureCount > 0
-        ? `Failed to prepare the project workspace checkout (${first.error}), and ${extraFailureCount} other candidate workspace(s) also failed. Using fallback workspace "${input.fallbackCwd}" for this run.`
-        : `Failed to prepare the project workspace checkout: ${first.error}. Using fallback workspace "${input.fallbackCwd}" for this run.`,
-    );
-  }
-  if (input.missingProjectCwds.length > 0) {
-    const firstMissing = input.missingProjectCwds[0];
-    const extraMissingCount = Math.max(0, input.missingProjectCwds.length - 1);
-    warnings.push(
-      extraMissingCount > 0
-        ? `Project workspace path "${firstMissing}" and ${extraMissingCount} other configured path(s) are not available yet. Using fallback workspace "${input.fallbackCwd}" for this run.`
-        : `Project workspace path "${firstMissing}" is not available yet. Using fallback workspace "${input.fallbackCwd}" for this run.`,
-    );
-  } else if (input.materializationFailures.length === 0 && !input.hasConfiguredProjectCwd) {
-    warnings.push(
-      `Project workspace has no local cwd configured. Using fallback workspace "${input.fallbackCwd}" for this run.`,
-    );
-  }
-  return warnings;
-}
+type ResolvedAnchorWorkspaceForRun = Omit<ResolvedWorkspaceForRun, "additionalWorkspaces">;
 
 /**
  * Build the plural workspace list that a run exposes to the agent through the
@@ -2661,40 +2594,17 @@ export function prioritizeProjectWorkspaceCandidatesForRun<T extends ProjectWork
 }
 
 /**
- * Environment flag (kill-switch, default ON) that gates whether run preparation
+ * Environment flag (kill-switch, default OFF) that gates whether run preparation
  * consumes the multi-project referenced-project set produced by
- * {@link resolveRunReferencedProjects}. The feature is live by default: an unset
- * value resolves ON. An operator disables the feature with an explicit false
- * value (`"false"`, `"0"`, `"off"`, or `""`). While off, a run materializes only
- * the anchor project's workspace exactly as before — the referenced set is inert.
+ * {@link resolveRunReferencedProjects}. While unset/off, a run materializes only the
+ * anchor project's workspace exactly as before — the referenced set is inert.
  */
 export const MULTI_PROJECT_WORKSPACE_SYNC_ENV = "PAPERCLIP_MULTI_PROJECT_WORKSPACE_SYNC";
-
-/**
- * True when an environment value explicitly turns a flag off. An unset value is
- * not false — the caller decides the unset default. This is the inverse of
- * {@link isTruthyRuntimeEnvValue} for the kill-switch words plus the empty string.
- */
-function isFalsyRuntimeEnvValue(value: string | undefined): boolean {
-  if (value === undefined) {
-    return false;
-  }
-  const normalized = value.trim().toLowerCase();
-  return (
-    normalized === "" ||
-    normalized === "false" ||
-    normalized === "0" ||
-    normalized === "off" ||
-    normalized === "no"
-  );
-}
 
 export function isMultiProjectWorkspaceSyncEnabled(
   env: Record<string, string | undefined> = process.env,
 ): boolean {
-  // Default ON: an unset value is not false, so the feature is live unless an
-  // operator sets an explicit false value as the kill switch (rollback path).
-  return !isFalsyRuntimeEnvValue(env[MULTI_PROJECT_WORKSPACE_SYNC_ENV]);
+  return isTruthyRuntimeEnvValue(env[MULTI_PROJECT_WORKSPACE_SYNC_ENV]);
 }
 
 /**
@@ -2706,41 +2616,6 @@ export function isMultiProjectWorkspaceSyncEnabled(
  */
 export function isRemoteExecutionEnvironmentDriver(driver: string | null | undefined): boolean {
   return driver === "ssh" || driver === "sandbox" || driver === "plugin";
-}
-
-/**
- * Environment flag (kill-switch, default ON) that gates whether a *remote* run stages the
- * referenced (mentioned) project set into the sandbox. This is a targeted rollback lever: it
- * disables only the remote referenced-project path and never regresses the working local path.
- * The master flag {@link MULTI_PROJECT_WORKSPACE_SYNC_ENV} is the blunt switch that kills both
- * local and remote. The remote path runs when both the master flag and this remote flag are ON —
- * the default state. An unset value resolves ON; an operator disables it with an explicit false
- * value (`"false"`, `"0"`, `"off"`, `"no"`, or `""`). The OFF state fails closed: a remote run
- * runs no referenced-project authorization or staging and reverts to the remote drop path.
- */
-export const MULTI_PROJECT_WORKSPACE_SYNC_REMOTE_ENV =
-  "PAPERCLIP_MULTI_PROJECT_WORKSPACE_SYNC_REMOTE";
-
-export function isMultiProjectWorkspaceSyncRemoteEnabled(
-  env: Record<string, string | undefined> = process.env,
-): boolean {
-  // Default ON: an unset value is not false, so the remote path is live unless an operator sets
-  // an explicit false value as the targeted kill switch (rollback path).
-  return !isFalsyRuntimeEnvValue(env[MULTI_PROJECT_WORKSPACE_SYNC_REMOTE_ENV]);
-}
-
-/**
- * True when an environment driver stages a multi-source remote workspace through the confined
- * sandbox/command runtime. Only the `sandbox` driver asserts per-project confinement on the
- * staging path (`assertSyncOperationsConfined` in `sandbox-managed-runtime`). The `ssh` driver
- * stages without that guard, and the `plugin` driver does not route through the confined command
- * runtime in the workspace-realization step, so both keep dropping referenced projects. A `local`
- * (or unknown) driver is not remote and never reaches this check. This gate is intentionally
- * narrower than {@link isRemoteExecutionEnvironmentDriver}: it names the one transport that
- * confines each staged referenced tree.
- */
-export function isConfinedRemoteStagingDriver(driver: string | null | undefined): boolean {
-  return driver === "sandbox";
 }
 
 /**
@@ -2774,23 +2649,6 @@ export interface RunReferencedProject {
   project: RunReferencedProjectRecord;
 }
 
-/**
- * The layer that dropped or failed a referenced project. The run surfacing and the
- * observability log both use these values as the per-failure reason:
- * - `authorization`: the run actor is not authorized to read the project.
- * - `resolution`: the project could not be brought into the run locally (unknown or
- *   unavailable project, cap exceeded, or a workspace clone/prepare failure).
- * - `staging`: the project resolved but failed to stage into the run sandbox (the
- *   downstream remote path; see `sandbox-managed-runtime`).
- */
-export type ReferencedProjectFailureReason = "authorization" | "resolution" | "staging";
-
-/** One referenced project that a run dropped or failed, with the layer that caused it. */
-export interface ReferencedProjectFailure {
-  projectId: string;
-  reason: ReferencedProjectFailureReason;
-}
-
 export interface ResolvedRunReferencedProjects {
   /** The anchor (primary) project — retains the existing git-worktree run path; never re-authorized here. */
   anchor: RunReferencedProject | null;
@@ -2798,8 +2656,6 @@ export interface ResolvedRunReferencedProjects {
   additional: RunReferencedProject[];
   /** Human-readable warnings for every referenced project that was dropped (unavailable, unauthorized, or capped). */
   warnings: string[];
-  /** Structured record of every dropped referenced project, paired with the layer that dropped it. */
-  failures: ReferencedProjectFailure[];
 }
 
 export interface ResolveRunReferencedProjectsOptions {
@@ -2849,7 +2705,6 @@ export async function resolveRunReferencedProjects(
 ): Promise<ResolvedRunReferencedProjects> {
   const { companyId, actor, issues, projects, access } = opts;
   const warnings: string[] = [];
-  const failures: ReferencedProjectFailure[] = [];
   const cap = Math.max(0, opts.maxAdditionalProjects ?? MAX_RUN_REFERENCED_ADDITIONAL_PROJECTS);
   // The evaluation cap bounds candidate hydration + authorization fan-out. It is always at least the
   // admitted cap so the admitted cap stays reachable in the normal (non-flood) case.
@@ -2905,7 +2760,6 @@ export async function resolveRunReferencedProjects(
       const project = byId.get(projectId);
       if (!project) {
         warnings.push(`Referenced project ${projectId} was skipped because it is not available in this company.`);
-        failures.push({ projectId, reason: "resolution" });
         continue;
       }
       availableCandidates.push({ projectId, project });
@@ -2959,7 +2813,6 @@ export async function resolveRunReferencedProjects(
 
     if (!allowed) {
       warnings.push(`Referenced project ${projectId} was skipped because it is not authorized for this run.`);
-      failures.push({ projectId, reason: "authorization" });
       continue;
     }
 
@@ -2982,20 +2835,7 @@ export async function resolveRunReferencedProjects(
     );
   }
 
-  // Record every capped or unevaluated candidate as a per-project resolution failure so the run
-  // surfacing and the observability log can reconcile requested against synced. The evaluated
-  // candidates past the admitted cap carry a known projectId; the candidates the fan-out cap
-  // dropped before hydration carry their id from the ordered mention set.
-  if (capReachedAtIndex !== null) {
-    for (let index = capReachedAtIndex; index < candidates.length; index++) {
-      failures.push({ projectId: candidates[index]!.projectId, reason: "resolution" });
-    }
-  }
-  for (const projectId of allCandidateIds.slice(hydrationCursor)) {
-    failures.push({ projectId, reason: "resolution" });
-  }
-
-  return { anchor, additional, warnings, failures };
+  return { anchor, additional, warnings };
 }
 
 export interface ResolveAdditionalRunWorkspacesOptions {
@@ -3013,26 +2853,11 @@ export interface ResolveAdditionalRunWorkspacesOptions {
   maxCandidateEvaluations?: number;
   /**
    * True when the run executes on a non-local target (ssh, sandbox, or plugin). A referenced
-   * project realizes as a local directory first. On a remote target that local tree reaches the
-   * agent only when a confined transport stages it into the sandbox and the remote flag is on
-   * (see `targetStagesConfined` and `remoteReferencedSyncEnabled`). Otherwise the run drops the
-   * whole referenced set and records it at the staging layer.
+   * project realizes as a local directory only, and a remote target has no path yet to receive
+   * that tree, so a resolved cwd would not exist on the target. When true, the function skips
+   * referenced-project authorization and workspace work and returns no additional workspaces.
    */
   executionTargetIsRemote?: boolean;
-  /**
-   * True when the remote target stages each referenced tree through the confined sandbox/command
-   * runtime (the `sandbox` driver; see {@link isConfinedRemoteStagingDriver}). The gate opens the
-   * referenced-project path on a remote target only when this is true. The SSH transport and any
-   * unconfined transport keep dropping referenced projects. Ignored on a local target.
-   */
-  targetStagesConfined?: boolean;
-  /**
-   * The remote-only kill switch (default ON; see {@link isMultiProjectWorkspaceSyncRemoteEnabled}).
-   * When true, a confined remote target stages the referenced set. When false, a remote target
-   * fails closed: it runs no referenced-project authorization or staging and reverts to the remote
-   * drop path. Ignored on a local target.
-   */
-  remoteReferencedSyncEnabled?: boolean;
 }
 
 /**
@@ -3049,53 +2874,31 @@ export async function resolveAdditionalRunWorkspaces(
   issueId: string | null,
   anchorProjectId: string | null,
   opts: ResolveAdditionalRunWorkspacesOptions,
-): Promise<{
-  additionalWorkspaces: ResolvedAdditionalWorkspace[];
-  warnings: string[];
-  failures: ReferencedProjectFailure[];
-}> {
+): Promise<{ additionalWorkspaces: ResolvedAdditionalWorkspace[]; warnings: string[] }> {
   if (!opts.enabled || !issueId) {
-    return { additionalWorkspaces: [], warnings: [], failures: [] };
+    return { additionalWorkspaces: [], warnings: [] };
   }
 
-  // A referenced project realizes as a local directory first. On a remote target the run carries
-  // that tree to the agent only when a confined transport stages it into the sandbox and the
-  // remote flag is on. The confined sandbox transport asserts per-project confinement on each
-  // staged tree (`assertSyncOperationsConfined` in `sandbox-managed-runtime`). The SSH transport
-  // does not, so it stays out of scope. When the remote flag is off the run fails closed. In every
-  // one of those drop cases the run neither does authorization or clone work it must discard nor
-  // exposes an inaccessible referenced path to the agent.
+  // A referenced project realizes as a local directory only. A remote execution target (ssh,
+  // sandbox, or plugin) has no path yet to receive the referenced tree, so a resolved cwd would
+  // not exist on the target and the anchor-only remote sync never carries it across. Skip the
+  // referenced-project authorization and clone work on a remote target, so the run neither does
+  // work it must discard nor exposes an inaccessible referenced path to the agent. Warn only when
+  // the issue actually mentions a project, so a remote run without any referenced mention stays
+  // silent.
   if (opts.executionTargetIsRemote) {
-    const remoteReferencedSyncOpen =
-      (opts.remoteReferencedSyncEnabled ?? false) && (opts.targetStagesConfined ?? false);
-    if (!remoteReferencedSyncOpen) {
-      const mentionedIds = await opts.issues.findMentionedProjectIds(issueId, {
-        includeCommentBodies: true,
-      });
-      // Each distinct non-anchor mention is a referenced project this remote run drops. An SSH
-      // target (or the remote flag off) has no confined path to receive the referenced tree, so
-      // the run drops the whole set at the staging layer. Record one failure per dropped project
-      // so the requested-vs-synced accounting counts the whole referenced set and the run still
-      // emits its structured sync log. Warn only when the issue actually mentions a project, so a
-      // remote run without any referenced mention stays silent.
-      const droppedProjectIds = [
-        ...new Set(mentionedIds.filter((projectId) => projectId !== anchorProjectId)),
-      ];
-      return {
-        additionalWorkspaces: [],
-        warnings:
-          droppedProjectIds.length > 0
-            ? [
-                "Referenced-project workspaces are available only on a local execution target or a confined sandbox target. This run uses a different remote execution target, so no referenced-project workspace was attached.",
-              ]
-            : [],
-        failures: droppedProjectIds.map((projectId) => ({ projectId, reason: "staging" as const })),
-      };
-    }
-    // Fall through: a confined sandbox target with the remote flag on resolves and authorizes the
-    // referenced set exactly like a local target. The resolver is driver-agnostic; the confined
-    // sandbox transport downstream stages each admitted tree into its own `project-<projectId>`
-    // directory. The per-project `project:read` check below still runs against the run actor.
+    const mentionedIds = await opts.issues.findMentionedProjectIds(issueId, {
+      includeCommentBodies: true,
+    });
+    const hasReferencedMention = mentionedIds.some((projectId) => projectId !== anchorProjectId);
+    return {
+      additionalWorkspaces: [],
+      warnings: hasReferencedMention
+        ? [
+            "Referenced-project workspaces are available only on a local execution target. This run uses a remote execution target, so no referenced-project workspace was attached.",
+          ]
+        : [],
+    };
   }
 
   const referenced = await resolveRunReferencedProjects(issueId, anchorProjectId, {
@@ -3110,7 +2913,6 @@ export async function resolveAdditionalRunWorkspaces(
 
   const additionalWorkspaces: ResolvedAdditionalWorkspace[] = [];
   const warnings = [...referenced.warnings];
-  const failures = [...referenced.failures];
   for (const project of referenced.additional) {
     try {
       additionalWorkspaces.push(await opts.resolveProjectWorkspace(project));
@@ -3119,44 +2921,10 @@ export async function resolveAdditionalRunWorkspaces(
       warnings.push(
         `Referenced project ${project.projectId} was skipped because its workspace could not be prepared: ${reason}`,
       );
-      failures.push({ projectId: project.projectId, reason: "resolution" });
     }
   }
 
-  return { additionalWorkspaces, warnings, failures };
-}
-
-/** Structured fields for the one requested-vs-synced observability log a run emits at run prep. */
-export interface ReferencedProjectRunObservability {
-  referenced_projects_requested: number;
-  referenced_projects_synced: number;
-  referenced_project_failures: Array<{
-    project_id: string;
-    reason: ReferencedProjectFailureReason;
-  }>;
-}
-
-/**
- * Build the requested-vs-synced observability fields for a run's referenced-project set.
- *
- * A run requests one referenced project per authorized mention and syncs the projects that resolve.
- * The requested count is the synced count plus every dropped project, so the two counts and the
- * per-failure reasons together account for the whole referenced set. The human-readable warning for
- * each drop rides the run's surfaced warnings channel; this function produces only the structured
- * log fields, so a run emits exactly one line with a stable field shape.
- */
-export function buildReferencedProjectRunObservability(input: {
-  syncedProjectIds: readonly string[];
-  failures: readonly ReferencedProjectFailure[];
-}): ReferencedProjectRunObservability {
-  return {
-    referenced_projects_requested: input.syncedProjectIds.length + input.failures.length,
-    referenced_projects_synced: input.syncedProjectIds.length,
-    referenced_project_failures: input.failures.map((failure) => ({
-      project_id: failure.projectId,
-      reason: failure.reason,
-    })),
-  };
+  return { additionalWorkspaces, warnings };
 }
 
 function readNonEmptyString(value: unknown): string | null {
@@ -3638,6 +3406,30 @@ export function summarizeHeartbeatRunListResultJson(input: {
   return Object.keys(summary).length > 0 ? summary : null;
 }
 
+function summarizeRunFailureForIssueComment(
+  run: Pick<typeof heartbeatRuns.$inferSelect, "error" | "errorCode"> | null | undefined,
+) {
+  if (!run) return null;
+
+  const errorCode = readNonEmptyString(run.errorCode)?.trim() ?? null;
+  const rawError = readNonEmptyString(run.error)?.trim() ?? null;
+  const apiMessageMatch = rawError?.match(/"message"\s*:\s*"([^"]+)"/);
+  const firstLine = rawError
+    ?.split(/\r?\n/)
+    .map((line) => line.trim())
+    .find(Boolean) ?? null;
+  const summarySource = apiMessageMatch?.[1] ?? firstLine;
+  const summary =
+    summarySource && summarySource.length > 240
+      ? `${summarySource.slice(0, 237)}...`
+      : summarySource;
+
+  if (errorCode && summary) return ` Latest retry failure: \`${errorCode}\` - ${summary}.`;
+  if (errorCode) return ` Latest retry failure: \`${errorCode}\`.`;
+  if (summary) return ` Latest retry failure: ${summary}.`;
+  return null;
+}
+
 function didAutomaticRecoveryFail(
   latestRun: Pick<typeof heartbeatRuns.$inferSelect, "status" | "contextSnapshot"> | null,
   expectedRetryReason:
@@ -3716,21 +3508,6 @@ export function resolveLedgerCostStatus(input: {
 }): CostStatus {
   const hasTokenUsage = input.inputTokens > 0 || input.cachedInputTokens > 0 || input.outputTokens > 0;
   return input.costUsd == null && hasTokenUsage ? "unpriced" : "reported";
-}
-
-export function resolveCacheAdjustedCostUsd(input: {
-  costUsd?: number | null;
-  cacheAdjustedCostUsd?: number | null;
-}) {
-  const explicit = input.cacheAdjustedCostUsd;
-  if (typeof explicit === "number" && Number.isFinite(explicit) && explicit >= 0) {
-    return explicit;
-  }
-  const reported = input.costUsd;
-  if (typeof reported === "number" && Number.isFinite(reported) && reported >= 0) {
-    return reported;
-  }
-  return null;
 }
 
 export async function resolveLedgerScopeForRun(
@@ -4177,26 +3954,6 @@ export function describeSessionResetReason(
     return "wake reason is heartbeat_timer (unscoped timer wake starts fresh)";
   }
   return null;
-}
-
-/**
- * Failure signatures from sandbox→host git workspace reconciliation. These
- * describe the state of the SHARED workspace (divergent histories written by
- * different runs), not a defect in the agent that happened to run last —
- * putting the agent into a sticky `error` state over them removes a healthy
- * agent from rotation while leaving the actual problem (the workspace)
- * untouched. The run still fails and carries the full message.
- */
-const WORKSPACE_SYNC_CONFLICT_SIGNATURES = [
-  "Failed to merge concurrent remote git histories",
-  "Failed to integrate concurrent remote git history",
-  "did not send all necessary objects",
-  "lacks these prerequisite commits",
-];
-
-export function isWorkspaceSyncConflictFailure(message: string | null | undefined): boolean {
-  if (!message) return false;
-  return WORKSPACE_SYNC_CONFLICT_SIGNATURES.some((signature) => message.includes(signature));
 }
 
 export function shouldDeferFollowupWakeForSameIssue(input: {
@@ -4879,7 +4636,6 @@ function buildWorkspaceConfigCategoryValues(input: {
     },
     lifecycleCommands: {
       provisionCommand: snapshot.provisionCommand ?? null,
-      runtimeProvisionCommand: snapshot.runtimeProvisionCommand ?? null,
       teardownCommand: snapshot.teardownCommand ?? null,
       cleanupCommand: snapshot.cleanupCommand ?? null,
     },
@@ -5482,9 +5238,6 @@ export async function buildPaperclipWakePayload(input: {
       }
     | null;
   exposeLowTrustRaw?: boolean;
-  // Experimental: agents write user-interaction content in ASD-STE100
-  // Simplified Technical English (rendered as a prompt directive downstream).
-  simplifiedEnglishInteractions?: boolean;
 }) {
   const executionStage = parseObject(input.contextSnapshot.executionStage);
   const commentIds = extractWakeCommentIds(input.contextSnapshot);
@@ -5702,7 +5455,7 @@ export async function buildPaperclipWakePayload(input: {
       .then((rows) => rows[0] ?? null)
     : null;
 
-  const payload = {
+  return {
     reason: readNonEmptyString(input.contextSnapshot.wakeReason),
     recovery: recoveryAction || recoveryCause
       ? {
@@ -5760,7 +5513,6 @@ export async function buildPaperclipWakePayload(input: {
     interactionStatus,
     checkboxSelection: Object.keys(checkboxSelection).length > 0 ? checkboxSelection : null,
     checkedOutByHarness: input.contextSnapshot[PAPERCLIP_HARNESS_CHECKOUT_KEY] === true,
-    simplifiedEnglishInteractions: input.simplifiedEnglishInteractions === true,
     dependencyBlockedInteraction: input.contextSnapshot.dependencyBlockedInteraction === true,
     treeHoldInteraction: input.contextSnapshot.treeHoldInteraction === true,
     activeTreeHold: parseObject(input.contextSnapshot.activeTreeHold),
@@ -5799,9 +5551,6 @@ export async function buildPaperclipWakePayload(input: {
     truncated: payloadTruncated,
     fallbackFetchNeeded: payloadTruncated || missingCommentCount > 0,
   };
-  return issueId
-    ? createRunSecretRedactionRegistry(input.db).redactForIssue(input.companyId, issueId, payload)
-    : payload;
 }
 
 function runTaskKey(run: typeof heartbeatRuns.$inferSelect) {
@@ -6217,31 +5966,68 @@ async function terminateHeartbeatRunProcess(input: {
   graceMs?: number;
   trustedPid?: boolean;
   trustedProcessGroup?: boolean;
+  childProcess?: ChildProcess | null;
 }): Promise<LocalServiceTerminationResult | null> {
   const pid = input.pid ?? null;
   const processGroupId = input.processGroupId ?? null;
   if (typeof pid !== "number" && typeof processGroupId !== "number") return null;
 
+  const normalizedPid =
+    typeof pid === "number" && Number.isInteger(pid) && pid > 0 ? pid : null;
+  const normalizedProcessGroupId =
+    typeof processGroupId === "number" && Number.isInteger(processGroupId) && processGroupId > 0
+      ? processGroupId
+      : null;
+  const pidAlive = normalizedPid !== null && isProcessAlive(normalizedPid);
+  const processGroupAlive = normalizedProcessGroupId !== null && isProcessGroupAlive(normalizedProcessGroupId);
+  if (!pidAlive && !processGroupAlive) {
+    return {
+      pid: normalizedPid ?? normalizedProcessGroupId,
+      attempted: false,
+      confirmedStopped: false,
+      outcome: "untrusted_identity",
+      error: process.platform === "win32"
+        ? "windows_process_tree_absence_unproven"
+        : "posix_process_tree_absence_unproven_without_kernel_custody",
+    };
+  }
+  if (!input.trustedPid && !input.trustedProcessGroup) {
+    return {
+      pid: normalizedPid ?? normalizedProcessGroupId,
+      attempted: false,
+      confirmedStopped: false,
+      outcome: "untrusted_identity",
+      error: "A live PID or process group reconstructed from persisted state is observation-only without a live ChildProcess handle.",
+    };
+  }
+
   return await terminateLocalService(
     {
-      pid:
-        typeof pid === "number" && Number.isInteger(pid) && pid > 0
-          ? pid
-          : (processGroupId ?? 0),
-      processGroupId:
-        typeof processGroupId === "number" && Number.isInteger(processGroupId) && processGroupId > 0
-          ? processGroupId
-          : null,
+      pid: normalizedPid ?? normalizedProcessGroupId ?? 0,
+      processGroupId: normalizedProcessGroupId,
     },
-    input.graceMs || input.trustedPid || input.trustedProcessGroup || input.expectedStartedAt
+    input.graceMs || input.trustedPid || input.trustedProcessGroup || input.expectedStartedAt || input.childProcess
       ? {
           ...(input.graceMs ? { forceAfterMs: input.graceMs } : {}),
           ...(input.trustedPid ? { trustedPid: true } : {}),
           ...(input.trustedProcessGroup ? { trustedProcessGroup: true } : {}),
           ...(input.expectedStartedAt ? { expectedStartedAt: input.expectedStartedAt } : {}),
+          ...(input.childProcess ? { childProcess: input.childProcess } : {}),
         }
       : undefined,
   );
+}
+
+function missingProcessTreeCustodyResult(): LocalServiceTerminationResult {
+  return {
+    pid: null,
+    attempted: false,
+    confirmedStopped: false,
+    outcome: "untrusted_identity",
+    error: process.platform === "win32"
+      ? "windows_process_tree_absence_unproven_without_job_custody"
+      : "posix_process_tree_absence_unproven_without_kernel_custody",
+  };
 }
 
 function buildProcessLossMessage(run: {
@@ -6536,41 +6322,6 @@ export interface HeartbeatServiceOptions {
   runtimeEnv?: Record<string, string | undefined>;
 }
 
-type WorkspaceReadyCommentWriter = {
-  addComment: (
-    issueId: string,
-    body: string,
-    actor: { agentId?: string; userId?: string; runId?: string | null },
-    options?: {
-      presentation?: ReturnType<typeof buildWorkspaceReadyPresentation>;
-      metadata?: ReturnType<typeof buildWorkspaceReadyMetadata>;
-    },
-  ) => Promise<unknown>;
-};
-
-export function postWorkspaceReadyComment(input: {
-  issuesSvc: WorkspaceReadyCommentWriter;
-  issueId: string;
-  agentId: string;
-  runId: string;
-  workspace: RealizedExecutionWorkspace;
-  runtimeServices: RuntimeServiceRef[];
-}) {
-  const workspaceReadyInput = {
-    workspace: input.workspace,
-    runtimeServices: input.runtimeServices,
-  };
-  return input.issuesSvc.addComment(
-    input.issueId,
-    buildWorkspaceReadyComment(workspaceReadyInput),
-    { agentId: input.agentId, runId: input.runId },
-    {
-      presentation: buildWorkspaceReadyPresentation(workspaceReadyInput),
-      metadata: buildWorkspaceReadyMetadata(workspaceReadyInput),
-    },
-  );
-}
-
 function isTruthyRuntimeEnvValue(value: string | undefined) {
   return value === "true" || value === "1" || value === "yes" || value === "on";
 }
@@ -6658,6 +6409,127 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     pluginWorkerManager: options.pluginWorkerManager,
     environmentRuntime,
   });
+  const releaseReconciledEnvironmentLease = async (run: typeof heartbeatRuns.$inferSelect) => {
+    const release = await envOrchestrator.releaseForRun({
+      heartbeatRunId: run.id,
+      companyId: run.companyId,
+      agentId: run.agentId,
+      status: "released",
+      failureReason: "Remote ACP terminal receipt reconciled before retained-run release",
+    });
+    if (release.errors.length > 0) {
+      throw new AggregateError(
+        release.errors.map((entry) => entry.error),
+        `Failed to release reconciled environment lease(s) for run ${run.id}`,
+      );
+    }
+  };
+  const reconcileRetainedProcessSessionLaunchResources = async (
+    run: typeof heartbeatRuns.$inferSelect,
+  ): Promise<{
+    found: boolean;
+    terminal: boolean;
+    treeCustodyVerified?: boolean;
+    cleanupComplete?: boolean;
+    released: boolean;
+    reconstructedAfterRestart?: boolean;
+    cleanupUnreconstructible?: boolean;
+  }> => {
+    const identity = readProcessSessionLaunchIdentityFromRun(run);
+    if (!identity) return { found: false, terminal: false, released: false };
+
+    const inProcess = await reconcileAndReleaseAcpxProcessSessionLaunchResources({
+      runId: run.id,
+      launchId: identity.launchId,
+    });
+    if (inProcess.found) {
+      if (inProcess.released) await releaseReconciledEnvironmentLease(run);
+      return inProcess;
+    }
+
+    // Paperclip may have restarted after the remote launch was accepted. Rebuild
+    // a read-only provider runner from the still-active persisted lease and the
+    // exact launch identity; never acquire a new lease or accept caller-supplied
+    // terminal state. Host sockets/locks ended with the old process. Managed-home
+    // copyback/staging cleanup closures are not reconstructible, and direct child
+    // terminal proof is not process-tree custody. Restart reconstruction is
+    // therefore read-only evidence: it can never release the environment/issue.
+    if (!identity.leaseId || !identity.environmentId) {
+      return { found: false, terminal: false, released: false, reconstructedAfterRestart: true };
+    }
+    const lease = await db
+      .select()
+      .from(environmentLeases)
+      .where(and(
+        eq(environmentLeases.id, identity.leaseId),
+        eq(environmentLeases.heartbeatRunId, run.id),
+        eq(environmentLeases.status, "active"),
+      ))
+      .then((rows) => rows[0] ?? null);
+    if (!lease || lease.environmentId !== identity.environmentId) {
+      return { found: false, terminal: false, released: false, reconstructedAfterRestart: true };
+    }
+    const [environment, agent] = await Promise.all([
+      db.select().from(environments).where(
+        eq(environments.id, identity.environmentId),
+      ).then((rows) => rows[0] ?? null),
+      db.select().from(agents).where(and(
+        eq(agents.id, run.agentId),
+        eq(agents.companyId, run.companyId),
+      )).then((rows) => rows[0] ?? null),
+    ]);
+    if (!environment || !agent) {
+      return { found: false, terminal: false, released: false, reconstructedAfterRestart: true };
+    }
+    const target = await resolveEnvironmentExecutionTarget({
+      db,
+      companyId: run.companyId,
+      adapterType: agent.adapterType,
+      environment,
+      leaseId: lease.id,
+      leaseMetadata: parseObject(lease.metadata),
+      lease: lease as EnvironmentLease,
+      environmentRuntime,
+    });
+    const terminal = await reconcileAdapterExecutionTargetProcessSessionLaunchTerminal({
+      target,
+      launchIdentity: identity,
+    });
+    if (!terminal) {
+      return { found: true, terminal: false, released: false, reconstructedAfterRestart: true };
+    }
+    const latest = await getRun(run.id);
+    if (latest?.status === "running") {
+      const existing = parseObject(latest.resultJson);
+      const launch = parseObject(existing.processSessionLaunch);
+      await db
+        .update(heartbeatRuns)
+        .set({
+          resultJson: {
+            ...existing,
+            processSessionLaunch: {
+              ...launch,
+              reconstructedAfterRestart: true,
+              directTerminalVerified: true,
+              treeCustodyVerified: false,
+              cleanupUnreconstructible: true,
+              managedHomeCopyback: "not_reconstructible_after_restart",
+            },
+          },
+          updatedAt: new Date(),
+        })
+        .where(and(eq(heartbeatRuns.id, latest.id), eq(heartbeatRuns.status, "running")));
+    }
+    return {
+      found: true,
+      terminal: true,
+      treeCustodyVerified: false,
+      cleanupComplete: false,
+      released: false,
+      reconstructedAfterRestart: true,
+      cleanupUnreconstructible: true,
+    };
+  };
   const workspaceOperationsSvc = workspaceOperationService(db);
   const liveRunExecutions = {
     has(id: string) {
@@ -7592,18 +7464,6 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     runId: string | null;
     activitySource: "manual" | "scheduled";
   }) {
-    const reviewPathLost = input.claimed.status === "in_review"
-      && (await issuesSvc
-        .listReviewAttention(input.claimed.companyId, [input.claimed])
-        .then((attention) => attention.get(input.claimed.id)?.state === "stalled"));
-    const reviewPathContext = reviewPathLost
-      ? {
-          reviewPathLost: true,
-          reviewPathConsumedRef:
-            `monitor:${input.claimed.id}:${input.clearReason}:${input.scheduledAtIso}`,
-          reviewPathInstruction: REVIEW_PATH_RECOVERY_INSTRUCTION,
-        }
-      : null;
     const details = monitorRecoveryDetails({
       claimed: input.claimed,
       scheduledAtIso: input.scheduledAtIso,
@@ -7714,7 +7574,6 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         serviceName: input.monitor?.serviceName ?? null,
         timeoutAt: input.monitor?.timeoutAt ?? null,
         maxAttempts: input.monitor?.maxAttempts ?? null,
-        ...(reviewPathContext ?? {}),
       }, "status_only"),
       requestedByActorType: input.actorType,
       requestedByActorId: input.actorId,
@@ -7728,7 +7587,6 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         serviceName: input.monitor?.serviceName ?? null,
         timeoutAt: input.monitor?.timeoutAt ?? null,
         maxAttempts: input.monitor?.maxAttempts ?? null,
-        ...(reviewPathContext ?? {}),
       }, "status_only"),
     });
 
@@ -8506,14 +8364,12 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         ? projectWorkspaceRows.find((workspace) => workspace.id === preferredProjectWorkspaceId) ?? null
         : null;
       const missingProjectCwds: string[] = [];
-      const materializationFailures: WorkspaceMaterializationFailure[] = [];
       let hasConfiguredProjectCwd = false;
       let preferredWorkspaceWarning: string | null = null;
       if (preferredProjectWorkspaceId && !preferredWorkspace) {
         preferredWorkspaceWarning =
           `Selected project workspace "${preferredProjectWorkspaceId}" is not available on this project.`;
       }
-      const resolveGitAuth = createGitRemoteAuthProvider(db, agent.companyId, { issueId });
       for (const workspace of projectWorkspaceRows) {
         let projectCwd: string;
         let managedWorkspaceWarning: string | null = null;
@@ -8523,22 +8379,12 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
             projectId: workspaceProjectId ?? resolvedProjectId ?? workspace.projectId,
             cwd: workspace.cwd,
             repoUrl: workspace.repoUrl,
-            resolveGitAuth,
           });
           projectCwd = resolvedCwd.cwd;
           managedWorkspaceWarning = resolvedCwd.warning;
         } catch (error) {
-          const scrubbedError = scrubGitCredentialText(
-            error instanceof Error ? error.message : String(error),
-          );
-          const workspaceRepoUrl = readNonEmptyString(workspace.repoUrl);
-          materializationFailures.push({
-            projectWorkspaceId: workspace.id,
-            repoUrl: workspaceRepoUrl ? scrubGitCredentialText(workspaceRepoUrl) : null,
-            error: scrubbedError,
-          });
           if (preferredWorkspace?.id === workspace.id) {
-            preferredWorkspaceWarning = scrubbedError;
+            preferredWorkspaceWarning = error instanceof Error ? error.message : String(error);
           }
           continue;
         }
@@ -8559,8 +8405,6 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
             warnings: [preferredWorkspaceWarning, managedWorkspaceWarning].filter(
               (value): value is string => Boolean(value),
             ),
-            baseCwdFallback: false,
-            materializationFailures,
           };
         }
         if (preferredWorkspace?.id === workspace.id) {
@@ -8572,13 +8416,23 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
 
       const fallbackCwd = resolveDefaultAgentWorkspaceDir(agent.id);
       await fs.mkdir(fallbackCwd, { recursive: true });
-      const warnings = buildAnchorFallbackWorkspaceNotes({
-        fallbackCwd,
-        preferredWorkspaceWarning,
-        materializationFailures,
-        missingProjectCwds,
-        hasConfiguredProjectCwd,
-      });
+      const warnings: string[] = [];
+      if (preferredWorkspaceWarning) {
+        warnings.push(preferredWorkspaceWarning);
+      }
+      if (missingProjectCwds.length > 0) {
+        const firstMissing = missingProjectCwds[0];
+        const extraMissingCount = Math.max(0, missingProjectCwds.length - 1);
+        warnings.push(
+          extraMissingCount > 0
+            ? `Project workspace path "${firstMissing}" and ${extraMissingCount} other configured path(s) are not available yet. Using fallback workspace "${fallbackCwd}" for this run.`
+            : `Project workspace path "${firstMissing}" is not available yet. Using fallback workspace "${fallbackCwd}" for this run.`,
+        );
+      } else if (!hasConfiguredProjectCwd) {
+        warnings.push(
+          `Project workspace has no local cwd configured. Using fallback workspace "${fallbackCwd}" for this run.`,
+        );
+      }
       return {
         cwd: fallbackCwd,
         source: "project_primary" as const,
@@ -8588,8 +8442,6 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         repoRef: projectWorkspaceRows[0]?.repoRef ?? null,
         workspaceHints,
         warnings,
-        baseCwdFallback: true,
-        materializationFailures,
       };
     }
 
@@ -8608,8 +8460,6 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         repoRef: null,
         workspaceHints,
         warnings: managedWorkspace.warning ? [managedWorkspace.warning] : [],
-        baseCwdFallback: false,
-        materializationFailures: [],
       };
     }
 
@@ -8630,8 +8480,6 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           repoRef: readNonEmptyString(previousSessionParams?.repoRef),
           workspaceHints,
           warnings: [],
-          baseCwdFallback: false,
-          materializationFailures: [],
         };
       }
     }
@@ -8665,8 +8513,6 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       repoRef: null,
       workspaceHints,
       warnings,
-      baseCwdFallback: false,
-      materializationFailures: [],
     };
   }
 
@@ -8679,27 +8525,20 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     agent: typeof agents.$inferSelect,
     context: Record<string, unknown>,
     previousSessionParams: Record<string, unknown> | null,
-    opts?: { useProjectWorkspace?: boolean | null; executionEnvironmentDriver?: string | null },
+    opts?: { useProjectWorkspace?: boolean | null; executionTargetIsRemote?: boolean },
   ): Promise<ResolvedWorkspaceForRun> {
     const anchor = await resolveAnchorWorkspaceForRun(agent, context, previousSessionParams, opts);
     if (!isMultiProjectWorkspaceSyncEnabled()) {
-      return { ...anchor, additionalWorkspaces: [], referencedProjectFailures: [] };
+      return { ...anchor, additionalWorkspaces: [] };
     }
 
-    // Derive the remote-transport facts from the selected environment driver. `executionTargetIsRemote`
-    // decides whether the referenced set needs the remote path at all; `targetStagesConfined` decides
-    // whether that remote target confines each staged tree (only the sandbox driver does). The remote
-    // flag is the targeted kill switch; with it off, a remote run fails closed.
-    const executionEnvironmentDriver = opts?.executionEnvironmentDriver ?? null;
     const issueId = readNonEmptyString(context.issueId) ?? readNonEmptyString(context.taskId);
-    const { additionalWorkspaces, warnings, failures } = await resolveAdditionalRunWorkspaces(
+    const { additionalWorkspaces, warnings } = await resolveAdditionalRunWorkspaces(
       issueId,
       anchor.projectId,
       {
         enabled: true,
-        executionTargetIsRemote: isRemoteExecutionEnvironmentDriver(executionEnvironmentDriver),
-        targetStagesConfined: isConfinedRemoteStagingDriver(executionEnvironmentDriver),
-        remoteReferencedSyncEnabled: isMultiProjectWorkspaceSyncRemoteEnabled(),
+        executionTargetIsRemote: opts?.executionTargetIsRemote ?? false,
         companyId: agent.companyId,
         actor: {
           type: "agent",
@@ -8721,7 +8560,6 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     return {
       ...anchor,
       additionalWorkspaces,
-      referencedProjectFailures: failures,
       warnings: warnings.length > 0 ? [...anchor.warnings, ...warnings] : anchor.warnings,
     };
   }
@@ -8854,24 +8692,10 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     status: string,
     patch?: Partial<typeof heartbeatRuns.$inferInsert>,
   ) {
-    return setRunStatusFromLive(runId, status, ["running"], patch);
-  }
-
-  // Move a run to a new status only when its current status is one of
-  // `fromStatuses`. The compare-and-set is a single conditional update, so a
-  // concurrent path can win the race. When this update matches nothing, the
-  // function reads the current row and reports updated=false, so the caller can
-  // keep the terminal outcome that another path already wrote.
-  async function setRunStatusFromLive(
-    runId: string,
-    status: string,
-    fromStatuses: string[],
-    patch?: Partial<typeof heartbeatRuns.$inferInsert>,
-  ) {
     const updated = await db
       .update(heartbeatRuns)
       .set({ status, ...patch, updatedAt: new Date() })
-      .where(and(eq(heartbeatRuns.id, runId), inArray(heartbeatRuns.status, fromStatuses)))
+      .where(and(eq(heartbeatRuns.id, runId), eq(heartbeatRuns.status, "running")))
       .returning()
       .then((rows) => rows[0] ?? null);
 
@@ -8895,75 +8719,6 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       .then((rows) => rows[0] ?? null);
 
     return { run: current, updated: false as const };
-  }
-
-  // Invariant: when a run releases its environment lease, the run row must be
-  // terminal. The finalizer writes the terminal status in a step that is
-  // separate from the agent status=done PATCH. If the sandbox or the run
-  // process stops between the two steps, heartbeat_runs.status stays "running".
-  // The UI reads liveness from that row, so a finished task shows "Live"
-  // forever. This function closes the gap in the run teardown: when the run is
-  // still running or queued, it forces a terminal status before the lease is
-  // released. It never overwrites a status that another path already made
-  // terminal.
-  async function terminalizeRunOnLeaseRelease(
-    run: typeof heartbeatRuns.$inferSelect,
-  ): Promise<typeof heartbeatRuns.$inferSelect> {
-    if (isHeartbeatRunTerminalStatus(run.status)) return run;
-    if (run.status !== "running" && run.status !== "queued") return run;
-
-    // Choose the terminal status that reflects the true outcome. When the issue
-    // already reached a terminal status, the run reached its goal, so use the
-    // matching terminal run status. Otherwise the teardown cut the run short,
-    // so use "interrupted".
-    const issueId = readNonEmptyString(parseObject(run.contextSnapshot).issueId);
-    let terminalStatus: "succeeded" | "cancelled" | "interrupted" = "interrupted";
-    if (issueId) {
-      const issueStatus = await db
-        .select({ status: issues.status })
-        .from(issues)
-        .where(eq(issues.id, issueId))
-        .then((rows) => rows[0]?.status ?? null);
-      if (issueStatus === "done") terminalStatus = "succeeded";
-      else if (issueStatus === "cancelled") terminalStatus = "cancelled";
-    }
-
-    const message =
-      `run terminalized on environment lease release: heartbeat_runs.status was still ${run.status} at teardown`;
-    // Match both "running" and "queued". A queued run has released its lease but
-    // never reached "running", so a running-only update would miss it and leave
-    // a phantom live run behind.
-    const write = await setRunStatusFromLive(run.id, terminalStatus, ["running", "queued"], {
-      finishedAt: run.finishedAt ?? new Date(),
-      error: run.error ?? (terminalStatus === "interrupted" ? message : null),
-      errorCode: run.errorCode ?? (terminalStatus === "interrupted" ? "lease_released_before_terminal" : null),
-    });
-    if (!write.updated) {
-      // Another path already finalized the run. Keep that terminal outcome.
-      return write.run ?? run;
-    }
-
-    const terminalRun = write.run;
-    if (terminalRun) {
-      await appendRunEvent(terminalRun, await nextRunEventSeq(terminalRun.id), {
-        eventType: "lifecycle",
-        stream: "system",
-        level: terminalStatus === "interrupted" ? "warn" : "info",
-        message,
-        payload: {
-          previousStatus: run.status,
-          terminalStatus,
-          reason: "environment_lease_release",
-          ...(issueId ? { issueId } : {}),
-        },
-      }).catch((eventErr) => {
-        logger.warn(
-          { err: eventErr, runId: run.id },
-          "failed to append run event for lease-release terminalization",
-        );
-      });
-    }
-    return terminalRun ?? run;
   }
 
   function publishRunLifecyclePluginEvent(run: typeof heartbeatRuns.$inferSelect) {
@@ -9042,6 +8797,11 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
   }
 
   async function handleRunLivenessContinuation(run: typeof heartbeatRuns.$inferSelect) {
+    if (isPaperclipExecutionConfigurationFencedRun(run)) return;
+    // The remote transport failed after launch submission, so replay could create a
+    // second ACP process. Only an operator may reconcile this terminal state.
+    if (isRemoteLaunchReplayFencedRun(run)) return;
+
     const livenessState = run.livenessState as RunLivenessState | null;
     if (livenessState !== "plan_only" && livenessState !== "empty_response") return;
 
@@ -9244,6 +9004,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
   }
 
   async function handleSuccessfulRunHandoff(run: typeof heartbeatRuns.$inferSelect, agent: typeof agents.$inferSelect) {
+    if (isPaperclipExecutionConfigurationFencedRun(run)) return;
     if (run.status !== "succeeded") return;
     const context = parseObject(run.contextSnapshot);
     const issueId = readNonEmptyString(context.issueId) ?? readNonEmptyString(context.taskId);
@@ -9528,93 +9289,6 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     });
   }
 
-  async function handleIssueReviewPathDisposition(run: typeof heartbeatRuns.$inferSelect) {
-    const contextSnapshot = parseObject(run.contextSnapshot);
-    const issueId = readNonEmptyString(contextSnapshot.issueId) ?? readNonEmptyString(contextSnapshot.taskId);
-    if (!issueId) return;
-
-    const issue = await db
-      .select({
-        id: issues.id,
-        companyId: issues.companyId,
-        identifier: issues.identifier,
-        status: issues.status,
-        assigneeAgentId: issues.assigneeAgentId,
-      })
-      .from(issues)
-      .where(and(eq(issues.id, issueId), eq(issues.companyId, run.companyId)))
-      .then((rows) => rows[0] ?? null);
-    if (!issue || issue.status !== "in_review" || !issue.assigneeAgentId) return;
-
-    const reviewAttention = await issuesSvc
-      .listReviewAttention(issue.companyId, [issue])
-      .then((map) => map.get(issue.id) ?? { state: "none" as const, paths: [], reason: null });
-    if (reviewAttention.state !== "stalled") return;
-
-    const consumedPathRef = reviewPathConsumedRefFromRun({
-      runId: run.id,
-      issueId: issue.id,
-      contextSnapshot,
-    });
-    const idempotencyKey = buildIssueReviewPathLostIdempotencyKey({
-      issueId: issue.id,
-      consumedPathRef,
-    });
-    const existingWake = await db
-      .select({ id: agentWakeupRequests.id })
-      .from(agentWakeupRequests)
-      .where(and(
-        eq(agentWakeupRequests.companyId, issue.companyId),
-        eq(agentWakeupRequests.idempotencyKey, idempotencyKey),
-        notInArray(agentWakeupRequests.status, ["skipped"]),
-      ))
-      .limit(1)
-      .then((rows) => rows[0] ?? null);
-
-    const decision = decideIssueReviewPathRecovery({
-      issueId: issue.id,
-      sourceRunId: run.id,
-      assigneeAgentId: issue.assigneeAgentId,
-      contextSnapshot,
-      reviewAttention,
-      existingWake: Boolean(existingWake),
-    });
-    if (decision.kind !== "enqueue") return;
-
-    const recoveryRun = await enqueueWakeup(issue.assigneeAgentId, {
-      source: "automation",
-      triggerDetail: "system",
-      reason: ISSUE_REVIEW_PATH_LOST_WAKE_REASON,
-      idempotencyKey: decision.idempotencyKey,
-      payload: decision.payload,
-      contextSnapshot: decision.contextSnapshot,
-      requestedByActorType: "system",
-      requestedByActorId: "heartbeat",
-    }).catch((error: unknown) => {
-      if (isReviewPathRecoveryIdempotencyConflict(error)) return null;
-      throw error;
-    });
-    if (!recoveryRun) return;
-
-    await logActivity(db, {
-      companyId: issue.companyId,
-      actorType: "system",
-      actorId: "heartbeat",
-      agentId: issue.assigneeAgentId,
-      runId: run.id,
-      action: "issue.review_path_recovery_queued",
-      entityType: "issue",
-      entityId: issue.id,
-      details: {
-        sourceRunId: run.id,
-        recoveryRunId: recoveryRun.id,
-        consumedPathRef,
-        recoveryAttempt: 1,
-        maxRecoveryAttempts: 1,
-      },
-    });
-  }
-
   async function appendRunEvent(
     run: typeof heartbeatRuns.$inferSelect,
     seq: number,
@@ -9757,6 +9431,113 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       .where(eq(heartbeatRuns.id, runId))
       .returning()
       .then((rows) => rows[0] ?? null);
+  }
+
+  async function retainProcessSessionLaunchForReconciliation(input: {
+    run: typeof heartbeatRuns.$inferSelect;
+    message: string;
+    resultJson?: Record<string, unknown> | null;
+  }) {
+    const latest = await getRun(input.run.id);
+    if (!latest || latest.status !== "running") return latest;
+    const supplied = parseObject(input.resultJson);
+    const suppliedLaunch = parseObject(supplied.processSessionLaunch);
+    const existing = parseObject(latest.resultJson);
+    const existingLaunch = parseObject(existing.processSessionLaunch);
+    const retained = await db
+      .update(heartbeatRuns)
+      .set({
+        error: input.message,
+        errorCode: ACP_PROCESS_SESSION_LAUNCH_AMBIGUOUS,
+        resultJson: {
+          ...existing,
+          ...supplied,
+          processSessionLaunch: {
+            ...existingLaunch,
+            ...suppliedLaunch,
+            status: "needs_human",
+            retryable: false,
+            needsHuman: true,
+          },
+        },
+        updatedAt: new Date(),
+      })
+      .where(and(eq(heartbeatRuns.id, latest.id), eq(heartbeatRuns.status, "running")))
+      .returning()
+      .then((rows) => rows[0] ?? null);
+    if (retained) {
+      await appendRunEvent(retained, await nextRunEventSeq(retained.id), {
+        eventType: "lifecycle",
+        stream: "system",
+        level: "error",
+        message: "Remote ACP launch retained as running; issue and environment remain fenced for reconciliation",
+        payload: { errorCode: ACP_PROCESS_SESSION_LAUNCH_AMBIGUOUS, needsHuman: true },
+      });
+    }
+    return retained ?? latest;
+  }
+
+  async function retainPaperclipBridgeLaunchForReconciliation(input: {
+    run: typeof heartbeatRuns.$inferSelect;
+    message: string;
+    resultJson?: Record<string, unknown> | null;
+  }) {
+    const latest = await getRun(input.run.id);
+    if (!latest || latest.status !== "running") return latest;
+    const supplied = parseObject(input.resultJson);
+    const suppliedLaunch = parseObject(supplied.paperclipBridgeLaunch);
+    const existing = parseObject(latest.resultJson);
+    const existingLaunch = parseObject(existing.paperclipBridgeLaunch);
+    const retained = await db
+      .update(heartbeatRuns)
+      .set({
+        error: input.message,
+        errorCode: PAPERCLIP_CALLBACK_BRIDGE_LAUNCH_AMBIGUOUS,
+        resultJson: {
+          ...existing,
+          ...supplied,
+          paperclipBridgeLaunch: {
+            ...existingLaunch,
+            ...suppliedLaunch,
+            status: "needs_human",
+            retryable: false,
+            needsHuman: true,
+          },
+        },
+        updatedAt: new Date(),
+      })
+      .where(and(eq(heartbeatRuns.id, latest.id), eq(heartbeatRuns.status, "running")))
+      .returning()
+      .then((rows) => rows[0] ?? null);
+    if (retained) {
+      await appendRunEvent(retained, await nextRunEventSeq(retained.id), {
+        eventType: "lifecycle",
+        stream: "system",
+        level: "error",
+        message: "Paperclip callback bridge retained as running; issue and environment remain fenced for exact cancellation reconciliation",
+        payload: { errorCode: PAPERCLIP_CALLBACK_BRIDGE_LAUNCH_AMBIGUOUS, needsHuman: true },
+      });
+    }
+    return retained ?? latest;
+  }
+
+  async function reconcileRetainedPaperclipBridgeLaunchResources(
+    run: typeof heartbeatRuns.$inferSelect,
+  ) {
+    const identity = readPaperclipBridgeLaunchIdentityFromRun(run);
+    if (!identity) {
+      return {
+        found: false,
+        controllerFound: false,
+        remoteCancelled: false,
+        cleanupComplete: false,
+        released: false,
+      };
+    }
+    return reconcileAndReleaseAdapterExecutionTargetPaperclipBridgeLaunch({
+      runId: run.id,
+      instanceId: identity.instanceId,
+    });
   }
 
   async function clearDetachedRunWarning(runId: string) {
@@ -10009,6 +9790,19 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     run: typeof heartbeatRuns.$inferSelect,
     agent: typeof agents.$inferSelect,
   ) {
+    // A missing-comment follow-up is still an execution replay. Suppress it when
+    // remote launch acceptance is unknown and preserve the needs-human receipt.
+    if (isRemoteLaunchReplayFencedRun(run) || isPaperclipExecutionConfigurationFencedRun(run)) {
+      if (run.issueCommentStatus !== "not_applicable") {
+        await patchRunIssueCommentStatus(run.id, {
+          issueCommentStatus: "not_applicable",
+          issueCommentSatisfiedByCommentId: null,
+          issueCommentRetryQueuedAt: null,
+        });
+      }
+      return { outcome: "not_applicable" as const, queuedRun: null };
+    }
+
     const contextSnapshot = parseObject(run.contextSnapshot);
     const issueId = readNonEmptyString(contextSnapshot.issueId);
     if (!issueId) {
@@ -10095,6 +9889,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     agent: typeof agents.$inferSelect,
     now: Date,
   ) {
+    if (isPaperclipExecutionConfigurationFencedRun(run)) return null;
     const existingRetry = await db
       .select()
       .from(heartbeatRuns)
@@ -10254,24 +10049,6 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     };
   }
 
-  function isServerStdioBoundHotRestartRun(input: {
-    run: typeof heartbeatRuns.$inferSelect;
-    adapterType: string;
-    adapterConfig: unknown;
-  }) {
-    const context = parseObject(input.run.contextSnapshot);
-    if (context.processTopology === "server_stdio" || context.executionEngine === "acp") {
-      return true;
-    }
-    if (context.processTopology === "detached" || context.executionEngine === "cli") {
-      return false;
-    }
-    if (!["claude_local", "codex_local", "gemini_local"].includes(input.adapterType)) {
-      return false;
-    }
-    return readNonEmptyString(parseObject(input.adapterConfig).engine) !== "cli";
-  }
-
   async function prepareHotRestartShutdown(signal: "SIGINT" | "SIGTERM", now = new Date()) {
     let intent: Awaited<ReturnType<typeof readHotRestartIntent>>;
     try {
@@ -10295,7 +10072,6 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       .select({
         run: heartbeatRuns,
         adapterType: agents.adapterType,
-        adapterConfig: agents.adapterConfig,
       })
       .from(heartbeatRuns)
       .innerJoin(agents, eq(heartbeatRuns.agentId, agents.id))
@@ -10305,39 +10081,6 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       ...intent,
       previousServerVersion: intent.previousServerVersion ?? serverVersion,
     };
-
-    const serverStdioRuns = activeRuns.filter(isServerStdioBoundHotRestartRun);
-    if (serverStdioRuns.length > 0) {
-      const activeServerStdioRunIds = serverStdioRuns.map(({ run }) => run.id);
-      await writeHotRestartShutdownSnapshot({
-        intent: intentWithVersion,
-        signal,
-        activeRuns: snapshotRuns,
-        drainReason: "active_acp_run",
-        drainRunIds: activeServerStdioRunIds,
-        capturedAt: now,
-      });
-
-      logger.warn(
-        {
-          signal,
-          previousServerPid: intent.previousServerPid,
-          activeRunIds: snapshotRuns.map((run) => run.runId),
-          activeServerStdioRunIds,
-          drainReason: "active_acp_run",
-        },
-        "server-stdio agent run prevents hot-restart adoption; using graceful drain and retry",
-      );
-
-      return {
-        mode: "acp_drain_required" as const,
-        skipDrain: false as const,
-        activeRunIds: snapshotRuns.map((run) => run.runId),
-        activeAcpRunIds: activeServerStdioRunIds,
-        drainRunIds: activeServerStdioRunIds,
-        drainReason: "active_acp_run" as const,
-      };
-    }
 
     await writeHotRestartShutdownSnapshot({
       intent: intentWithVersion,
@@ -10399,24 +10142,13 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     }
 
     if (!intent.shutdownSnapshot) {
-      const log = intent.drainRequired ? logger.info.bind(logger) : logger.warn.bind(logger);
-      log(
-        {
-          previousServerPid: intent.previousServerPid,
-          preflightActiveRunIds: intent.preflightActiveRunIds,
-          drainReason: intent.drainReason ?? null,
-        },
-        intent.drainRequired
-          ? "drain-required restart intent has no adoption snapshot"
-          : "hot-restart intent present but shutdown snapshot is missing; no runs can be adopted",
+      logger.warn(
+        { previousServerPid: intent.previousServerPid },
+        "hot-restart intent present but shutdown snapshot is missing; no runs can be adopted",
       );
     }
     const candidates = intent.shutdownSnapshot?.activeRuns ?? [];
-    const missingSnapshotRunIds = findMissingHotRestartSnapshotRunIds(intent);
-    const reconciliationRunIds = [
-      ...new Set([...candidates.map((run) => run.runId), ...missingSnapshotRunIds]),
-    ];
-    const currentRows = reconciliationRunIds.length > 0
+    const currentRows = candidates.length > 0
       ? await db
         .select({
           run: heartbeatRuns,
@@ -10424,7 +10156,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         })
         .from(heartbeatRuns)
         .innerJoin(agents, eq(heartbeatRuns.agentId, agents.id))
-        .where(inArray(heartbeatRuns.id, reconciliationRunIds))
+        .where(inArray(heartbeatRuns.id, candidates.map((run) => run.runId)))
       : [];
     const currentByRunId = new Map(currentRows.map((row) => [row.run.id, row]));
 
@@ -10448,28 +10180,6 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       else skippedRunIds.push(candidate.runId);
     };
 
-    for (const runId of missingSnapshotRunIds) {
-      const current = currentByRunId.get(runId);
-      if (!current) {
-        finalizedWhileDownRunIds.push(runId);
-        continue;
-      }
-
-      const candidate = toHotRestartIntentRun(current);
-      if (current.run.status !== "running") {
-        classify(candidate, "finalized_while_down", `run_status_${current.run.status}`);
-      } else {
-        classify(candidate, "lost", "missing_shutdown_snapshot");
-      }
-    }
-
-    if (lostRunIds.length > 0) {
-      logger.error(
-        { previousServerPid: intent.previousServerPid, lostRunIds },
-        "hot-restart shutdown snapshot omitted live preflight runs; reporting them as lost",
-      );
-    }
-
     for (const candidate of candidates) {
       const current = currentByRunId.get(candidate.runId);
       if (!current) {
@@ -10490,20 +10200,12 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         continue;
       }
 
-      const hasSelectiveAcpDrain = intent.drainReason === "active_acp_run"
-        && (intent.drainRunIds?.length ?? 0) > 0;
-      if (hasSelectiveAcpDrain && intent.drainRunIds?.includes(candidate.runId)) {
-        // A selective ACP drain is expected to persist a terminal row before
-        // the new server starts. If the process was terminated but that write
-        // failed, surface the run as lost instead of hiding it as an expected
-        // drain skip.
-        classify(candidate, "lost", "selective_drain_not_finalized", patch);
+      if (isRemoteLaunchReplayFencedRun(run)) {
+        classify(candidate, "skipped", "remote_launch_reconciliation_required", patch);
         continue;
       }
-      if (
-        intent.drainRequired
-        && !hasSelectiveAcpDrain
-      ) {
+
+      if (intent.drainRequired) {
         classify(candidate, "skipped", "drain_required", patch);
         continue;
       }
@@ -10517,9 +10219,21 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       const processGroupId = run.processGroupId ?? candidate.processGroupId;
       const processPidAlive = isProcessAlive(processPid);
       const processGroupAlive = isProcessGroupAlive(processGroupId);
-      if (!processPid && !processGroupId) {
-        classify(candidate, "lost", "missing_process_metadata", patch);
-        continue;
+      if (!processPidAlive && !processGroupAlive) {
+        const termination = await terminateHeartbeatRunProcess({
+          pid: processPid,
+          processGroupId,
+          expectedStartedAt: run.processStartedAt,
+        }) ?? missingProcessTreeCustodyResult();
+        if (termination.confirmedStopped === false) {
+          await retainRunForUnverifiedTermination({
+            run,
+            result: termination,
+            operation: "shutdown",
+          });
+          classify(candidate, "skipped", "process_tree_absence_unproven_without_kernel_custody", patch);
+          continue;
+        }
       }
       if (!processPidAlive && !processGroupAlive) {
         classify(candidate, "lost", "process_not_alive", patch);
@@ -10583,7 +10297,6 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       requestedAt: intent.requestedAt,
       completedAt: now.toISOString(),
       drainRequired: intent.drainRequired,
-      drainReason: intent.drainReason ?? (intent.drainRequired ? "requested" : null),
       previousServerPid: intent.previousServerPid,
       newServerPid: process.pid,
       previousServerVersion: intent.previousServerVersion,
@@ -10594,7 +10307,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       skippedRunIds,
       runs: reportRuns,
     });
-    await removeHotRestartIntent(undefined, intent);
+    await removeHotRestartIntent();
 
     logger.info(
       {
@@ -10603,7 +10316,6 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         adoptedRunIds,
         finalizedWhileDownRunIds,
         lostRunIds,
-        missingSnapshotRunIds,
         skippedRunIds,
       },
       "hot-restart adoption report written",
@@ -10618,15 +10330,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     };
   }
 
-  async function drainRunningRunsForShutdown(
-    signal: "SIGINT" | "SIGTERM",
-    now = new Date(),
-    runIds: readonly string[] | null = null,
-  ) {
-    const selectedRunIds = runIds ? [...new Set(runIds)] : null;
-    if (selectedRunIds?.length === 0) {
-      return { interrupted: 0, interruptedRunIds: [], retryRunIds: [] };
-    }
+  async function drainRunningRunsForShutdown(signal: "SIGINT" | "SIGTERM", now = new Date()) {
     const activeRuns = await db
       .select({
         run: heartbeatRuns,
@@ -10634,20 +10338,75 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       })
       .from(heartbeatRuns)
       .innerJoin(agents, eq(heartbeatRuns.agentId, agents.id))
-      .where(
-        selectedRunIds
-          ? and(
-            eq(heartbeatRuns.status, "running"),
-            inArray(heartbeatRuns.id, selectedRunIds),
-          )
-          : eq(heartbeatRuns.status, "running"),
-      );
+      .where(eq(heartbeatRuns.status, "running"));
 
     const interruptedRunIds: string[] = [];
     const retryRunIds: string[] = [];
     const needsHumanRunIds: string[] = [];
 
     for (const { run, agent } of activeRuns) {
+      if (isPaperclipBridgeLaunchReplayFencedRun(run)) {
+        const reconciliation = await reconcileRetainedPaperclipBridgeLaunchResources(run).catch(() => ({
+          found: true,
+          controllerFound: false,
+          remoteCancelled: false,
+          cleanupComplete: false,
+          released: false,
+        }));
+        if (!reconciliation.released) {
+          await appendRunEvent(run, await nextRunEventSeq(run.id), {
+            eventType: "lifecycle",
+            stream: "system",
+            level: "warn",
+            message: "Graceful shutdown preserved a callback bridge without exact cancellation/cleanup reconciliation",
+            payload: {
+              signal,
+              errorCode: PAPERCLIP_CALLBACK_BRIDGE_LAUNCH_AMBIGUOUS,
+              reconciliation,
+            },
+          });
+          needsHumanRunIds.push(run.id);
+          continue;
+        }
+      }
+      if (isProcessSessionLaunchReplayFencedRun(run)) {
+        // The remote wrapper/child may outlive this host process. Do not stop,
+        // release, or replay it during graceful shutdown; preserve the durable
+        // identity and lease for explicit reconciliation after restart.
+        const identity = readProcessSessionLaunchIdentityFromRun(run);
+        const reconciliation = isProcessSessionLaunchActiveFenceRun(run) && identity
+          ? await requestStopAndWaitAcpxProcessSessionLaunch({
+              runId: run.id,
+              launchId: identity.launchId,
+            }).catch(() => ({
+              found: true,
+              terminal: false,
+              treeCustodyVerified: false,
+              cleanupComplete: false,
+              released: false,
+            }))
+          : await reconcileRetainedProcessSessionLaunchResources(run).catch(() => ({
+              found: true,
+              terminal: false,
+              treeCustodyVerified: false,
+              cleanupComplete: false,
+              released: false,
+            }));
+        if (reconciliation.released) {
+          // A future provider may supply exact launch-bound tree custody and
+          // complete all retained cleanup before shutdown continues normally.
+        } else {
+        await appendRunEvent(run, await nextRunEventSeq(run.id), {
+          eventType: "lifecycle",
+          stream: "system",
+          level: "warn",
+          message: "Graceful shutdown preserved a remote ACP launch without verified tree custody/cleanup",
+          payload: { signal, errorCode: ACP_PROCESS_SESSION_LAUNCH_AMBIGUOUS, reconciliation },
+        });
+        needsHumanRunIds.push(run.id);
+        continue;
+        }
+      }
       const running = runningProcesses.get(run.id);
       const runningChildIsLive = running
         ? (running.child.exitCode == null && running.child.signalCode == null)
@@ -10658,7 +10417,9 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
             processGroupId: running.processGroupId ?? run.processGroupId,
             expectedStartedAt: run.processStartedAt,
             graceMs: Math.max(1, running.graceSec) * 1000,
-            ...(runningChildIsLive ? { trustedPid: true, trustedProcessGroup: true } : {}),
+            ...(runningChildIsLive
+              ? { trustedPid: true, trustedProcessGroup: true, childProcess: running.child }
+              : {}),
           })
         : run.processPid || run.processGroupId
           ? await terminateHeartbeatRunProcess({
@@ -10666,7 +10427,9 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
               processGroupId: run.processGroupId,
               expectedStartedAt: run.processStartedAt,
             })
-          : null;
+          : isTrackedLocalChildProcessAdapter(agent.adapterType)
+            ? missingProcessTreeCustodyResult()
+            : null;
       if (termination?.confirmedStopped === false) {
         await retainRunForUnverifiedTermination({
           run,
@@ -10728,9 +10491,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         },
       });
 
-      await finalizeAgentStatus(run.agentId, "interrupted", message, {
-        wasFirstHeartbeat: timerClaimWasFirstHeartbeat(run),
-      });
+      await finalizeAgentStatus(run.agentId, "interrupted", message);
       interruptedRunIds.push(interrupted.id);
     }
 
@@ -10846,19 +10607,17 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     }
 
     if (issue.assigneeAgentId !== run.agentId) {
-      if (!isNonAssigneeWorkspaceBusyRetry(retryReason, contextSnapshot)) {
-        return {
-          allowed: false,
-          reason: "Scheduled retry suppressed because issue ownership changed",
-          errorCode: "issue_reassigned",
+      return {
+        allowed: false,
+        reason: "Scheduled retry suppressed because issue ownership changed",
+        errorCode: "issue_reassigned",
+        issueId,
+        details: {
           issueId,
-          details: {
-            issueId,
-            previousAssigneeAgentId: run.agentId,
-            currentAssigneeAgentId: issue.assigneeAgentId,
-          },
-        };
-      }
+          previousAssigneeAgentId: run.agentId,
+          currentAssigneeAgentId: issue.assigneeAgentId,
+        },
+      };
     }
 
     if (issue.status === "cancelled" || issue.status === "done") {
@@ -11144,6 +10903,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       delayMs?: number;
     },
   ) {
+    if (isPaperclipExecutionConfigurationFencedRun(run)) return null;
     const now = opts?.now ?? new Date();
     const retryReason = opts?.retryReason ?? BOUNDED_TRANSIENT_HEARTBEAT_RETRY_REASON;
     const wakeReason = opts?.wakeReason ?? BOUNDED_TRANSIENT_HEARTBEAT_RETRY_WAKE_REASON;
@@ -11795,179 +11555,11 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     };
   }
 
-  // Finds a running heartbeat run (other than the caller's) whose context
-  // issue shares the same project workspace, i.e. the run that currently
-  // "holds" the shared working tree. Runs that have been silent past
-  // WORKSPACE_BUSY_HOLDER_STALE_AFTER_MS do not count — a zombie holder must
-  // not park other work forever, and recovery's silent-run escalation is
-  // already reaping it. When isolated workspaces are enabled, holders whose
-  // issue explicitly opted into an isolated workspace never touch the shared
-  // tree, so they are excluded; a NULL/agent_default mode may resolve to the
-  // shared tree and counts as a holder (over-serializing is the safe
-  // direction). When the isolated-workspaces experiment is off, every run
-  // resolves to the shared tree, so no holder is excluded.
-  async function findSharedWorkspaceHolder(input: {
-    companyId: string;
-    projectWorkspaceId: string;
-    excludeIssueId: string;
-    excludeRunId: string;
-    honorIsolatedWorkspaceModes: boolean;
-    now?: Date;
-  }): Promise<SharedWorkspaceHolder | null> {
-    const staleCutoff = new Date(
-      (input.now ?? new Date()).getTime() - WORKSPACE_BUSY_HOLDER_STALE_AFTER_MS,
-    );
-    return await db
-      .select({
-        runId: heartbeatRuns.id,
-        agentId: heartbeatRuns.agentId,
-        issueId: sql<string>`${issues.id}::text`,
-        issueIdentifier: issues.identifier,
-      })
-      .from(heartbeatRuns)
-      .innerJoin(
-        issues,
-        and(
-          eq(issues.companyId, heartbeatRuns.companyId),
-          sql`${issues.id}::text = ${heartbeatRuns.contextSnapshot} ->> 'issueId'`,
-        ),
-      )
-      .where(
-        and(
-          eq(heartbeatRuns.companyId, input.companyId),
-          eq(heartbeatRuns.status, "running"),
-          ne(heartbeatRuns.id, input.excludeRunId),
-          // Last observed activity: output beats start beats creation. A run
-          // that started recently but has not written output yet is live.
-          sql`coalesce(${heartbeatRuns.lastOutputAt}, ${heartbeatRuns.startedAt}, ${heartbeatRuns.createdAt}) >= ${staleCutoff.toISOString()}::timestamptz`,
-          eq(issues.projectWorkspaceId, input.projectWorkspaceId),
-          ne(sql`${issues.id}::text`, input.excludeIssueId),
-          ...(input.honorIsolatedWorkspaceModes
-            ? [
-                or(
-                  // Covers both a NULL settings blob and a blob without a mode
-                  // key; either may still resolve to the shared workspace.
-                  sql`${issues.executionWorkspaceSettings} ->> 'mode' is null`,
-                  notInArray(
-                    sql`${issues.executionWorkspaceSettings} ->> 'mode'`,
-                    [...ISOLATED_EXECUTION_WORKSPACE_MODES],
-                  ),
-                ),
-              ]
-            : []),
-        ),
-      )
-      .orderBy(asc(heartbeatRuns.createdAt), asc(heartbeatRuns.id))
-      .limit(1)
-      .then((rows) => rows[0] ?? null);
-  }
-
-  // Terminal handling for a WorkspaceBusyDeferral thrown by the pre-dispatch
-  // gate: cancel the run (contention is not a failure), schedule a
-  // workspace_busy retry, and leave the agent idle. The issue execution lock
-  // transfers to the scheduled retry run inside scheduleBoundedRetryForRun, so
-  // the issue keeps an active execution path and recovery leaves it alone.
-  // Deferral has no attempt ceiling — the retry keeps rescheduling while a
-  // live holder exists, and holder staleness (not a counter) is what prevents
-  // waiting on a zombie. If no retry could be scheduled (agent no longer
-  // invokable), the lock is released so the issue does not strand on a
-  // cancelled run.
-  async function finalizeWorkspaceBusyDeferral(
-    run: typeof heartbeatRuns.$inferSelect,
-    deferral: WorkspaceBusyDeferral,
-  ) {
-    const now = new Date();
-    const cancelWrite = await setRunStatusIfRunning(run.id, "cancelled", {
-      error: deferral.message,
-      errorCode: WORKSPACE_BUSY_ERROR_CODE,
-      finishedAt: now,
-      resultJson: {
-        workspaceBusy: {
-          projectWorkspaceId: deferral.projectWorkspaceId,
-          holderRunId: deferral.holder.runId,
-          holderIssueId: deferral.holder.issueId,
-          deferralAttempt: deferral.deferralAttempt,
-        },
-      },
-      // Recorded on the run (and inherited by the scheduled retry's context)
-      // so the retry promotion gate can tell a non-assignee wake — where an
-      // assignee mismatch is the expected state — from a reassignment race.
-      contextSnapshot: {
-        ...parseObject(run.contextSnapshot),
-        workspaceBusyDeferredWhileAssignee: deferral.wasIssueAssignee,
-      },
-    });
-    if (!cancelWrite.updated) {
-      logger.info(
-        { runId: run.id, currentStatus: cancelWrite.run?.status ?? null },
-        "skipping workspace-busy deferral finalization because the run already left running state",
-      );
-      return;
-    }
-    await setWakeupStatus(run.wakeupRequestId, "cancelled", {
-      finishedAt: now,
-      error: deferral.message,
-    }).catch(() => undefined);
-
-    const cancelledRun = cancelWrite.run ?? (await getRun(run.id).catch(() => null));
-    const agentRow = await getAgent(run.agentId).catch(() => null);
-    let scheduleOutcome: string | null = null;
-    if (cancelledRun && agentRow) {
-      const scheduleResult = await scheduleBoundedRetryForRun(cancelledRun, agentRow, {
-        now,
-        retryReason: WORKSPACE_BUSY_RETRY_REASON,
-        wakeReason: WORKSPACE_BUSY_RETRY_WAKE_REASON,
-        // Always admit the next attempt: workspace-busy deferral is bounded by
-        // holder liveness, not by an attempt counter.
-        maxAttempts: (cancelledRun.scheduledRetryAttempt ?? 0) + 1,
-        delayMs: computeWorkspaceBusyRetryDelayMs(),
-      }).catch((scheduleErr) => {
-        logger.error(
-          { err: scheduleErr, runId: run.id },
-          "failed to schedule workspace-busy retry after deferral",
-        );
-        return null;
-      });
-      scheduleOutcome = scheduleResult?.outcome ?? null;
-    }
-
-    if (cancelledRun) {
-      await appendRunEvent(cancelledRun, await nextRunEventSeq(cancelledRun.id), {
-        eventType: "lifecycle",
-        stream: "system",
-        level: "info",
-        message:
-          scheduleOutcome === "scheduled"
-            ? `Deferred: ${deferral.message}. Retry ${deferral.deferralAttempt + 1} scheduled; the run waits for the workspace to free.`
-            : `Deferred: ${deferral.message}. No retry could be scheduled; releasing the issue for other runs.`,
-        payload: {
-          projectWorkspaceId: deferral.projectWorkspaceId,
-          holderRunId: deferral.holder.runId,
-          holderIssueId: deferral.holder.issueId,
-          deferralAttempt: deferral.deferralAttempt,
-          retryScheduled: scheduleOutcome === "scheduled",
-        },
-      }).catch(() => undefined);
-    }
-
-    if (cancelledRun && scheduleOutcome !== "scheduled") {
-      await releaseIssueExecutionAndPromote(cancelledRun).catch((releaseErr) => {
-        logger.error(
-          { err: releaseErr, runId: run.id },
-          "failed to release issue execution after workspace-busy deferral",
-        );
-      });
-    }
-
-    await finalizeAgentStatus(run.agentId, "cancelled", null, {
-      wasFirstHeartbeat: timerClaimWasFirstHeartbeat(run),
-    }).catch(() => undefined);
-  }
-
   async function scheduleInteractionContinuationInfrastructureRetryIfEligible(
     run: typeof heartbeatRuns.$inferSelect,
     agent: typeof agents.$inferSelect,
   ) {
+    if (isPaperclipExecutionConfigurationFencedRun(run)) return null;
     if (!run.wakeupRequestId) return null;
     if (!isResolvedInteractionContinuationWakeContext(run.contextSnapshot)) return null;
     if (!isRetryableInteractionContinuationInfrastructureFailure(run)) {
@@ -12372,40 +11964,6 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       .where(eq(agents.id, agentId));
   }
 
-  async function claimDueTimerHeartbeat(
-    agent: typeof agents.$inferSelect,
-    now: Date,
-    intervalSec: number,
-  ) {
-    const dueBefore = new Date(now.getTime() - intervalSec * 1000);
-    const claimed = await db
-      .update(agents)
-      .set({
-        lastHeartbeatAt: now,
-        updatedAt: now,
-      })
-      .where(and(
-        eq(agents.id, agent.id),
-        eq(agents.companyId, agent.companyId),
-        or(
-          lte(agents.lastHeartbeatAt, dueBefore),
-          and(isNull(agents.lastHeartbeatAt), lte(agents.createdAt, dueBefore)),
-        ),
-      ))
-      .returning({ id: agents.id })
-      .then((rows) => rows[0] ?? null);
-    if (!claimed) return null;
-    return { wasFirstHeartbeat: !agent.lastHeartbeatAt };
-  }
-
-  function timerClaimWasFirstHeartbeat(
-    run: Pick<typeof heartbeatRuns.$inferSelect, "contextSnapshot">,
-  ): true | undefined {
-    return parseObject(run.contextSnapshot).timerClaimWasFirstHeartbeat === true
-      ? true
-      : undefined;
-  }
-
   function parseMaxTurnContinuationPolicy(agent: typeof agents.$inferSelect): MaxTurnContinuationPolicy {
     const runtimeConfig = parseObject(agent.runtimeConfig);
     const heartbeat = parseObject(runtimeConfig.heartbeat);
@@ -12761,12 +12319,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     const isCurrentReviewParticipant = reviewParticipant?.type === "agent" &&
       reviewParticipant.agentId === run.agentId;
 
-    if (
-      issue.assigneeAgentId !== run.agentId &&
-      !isInteractionWake &&
-      !isCurrentReviewParticipant &&
-      !isNonAssigneeWorkspaceBusyRetry(retryReason, context)
-    ) {
+    if (issue.assigneeAgentId !== run.agentId && !isInteractionWake && !isCurrentReviewParticipant) {
       return {
         stale: true,
         errorCode: "issue_assignee_changed",
@@ -12902,7 +12455,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     agentId: string,
     outcome: "succeeded" | "interrupted" | "failed" | "cancelled" | "timed_out",
     failureReason?: string | null,
-    options?: { keepIdleOnFailure?: boolean; wasFirstHeartbeat?: boolean },
+    options?: { keepIdleOnFailure?: boolean },
   ) {
     const existing = await getAgent(agentId);
     if (!existing) return;
@@ -12911,7 +12464,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       return;
     }
 
-    const isFirstHeartbeat = options?.wasFirstHeartbeat ?? !existing.lastHeartbeatAt;
+    const isFirstHeartbeat = !existing.lastHeartbeatAt;
 
     const runningCount = await countRunningRunsForAgent(agentId);
     const nextStatus =
@@ -13217,6 +12770,12 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     for (const { run, adapterType, adapterConfig } of activeRuns) {
       if (runningProcesses.has(run.id) || activeRunExecutions.has(run.id)) continue;
 
+      // A remote ACP child may already exist even though the host proxy never
+      // reached onSpawn. Preserve the run and its environment lease until the
+      // durable remote identity is reconciled; process-loss replay could create
+      // a duplicate child.
+      if (isRemoteLaunchReplayFencedRun(run)) continue;
+
       // Apply staleness threshold to avoid false positives
       if (staleThresholdMs > 0) {
         const refTime = run.updatedAt ? new Date(run.updatedAt).getTime() : 0;
@@ -13255,14 +12814,13 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       }
 
       let descendantOnlyCleanup = false;
-      if (processGroupAlive) {
+      if (tracksLocalChild) {
         const termination = await terminateHeartbeatRunProcess({
           pid: run.processPid,
           processGroupId: run.processGroupId,
           expectedStartedAt: run.processStartedAt,
-          trustedProcessGroup: true,
-        });
-        if (termination?.confirmedStopped === false) {
+        }) ?? missingProcessTreeCustodyResult();
+        if (termination.confirmedStopped === false) {
           await retainRunForUnverifiedTermination({
             run,
             result: termination,
@@ -13270,7 +12828,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           });
           continue;
         }
-        descendantOnlyCleanup = termination?.confirmedStopped === true;
+        descendantOnlyCleanup = termination.confirmedStopped === true;
       }
 
       const runContext = parseObject(run.contextSnapshot);
@@ -13366,9 +12924,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         },
       });
 
-      await finalizeAgentStatus(run.agentId, "failed", baseMessage, {
-        wasFirstHeartbeat: timerClaimWasFirstHeartbeat(run),
-      });
+      await finalizeAgentStatus(run.agentId, "failed", baseMessage);
       await startNextQueuedRunForAgent(run.agentId);
       runningProcesses.delete(run.id);
       reaped.push(run.id);
@@ -13470,11 +13026,10 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     const outputTokens = usage?.outputTokens ?? 0;
     const cachedInputTokens = usage?.cachedInputTokens ?? 0;
     const billingType = normalizeLedgerBillingType(result.billingType);
-    const billedCostUsd = resolveCacheAdjustedCostUsd(result);
-    const additionalCostCents = normalizeBilledCostCents(billedCostUsd, billingType);
+    const additionalCostCents = normalizeBilledCostCents(result.costUsd, billingType);
     const hasTokenUsage = inputTokens > 0 || outputTokens > 0 || cachedInputTokens > 0;
     const costStatus = resolveLedgerCostStatus({
-      costUsd: billedCostUsd,
+      costUsd: result.costUsd,
       inputTokens,
       cachedInputTokens,
       outputTokens,
@@ -13669,6 +13224,12 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
 
     activeRunExecutions.add(run.id);
     let runScratch: HeartbeatRunScratch | null = null;
+    // In-memory fail-closed witness for a launch fence observed during this
+    // execution. It survives a later DB read/write failure in the outer catch
+    // and finally blocks, where null/unknown must never authorize release.
+    let processSessionLaunchFenceObserved = false;
+    let callbackBridgeLaunchFenceObserved = false;
+    let remoteLaunchFenceWriteTail: Promise<void> = Promise.resolve();
 
     try {
     const agent = await getAgent(run.agentId);
@@ -13760,8 +13321,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
             issueContext.assigneeAdapterOverrides,
           )
         : null;
-    const experimentalInstanceSettings = await instanceSettings.getExperimental();
-    const isolatedWorkspacesEnabled = experimentalInstanceSettings.enableIsolatedWorkspaces;
+    const isolatedWorkspacesEnabled = (await instanceSettings.getExperimental()).enableIsolatedWorkspaces;
     const parsedIssueExecutionWorkspaceSettings = parseIssueExecutionWorkspaceSettings(
       issueContext?.executionWorkspaceSettings,
     );
@@ -13840,11 +13400,8 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         .where(and(eq(issues.companyId, agent.companyId), eq(issues.id, issueContext.id), isNull(issues.responsibleUserId)));
       issueContext = { ...issueContext, responsibleUserId };
     }
-    const parsedProjectExecutionWorkspacePolicy = parseProjectExecutionWorkspacePolicy(
-      projectContext?.executionWorkspacePolicy,
-    );
     const projectExecutionWorkspacePolicy = gateProjectExecutionWorkspacePolicy(
-      parsedProjectExecutionWorkspacePolicy,
+      parseProjectExecutionWorkspacePolicy(projectContext?.executionWorkspacePolicy),
       isolatedWorkspacesEnabled,
     );
     const trustPreset = resolveCoreTrustPreset({
@@ -13963,7 +13520,6 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           }
         : null,
       exposeLowTrustRaw,
-      simplifiedEnglishInteractions: experimentalInstanceSettings.enableSimplifiedEnglishInteractions === true,
     });
     if (paperclipWakePayload) {
       context[PAPERCLIP_WAKE_PAYLOAD_KEY] = paperclipWakePayload;
@@ -14018,28 +13574,6 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     } else {
       delete context.paperclipTaskMarkdownCompact;
     }
-    if (issueRef) {
-      const redactedWakeContext = await createRunSecretRedactionRegistry(db).redactForIssue(
-        agent.companyId,
-        issueRef.id,
-        {
-          paperclipIssue: context.paperclipIssue,
-          paperclipWakeComment: context.paperclipWakeComment,
-          paperclipTaskMarkdown: context.paperclipTaskMarkdown,
-          paperclipTaskMarkdownCompact: context.paperclipTaskMarkdownCompact,
-        },
-      );
-      context.paperclipIssue = redactedWakeContext.paperclipIssue;
-      if (redactedWakeContext.paperclipWakeComment) {
-        context.paperclipWakeComment = redactedWakeContext.paperclipWakeComment;
-      }
-      if (redactedWakeContext.paperclipTaskMarkdown) {
-        context.paperclipTaskMarkdown = redactedWakeContext.paperclipTaskMarkdown;
-      }
-      if (redactedWakeContext.paperclipTaskMarkdownCompact) {
-        context.paperclipTaskMarkdownCompact = redactedWakeContext.paperclipTaskMarkdownCompact;
-      }
-    }
     const requestedExecutionWorkspaceId = readNonEmptyString(issueRef?.executionWorkspaceId);
     const existingExecutionWorkspace =
       requestedExecutionWorkspaceId ? await executionWorkspacesSvc.getById(requestedExecutionWorkspaceId) : null;
@@ -14062,10 +13596,9 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     });
     const effectiveExecutionWorkspaceMode: ReturnType<typeof resolveExecutionWorkspaceMode> =
       requestedExecutionWorkspaceMode;
-    const executionPolicy = { executionMode: resolvedInstanceSettings.general.executionMode };
-    const executionForcedToKubernetes = isExecutionForcedToKubernetes(executionPolicy);
+    const executionPolicy = { executionMode: (await instanceSettings.getGeneral()).executionMode };
     let selectedEnvironmentId = environmentResolution.environmentId;
-    if (executionForcedToKubernetes) {
+    if (isExecutionForcedToKubernetes(executionPolicy)) {
       let kubernetesEnvironment = await environmentsSvc.findKubernetesEnvironment(agent.companyId);
       if (!kubernetesEnvironment) {
         // Lazy recovery for companies created after the startup bootstrap ran
@@ -14129,79 +13662,6 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       }
       selectedEnvironmentId = kubernetesEnvironment.id;
     }
-    const selectedEnvironmentForConfig = selectedEnvironmentId === localEnvironment.id
-      ? localEnvironment
-      : selectedEnvironmentId
-        ? await environmentsSvc.getById(selectedEnvironmentId)
-        : null;
-    const sharedWorkspaceConcurrency = resolveSharedWorkspaceConcurrency({
-      projectPolicy: projectExecutionWorkspacePolicy,
-      issueSettings: issueExecutionWorkspaceSettings,
-    });
-    // A live holder is always consulted for shared workspaces. Depending on policy and the final
-    // execution target it either remains the existing deferral gate or becomes dispatch context.
-    // Holder staleness and the workspace_busy retry ladder are intentionally unchanged for every
-    // path that serializes.
-    if (issueRef?.projectWorkspaceId && effectiveExecutionWorkspaceMode === "shared_workspace") {
-      const workspaceHolder = await findSharedWorkspaceHolder({
-        companyId: agent.companyId,
-        projectWorkspaceId: issueRef.projectWorkspaceId,
-        excludeIssueId: issueRef.id,
-        excludeRunId: run.id,
-        honorIsolatedWorkspaceModes: isolatedWorkspacesEnabled,
-      });
-      if (workspaceHolder) {
-        const environmentDriver = selectedEnvironmentForConfig?.driver ?? null;
-        const shouldSerialize = sharedWorkspaceConcurrency === "serialize"
-          || (
-            sharedWorkspaceConcurrency === "auto"
-            && (
-              executionForcedToKubernetes
-              || (environmentDriver !== "local" && environmentDriver !== "ssh")
-            )
-          );
-        if (shouldSerialize) {
-          throw new WorkspaceBusyDeferral({
-            holder: workspaceHolder,
-            projectWorkspaceId: issueRef.projectWorkspaceId,
-            deferralAttempt:
-              run.scheduledRetryReason === WORKSPACE_BUSY_RETRY_REASON
-                ? (run.scheduledRetryAttempt ?? 0)
-                : 0,
-            wasIssueAssignee: issueContext?.assigneeAgentId === agent.id,
-          });
-        }
-
-        const holderIssueLabel = workspaceHolder.issueIdentifier ?? workspaceHolder.issueId;
-        const concurrentWorkspaceNote =
-          `shared workspace is concurrently held by run ${workspaceHolder.runId} (issue ${holderIssueLabel}); `
-          + "expect concurrent mutations, coordinate via commits";
-        const appendConcurrentWorkspaceNote = (value: unknown) => {
-          const existing = typeof value === "string" ? value.trimEnd() : "";
-          return existing ? `${existing}\n${concurrentWorkspaceNote}` : concurrentWorkspaceNote;
-        };
-        context.paperclipTaskMarkdown = appendConcurrentWorkspaceNote(context.paperclipTaskMarkdown);
-        if (typeof context.paperclipTaskMarkdownCompact === "string") {
-          context.paperclipTaskMarkdownCompact = appendConcurrentWorkspaceNote(
-            context.paperclipTaskMarkdownCompact,
-          );
-        }
-        logger.info(
-          {
-            event: "shared_workspace_concurrent_dispatch",
-            runId: run.id,
-            issueId: issueRef.id,
-            projectWorkspaceId: issueRef.projectWorkspaceId,
-            holderRunId: workspaceHolder.runId,
-            holderIssueId: workspaceHolder.issueId,
-            sharedWorkspaceConcurrency,
-            environmentDriver,
-            executionForcedToKubernetes,
-          },
-          "Dispatching alongside a live shared-workspace holder",
-        );
-      }
-    }
     const workspaceManagedConfig = buildExecutionWorkspaceAdapterConfig({
       agentConfig: config,
       projectPolicy: projectExecutionWorkspacePolicy,
@@ -14247,6 +13707,11 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     });
     const configSnapshot = buildExecutionWorkspaceConfigSnapshot(mergedConfig, selectedEnvironmentId);
     const executionRunConfig = stripWorkspaceRuntimeFromExecutionRunConfig(mergedConfig);
+    const selectedEnvironmentForConfig = selectedEnvironmentId === localEnvironment.id
+      ? localEnvironment
+      : selectedEnvironmentId
+        ? await environmentsSvc.getById(selectedEnvironmentId)
+        : null;
     const runScopedMentionedSkillKeys = await resolveRunScopedMentionedSkillKeys({
       db,
       companyId: agent.companyId,
@@ -14265,7 +13730,6 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       heartbeatRunId: run.id,
       environmentId: selectedEnvironmentForConfig?.id ?? null,
       environmentEnv: selectedEnvironmentForConfig?.envVars ?? null,
-      environmentDriver: selectedEnvironmentForConfig?.driver ?? null,
       projectId: projectContext?.id ?? null,
       routineId: routineEnvContext.routineId,
       responsibleUserId,
@@ -14419,11 +13883,12 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           previousSessionParams,
           {
             useProjectWorkspace: requestedExecutionWorkspaceMode !== "agent_default",
-            // Thread the selected environment driver so run-workspace resolution can tell a local
-            // target from a remote one, and a confined sandbox target from an unconfined remote
-            // target. A remote run resolves referenced projects only for the confined sandbox
-            // transport with the remote flag on. This never changes the anchor workspace.
-            executionEnvironmentDriver: selectedEnvironmentForConfig?.driver ?? null,
+            // Referenced-project workspaces attach on a local execution target only. Gate their
+            // resolution on the selected environment driver so a remote run never resolves a
+            // referenced path it cannot reach. This never changes the anchor workspace.
+            executionTargetIsRemote: isRemoteExecutionEnvironmentDriver(
+              selectedEnvironmentForConfig?.driver,
+            ),
           },
         ),
     });
@@ -14446,10 +13911,6 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       config: hostExecutionWorkspaceConfig,
       issue: issueRef,
       base: executionWorkspaceBase,
-      anchor: {
-        baseCwdFallback: resolvedWorkspace.baseCwdFallback,
-        materializationFailures: resolvedWorkspace.materializationFailures,
-      },
     });
     const workspaceStrategyForFingerprint = parseObject(hostExecutionWorkspaceConfig.workspaceStrategy);
     const workspaceStrategyFingerprintValue =
@@ -14533,13 +13994,6 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         : null,
       issueId,
     });
-    // One credential provider per run: base-ref refreshes during workspace realization and
-    // restore authenticate against private GitHub remotes with the same company-secret token
-    // the managed clone uses.
-    const workspaceGitAuthProvider = createGitRemoteAuthProvider(db, agent.companyId, {
-      issueId,
-      heartbeatRunId: run.id,
-    });
     const { executionWorkspace, reusedExecutionWorkspace, policy: resolvedWorkspaceReusePolicy } =
       await provisionExecutionWorkspaceForFreshnessDecision<RealizedExecutionWorkspace>({
         requestedShouldReuseExisting,
@@ -14569,11 +14023,6 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
                     ?? reusableExistingExecutionWorkspace.config?.provisionCommand
                     ?? projectExecutionWorkspacePolicy?.workspaceStrategy?.provisionCommand
                     ?? null,
-                  runtimeProvisionCommand:
-                    configSnapshot?.runtimeProvisionCommand
-                    ?? reusableExistingExecutionWorkspace.config?.runtimeProvisionCommand
-                    ?? projectExecutionWorkspacePolicy?.workspaceStrategy?.runtimeProvisionCommand
-                    ?? null,
                 },
               },
               issue: issueRef,
@@ -14588,7 +14037,6 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
               enableWorkspaceDirtyQuarantineRepair:
                 resolvedInstanceSettings.experimental.enableWorkspaceDirtyQuarantineRepair,
               recorder: workspaceOperationRecorder,
-              resolveGitAuth: workspaceGitAuthProvider,
             })
           : null,
         realizeWorkspace: () => realizeExecutionWorkspace({
@@ -14607,13 +14055,12 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           enableWorkspaceDirtyQuarantineRepair:
             resolvedInstanceSettings.experimental.enableWorkspaceDirtyQuarantineRepair,
           recorder: workspaceOperationRecorder,
-          resolveGitAuth: workspaceGitAuthProvider,
         }),
       });
     const resolvedProjectId = executionWorkspace.projectId ?? issueRef?.projectId ?? executionProjectId ?? null;
     const resolvedProjectWorkspaceId = issueRef?.projectWorkspaceId ?? resolvedWorkspace.workspaceId ?? null;
     let persistedExecutionWorkspace: ExecutionWorkspace | null = null;
-    const baseExecutionWorkspaceMetadata = mergeExecutionWorkspaceMetadataForPersistence({
+    const nextExecutionWorkspaceMetadata = mergeExecutionWorkspaceMetadataForPersistence({
       existingMetadata: resolvedWorkspaceReusePolicy.shouldRestoreExistingWorkspace
         ? reusableExistingExecutionWorkspace?.metadata ?? null
         : null,
@@ -14628,38 +14075,6 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       baseRef: executionWorkspace.repoRef,
       baseRefSha: executionWorkspace.baseRefSha ?? null,
     });
-    let persistedWorktreeInstanceRoot =
-      resolvedWorkspaceReusePolicy.shouldRestoreExistingWorkspace
-      && typeof reusableExistingExecutionWorkspace?.metadata?.[WORKTREE_INSTANCE_ROOT_METADATA_KEY] === "string"
-        ? reusableExistingExecutionWorkspace.metadata[WORKTREE_INSTANCE_ROOT_METADATA_KEY]
-        : null;
-    if (
-      !persistedWorktreeInstanceRoot
-      && executionWorkspace.strategy === "git_worktree"
-      && executionWorkspace.worktreePath
-    ) {
-      try {
-        persistedWorktreeInstanceRoot = (
-          await readManagedWorktreeInstanceOwnership(executionWorkspace.worktreePath)
-        )?.instanceRoot ?? null;
-      } catch (error) {
-        logger.warn(
-          {
-            runId: run.id,
-            issueId,
-            executionWorkspaceCwd: executionWorkspace.cwd,
-            error: error instanceof Error ? error.message : String(error),
-          },
-          "Could not record managed worktree instance ownership",
-        );
-      }
-    }
-    const nextExecutionWorkspaceMetadata = {
-      ...baseExecutionWorkspaceMetadata,
-      ...(persistedWorktreeInstanceRoot
-        ? { [WORKTREE_INSTANCE_ROOT_METADATA_KEY]: persistedWorktreeInstanceRoot }
-        : {}),
-    };
     const pendingForwardBranchReconcile = executionWorkspace.pendingForwardBranchReconcile ?? null;
     const branchNameForInitialPersistence =
       pendingForwardBranchReconcile?.recordedBranchName ?? executionWorkspace.branchName;
@@ -14675,10 +14090,6 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
             status: "active",
             lastUsedAt: new Date(),
             metadata: nextExecutionWorkspaceMetadata,
-            projectWorkspaceId: reconcileReusedExecutionWorkspaceProjectWorkspaceId(
-              reusableExistingExecutionWorkspace.projectWorkspaceId,
-              resolvedProjectWorkspaceId,
-            ),
           })
         : resolvedProjectId
           ? await executionWorkspacesSvc.create({
@@ -14726,7 +14137,10 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
               projectId: resolvedProjectId,
               projectWorkspaceId: resolvedProjectWorkspaceId,
               sourceIssueId: issueRef?.id ?? null,
-              metadata: nextExecutionWorkspaceMetadata,
+              metadata: {
+                createdByRuntime: true,
+                source: executionWorkspace.source,
+              },
             },
             projectWorkspace: {
               cwd: resolvedWorkspace.cwd,
@@ -14984,27 +14398,6 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       })(),
     };
     context.paperclipWorkspaces = buildRunWorkspaceHints(resolvedWorkspace);
-    // Emit exactly one requested-vs-synced observability line for the referenced-project set. A run
-    // with no referenced project stays silent, so this adds no noise to the anchor-only default. The
-    // per-drop human warning already rides `runtimeWorkspaceWarnings`; this line carries the counts
-    // and the per-failure reason for a partial sync.
-    const referencedProjectObservability = buildReferencedProjectRunObservability({
-      syncedProjectIds: resolvedWorkspace.additionalWorkspaces.map(
-        (additional) => additional.projectId,
-      ),
-      failures: resolvedWorkspace.referencedProjectFailures,
-    });
-    if (referencedProjectObservability.referenced_projects_requested > 0) {
-      logger.info(
-        {
-          runId: run.id,
-          companyId: agent.companyId,
-          issueId: issueRef?.id ?? null,
-          ...referencedProjectObservability,
-        },
-        "run referenced-project sync",
-      );
-    }
     // The wake payload is built before the execution workspace is resolved, so
     // attach the branch pin here; the shared wake-prompt renderer surfaces it as
     // a one-time "stay on this branch" hint on non-resumed sessions.
@@ -15369,7 +14762,6 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         config: hostExecutionWorkspaceConfig,
         adapterEnv,
         onLog,
-        recorder: workspaceOperationRecorder,
       });
       if (runtimeServices.length > 0) {
         context.paperclipRuntimeServices = runtimeServices;
@@ -15385,14 +14777,14 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       }
       if (issueId && (executionWorkspace.created || runtimeServices.some((service) => !service.reused))) {
         try {
-          await postWorkspaceReadyComment({
-            issuesSvc,
+          await issuesSvc.addComment(
             issueId,
-            agentId: agent.id,
-            runId: run.id,
-            workspace: executionWorkspace,
-            runtimeServices,
-          });
+            buildWorkspaceReadyComment({
+              workspace: executionWorkspace,
+              runtimeServices,
+            }),
+            { agentId: agent.id, runId: run.id },
+          );
         } catch (err) {
           await onLog(
             "stderr",
@@ -15422,6 +14814,81 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       const onAdapterEvent = async (event: AdapterRuntimeEvent) => {
         const eventType = event.eventType.trim();
         if (!eventType) return;
+        const launchFence = readProcessSessionLaunchFencePayload(event);
+        const callbackBridgeFence = readPaperclipBridgeLaunchFencePayload(event);
+        if (launchFence && launchFence.runId !== currentRun.id) {
+          throw new Error(
+            `Remote ACP process-session lifecycle identity ${String(launchFence.runId)} does not belong to run ${currentRun.id}.`,
+          );
+        }
+        if (callbackBridgeFence && callbackBridgeFence.runId !== currentRun.id) {
+          throw new Error(
+            `Paperclip callback bridge lifecycle identity ${String(callbackBridgeFence.runId)} does not belong to run ${currentRun.id}.`,
+          );
+        }
+        if (launchFence || callbackBridgeFence) {
+          const write = remoteLaunchFenceWriteTail.then(async () => {
+            const latest = await getRun(currentRun.id);
+            if (!latest || latest.status !== "running") {
+              throw new Error(`Could not read the active remote launch fence for run ${currentRun.id}.`);
+            }
+            const nextResultJson = {
+              ...parseObject(latest.resultJson),
+              ...(launchFence ? { processSessionLaunch: launchFence } : {}),
+              ...(callbackBridgeFence ? { paperclipBridgeLaunch: callbackBridgeFence } : {}),
+            };
+            const callbackStatus = readNonEmptyString(
+              parseObject(nextResultJson.paperclipBridgeLaunch).status,
+            );
+            const processStatus = readNonEmptyString(
+              parseObject(nextResultJson.processSessionLaunch).status,
+            );
+            const callbackNeedsHuman = callbackStatus === "needs_human";
+            const processNeedsHuman = processStatus === "needs_human";
+            const nextErrorCode = callbackNeedsHuman
+              ? PAPERCLIP_CALLBACK_BRIDGE_LAUNCH_AMBIGUOUS
+              : processNeedsHuman
+                ? ACP_PROCESS_SESSION_LAUNCH_AMBIGUOUS
+                : latest.errorCode === PAPERCLIP_CALLBACK_BRIDGE_LAUNCH_AMBIGUOUS ||
+                    latest.errorCode === ACP_PROCESS_SESSION_LAUNCH_AMBIGUOUS
+                  ? null
+                  : latest.errorCode;
+            const nextError = callbackNeedsHuman
+              ? "Paperclip callback bridge launch requires exact cancellation reconciliation."
+              : processNeedsHuman
+                ? "Remote ACP launch requires exact process-session reconciliation."
+                : nextErrorCode
+                  ? latest.error
+                  : null;
+            const fenced = await db
+              .update(heartbeatRuns)
+              .set({
+                error: nextError,
+                errorCode: nextErrorCode,
+                resultJson: nextResultJson,
+                updatedAt: new Date(),
+              })
+              .where(and(eq(heartbeatRuns.id, currentRun.id), eq(heartbeatRuns.status, "running")))
+              .returning({ id: heartbeatRuns.id })
+              .then((rows) => rows[0] ?? null);
+            if (!fenced) {
+              throw new Error(`Could not persist the remote launch replay fence for run ${currentRun.id}.`);
+            }
+            // These witnesses change only after the serialized guarded write.
+            // A later append failure therefore still leaves finally fail-closed.
+            if (launchFence) {
+              processSessionLaunchFenceObserved = launchFence.status !== "not_started";
+            }
+            if (callbackBridgeFence) {
+              callbackBridgeLaunchFenceObserved =
+                callbackBridgeFence.status === "launching" ||
+                callbackBridgeFence.status === "accepted" ||
+                callbackBridgeFence.status === "needs_human";
+            }
+          });
+          remoteLaunchFenceWriteTail = write.catch(() => undefined);
+          await write;
+        }
         await appendRunEvent(currentRun, seq++, {
           eventType: eventType.slice(0, 120),
           stream: event.stream,
@@ -15637,6 +15104,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       };
 
       let adapterResult: Awaited<ReturnType<typeof adapter.execute>>;
+      let workspaceFinalizeDeferredForActiveLaunch = false;
       try {
         const adapterContext = { ...context };
         const runtimeMcpServers = await buildPaperclipRuntimeMcpServers({
@@ -15681,11 +15149,6 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           onLog,
           onMeta: onAdapterMeta,
           onEvent: onAdapterEvent,
-          // The endpoint-gated OpenTelemetry startup trace context. It is a
-          // no-op unless `OTEL_EXPORTER_OTLP_ENDPOINT` is set and the OTel
-          // packages are installed, so the sandbox-start span path stays inert
-          // by default.
-          startupTraceContext: getStartupTraceContext(),
           onRuntimeProgress: async (progress) => {
             await recordCurrentHeartbeatRunRuntimeProgress(run, progress, issueId);
           },
@@ -15701,13 +15164,24 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           },
           authToken: authToken ?? undefined,
         });
-        // Adapter returned cleanly, which means its workspace-restore finally
-        // block also ran without throwing. Record the workspace_finalize
-        // barrier so dependents that share this executionWorkspace can wake.
-        // If recording the barrier itself fails, propagate as a run failure
-        // rather than silently leaving dependents stranded behind a missing
-        // finalize row.
-        await recordWorkspaceFinalize("succeeded");
+        const postAdapterRun = await getRun(run.id);
+        workspaceFinalizeDeferredForActiveLaunch = isProcessSessionLaunchActiveFenceRun(postAdapterRun);
+        if (
+          adapterResult.errorCode !== ACP_PROCESS_SESSION_LAUNCH_AMBIGUOUS &&
+          !workspaceFinalizeDeferredForActiveLaunch
+        ) {
+          // Adapter returned cleanly, which means its workspace-restore finally
+          // block also ran without throwing. Record the workspace_finalize
+          // barrier so dependents that share this executionWorkspace can wake.
+          // If recording the barrier itself fails, propagate as a run failure
+          // rather than silently leaving dependents stranded behind a missing
+          // finalize row.
+          await recordWorkspaceFinalize("succeeded");
+        }
+        // An ambiguous accepted remote launch deliberately leaves the finalize
+        // barrier absent/pending. The remote child may still be mutating this
+        // workspace, so a succeeded row would wake dependents into overlapping
+        // WIP before explicit launch reconciliation.
       } catch (adapterErr) {
         // Adapter (or its restore finally) threw — or the finalize record
         // write itself threw. Either way the workspace may be in a partial
@@ -15739,36 +15213,141 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           );
         }
       }
-      // Reconcile the referenced-project set against the real remote staging outcome. A referenced
-      // project can pass authorization and clone locally at run prep, then fail to stage into the
-      // sandbox during execution. The run-prep observability above counts such a project as synced,
-      // so emit a second, stage-time line that counts each staging failure as a first-class
-      // `staging` failure. The synced set is the resolved referenced projects minus the ones that
-      // failed to stage. A run with no staging failure stays silent, so the anchor-only and
-      // fully-synced paths add no noise.
-      const referencedProjectStagingFailures = adapterResult.referencedProjectStagingFailures ?? [];
-      if (referencedProjectStagingFailures.length > 0) {
-        const stagingFailedProjectIds = new Set(
-          referencedProjectStagingFailures.map((failure) => failure.projectId),
-        );
-        const stagedProjectObservability = buildReferencedProjectRunObservability({
-          syncedProjectIds: resolvedWorkspace.additionalWorkspaces
-            .map((additional) => additional.projectId)
-            .filter((projectId) => !stagingFailedProjectIds.has(projectId)),
-          failures: referencedProjectStagingFailures.map((failure) => ({
-            projectId: failure.projectId,
-            reason: "staging" as const,
-          })),
+      if (adapterResult.errorCode === ACP_PROCESS_SESSION_LAUNCH_AMBIGUOUS) {
+        await retainProcessSessionLaunchForReconciliation({
+          run,
+          message:
+            adapterResult.errorMessage ??
+            "Remote ACP launch acceptance requires reconciliation; automatic replay is fenced.",
+          resultJson: parseObject(adapterResult.resultJson),
         });
-        logger.info(
-          {
-            runId: run.id,
-            companyId: agent.companyId,
-            issueId: issueRef?.id ?? null,
-            ...stagedProjectObservability,
-          },
-          "run referenced-project remote staging",
-        );
+        return;
+      }
+      if (adapterResult.errorCode === PAPERCLIP_CALLBACK_BRIDGE_LAUNCH_AMBIGUOUS) {
+        await retainPaperclipBridgeLaunchForReconciliation({
+          run,
+          message:
+            adapterResult.errorMessage ??
+            "Paperclip callback bridge cancellation requires reconciliation; automatic replay is fenced.",
+          resultJson: parseObject(adapterResult.resultJson),
+        });
+        return;
+      }
+      const activeLaunchRun = await getRun(run.id);
+      if (activeLaunchRun && isPaperclipBridgeLaunchReplayFencedRun(activeLaunchRun)) {
+        let reconciliation: Awaited<
+          ReturnType<typeof reconcileRetainedPaperclipBridgeLaunchResources>
+        >;
+        try {
+          reconciliation = await reconcileRetainedPaperclipBridgeLaunchResources(activeLaunchRun);
+        } catch (error) {
+          reconciliation = {
+            found: true,
+            controllerFound: true,
+            remoteCancelled: false,
+            cleanupComplete: false,
+            released: false,
+          };
+          logger.warn(
+            { err: error, runId: run.id },
+            "callback bridge cleanup reconciliation remained fenced after adapter completion",
+          );
+        }
+        if (!reconciliation.released) {
+          await retainPaperclipBridgeLaunchForReconciliation({
+            run: activeLaunchRun,
+            message:
+              "Adapter completion did not prove callback bridge cancellation and retained cleanup; issue, environment, credentials, and staging remain fenced.",
+            resultJson: parseObject(adapterResult.resultJson),
+          });
+          return;
+        }
+        callbackBridgeLaunchFenceObserved = false;
+      }
+      if (activeLaunchRun && isProcessSessionLaunchActiveFenceRun(activeLaunchRun)) {
+        const launchIdentity = readProcessSessionLaunchIdentityFromRun(activeLaunchRun);
+        let reconciliation: {
+          found: boolean;
+          terminal: boolean;
+          treeCustodyVerified: boolean;
+          cleanupComplete: boolean;
+          released: boolean;
+          controllerError?: string;
+        } = {
+          found: false,
+          terminal: false,
+          treeCustodyVerified: false,
+          cleanupComplete: false,
+          released: false,
+        };
+        if (launchIdentity) {
+          try {
+            reconciliation = await requestStopAndWaitAcpxProcessSessionLaunch({
+              runId: run.id,
+              launchId: launchIdentity.launchId,
+            });
+          } catch (error) {
+            reconciliation = {
+              found: true,
+              terminal: false,
+              treeCustodyVerified: false,
+              cleanupComplete: false,
+              released: false,
+              controllerError: error instanceof Error ? error.message : String(error),
+            };
+          }
+        }
+        if (!reconciliation.released) {
+          const existingLaunch = parseObject(parseObject(activeLaunchRun.resultJson).processSessionLaunch);
+          await retainProcessSessionLaunchForReconciliation({
+            run: activeLaunchRun,
+            message:
+              "Remote ACP attempt reached an adapter terminal state, but process-tree custody and retained cleanup are not verified; issue, environment, credentials, and staging remain fenced.",
+            resultJson: {
+              ...parseObject(adapterResult.resultJson),
+              processSessionLaunch: {
+                ...existingLaunch,
+                adapterTerminal: {
+                  exitCode: adapterResult.exitCode,
+                  signal: adapterResult.signal,
+                  timedOut: adapterResult.timedOut,
+                  errorCode: adapterResult.errorCode ?? null,
+                },
+                directTerminalVerified: reconciliation.terminal,
+                treeCustodyVerified: reconciliation.treeCustodyVerified,
+                cleanupComplete: reconciliation.cleanupComplete,
+                controllerFound: reconciliation.found,
+                ...(reconciliation.controllerError
+                  ? { controllerError: reconciliation.controllerError }
+                  : {}),
+              },
+            },
+          });
+          return;
+        }
+        // The active controller proved terminal + launch-bound tree custody,
+        // revoked retained capabilities, completed copyback/disposal, and
+        // released its staging lease. Clear only the local witness here; the
+        // finally block still requires a readable durable run with no active
+        // fence, so any later status-write/read uncertainty remains fail-closed.
+        processSessionLaunchFenceObserved = false;
+      }
+      if (workspaceFinalizeDeferredForActiveLaunch) {
+        try {
+          await recordWorkspaceFinalize("succeeded");
+        } catch (adapterErr) {
+          try {
+            await recordWorkspaceFinalize("failed", {
+              errorMessage: adapterErr instanceof Error ? adapterErr.message : String(adapterErr),
+            });
+          } catch (recordErr) {
+            logger.warn(
+              { err: recordErr, runId: run.id, executionWorkspaceId: persistedExecutionWorkspace?.id ?? null },
+              "failed to record deferred workspace_finalize=failed operation",
+            );
+          }
+          throw adapterErr;
+        }
       }
       const adapterManagedRuntimeServices = adapterResult.runtimeServices
         ? await persistAdapterManagedRuntimeServices({
@@ -15802,14 +15381,14 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           .where(eq(heartbeatRuns.id, run.id));
         if (issueId) {
           try {
-            await postWorkspaceReadyComment({
-              issuesSvc,
+            await issuesSvc.addComment(
               issueId,
-              agentId: agent.id,
-              runId: run.id,
-              workspace: executionWorkspace,
-              runtimeServices: adapterManagedRuntimeServices,
-            });
+              buildWorkspaceReadyComment({
+                workspace: executionWorkspace,
+                runtimeServices: adapterManagedRuntimeServices,
+              }),
+              { agentId: agent.id, runId: run.id },
+            );
           } catch (err) {
             await onLog(
               "stderr",
@@ -15887,9 +15466,8 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
               ? "timed_out"
               : "failed";
 
-      const cacheAdjustedCostUsd = resolveCacheAdjustedCostUsd(adapterResult);
       const usageJson =
-        normalizedUsage || adapterResult.costUsd != null || cacheAdjustedCostUsd != null
+        normalizedUsage || adapterResult.costUsd != null
           ? ({
               ...(normalizedUsage ?? {}),
               ...(rawUsage ? {
@@ -15915,9 +15493,8 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
               biller: resolveLedgerBiller(adapterResult),
               model: readNonEmptyString(adapterResult.model) ?? "unknown",
               ...(adapterResult.costUsd != null ? { costUsd: adapterResult.costUsd } : {}),
-              ...(cacheAdjustedCostUsd != null ? { cacheAdjustedCostUsd } : {}),
               costStatus: resolveLedgerCostStatus({
-                costUsd: cacheAdjustedCostUsd,
+                costUsd: adapterResult.costUsd,
                 inputTokens: normalizedUsage?.inputTokens ?? 0,
                 cachedInputTokens: normalizedUsage?.cachedInputTokens ?? 0,
                 outputTokens: normalizedUsage?.outputTokens ?? 0,
@@ -16058,7 +15635,6 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         const issueCommentPolicyResult = await finalizeIssueCommentPolicy(livenessRun, agent);
         await releaseIssueExecutionAndPromote(livenessRun);
         await handleRunLivenessContinuation(livenessRun);
-        await handleIssueReviewPathDisposition(livenessRun);
         await handleSuccessfulRunHandoff(
           issueCommentPolicyResult.outcome === "retry_queued" || issueCommentPolicyResult.outcome === "retry_exhausted"
             ? {
@@ -16133,9 +15709,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         {
           keepIdleOnFailure:
             outcome === "failed" &&
-            ((finalizedRun ? readHeartbeatRunErrorFamily(finalizedRun) === "provider_quota" : runErrorCode === "provider_quota") ||
-              isWorkspaceSyncConflictFailure(adapterResult.errorMessage)),
-          wasFirstHeartbeat: timerClaimWasFirstHeartbeat(run),
+            (finalizedRun ? readHeartbeatRunErrorFamily(finalizedRun) === "provider_quota" : runErrorCode === "provider_quota"),
         },
       );
     } catch (err) {
@@ -16143,16 +15717,40 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         err instanceof Error ? err.message : "Unknown adapter failure",
         await getCurrentUserRedactionOptions(),
       );
+      const processSessionLaunchAmbiguousFailure = isProcessSessionLaunchAmbiguousFailure(err) ? err : null;
+      const paperclipBridgeLaunchAmbiguousFailure = isPaperclipBridgeLaunchAmbiguousFailure(err) ? err : null;
+      const paperclipBridgeDisabledFailure = isPaperclipCallbackBridgeDisabledError(err) ? err : null;
+      const executionTargetInvalidFailure = isPaperclipExecutionTargetInvalidError(err) ? err : null;
       const workspaceValidationFailure = isWorkspaceValidationFailure(err) ? err : null;
       const configurationIncompleteFailure = isConfigurationIncompleteFailure(err) ? err : null;
       const recordedResponsibleUserDenialCode =
         normalizeResponsibleUserDenialCode((await getRun(run.id).catch(() => null))?.errorCode);
       const failureErrorCode =
-        workspaceValidationFailure?.code
+        executionTargetInvalidFailure?.code
+        ?? paperclipBridgeDisabledFailure?.code
+        ?? paperclipBridgeLaunchAmbiguousFailure?.code
+        ?? processSessionLaunchAmbiguousFailure?.code
+        ?? workspaceValidationFailure?.code
         ?? configurationIncompleteFailure?.code
         ?? recordedResponsibleUserDenialCode
         ?? "adapter_failed";
       logger.error({ err, runId }, "heartbeat execution failed");
+      if (paperclipBridgeLaunchAmbiguousFailure) {
+        await retainPaperclipBridgeLaunchForReconciliation({
+          run,
+          message,
+          resultJson: paperclipBridgeLaunchAmbiguousResultJson(paperclipBridgeLaunchAmbiguousFailure),
+        });
+        return;
+      }
+      if (processSessionLaunchAmbiguousFailure) {
+        await retainProcessSessionLaunchForReconciliation({
+          run,
+          message,
+          resultJson: processSessionLaunchAmbiguousResultJson(processSessionLaunchAmbiguousFailure),
+        });
+        return;
+      }
 
       let logSummary: { bytes: number; sha256?: string; compressed: boolean } | null = null;
       if (handle) {
@@ -16177,7 +15775,34 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         resultJson: mergeRunStopMetadataForAgent(agent, "failed", {
           errorCode: failureErrorCode,
           errorMessage: message,
-          resultJson: workspaceValidationFailure?.resultJson ?? configurationIncompleteFailure?.resultJson ?? null,
+          resultJson:
+            (executionTargetInvalidFailure
+              ? {
+                  executionTarget: {
+                    status: "invalid",
+                    retryable: false,
+                    needsHuman: true,
+                  },
+                }
+              : null)
+            ?? (paperclipBridgeDisabledFailure
+              ? {
+                  paperclipBridgeLaunch: {
+                    status: "disabled",
+                    retryable: false,
+                    needsHuman: true,
+                  },
+                }
+              : null)
+            ?? (paperclipBridgeLaunchAmbiguousFailure
+              ? paperclipBridgeLaunchAmbiguousResultJson(paperclipBridgeLaunchAmbiguousFailure)
+              : null)
+            ?? (processSessionLaunchAmbiguousFailure
+              ? processSessionLaunchAmbiguousResultJson(processSessionLaunchAmbiguousFailure)
+              : null)
+            ?? workspaceValidationFailure?.resultJson
+            ?? configurationIncompleteFailure?.resultJson
+            ?? null,
         }),
         stdoutExcerpt,
         stderrExcerpt,
@@ -16231,7 +15856,6 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         }
         await scheduleInteractionContinuationInfrastructureRetryIfEligible(livenessRun, agent);
         await releaseIssueExecutionAndPromote(livenessRun);
-        await handleIssueReviewPathDisposition(livenessRun);
 
         await updateRuntimeState(agent, livenessRun, {
           exitCode: null,
@@ -16260,24 +15884,9 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         }
       }
 
-      await finalizeAgentStatus(agent.id, "failed", message, {
-        wasFirstHeartbeat: timerClaimWasFirstHeartbeat(run),
-        keepIdleOnFailure: isWorkspaceSyncConflictFailure(message),
-      });
+      await finalizeAgentStatus(agent.id, "failed", message);
     }
     } catch (outerErr) {
-          if (isWorkspaceBusyDeferral(outerErr)) {
-            // Expected contention on a shared project workspace, not a
-            // failure: park the run as a bounded scheduled retry and leave the
-            // holder undisturbed. The finally block below still releases
-            // leases, runtime services, and scratch for this run.
-            await finalizeWorkspaceBusyDeferral(run, outerErr).catch((deferralErr) => {
-              logger.error(
-                { err: deferralErr, runId },
-                "failed to finalize workspace-busy deferral",
-              );
-            });
-          } else {
           // Setup code before adapter.execute threw (e.g. ensureRuntimeState, resolveWorkspaceForRun).
           // The inner catch did not fire, so we must record the failure here.
           const message = redactCurrentUserText(
@@ -16287,16 +15896,101 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           // A missing secret/env binding is a known pre-dispatch configuration gap,
           // not an opaque setup crash. Surface it with its own errorCode so the
           // recovery path routes it to a human owner instead of looping retries.
+          const processSessionLaunchAmbiguousSetupFailure = isProcessSessionLaunchAmbiguousFailure(outerErr)
+            ? outerErr
+            : null;
+          const paperclipBridgeLaunchAmbiguousSetupFailure = isPaperclipBridgeLaunchAmbiguousFailure(outerErr)
+            ? outerErr
+            : null;
+          const paperclipBridgeDisabledSetupFailure = isPaperclipCallbackBridgeDisabledError(outerErr)
+            ? outerErr
+            : null;
+          const executionTargetInvalidSetupFailure = isPaperclipExecutionTargetInvalidError(outerErr)
+            ? outerErr
+            : null;
           const workspaceValidationSetupFailure = isWorkspaceValidationFailure(outerErr) ? outerErr : null;
           const configurationIncompleteSetupFailure = isConfigurationIncompleteFailure(outerErr) ? outerErr : null;
           const recordedResponsibleUserDenialCode =
             normalizeResponsibleUserDenialCode((await getRun(runId).catch(() => null))?.errorCode);
           const setupFailureErrorCode =
+            executionTargetInvalidSetupFailure?.code ??
+            paperclipBridgeDisabledSetupFailure?.code ??
+            paperclipBridgeLaunchAmbiguousSetupFailure?.code ??
+            processSessionLaunchAmbiguousSetupFailure?.code ??
             workspaceValidationSetupFailure?.code ??
             configurationIncompleteSetupFailure?.code ??
             recordedResponsibleUserDenialCode ??
             "setup_failed";
           logger.error({ err: outerErr, runId }, "heartbeat execution setup failed");
+          if (paperclipBridgeLaunchAmbiguousSetupFailure) {
+            await retainPaperclipBridgeLaunchForReconciliation({
+              run,
+              message,
+              resultJson: paperclipBridgeLaunchAmbiguousResultJson(
+                paperclipBridgeLaunchAmbiguousSetupFailure,
+              ),
+            }).catch((retainError) => {
+              logger.error(
+                { err: retainError, runId },
+                "failed to preserve callback bridge launch reconciliation fence after setup failure",
+              );
+            });
+            return;
+          }
+          if (processSessionLaunchAmbiguousSetupFailure) {
+            await retainProcessSessionLaunchForReconciliation({
+              run,
+              message,
+              resultJson: processSessionLaunchAmbiguousResultJson(processSessionLaunchAmbiguousSetupFailure),
+            }).catch((retainError) => {
+              logger.error(
+                { err: retainError, runId },
+                "failed to preserve remote ACP launch reconciliation fence after setup failure",
+              );
+            });
+            return;
+          }
+          const replayFencedSetupRun = await getRun(runId).catch(() => null);
+          if (
+            processSessionLaunchFenceObserved ||
+            callbackBridgeLaunchFenceObserved ||
+            (replayFencedSetupRun && isRemoteLaunchReplayFencedRun(replayFencedSetupRun))
+          ) {
+            // A provider mutation may already have been accepted even when a
+            // later, unrelated setup callback throws an ordinary Error. Never
+            // let that outer error overwrite the durable launch fence or wake a
+            // dependent task. Preserve the exact existing launch identity and
+            // keep issue/environment/runtime custody retained.
+            if (replayFencedSetupRun) {
+              if (isPaperclipBridgeLaunchReplayFencedRun(replayFencedSetupRun)) {
+                await retainPaperclipBridgeLaunchForReconciliation({
+                  run: replayFencedSetupRun,
+                  message,
+                }).catch((retainError) => {
+                  logger.error(
+                    { err: retainError, runId },
+                    "failed to preserve active callback bridge launch fence after setup failure",
+                  );
+                });
+              } else {
+                await retainProcessSessionLaunchForReconciliation({
+                  run: replayFencedSetupRun,
+                  message,
+                }).catch((retainError) => {
+                  logger.error(
+                    { err: retainError, runId },
+                    "failed to preserve active remote ACP launch fence after setup failure",
+                  );
+                });
+              }
+            } else {
+              logger.error(
+                { runId },
+                "remote ACP launch fence was observed but run readback failed; retaining environment and runtime",
+              );
+            }
+            return;
+          }
           const setupFailureAgent = await getAgent(run.agentId).catch(() => null);
           const setupFailureWrite = await setRunStatusIfRunning(runId, "failed", {
             error: message,
@@ -16307,7 +16001,35 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
                 errorCode: setupFailureErrorCode,
                 errorMessage: message,
                 resultJson:
-                  workspaceValidationSetupFailure?.resultJson ?? configurationIncompleteSetupFailure?.resultJson ?? null,
+                  (executionTargetInvalidSetupFailure
+                    ? {
+                        executionTarget: {
+                          status: "invalid",
+                          retryable: false,
+                          needsHuman: true,
+                        },
+                      }
+                    : null)
+                  ?? (paperclipBridgeDisabledSetupFailure
+                    ? {
+                        paperclipBridgeLaunch: {
+                          status: "disabled",
+                          retryable: false,
+                          needsHuman: true,
+                        },
+                      }
+                    : null)
+                  ?? (paperclipBridgeLaunchAmbiguousSetupFailure
+                    ? paperclipBridgeLaunchAmbiguousResultJson(
+                      paperclipBridgeLaunchAmbiguousSetupFailure,
+                    )
+                    : null)
+                  ?? (processSessionLaunchAmbiguousSetupFailure
+                    ? processSessionLaunchAmbiguousResultJson(processSessionLaunchAmbiguousSetupFailure)
+                    : null)
+                    ?? workspaceValidationSetupFailure?.resultJson
+                    ?? configurationIncompleteSetupFailure?.resultJson
+                    ?? null,
               }),
             } : {}),
           }).catch(() => ({ run: null, updated: false as const }));
@@ -16370,45 +16092,55 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
                 "failed to release issue execution after heartbeat setup failure",
               );
             });
-            await handleIssueReviewPathDisposition(livenessRun).catch((reviewPathError) => {
-              logger.error(
-                { err: reviewPathError, runId },
-                "failed to evaluate review-path disposition after heartbeat setup failure",
-              );
-            });
           }
           // Ensure the agent is not left stuck in "running" if the setup-failure
           // path owned the terminal transition. If another path already finalized
           // the run, keep that terminal outcome authoritative.
           if (setupFailureWrite.updated) {
-            await finalizeAgentStatus(run.agentId, "failed", message, {
-              wasFirstHeartbeat: timerClaimWasFirstHeartbeat(run),
-            }).catch(() => undefined);
-          }
+            await finalizeAgentStatus(run.agentId, "failed", message).catch(() => undefined);
           }
         } finally {
-          let latestRun = await getRun(run.id).catch(() => null);
-          // Close the invariant "environment lease released implies the run is
-          // terminal". When the teardown reaches this point with the run still
-          // running or queued, force a terminal status before the lease is
-          // released, so the UI never shows a finished task as "Live".
-          if (latestRun) {
-            latestRun = await terminalizeRunOnLeaseRelease(latestRun).catch((terminalizeErr) => {
-              logger.error(
-                { err: terminalizeErr, runId: run.id },
-                "failed to terminalize run before environment lease release",
+          const latestRun = await getRun(run.id).catch(() => null);
+          if (
+            latestRun &&
+            !processSessionLaunchFenceObserved &&
+            !callbackBridgeLaunchFenceObserved &&
+            !isRemoteLaunchReplayFencedRun(latestRun)
+          ) {
+            await releaseEnvironmentLeasesForRun({
+              runId: run.id,
+              companyId: run.companyId,
+              agentId: run.agentId,
+              status: latestRun?.status,
+              failureReason: latestRun?.error ?? undefined,
+            });
+            await releaseRuntimeServicesForRun(run.id).catch(async (runtimeReleaseError) => {
+              logger.warn(
+                { err: runtimeReleaseError, runId: run.id },
+                "runtime service release remained fenced after heartbeat completion",
               );
-              return latestRun;
+              if (latestRun) {
+                await appendRunEvent(latestRun, await nextRunEventSeq(latestRun.id), {
+                  eventType: "lifecycle",
+                  stream: "system",
+                  level: "warn",
+                  message: "Runtime service release remained fenced pending authoritative process-tree reconciliation",
+                  payload: {
+                    needsHuman: true,
+                    runtimeServiceReleaseRetained: true,
+                    reason: runtimeReleaseError instanceof Error
+                      ? runtimeReleaseError.message
+                      : String(runtimeReleaseError),
+                  },
+                }).catch((eventError) => {
+                  logger.warn(
+                    { err: eventError, runId: latestRun.id },
+                    "failed to persist runtime service release retention event",
+                  );
+                });
+              }
             });
           }
-          await releaseEnvironmentLeasesForRun({
-            runId: run.id,
-            companyId: run.companyId,
-            agentId: run.agentId,
-            status: latestRun?.status,
-            failureReason: latestRun?.error ?? undefined,
-          });
-          await releaseRuntimeServicesForRun(run.id).catch(() => undefined);
           if (runScratch && latestRun && isHeartbeatRunTerminalStatus(latestRun.status)) {
             const scratchForCleanup = runScratch;
             let scratchCleanup: Awaited<ReturnType<typeof cleanupHeartbeatRunScratch>> | null = null;
@@ -16464,6 +16196,74 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           activeRunExecutions.delete(run.id);
           await startNextQueuedRunForAgent(run.agentId);
         }
+  }
+
+  function buildImmediateExecutionPathRecoveryComment(input: {
+    status: "todo" | "in_progress";
+    latestRun: Pick<typeof heartbeatRuns.$inferSelect, "error" | "errorCode"> | null | undefined;
+  }) {
+    const failureSummary = summarizeRunFailureForIssueComment(input.latestRun);
+    if (input.status === "todo") {
+      return (
+        "Paperclip automatically retried dispatch for this assigned `todo` issue during terminal run recovery, " +
+        `but it still has no live execution path.${failureSummary ?? ""} ` +
+        "Moving it to `blocked` so it is visible for intervention."
+      );
+    }
+
+    return (
+      "Paperclip automatically retried continuation for this assigned `in_progress` issue during terminal run " +
+      `recovery, but it still has no live execution path.${failureSummary ?? ""} ` +
+      "Moving it to `blocked` so it is visible for intervention."
+    );
+  }
+
+  function buildWorkspaceValidationRecoveryComment(input: {
+    latestRun: Pick<typeof heartbeatRuns.$inferSelect, "error" | "errorCode"> | null | undefined;
+  }) {
+    const failureSummary = summarizeRunFailureForIssueComment(input.latestRun);
+    return (
+      "Paperclip stopped before launching the local adapter because the issue workspace failed validation. " +
+      `This prevents git-sensitive adapters from running in an unrelated fallback cwd.${failureSummary ?? ""} ` +
+      "Moving it to `blocked` with a source-scoped recovery action so the workspace link, cwd, or git checkout can be repaired before resuming."
+    );
+  }
+
+function buildConfigurationIncompleteRecoveryComment(input: {
+  latestRun: Pick<typeof heartbeatRuns.$inferSelect, "error" | "errorCode"> | null | undefined;
+}) {
+    const failureSummary = summarizeRunFailureForIssueComment(input.latestRun);
+    return (
+      "Paperclip stopped before dispatching the adapter because required secret/env bindings are missing. " +
+      `Resolving them as a runtime failure would only produce repeated opaque setup failures.${failureSummary ?? ""} ` +
+      "Moving it to `blocked` with a source-scoped recovery action so an operator can bind the missing secret(s) before resuming."
+  );
+}
+
+function buildPaperclipExecutionConfigurationFenceRecoveryComment(input: {
+  latestRun: Pick<typeof heartbeatRuns.$inferSelect, "error" | "errorCode"> | null | undefined;
+}) {
+  const failureSummary = summarizeRunFailureForIssueComment(input.latestRun);
+  const reason = input.latestRun?.errorCode === PAPERCLIP_CALLBACK_BRIDGE_DISABLED
+    ? "the remote callback bridge is intentionally default-disabled"
+    : "the configured execution target is invalid";
+  return (
+    `Paperclip stopped before adapter or provider dispatch because ${reason}.${failureSummary ?? ""} ` +
+    "Automatic retry cannot repair this configuration fence. Moving the issue to `blocked` for explicit " +
+    "operator configuration or an intentional manual resolution."
+  );
+}
+
+  function buildExecutionReviewParticipantRecoveryComment(input: {
+    latestRun: Pick<typeof heartbeatRuns.$inferSelect, "error" | "errorCode"> | null | undefined;
+  }) {
+    const failureSummary = summarizeRunFailureForIssueComment(input.latestRun);
+    return (
+      "Paperclip retried the pending execution-review participant once, but the review stage still has no completed decision " +
+      `or live reviewer run.${failureSummary ?? ""} ` +
+      "Moving it to `blocked` with a source-scoped recovery action so the recovery owner can repair the reviewer runtime, " +
+      "restore the review stage, or record an intentional manual resolution."
+    );
   }
 
   async function releaseIssueExecutionAndPromote(
@@ -16584,6 +16384,39 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       if (!issue) return null;
       if (issue.executionRunId && issue.executionRunId !== run.id) return null;
 
+      // The callback bridge default-off and invalid-target fences are terminal
+      // configuration outcomes. Block before deferred-wake, review-participant,
+      // or immediate-recovery promotion can create another provider-capable run.
+      const configurationFenceExecutionState = parseIssueExecutionState(issue.executionState);
+      const configurationFenceParticipant = configurationFenceExecutionState?.status === "pending"
+        ? configurationFenceExecutionState.currentParticipant
+        : null;
+      const configurationFenceRunOwnsIssue =
+        (!issue.assigneeUserId && issue.assigneeAgentId === run.agentId) ||
+        (
+          issue.status === "in_review" &&
+          configurationFenceParticipant?.type === "agent" &&
+          configurationFenceParticipant.agentId === run.agentId
+        );
+      if (
+        isPaperclipExecutionConfigurationFencedRun(run) &&
+        (issue.status === "todo" || issue.status === "in_progress" || issue.status === "in_review") &&
+        configurationFenceRunOwnsIssue
+      ) {
+        return {
+          kind: "blocked" as const,
+          issue,
+          previousStatus: issue.status,
+          comment: buildPaperclipExecutionConfigurationFenceRecoveryComment({ latestRun: run }),
+          recoveryCause: PAPERCLIP_EXECUTION_CONFIGURATION_RECOVERY_CAUSE,
+          recoveryOwnerAgentId:
+            configurationFenceParticipant?.type === "agent" &&
+            configurationFenceParticipant.agentId === run.agentId
+              ? configurationFenceParticipant.agentId
+              : undefined,
+        };
+      }
+
       // Workspace-validation recovery: if the finalizing run failed workspace
       // validation, surface the primary issue for the blocked-recovery comment path.
       // Sibling lock cleanup is already done above; only the primary issue carries
@@ -16599,9 +16432,9 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           kind: "blocked" as const,
           issue,
           previousStatus: issue.status,
-          notice: configurationIncomplete
-            ? buildConfigurationIncompleteRecoveryNoticeSeed()
-            : buildWorkspaceValidationRecoveryNoticeSeed(),
+          comment: configurationIncomplete
+            ? buildConfigurationIncompleteRecoveryComment({ latestRun: run })
+            : buildWorkspaceValidationRecoveryComment({ latestRun: run }),
           recoveryCause: configurationIncomplete
             ? CONFIGURATION_INCOMPLETE_RECOVERY_CAUSE
             : WORKSPACE_VALIDATION_RECOVERY_CAUSE,
@@ -16945,7 +16778,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
             kind: "blocked" as const,
             issue,
             previousStatus: issue.status,
-            notice: buildExecutionReviewParticipantRecoveryNoticeSeed(),
+            comment: buildExecutionReviewParticipantRecoveryComment({ latestRun: run }),
             recoveryCause: EXECUTION_REVIEW_PARTICIPANT_RECOVERY_CAUSE,
             recoveryOwnerAgentId: currentParticipant.agentId,
           };
@@ -17066,18 +16899,19 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       if (shouldBlockImmediately) {
         const workspaceValidationFailure = isWorkspaceValidationFailedRun(run);
         const configurationIncompleteFailure = isConfigurationIncompleteFailedRun(run);
-        const notice = workspaceValidationFailure
-          ? buildWorkspaceValidationRecoveryNoticeSeed()
+        const comment = workspaceValidationFailure
+          ? buildWorkspaceValidationRecoveryComment({ latestRun: run })
           : configurationIncompleteFailure
-            ? buildConfigurationIncompleteRecoveryNoticeSeed()
-            : buildImmediateExecutionPathRecoveryNoticeSeed({
+            ? buildConfigurationIncompleteRecoveryComment({ latestRun: run })
+            : buildImmediateExecutionPathRecoveryComment({
                 status: issue.status as "todo" | "in_progress",
+                latestRun: run,
               });
         return {
           kind: "blocked" as const,
           issue,
           previousStatus: issue.status,
-          notice,
+          comment,
           recoveryCause: workspaceValidationFailure
             ? WORKSPACE_VALIDATION_RECOVERY_CAUSE
             : configurationIncompleteFailure
@@ -17187,12 +17021,14 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         issue: promotionResult.issue,
         previousStatus: promotionResult.previousStatus as "todo" | "in_progress" | "in_review",
         latestRun: run,
-        notice: promotionResult.notice,
+        comment: promotionResult.comment,
         recoveryCause:
           promotionResult.recoveryCause === WORKSPACE_VALIDATION_RECOVERY_CAUSE
             ? WORKSPACE_VALIDATION_RECOVERY_CAUSE
             : promotionResult.recoveryCause === CONFIGURATION_INCOMPLETE_RECOVERY_CAUSE
               ? CONFIGURATION_INCOMPLETE_RECOVERY_CAUSE
+            : promotionResult.recoveryCause === PAPERCLIP_EXECUTION_CONFIGURATION_RECOVERY_CAUSE
+              ? PAPERCLIP_EXECUTION_CONFIGURATION_RECOVERY_CAUSE
               : promotionResult.recoveryCause === EXECUTION_REVIEW_PARTICIPANT_RECOVERY_CAUSE
                 ? EXECUTION_REVIEW_PARTICIPANT_RECOVERY_CAUSE
               : undefined,
@@ -18109,7 +17945,6 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           isThrottleCandidateIssueRewake({
             reason,
             wakeCommentId: wakeCommentId ?? null,
-            requestedByActorType: opts.requestedByActorType ?? null,
             forceFreshSession: enrichedContextSnapshot.forceFreshSession === true,
             hasExplicitResume: Boolean(explicitResumeSession),
           })
@@ -18160,9 +17995,6 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
                     eq(activityLog.entityId, issue.id),
                     gt(activityLog.createdAt, lastRunFinishedAt),
                     inArray(activityLog.action, ISSUE_NEW_INPUT_ACTIVITY_ACTIONS),
-                    wakeCommentId && opts.requestedByActorType === "agent"
-                      ? ne(activityLog.actorType, "agent")
-                      : undefined,
                   ),
                 )
                 .limit(1)
@@ -18176,10 +18008,6 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
                   .map((row) => row.runId)
                   .filter((runId): runId is string => Boolean(runId)),
               ),
-              // For an agent comment wake, the query excludes agent-authored
-              // activity while preserving genuinely new user/system input.
-              // Presentation/author metadata therefore cannot smuggle human
-              // wake privilege, nor can it mask an actual human response.
               hasNewIssueInputSinceLastRun: newInputRows.length > 0,
             });
 
@@ -18597,6 +18425,107 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     const run = await getRun(runId);
     if (!run) throw notFound("Heartbeat run not found");
     if (!CANCELLABLE_HEARTBEAT_RUN_STATUSES.includes(run.status as (typeof CANCELLABLE_HEARTBEAT_RUN_STATUSES)[number])) return run;
+    let remoteLaunchReleased = false;
+    if (isPaperclipBridgeLaunchReplayFencedRun(run)) {
+      let reconciliation: Awaited<ReturnType<typeof reconcileRetainedPaperclipBridgeLaunchResources>>;
+      try {
+        reconciliation = await reconcileRetainedPaperclipBridgeLaunchResources(run);
+      } catch (error) {
+        reconciliation = {
+          found: true,
+          controllerFound: false,
+          remoteCancelled: false,
+          cleanupComplete: false,
+          released: false,
+        };
+        await appendRunEvent(run, await nextRunEventSeq(run.id), {
+          eventType: "lifecycle",
+          stream: "system",
+          level: "error",
+          message: "Callback bridge reconciliation failed; run and issue lock remain fenced",
+          payload: {
+            errorCode: PAPERCLIP_CALLBACK_BRIDGE_LAUNCH_AMBIGUOUS,
+            needsHuman: true,
+            cleanupError: error instanceof Error ? error.message : String(error),
+          },
+        });
+      }
+      if (!reconciliation.released) {
+        throw conflict(
+          "Callback bridge cancellation and retained cleanup must be reconciled before cancelling or releasing its issue lock",
+          {
+            code: PAPERCLIP_CALLBACK_BRIDGE_LAUNCH_AMBIGUOUS,
+            needsHuman: true,
+            reconciliation,
+            paperclipBridgeLaunch: parseObject(parseObject(run.resultJson).paperclipBridgeLaunch),
+          },
+        );
+      }
+      remoteLaunchReleased = true;
+      await appendRunEvent(run, await nextRunEventSeq(run.id), {
+        eventType: "lifecycle",
+        stream: "system",
+        level: "info",
+        message: "Callback bridge cancellation reconciled; cancellation may release retained run resources",
+        payload: { errorCode: PAPERCLIP_CALLBACK_BRIDGE_LAUNCH_AMBIGUOUS, reconciliation },
+      });
+    }
+    if (isProcessSessionLaunchReplayFencedRun(run)) {
+      let reconciliation:
+        | Awaited<ReturnType<typeof reconcileRetainedProcessSessionLaunchResources>>
+        | Awaited<ReturnType<typeof requestStopAndWaitAcpxProcessSessionLaunch>>;
+      try {
+        const identity = readProcessSessionLaunchIdentityFromRun(run);
+        reconciliation = isProcessSessionLaunchActiveFenceRun(run) && identity
+          ? await requestStopAndWaitAcpxProcessSessionLaunch({
+              runId: run.id,
+              launchId: identity.launchId,
+            })
+          : await reconcileRetainedProcessSessionLaunchResources(run);
+      } catch (error) {
+        reconciliation = {
+          found: true,
+          terminal: false,
+          treeCustodyVerified: false,
+          cleanupComplete: false,
+          released: false,
+        };
+        await appendRunEvent(run, await nextRunEventSeq(run.id), {
+          eventType: "lifecycle",
+          stream: "system",
+          level: "error",
+          message: "Remote ACP terminal reconciliation cleanup failed; run and issue lock remain fenced",
+          payload: {
+            errorCode: ACP_PROCESS_SESSION_LAUNCH_AMBIGUOUS,
+            needsHuman: true,
+            cleanupError: error instanceof Error ? error.message : String(error),
+          },
+        });
+      }
+      if (!reconciliation.released) {
+        await appendRunEvent(run, await nextRunEventSeq(run.id), {
+          eventType: "lifecycle",
+          stream: "system",
+          level: "warn",
+          message: "Run cancellation refused while remote ACP launch/tree custody and cleanup remain fenced",
+          payload: { errorCode: ACP_PROCESS_SESSION_LAUNCH_AMBIGUOUS, needsHuman: true, reconciliation },
+        });
+        throw conflict("Remote ACP launch, process-tree custody, and retained cleanup must be reconciled before cancelling or releasing its issue lock", {
+          code: ACP_PROCESS_SESSION_LAUNCH_AMBIGUOUS,
+          needsHuman: true,
+          reconciliation,
+          processSessionLaunch: parseObject(parseObject(run.resultJson).processSessionLaunch),
+        });
+      }
+      remoteLaunchReleased = true;
+      await appendRunEvent(run, await nextRunEventSeq(run.id), {
+        eventType: "lifecycle",
+        stream: "system",
+        level: "info",
+        message: "Remote ACP terminal receipt reconciled; cancellation may release retained run resources",
+        payload: { errorCode: ACP_PROCESS_SESSION_LAUNCH_AMBIGUOUS, reconciliation },
+      });
+    }
     const agent = await getAgent(run.agentId);
     const errorCode = options.errorCode ?? "cancelled";
     const resultJson = agent
@@ -18620,7 +18549,9 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           processGroupId: running.processGroupId ?? run.processGroupId,
           expectedStartedAt: run.processStartedAt,
           graceMs: Math.max(1, running.graceSec) * 1000,
-          ...(runningChildIsLive ? { trustedPid: true, trustedProcessGroup: true } : {}),
+          ...(runningChildIsLive
+            ? { trustedPid: true, trustedProcessGroup: true, childProcess: running.child }
+            : {}),
         })
       : run.processPid || run.processGroupId
         ? await terminateHeartbeatRunProcess({
@@ -18628,7 +18559,9 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
             processGroupId: run.processGroupId,
             expectedStartedAt: run.processStartedAt,
           })
-        : null;
+        : !remoteLaunchReleased && agent && isTrackedLocalChildProcessAdapter(agent.adapterType)
+          ? missingProcessTreeCustodyResult()
+          : null;
     if (termination?.confirmedStopped === false) {
       await retainRunForUnverifiedTermination({
         run,
@@ -18669,9 +18602,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       await releaseIssueExecutionAndPromote(cancelled);
     }
 
-    await finalizeAgentStatus(run.agentId, "cancelled", undefined, {
-      wasFirstHeartbeat: timerClaimWasFirstHeartbeat(run),
-    });
+    await finalizeAgentStatus(run.agentId, "cancelled");
     await startNextQueuedRunForAgent(run.agentId);
     return cancelled;
   }
@@ -18685,6 +18616,80 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
 
     let cancelledCount = 0;
     for (const run of runs) {
+      let remoteLaunchReleased = false;
+      if (isPaperclipBridgeLaunchReplayFencedRun(run)) {
+        const reconciliation = await reconcileRetainedPaperclipBridgeLaunchResources(run).catch(() => ({
+          found: true,
+          controllerFound: false,
+          remoteCancelled: false,
+          cleanupComplete: false,
+          released: false,
+        }));
+        if (reconciliation.released) {
+          remoteLaunchReleased = true;
+          await appendRunEvent(run, await nextRunEventSeq(run.id), {
+            eventType: "lifecycle",
+            stream: "system",
+            level: "info",
+            message: "Callback bridge cancellation reconciled during agent pause",
+            payload: { errorCode: PAPERCLIP_CALLBACK_BRIDGE_LAUNCH_AMBIGUOUS, reconciliation },
+          });
+        } else {
+          await appendRunEvent(run, await nextRunEventSeq(run.id), {
+            eventType: "lifecycle",
+            stream: "system",
+            level: "warn",
+            message: "Agent pause retained a callback bridge without exact cancellation/cleanup reconciliation",
+            payload: {
+              errorCode: PAPERCLIP_CALLBACK_BRIDGE_LAUNCH_AMBIGUOUS,
+              needsHuman: true,
+              reconciliation,
+            },
+          });
+          continue;
+        }
+      }
+      if (isProcessSessionLaunchReplayFencedRun(run)) {
+        let reconciliation:
+          | Awaited<ReturnType<typeof reconcileRetainedProcessSessionLaunchResources>>
+          | Awaited<ReturnType<typeof requestStopAndWaitAcpxProcessSessionLaunch>>;
+        try {
+          const identity = readProcessSessionLaunchIdentityFromRun(run);
+          reconciliation = isProcessSessionLaunchActiveFenceRun(run) && identity
+            ? await requestStopAndWaitAcpxProcessSessionLaunch({
+                runId: run.id,
+                launchId: identity.launchId,
+              })
+            : await reconcileRetainedProcessSessionLaunchResources(run);
+        } catch {
+          reconciliation = {
+            found: true,
+            terminal: false,
+            treeCustodyVerified: false,
+            cleanupComplete: false,
+            released: false,
+          };
+        }
+        if (reconciliation.released) {
+          remoteLaunchReleased = true;
+          await appendRunEvent(run, await nextRunEventSeq(run.id), {
+            eventType: "lifecycle",
+            stream: "system",
+            level: "info",
+            message: "Remote ACP terminal receipt reconciled during agent pause",
+            payload: { errorCode: ACP_PROCESS_SESSION_LAUNCH_AMBIGUOUS, reconciliation },
+          });
+        } else {
+          await appendRunEvent(run, await nextRunEventSeq(run.id), {
+            eventType: "lifecycle",
+            stream: "system",
+            level: "warn",
+            message: "Agent pause retained a remote ACP launch without verified tree custody/cleanup",
+            payload: { errorCode: ACP_PROCESS_SESSION_LAUNCH_AMBIGUOUS, needsHuman: true, reconciliation },
+          });
+          continue;
+        }
+      }
       const running = runningProcesses.get(run.id);
       const runningChildIsLive = running
         ? (running.child.exitCode == null && running.child.signalCode == null)
@@ -18695,7 +18700,9 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
             processGroupId: running.processGroupId ?? run.processGroupId,
             expectedStartedAt: run.processStartedAt,
             graceMs: Math.max(1, running.graceSec) * 1000,
-            ...(runningChildIsLive ? { trustedPid: true, trustedProcessGroup: true } : {}),
+            ...(runningChildIsLive
+              ? { trustedPid: true, trustedProcessGroup: true, childProcess: running.child }
+              : {}),
           })
         : run.processPid || run.processGroupId
           ? await terminateHeartbeatRunProcess({
@@ -18703,7 +18710,9 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
               processGroupId: run.processGroupId,
               expectedStartedAt: run.processStartedAt,
             })
-          : null;
+          : !remoteLaunchReleased && agent && isTrackedLocalChildProcessAdapter(agent.adapterType)
+            ? missingProcessTreeCustodyResult()
+            : null;
       if (termination?.confirmedStopped === false) {
         await retainRunForUnverifiedTermination({
           run,
@@ -19109,8 +19118,6 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
 
     reconcileStrandedAssignedIssues,
 
-    terminalizeRunOnLeaseRelease,
-
     sweepStaleIssueLocks,
 
     buildIssueGraphLivenessAutoRecoveryPreview,
@@ -19170,8 +19177,6 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         const baseline = new Date(agent.lastHeartbeatAt ?? agent.createdAt).getTime();
         const elapsedMs = now.getTime() - baseline;
         if (elapsedMs < policy.intervalSec * 1000) continue;
-        const timerClaim = await claimDueTimerHeartbeat(agent, now, policy.intervalSec);
-        if (!timerClaim) continue;
 
         const run = await enqueueWakeup(agent.id, {
           source: "timer",
@@ -19183,7 +19188,6 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
             source: "scheduler",
             reason: "interval_elapsed",
             now: now.toISOString(),
-            timerClaimWasFirstHeartbeat: timerClaim.wasFirstHeartbeat,
           },
         });
         if (run) enqueued += 1;

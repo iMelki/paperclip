@@ -15,7 +15,15 @@ import { resolveTestShellCommand } from "@paperclipai/adapter-utils/test-shell";
 import { buildCodexAuthInboundProvision } from "./codex-auth-merge-scripts.js";
 
 const execFile = promisify(execFileCallback);
-const testShell = resolveTestShellCommand("sh");
+const testSh = resolveTestShellCommand("sh");
+
+function expectPrivatePosixMode(actual: number, expected = 0o600): void {
+  // Node does not implement owner/group/other mode bits on Windows. These
+  // remote-target fixtures retain byte/atomicity coverage there; the distinct
+  // host staging and copy-back paths have real DACL suites, while native remote
+  // target ACL policy remains tracked under #22.
+  if (process.platform !== "win32") expect(actual).toBe(expected);
+}
 
 describe("Codex auth merge command paths", () => {
   it("converts Windows sandbox paths before invoking POSIX merge tooling", () => {
@@ -63,14 +71,9 @@ describe("codex home auth merge on sandbox asset extract", () => {
     return JSON.stringify({ OPENAI_API_KEY: `sk-${marker}` }, null, 2);
   }
 
-  function expectPrivatePosixModeWhereSupported(mode: number, label?: string): void {
-    if (process.platform !== "win32") expect(mode, label).toBe(0o600);
-  }
-
   async function runCodexHomeAssetExtract(input: {
-    sandboxAuth?: string;
-    hostAuth?: string;
-    imageAuth?: string;
+    sandboxAuth: string;
+    hostAuth: string;
   }): Promise<{
     commandText: string;
     writtenPaths: string[];
@@ -89,19 +92,9 @@ describe("codex home auth merge on sandbox asset extract", () => {
     await mkdir(localHomeDir, { recursive: true });
     await mkdir(remoteHomeDir, { recursive: true });
     await writeFile(path.join(localWorkspaceDir, "README.md"), "workspace\n", "utf8");
-    if (input.hostAuth !== undefined) {
-      await writeFile(path.join(localHomeDir, "auth.json"), input.hostAuth, { mode: 0o600 });
-    }
+    await writeFile(path.join(localHomeDir, "auth.json"), input.hostAuth, { mode: 0o600 });
     await writeFile(path.join(localHomeDir, "config.toml"), "model = \"gpt\"\n", "utf8");
-    if (input.sandboxAuth !== undefined) {
-      await writeFile(path.join(remoteHomeDir, "auth.json"), input.sandboxAuth, { mode: 0o600 });
-    }
-    // A fake in-sandbox $HOME whose ~/.codex may carry the image's own login.
-    const imageHomeDir = path.join(rootDir, "image-home");
-    await mkdir(path.join(imageHomeDir, ".codex"), { recursive: true });
-    if (input.imageAuth !== undefined) {
-      await writeFile(path.join(imageHomeDir, ".codex", "auth.json"), input.imageAuth, { mode: 0o600 });
-    }
+    await writeFile(path.join(remoteHomeDir, "auth.json"), input.sandboxAuth, { mode: 0o600 });
 
     const commands: string[] = [];
     const outputs: string[] = [];
@@ -122,10 +115,7 @@ describe("codex home auth merge on sandbox asset extract", () => {
       },
       run: async (command) => {
         commands.push(command);
-        const result = await execFile(testShell, ["-c", command], {
-          maxBuffer: 32 * 1024 * 1024,
-          env: { ...process.env, HOME: imageHomeDir },
-        });
+        const result = await execFile(testSh, ["-c", command], { maxBuffer: 32 * 1024 * 1024 });
         outputs.push(result.stdout, result.stderr);
       },
     };
@@ -201,7 +191,7 @@ describe("codex home auth merge on sandbox asset extract", () => {
     const result = await runCodexHomeAssetExtract({ sandboxAuth, hostAuth });
 
     expect(result.finalAuth).toBe(sandboxAuth);
-    expectPrivatePosixModeWhereSupported(result.finalMode);
+    expectPrivatePosixMode(result.finalMode);
     expect(result.combinedOutput).not.toContain("SENTINEL");
     expect(result.commandText).not.toContain("SENTINEL");
     expect(result.commandText).toContain("codex-auth-merge-extract.sh");
@@ -228,7 +218,7 @@ describe("codex home auth merge on sandbox asset extract", () => {
     const result = await runCodexHomeAssetExtract({ sandboxAuth, hostAuth });
 
     expect(result.finalAuth).toBe(hostAuth);
-    expectPrivatePosixModeWhereSupported(result.finalMode);
+    expectPrivatePosixMode(result.finalMode);
   });
 
   it("installs host auth on identity mismatch, auth-mode mismatch, apikey mode, and unusable sandbox auth", async () => {
@@ -284,7 +274,7 @@ describe("codex home auth merge on sandbox asset extract", () => {
         hostAuth: entry.hostAuth,
       });
       expect(result.finalAuth, entry.name).toBe(entry.hostAuth);
-      expectPrivatePosixModeWhereSupported(result.finalMode, entry.name);
+      expectPrivatePosixMode(result.finalMode);
     }
   });
 
@@ -365,7 +355,7 @@ describe("codex home auth merge on sandbox asset extract", () => {
         hostAuth: entry.hostAuth,
       });
       expect(result.finalAuth, entry.name).toBe(entry.hostAuth);
-      expectPrivatePosixModeWhereSupported(result.finalMode, entry.name);
+      expectPrivatePosixMode(result.finalMode);
     }
   });
 
@@ -404,68 +394,10 @@ describe("codex home auth merge on sandbox asset extract", () => {
       });
       expect(result.finalAuth, entry.name).toBe(entry.hostAuth);
       expect(result.finalAuth, entry.name).not.toBe(sandboxAuth);
-      expectPrivatePosixModeWhereSupported(result.finalMode, entry.name);
+      expectPrivatePosixMode(result.finalMode);
       expect(result.combinedOutput, entry.name).not.toContain("SENTINEL");
       expect(result.commandText, entry.name).not.toContain("SENTINEL");
     }
-  });
-
-  it("falls back to the sandbox image's own login when neither host nor prior asset has auth", async () => {
-    const imageAuth = subscriptionAuth({
-      accountId: "acct-image",
-      lastRefresh: "2026-07-01T00:00:00Z",
-      marker: "image",
-    });
-    const result = await runCodexHomeAssetExtract({
-      imageAuth,
-    });
-
-    expect(result.finalAuth).toBe(imageAuth);
-    expectPrivatePosixModeWhereSupported(result.finalMode);
-  });
-
-  it("prefers shipped host auth over the image's own login", async () => {
-    const hostAuth = subscriptionAuth({
-      accountId: "acct-host",
-      lastRefresh: "2026-07-02T00:00:00Z",
-      marker: "host",
-    });
-    const imageAuth = subscriptionAuth({
-      accountId: "acct-image",
-      lastRefresh: "2026-07-03T00:00:00Z",
-      marker: "image",
-    });
-    const result = await runCodexHomeAssetExtract({
-      hostAuth,
-      imageAuth,
-    });
-
-    expect(result.finalAuth).toBe(hostAuth);
-  });
-
-  it("prefers a preserved newer prior-lease credential over the image's own login", async () => {
-    const hostAuth = subscriptionAuth({
-      accountId: "acct-1",
-      lastRefresh: "2026-07-01T00:00:00Z",
-      marker: "host",
-    });
-    const sandboxAuth = subscriptionAuth({
-      accountId: "acct-1",
-      lastRefresh: "2026-07-05T00:00:00Z",
-      marker: "prior-lease",
-    });
-    const imageAuth = subscriptionAuth({
-      accountId: "acct-image",
-      lastRefresh: "2026-07-06T00:00:00Z",
-      marker: "image",
-    });
-    const result = await runCodexHomeAssetExtract({
-      hostAuth,
-      sandboxAuth,
-      imageAuth,
-    });
-
-    expect(result.finalAuth).toBe(sandboxAuth);
   });
 
   it("routes the Codex home asset through a single native syncIn operation whose post-command is the auth-merge (#4, C5/C6)", async () => {
@@ -516,7 +448,7 @@ describe("codex home auth merge on sandbox asset extract", () => {
       },
       run: async (command) => {
         directRuns.push(command);
-        await execFile(testShell, ["-c", command], { maxBuffer: 32 * 1024 * 1024 });
+        await execFile(testSh, ["-c", command], { maxBuffer: 32 * 1024 * 1024 });
       },
     };
     client.syncIn = async (operations) => {
@@ -529,7 +461,7 @@ describe("codex home auth merge on sandbox asset extract", () => {
           if (mapping.mode != null) await lstat(mapping.targetPath);
         }
         for (const command of operation.postUploadCommands ?? []) {
-          await execFile(testShell, ["-c", command.command], { maxBuffer: 32 * 1024 * 1024 });
+          await execFile(testSh, ["-c", command.command], { maxBuffer: 32 * 1024 * 1024 });
         }
       }
       return { operations: [] };
@@ -565,7 +497,7 @@ describe("codex home auth merge on sandbox asset extract", () => {
       op.files.some((mapping) => mapping.targetPath.endsWith("home-upload.tar")),
     );
     expect(homeOp).toBeDefined();
-    const targets = homeOp!.files.map((mapping) => path.posix.basename(mapping.targetPath)).sort();
+    const targets = homeOp!.files.map((mapping) => path.basename(mapping.targetPath)).sort();
     expect(targets).toEqual([
       "codex-auth-merge-decision.cjs",
       "codex-auth-merge-extract.sh",
@@ -586,7 +518,7 @@ describe("codex home auth merge on sandbox asset extract", () => {
     // C6: newer host credential won, installed atomically at mode 0600.
     const finalAuthPath = path.join(remoteHomeDir, "auth.json");
     expect(await readFile(finalAuthPath, "utf8")).toBe(hostAuth);
-    expectPrivatePosixModeWhereSupported((await lstat(finalAuthPath)).mode & 0o777);
+    expectPrivatePosixMode((await lstat(finalAuthPath)).mode & 0o777);
   });
 });
 

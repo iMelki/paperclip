@@ -6,7 +6,6 @@ import {
   createTarballFromDirectory,
   prepareSandboxManagedRuntime,
   type PreparedSandboxManagedRuntime,
-  type SandboxAdditionalSource,
   type SandboxManagedRuntimeAsset,
   type SandboxManagedRuntimeClient,
   type SandboxRemoteExecutionSpec,
@@ -14,12 +13,39 @@ import {
   type SandboxSyncResult,
 } from "./sandbox-managed-runtime.js";
 import { preferredShellForSandbox, shellCommandArgs } from "./sandbox-shell.js";
+import {
+  dirnamePortablePath,
+  isWindowsAbsolutePath,
+  shellQuote,
+  shellQuotePath,
+} from "./shell-path.js";
 import type { RunProcessResult } from "./server-utils.js";
 import type { RuntimeProgressSink, RuntimeStatusSink } from "./runtime-progress.js";
-import { dirnamePortablePath, shellQuotePath } from "./shell-path.js";
-import type { RuntimeSpanRunner } from "./acpx-engine/startup-timing.js";
 
 export interface CommandManagedRuntimeRunner {
+  /**
+   * True only when `execute({ stdin })` keeps stdin bytes out of the provider
+   * command/argv/environment and delivers them over a private transport or a
+   * provider-native private file API. Secret-bearing process-session launch
+   * requests fail closed unless this capability is explicitly asserted.
+   */
+  supportsConfidentialStdin?: boolean;
+  /**
+   * True only when this runner can prove launch-bound process-tree absence via
+   * `reconcileProcessTreeCustody`. Direct-child exit/close is insufficient.
+   * Runner-backed remote ACP execution fails closed unless both are present.
+   */
+  supportsProcessTreeCustody?: boolean;
+  reconcileProcessTreeCustody?(input: {
+    launchId: string;
+    sessionId: string;
+    runId: string;
+    adapterKey: string;
+    environmentId: string | null;
+    leaseId: string | null;
+    remoteCwd: string;
+    sessionDir: string;
+  }): Promise<boolean>;
   /**
    * True only when `execute({ stdin })` can surface useful in-flight progress
    * for a single stdin-backed command. Provider-backed sandbox runners usually
@@ -27,6 +53,25 @@ export interface CommandManagedRuntimeRunner {
    * and let the caller choose a chunked upload path when progress is requested.
    */
   supportsSingleStreamStdinProgress?: boolean;
+  /**
+   * Cumulative count of host→sandbox `execute` round-trips this runner has
+   * performed (Open Q1). Present only on runners that instrument the single
+   * exec seam (the sandbox runner); the per-step delta is emitted as
+   * `run.startup.step` `payload.roundTrips`. A `() => number` reader, never the
+   * runner itself, is threaded into `measureStartupStep` so the timing helper
+   * stays runner-agnostic.
+   */
+  execCount?(): number;
+  /**
+   * Cumulative provider-reported wall-time (ms) for the `executeCommand` REST
+   * call ({@link providerExecMs}) vs the `client.get` sandbox re-fetch that
+   * precedes it ({@link providerGetMs}), accumulated across every `execute`
+   * round-trip (Open Q1, finer attribution). Present only when the provider
+   * surfaces these durations on its result metadata; the per-step deltas are
+   * emitted as `payload.providerExecMs` / `payload.providerGetMs`.
+   */
+  providerExecMs?(): number;
+  providerGetMs?(): number;
   execute(input: {
     command: string;
     args?: string[];
@@ -36,27 +81,6 @@ export interface CommandManagedRuntimeRunner {
     timeoutMs?: number;
     onLog?: (stream: "stdout" | "stderr", chunk: string) => Promise<void>;
     onSpawn?: (meta: { pid: number; startedAt: string }) => Promise<void>;
-    /**
-     * Run this command through the lease's persistent session even when no run
-     * step is active. A sandbox provider opens the session on the first
-     * non-bypassed command; the ACP process session bridge sets this so the
-     * long-lived agent command streams its output through the session log
-     * stream. The default keeps the context-based session selection.
-     */
-    useSession?: boolean;
-    /**
-     * Run this command outside the lease's persistent session even when a run
-     * step is active. The persistent session is a single serialized shell. In
-     * streamed mode the agent runs as one long-lived foreground command that
-     * holds the session for the whole run. The bridge control-plane execs
-     * (input delivery, output read, callback relay, and the queue/setup
-     * bookkeeping) must run concurrently with the agent, so they run as
-     * independent one-shot commands. On the session they queue behind the agent
-     * command that never returns — a permanent deadlock. An explicit bypass
-     * always wins over the context-based session selection and over
-     * `useSession`. The default keeps the context-based session selection.
-     */
-    bypassSession?: boolean;
   }): Promise<RunProcessResult>;
   /**
    * Optional native inbound file transfer. Present only when the sandbox
@@ -80,12 +104,6 @@ export interface CommandManagedRuntimeSpec {
 
 export type CommandManagedRuntimeAsset = SandboxManagedRuntimeAsset;
 
-function shellQuoteLegacy(value: string) {
-  return `'${value.replace(/'/g, `'"'"'`)}'`;
-}
-
-const shellQuote = shellQuotePath;
-
 function mergeRuntimeExcludes(entries: string[] | undefined): string[] {
   return [...new Set([".paperclip-runtime", ...(entries ?? [])])];
 }
@@ -100,6 +118,11 @@ const REMOTE_WRITE_SINGLE_STREAM_MAX_BASE64_BYTES = 96 * 1024 * 1024;
 const REMOTE_WRITE_FALLBACK_BASE64_CHUNK_SIZE = 4 * 1024 * 1024;
 const REMOTE_WRITE_FALLBACK_DECODED_CHUNK_SIZE = (REMOTE_WRITE_FALLBACK_BASE64_CHUNK_SIZE / 4) * 3;
 const REMOTE_READ_CHUNK_BYTES = REMOTE_WRITE_FALLBACK_DECODED_CHUNK_SIZE;
+// Private sentinel used by the size probe so an absent remote path can retain
+// the same ENOENT contract as node:fs instead of becoming an untyped shell
+// failure. Other command failures remain fail-loud with their diagnostics.
+const REMOTE_READ_MISSING_EXIT_CODE = 44;
+const REMOTE_READ_MISSING_SENTINEL = "__PAPERCLIP_REMOTE_READ_ENOENT_V1__";
 
 function base64EncodedLength(byteLength: number): number {
   return Math.ceil(byteLength / 3) * 4;
@@ -139,26 +162,36 @@ function bufferToArrayBuffer(buffer: Buffer): ArrayBuffer {
   return buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength) as ArrayBuffer;
 }
 
+function createRemoteReadMissingError(remotePath: string): NodeJS.ErrnoException {
+  const error = new Error(
+    `ENOENT: no such file or directory, readFile '${remotePath}'`,
+  ) as NodeJS.ErrnoException;
+  error.code = "ENOENT";
+  error.path = remotePath;
+  error.syscall = "readFile";
+  return error;
+}
+
 // Named builder (Security Condition C3): extract an uploaded tarball into its
 // target directory as a clean destroy-then-replace, then remove the tarball.
 // Every path is shell-quoted; the fallback NEVER concatenates untrusted asset
 // keys / file names into the shell.
 function buildSyncInExtractDirectoryCommand(input: { remoteTarPath: string; targetDir: string }): string {
   return (
-    `rm -rf ${shellQuote(input.targetDir)} && ` +
-    `mkdir -p ${shellQuote(input.targetDir)} && ` +
-    `tar -xf ${shellQuote(input.remoteTarPath)} -C ${shellQuote(input.targetDir)} && ` +
-    `rm -f ${shellQuote(input.remoteTarPath)}`
+    `rm -rf ${shellQuotePath(input.targetDir)} && ` +
+    `mkdir -p ${shellQuotePath(input.targetDir)} && ` +
+    `tar -xf ${shellQuotePath(input.remoteTarPath)} -C ${shellQuotePath(input.targetDir)} && ` +
+    `rm -f ${shellQuotePath(input.remoteTarPath)}`
   );
 }
 
 // Named builder (C3): apply a POSIX mode to a placed file. Octal literal, quoted
 // path; no interpolation of untrusted values.
 function buildSyncInChmodCommand(input: { mode: number; targetPath: string }): string {
-  return `chmod ${(input.mode & 0o7777).toString(8)} ${shellQuote(input.targetPath)}`;
+  return `chmod ${(input.mode & 0o7777).toString(8)} ${shellQuotePath(input.targetPath)}`;
 }
 function buildSyncInRenameCommand(input: { sourcePath: string; targetPath: string }): string {
-  return "mv -f " + shellQuote(input.sourcePath) + " " + shellQuote(input.targetPath);
+  return "mv -f " + shellQuotePath(input.sourcePath) + " " + shellQuotePath(input.targetPath);
 }
 
 function buildUniqueStagingPath(input: { targetPath: string; suffix: string }): string {
@@ -182,17 +215,38 @@ export function assertPostUploadCommandsConfined(operations: readonly SandboxSyn
   for (const operation of operations) {
     const commands = operation.postUploadCommands ?? [];
     if (commands.length === 0) continue;
-    const targetRoots = operation.files.map((mapping) => path.posix.normalize(mapping.targetPath));
+    const targetRoots = operation.files.map((mapping) => mapping.targetPath);
     for (const command of commands) {
       if (command.cwd == null) continue;
       const raw = command.cwd;
-      if (!path.posix.isAbsolute(raw) || raw.split("/").includes("..")) {
-        throw new Error(`post-upload command cwd is not a confined absolute POSIX path: ${raw}`);
+      const usesWindowsPaths = isWindowsAbsolutePath(raw);
+      const pathApi = usesWindowsPaths ? path.win32 : path.posix;
+      if (!pathApi.isAbsolute(raw)) {
+        throw new Error(`post-upload command cwd is not a confined absolute path: ${raw}`);
       }
-      const normalized = path.posix.normalize(raw);
-      const within = targetRoots.some(
-        (root) => normalized === root || normalized.startsWith(`${root}/`),
-      );
+      const rawSegments = raw.split(usesWindowsPaths ? /[\\/]+/ : /\/+/);
+      if (rawSegments.includes("..")) {
+        throw new Error(`post-upload command cwd is not a confined absolute ${usesWindowsPaths ? "Windows" : "POSIX"} path because '..' segments are forbidden: ${raw}`);
+      }
+      const normalized = pathApi.normalize(raw);
+      const within = targetRoots.some((root) => {
+        const rootUsesWindowsPaths = isWindowsAbsolutePath(root);
+        const rootPathApi = rootUsesWindowsPaths ? path.win32 : path.posix;
+        const rootSegments = root.split(rootUsesWindowsPaths ? /[\\/]+/ : /\/+/);
+        if (
+          rootUsesWindowsPaths !== usesWindowsPaths
+          || !rootPathApi.isAbsolute(root)
+          || rootSegments.includes("..")
+        ) {
+          return false;
+        }
+        const relative = pathApi.relative(pathApi.normalize(root), normalized);
+        return relative === "" || (
+          relative !== ".."
+          && !relative.startsWith(`..${pathApi.sep}`)
+          && !pathApi.isAbsolute(relative)
+        );
+      });
       if (!within) {
         throw new Error(`post-upload command cwd escapes the operation's target root: ${raw}`);
       }
@@ -207,6 +261,21 @@ export function createCommandManagedRuntimeClient(input: {
   shellCommand?: "bash" | "sh" | null;
 }): SandboxManagedRuntimeClient {
   const shellCommand = preferredShellForSandbox(input.shellCommand);
+  const executeShell = async (
+    script: string,
+    opts: {
+      stdin?: string;
+      timeoutMs?: number;
+      onLog?: (stream: "stdout" | "stderr", chunk: string) => Promise<void>;
+    } = {},
+  ) => input.runner.execute({
+    command: shellCommand,
+    args: shellCommandArgs(script),
+    cwd: input.commandCwd,
+    stdin: opts.stdin,
+    timeoutMs: opts.timeoutMs ?? input.timeoutMs,
+    onLog: opts.onLog,
+  });
   const runShell = async (
     script: string,
     opts: {
@@ -215,21 +284,14 @@ export function createCommandManagedRuntimeClient(input: {
       onLog?: (stream: "stdout" | "stderr", chunk: string) => Promise<void>;
     } = {},
   ) => {
-    const result = await input.runner.execute({
-      command: shellCommand,
-      args: shellCommandArgs(script),
-      cwd: input.commandCwd,
-      stdin: opts.stdin,
-      timeoutMs: opts.timeoutMs ?? input.timeoutMs,
-      onLog: opts.onLog,
-    });
+    const result = await executeShell(script, opts);
     requireSuccessfulResult(result, script);
     return result;
   };
 
   const client: SandboxManagedRuntimeClient = {
     makeDir: async (remotePath) => {
-      await runShell(`mkdir -p ${shellQuote(remotePath)}`);
+      await runShell(`mkdir -p ${shellQuotePath(remotePath)}`);
     },
     writeFile: async (remotePath, bytes, options) => {
       const buffer = toBuffer(bytes);
@@ -259,10 +321,10 @@ export function createCommandManagedRuntimeClient(input: {
           const body = buffer.toString("base64");
           await options?.onProgress?.(0, total);
           await runShell(
-            `cleanup() { rm -f ${shellQuote(remoteTempPath)}; }; trap cleanup EXIT INT TERM; ` +
-              `mkdir -p ${shellQuote(remoteDir)} && ` +
-              `base64 -d > ${shellQuote(remoteTempPath)} && ` +
-              `mv -f ${shellQuote(remoteTempPath)} ${shellQuote(remotePath)}`,
+            `cleanup() { rm -f ${shellQuotePath(remoteTempPath)}; }; trap cleanup EXIT INT TERM; ` +
+              `mkdir -p ${shellQuotePath(remoteDir)} && ` +
+              `base64 -d > ${shellQuotePath(remoteTempPath)} && ` +
+              `mv -f ${shellQuotePath(remoteTempPath)} ${shellQuotePath(remotePath)}`,
             { stdin: body },
           );
           await options?.onProgress?.(total, total);
@@ -275,16 +337,16 @@ export function createCommandManagedRuntimeClient(input: {
         // each self-contained chunk on arrival and emitting progress per write,
         // then atomically rename into place.
         await runShell(
-          `mkdir -p ${shellQuote(remoteDir)} && ` +
-            `rm -f ${shellQuote(remoteTempPath)} && : > ${shellQuote(remoteTempPath)}`,
+          `mkdir -p ${shellQuotePath(remoteDir)} && ` +
+            `rm -f ${shellQuotePath(remoteTempPath)} && : > ${shellQuotePath(remoteTempPath)}`,
         );
         for (let offset = 0; offset < total; offset += REMOTE_WRITE_FALLBACK_DECODED_CHUNK_SIZE) {
           const end = Math.min(total, offset + REMOTE_WRITE_FALLBACK_DECODED_CHUNK_SIZE);
           const chunk = buffer.subarray(offset, end).toString("base64");
-          await runShell(`base64 -d >> ${shellQuote(remoteTempPath)}`, { stdin: chunk });
+          await runShell(`base64 -d >> ${shellQuotePath(remoteTempPath)}`, { stdin: chunk });
           await options?.onProgress?.(end, total);
         }
-        await runShell(`mv -f ${shellQuote(remoteTempPath)} ${shellQuote(remotePath)}`);
+        await runShell(`mv -f ${shellQuotePath(remoteTempPath)} ${shellQuotePath(remotePath)}`);
         await options?.onProgress?.(total, total);
       } finally {
         await bestEffortRemoveRemotePath(client, remoteTempPath);
@@ -294,7 +356,25 @@ export function createCommandManagedRuntimeClient(input: {
       // Chunked reads intentionally query the remote size first, even without
       // a progress sink, so each sandbox RPC stays bounded and truncation is
       // detected without materializing the whole file as one stdout string.
-      const sizeResult = await runShell(`wc -c < ${shellQuote(remotePath)}`);
+      const quotedRemotePath = shellQuotePath(remotePath);
+      const quotedRemoteParent = shellQuotePath(dirnamePortablePath(remotePath));
+      const sizeScript =
+        `if [ -e ${quotedRemotePath} ] || [ -L ${quotedRemotePath} ]; then ` +
+        `wc -c < ${quotedRemotePath}; ` +
+        `elif [ -d ${quotedRemoteParent} ] && [ -x ${quotedRemoteParent} ]; then ` +
+        `printf '%s\n' ${shellQuote(REMOTE_READ_MISSING_SENTINEL)}; ` +
+        `exit ${REMOTE_READ_MISSING_EXIT_CODE}; ` +
+        "else exit 45; fi";
+      const sizeResult = await executeShell(sizeScript);
+      if (
+        !sizeResult.timedOut
+        && sizeResult.exitCode === REMOTE_READ_MISSING_EXIT_CODE
+        && sizeResult.stderr.trim().length === 0
+        && sizeResult.stdout.trim() === REMOTE_READ_MISSING_SENTINEL
+      ) {
+        throw createRemoteReadMissingError(remotePath);
+      }
+      requireSuccessfulResult(sizeResult, sizeScript);
       const totalBytes = Number.parseInt(sizeResult.stdout.trim(), 10);
       if (!Number.isFinite(totalBytes) || totalBytes < 0) {
         throw new Error(`Could not determine remote file size for ${remotePath}`);
@@ -312,7 +392,7 @@ export function createCommandManagedRuntimeClient(input: {
       }
       for (let chunkIndex = 0; decodedSoFar < totalBytes; chunkIndex++) {
         const result = await runShell(
-          `dd if=${shellQuote(remotePath)} bs=${REMOTE_READ_CHUNK_BYTES} skip=${chunkIndex} count=1 2>/dev/null | base64`,
+          `dd if=${shellQuotePath(remotePath)} bs=${REMOTE_READ_CHUNK_BYTES} skip=${chunkIndex} count=1 2>/dev/null | base64`,
         );
         const chunk = Buffer.from(result.stdout.replace(/\s+/g, ""), "base64");
         if (chunk.byteLength === 0) break;
@@ -329,8 +409,8 @@ export function createCommandManagedRuntimeClient(input: {
     },
     listFiles: async (remotePath) => {
       const result = await runShell(
-        `if [ -d ${shellQuote(remotePath)} ]; then ` +
-          `for entry in ${shellQuote(remotePath)}/*; do ` +
+        `if [ -d ${shellQuotePath(remotePath)} ]; then ` +
+          `for entry in ${shellQuotePath(remotePath)}/*; do ` +
           `[ -f "$entry" ] || continue; ` +
           `basename "$entry"; ` +
           `done; ` +
@@ -345,7 +425,7 @@ export function createCommandManagedRuntimeClient(input: {
     remove: async (remotePath) => {
       const result = await input.runner.execute({
         command: shellCommand,
-        args: shellCommandArgs(`rm -rf ${shellQuote(remotePath)}`),
+        args: shellCommandArgs(`rm -rf ${shellQuotePath(remotePath)}`),
         cwd: input.commandCwd,
         timeoutMs: input.timeoutMs,
       });
@@ -367,7 +447,8 @@ export function createCommandManagedRuntimeClient(input: {
   // replace untar for directories, direct `writeFile` for single files), then run
   // the operation's ordered `postUploadCommands` fail-fast. Byte-for-byte
   // behavior-equivalent to the caller-inlined tar path it will replace. All exec
-  // rides the shared `execute` seam.
+  // rides the shared `execute` seam so `execCount`/`providerExecMs` still
+  // attribute (Open Q1).
   const fallbackSyncIn = async (operations: SandboxSyncOperation[]): Promise<SandboxSyncResult> => {
     const resultOperations: SandboxSyncResult["operations"] = [];
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-syncin-fallback-"));
@@ -480,8 +561,6 @@ export async function prepareCommandManagedRuntime(input: {
   workspaceExclude?: string[];
   preserveAbsentOnRestore?: string[];
   assets?: CommandManagedRuntimeAsset[];
-  /** Referenced (additional) projects to stage into the sandbox as plain, read-only trees. */
-  additionalSources?: SandboxAdditionalSource[];
   installCommand?: string | null;
   /** When provided alongside `installCommand`, skip the install if `command -v <detectCommand>` succeeds. */
   detectCommand?: string | null;
@@ -489,10 +568,6 @@ export async function prepareCommandManagedRuntime(input: {
   // task wires it into the byte-counting writeFile/readFile transport.
   onProgress?: RuntimeProgressSink;
   onRuntimeProgress?: RuntimeStatusSink;
-  // Optional host span runner for the workspace tarball build. Forwarded to
-  // prepareSandboxManagedRuntime so the host pack time rides one `pack` span
-  // under the `stage.sync` step. The default is a no-op.
-  runtimeSpan?: RuntimeSpanRunner;
 }): Promise<PreparedSandboxManagedRuntime> {
   const timeoutMs = input.spec.timeoutMs && input.spec.timeoutMs > 0 ? input.spec.timeoutMs : 300_000;
   const workspaceRemoteDir = input.workspaceRemoteDir ?? input.spec.remoteCwd;
@@ -541,10 +616,8 @@ export async function prepareCommandManagedRuntime(input: {
           workspaceExclude: mergeRuntimeExcludes(input.workspaceExclude),
           preserveAbsentOnRestore: input.preserveAbsentOnRestore,
           assets: input.assets,
-          additionalSources: input.additionalSources,
           onProgress: input.onProgress,
           onRuntimeProgress: input.onRuntimeProgress,
-          runtimeSpan: input.runtimeSpan,
         });
       }
     }
@@ -580,9 +653,7 @@ export async function prepareCommandManagedRuntime(input: {
     workspaceExclude: mergeRuntimeExcludes(input.workspaceExclude),
     preserveAbsentOnRestore: input.preserveAbsentOnRestore,
     assets: input.assets,
-    additionalSources: input.additionalSources,
     onProgress: input.onProgress,
     onRuntimeProgress: input.onRuntimeProgress,
-    runtimeSpan: input.runtimeSpan,
   });
 }

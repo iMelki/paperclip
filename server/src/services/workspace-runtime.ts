@@ -2,21 +2,32 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync, lstatSync, readdirSync, readFileSync, realpathSync } from "node:fs";
 import fs from "node:fs/promises";
 import net from "node:net";
-import os from "node:os";
 import { createHash, randomUUID } from "node:crypto";
 import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import type { AdapterRuntimeServiceReport } from "@paperclipai/adapter-utils";
-import { shellQuotePath } from "@paperclipai/adapter-utils/shell-path";
-import type { Db } from "@paperclipai/db";
-import { executionWorkspaces, issueComments, issues, projectWorkspaces, workspaceRuntimeServices } from "@paperclipai/db";
+import type {
+  Db,
+  ReapWindowsTestProcessTreeResult,
+  WindowsJobObjectTerminationReceipt,
+  WindowsTestJobCustody,
+} from "@paperclipai/db";
+import {
+  acquireWindowsTestJobCustody,
+  executionWorkspaces,
+  issueComments,
+  issues,
+  projectWorkspaces,
+  readWindowsTestProcessIdentity,
+  reapWindowsTestProcessTree,
+  snapshotWindowsTestProcesses,
+  workspaceRuntimeServices,
+} from "@paperclipai/db";
 import {
   listWorkspaceServiceCommandDefinitions,
   type GitWorktreeBranchAncestryVerdict,
   type GitWorktreeBranchIncoherenceEvidence as SharedGitWorktreeBranchIncoherenceEvidence,
   type GitWorktreeInProgressOperation,
-  type IssueCommentMetadata,
-  type IssueCommentPresentation,
   type WorkspaceOperationPhase,
   type WorkspaceRuntimeDesiredState,
   type WorkspaceRuntimeServiceStateMap,
@@ -28,25 +39,29 @@ import {
   createLocalServiceKey,
   findLocalServiceRegistryRecordByRuntimeServiceId,
   findAdoptableLocalService,
+  inspectLocalServiceRegistryRecord,
+  isPidAlive as isLocalServicePidAlive,
+  isProcessGroupAlive as isLocalServiceProcessGroupAlive,
   isLocalServiceProcessInWorkspace,
+  normalizeLocalServicePid,
+  readLocalServiceRegistryRecord,
   readLocalServiceProcessCwd,
   readLocalServicePortOwner,
   removeLocalServiceRegistryRecord,
   terminateLocalService,
   touchLocalServiceRegistryRecord,
   writeLocalServiceRegistryRecord,
+  type LocalServiceRegistryRecord,
+  type LocalServiceTerminationResult,
 } from "./local-service-supervisor.js";
-import { workspaceOperationService, type WorkspaceOperationRecorder } from "./workspace-operations.js";
+import type { WorkspaceOperationRecorder } from "./workspace-operations.js";
 import { executionWorkspaceService, readExecutionWorkspaceConfig } from "./execution-workspaces.js";
 import { logActivity } from "./activity-log.js";
 import { readProjectWorkspaceRuntimeConfig } from "./project-workspace-runtime-config.js";
 import {
-  cleanupWorktreeInstanceArtifacts,
-  deriveWorktreeInstanceId,
-  readWorktreeInstancePointer,
-  WORKTREE_INSTANCE_ROOT_METADATA_KEY,
-  type WorktreeInstancePointer,
-} from "./workspace-instance-cleanup.js";
+  claimLocalServiceLaunchOrAdopt,
+  type LocalServiceLaunchClaim,
+} from "./dev-runner-registry.js";
 
 export function resolveShell(): string {
   const fallback = process.platform === "win32" ? "sh" : "/bin/sh";
@@ -66,6 +81,23 @@ export function resolveShell(): string {
   if (!shell) return resolveFallback();
   if (path.isAbsolute(shell) && !existsSync(shell)) return resolveFallback();
   return shell;
+}
+
+function resolveShellEnvironment(shell: string, env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  if (process.platform !== "win32" || !path.isAbsolute(shell)) return env;
+  const shellName = path.basename(shell).toLowerCase();
+  if (shellName !== "bash.exe" && shellName !== "sh.exe") return env;
+
+  // Launching Git for Windows' usr/bin/bash.exe directly does not run the
+  // interactive profile that normally adds usr/bin to PATH. Keep coreutils
+  // such as dirname/cp available without mutating the parent process or
+  // allowing a nested bare `bash` lookup to select WSL instead.
+  const pathKey = Object.keys(env).find((key) => key.toLowerCase() === "path") ?? "PATH";
+  const existingPath = env[pathKey] ?? "";
+  return {
+    ...env,
+    [pathKey]: [path.dirname(shell), existingPath].filter(Boolean).join(path.delimiter),
+  };
 }
 
 /**
@@ -90,21 +122,6 @@ export interface ExecutionWorkspaceInput {
   repoRef: string | null;
   additionalWorkspaces?: ExecutionWorkspaceAdditionalInput[];
 }
-
-/**
- * A prepared credential-bearing git invocation for one remote URL, or null to keep ambient
- * behavior. Structurally compatible with the provider built by `git-credentials.ts` — this
- * module deliberately takes prepared invocations rather than tokens, so it never imports the
- * secrets layer and test fakes stay trivial.
- */
-export type GitRemoteAuthInvocation = {
-  configArgs: string[];
-  env: Record<string, string>;
-  source?: string;
-  secretName?: string | null;
-};
-
-export type GitRemoteAuthProvider = (remoteUrl: string) => Promise<GitRemoteAuthInvocation | null>;
 
 export interface ExecutionWorkspaceIssueRef {
   id: string;
@@ -149,7 +166,7 @@ export interface RuntimeServiceRef {
   executionWorkspaceId: string | null;
   issueId: string | null;
   serviceName: string;
-  status: "provisioning" | "starting" | "running" | "stopped" | "failed";
+  status: "starting" | "running" | "stopped" | "failed";
   lifecycle: "shared" | "ephemeral";
   scopeType: "project_workspace" | "execution_workspace" | "run" | "agent";
   scopeId: string | null;
@@ -173,12 +190,25 @@ export interface RuntimeServiceRef {
 interface RuntimeServiceRecord extends RuntimeServiceRef {
   db?: Db;
   child: ChildProcess | null;
+  stopRequested?: boolean;
   leaseRunIds: Set<string>;
   idleTimer: ReturnType<typeof globalThis.setTimeout> | null;
   envFingerprint: string;
   serviceKey: string;
   profileKind: string;
   processGroupId: number | null;
+  launchClaim: LocalServiceLaunchClaim | null;
+  // Windows Job Object custody for this process's tree, acquired right after
+  // spawn when available (test/win32 gated). When present, test cleanup can
+  // get a kernel-confirmed stop instead of the CIM-snapshot-only advisory
+  // path -- see windows-test-job-warden.ts and reapWindowsTestProcessTree.
+  windowsJobCustody?: WindowsTestJobCustody | null;
+  windowsJobCustodyRequired?: boolean;
+  windowsJobCustodyGateState?: "blocked" | "released";
+  // Test-only immutable step checkpoint. Job Object termination consumes the
+  // warden handle, so a later registry/claim finalization failure must reuse
+  // this exact kernel receipt instead of signaling the already-stopped tree.
+  windowsJobTerminationReceipt?: WindowsJobObjectTerminationReceipt | null;
 }
 
 type LocalRuntimeServiceStart = {
@@ -194,7 +224,6 @@ type StoppedRuntimeServiceReuseCandidate = {
 const runtimeServicesById = new Map<string, RuntimeServiceRecord>();
 const runtimeServicesByReuseKey = new Map<string, string>();
 const runtimeServiceLeasesByRun = new Map<string, string[]>();
-const runtimeProvisionByWorkspace = new Map<string, Promise<void>>();
 const DEFAULT_EXECUTE_PROCESS_OUTPUT_BYTES = 256 * 1024;
 
 type ProcessOutputCapture = {
@@ -208,31 +237,226 @@ type ProcessOutputAccumulator = {
   finish(): ProcessOutputCapture;
 };
 
-export async function resetRuntimeServicesForTests(options?: { preserveProcesses?: boolean }) {
-  // Forgetting a record without stopping its process leaks the real service
-  // (and every descendant its shell wrapper spawned) as an orphan: nothing
-  // else in the process ever holds a reference to it again once the maps
-  // below are cleared. Route every live record through the same termination
-  // stopRuntimeService already uses in production so tests actually observe
-  // the service go away, not just Paperclip's bookkeeping about it.
-  //
-  // preserveProcesses is the deliberate exception: tests that simulate a
-  // Paperclip restart (bookkeeping wiped, real OS process left running) need
-  // the process to survive so reconcilePersistedRuntimeServicesOnStartup has
-  // something live to adopt back.
-  if (!options?.preserveProcesses) {
-    const serviceIds = [...runtimeServicesById.keys()];
-    for (const serviceId of serviceIds) {
-      await stopRuntimeService(serviceId).catch(() => undefined);
-    }
+async function terminateBlockedWindowsTestRuntimeChild(
+  child: ChildProcess,
+  timeoutMs = 5_000,
+): Promise<boolean> {
+  if (child.exitCode !== null || child.signalCode !== null) {
+    child.stdin?.end();
+    return true;
   }
-  for (const record of runtimeServicesById.values()) {
+
+  const terminal = new Promise<boolean>((resolve) => {
+    child.once("exit", () => resolve(true));
+  });
+  child.stdin?.once("error", () => undefined);
+  try {
+    // The child is still blocked before exec. Signal the exact ChildProcess
+    // first; closing stdin first would turn EOF into a competing release path.
+    child.kill("SIGKILL");
+  } catch {
+    // Terminal-state readback below is authoritative for this exact handle.
+  }
+  const exited = await Promise.race([
+    terminal,
+    delay(timeoutMs, false, { ref: false }),
+  ]);
+  const confirmedTerminal =
+    exited === true
+    && (child.exitCode !== null || child.signalCode !== null);
+  if (confirmedTerminal) child.stdin?.end();
+  return confirmedTerminal;
+}
+
+async function terminateRuntimeServiceWithWindowsTestJobCustody(
+  record: RuntimeServiceRecord,
+): Promise<LocalServiceTerminationResult | null> {
+  const custody = record.windowsJobCustody;
+  if (process.platform !== "win32") return null;
+  if (!custody) {
+    if (
+      record.windowsJobCustodyRequired
+      && record.windowsJobCustodyGateState === "blocked"
+      && record.child
+    ) {
+      const confirmedTerminal = await terminateBlockedWindowsTestRuntimeChild(record.child);
+      return {
+        pid: normalizeLocalServicePid(record.child.pid),
+        attempted: true,
+        confirmedStopped: confirmedTerminal,
+        outcome: confirmedTerminal ? "terminated" : "still_running",
+        ...(!confirmedTerminal
+          ? { error: "windows_test_job_custody_unavailable_blocked_child_retained" }
+          : {}),
+      };
+    }
+    return record.windowsJobCustodyRequired
+      ? {
+          pid: normalizeLocalServicePid(record.child?.pid),
+          attempted: false,
+          confirmedStopped: false,
+          outcome: "untrusted_identity",
+          error: "windows_test_job_custody_required_but_unavailable",
+        }
+      : null;
+  }
+
+  const rootPid = normalizeLocalServicePid(record.child?.pid);
+  if (
+    rootPid === null
+    || rootPid === process.pid
+    || custody.serviceId !== record.id
+    || custody.rootPid !== rootPid
+  ) {
+    return {
+      pid: rootPid,
+      attempted: false,
+      confirmedStopped: false,
+      outcome: "untrusted_identity",
+      error: "windows_test_job_custody_identity_mismatch",
+    };
+  }
+
+  const checkpointedReceipt = record.windowsJobTerminationReceipt;
+  if (checkpointedReceipt) {
+    const checkpointMatches =
+      checkpointedReceipt.authority === "job_object_kernel"
+      && checkpointedReceipt.authoritative === true
+      && checkpointedReceipt.serviceId === record.id
+      && checkpointedReceipt.rootPid === rootPid
+      && checkpointedReceipt.activeProcessesAfter === 0;
+    if (!checkpointMatches) {
+      return {
+        pid: rootPid,
+        attempted: false,
+        confirmedStopped: false,
+        outcome: "untrusted_identity",
+        error: "windows_test_job_termination_receipt_identity_mismatch",
+      };
+    }
+    return {
+      pid: rootPid,
+      attempted: false,
+      confirmedStopped: true,
+      outcome: "terminated",
+    };
+  }
+
+  const termination = await reapWindowsTestProcessTree({
+    rootPid,
+    ownerMarkers: [],
+    timeoutMs: 8_000,
+    jobCustody: custody,
+  });
+  const receipt = termination.jobReceipt;
+  const receiptMatches =
+    receipt?.authority === "job_object_kernel"
+    && receipt.authoritative === true
+    && receipt.serviceId === record.id
+    && receipt.rootPid === rootPid
+    && receipt.activeProcessesAfter === 0;
+  if (termination.confirmedStopped && receiptMatches) {
+    record.windowsJobTerminationReceipt = receipt;
+    return {
+      pid: rootPid,
+      attempted: true,
+      confirmedStopped: true,
+      outcome: "terminated",
+    };
+  }
+
+  return {
+    pid: rootPid,
+    attempted: termination.attempted,
+    confirmedStopped: false,
+    outcome: termination.reason === "job_terminate_unconfirmed"
+      ? "still_running"
+      : "untrusted_identity",
+    error: termination.reason,
+  };
+}
+
+export async function resetRuntimeServicesForTests(options?: { preserveProcesses?: boolean }) {
+  const records = [...runtimeServicesById.values()];
+  for (const record of records) {
     clearIdleTimer(record);
+  }
+  if (!options?.preserveProcesses) {
+    for (const record of records) {
+      const childPid = normalizeLocalServicePid(record.child?.pid);
+      const custodyTermination = await terminateRuntimeServiceWithWindowsTestJobCustody(record);
+      const usedWindowsTestJobCustody = custodyTermination !== null;
+      let termination: LocalServiceTerminationResult | ReapWindowsTestProcessTreeResult | null =
+        custodyTermination;
+      if (!termination) {
+        let childIsLive =
+          childPid !== null
+          && record.child?.exitCode === null
+          && record.child?.signalCode === null;
+        let windowsProcessIdentity =
+          process.platform === "win32" && childIsLive
+            ? await readWindowsTestProcessIdentity(childPid!, 5_000).catch(() => null)
+            : null;
+        if (process.platform === "win32" && childIsLive && !windowsProcessIdentity) {
+          await delay(100);
+          if (record.child?.exitCode !== null || record.child?.signalCode !== null) {
+            childIsLive = false;
+          } else {
+            windowsProcessIdentity = await readWindowsTestProcessIdentity(childPid!, 5_000).catch(() => null);
+            if (
+              !windowsProcessIdentity
+              && !isLocalServicePidAlive(childPid!)
+              && !(await runtimeServiceHasObservedDescendantsForTestCleanup(record))
+            ) {
+              childIsLive = false;
+            }
+          }
+          if (childIsLive && !windowsProcessIdentity) {
+            throw new Error(
+              "Test runtime service process termination could not be verified (identity_unavailable); tracking was retained.",
+            );
+          }
+        }
+        termination =
+          process.platform === "win32" && childIsLive
+            ? await reapWindowsTestProcessTree({
+                rootPid: childPid!,
+                ownerMarkers: [],
+                expectedRootIdentity: windowsProcessIdentity!,
+                timeoutMs: 8_000,
+              })
+            : await terminateRuntimeServiceProcess(record);
+      }
+      if (
+        !usedWindowsTestJobCustody
+        && termination?.confirmedStopped !== true
+        && record.child
+        && (record.child.exitCode !== null || record.child.signalCode !== null)
+        && !(await runtimeServiceHasObservedDescendantsForTestCleanup(record))
+      ) {
+        termination = testRuntimeServiceNotRunningResult(childPid);
+      }
+      if (termination?.confirmedStopped !== true) {
+        const terminationReason =
+          termination && "reason" in termination
+            ? termination.reason
+            : termination?.outcome ?? "identity_unavailable";
+        throw new Error(
+          `Test runtime service process termination could not be verified (${terminationReason}); tracking was retained.`,
+        );
+      }
+      await removeLocalServiceRegistryRecord(
+        record.serviceKey,
+        record.launchClaim
+          ? { launchClaimNonce: record.launchClaim.generationId }
+          : undefined,
+      );
+      await releaseRuntimeServiceLaunchClaim(record);
+    }
   }
   runtimeServicesById.clear();
   runtimeServicesByReuseKey.clear();
   runtimeServiceLeasesByRun.clear();
-  runtimeProvisionByWorkspace.clear();
 }
 
 function stableStringify(value: unknown): string {
@@ -608,12 +832,11 @@ async function executeProcess(input: {
   };
 }
 
-async function runGit(args: string[], cwd: string, opts?: { env?: NodeJS.ProcessEnv }): Promise<string> {
+async function runGit(args: string[], cwd: string): Promise<string> {
   const proc = await executeProcess({
     command: "git",
     args,
     cwd,
-    env: opts?.env,
   });
   if (proc.code !== 0) {
     throw new Error(proc.stderr.trim() || proc.stdout.trim() || `git ${args.join(" ")} failed`);
@@ -644,40 +867,26 @@ function parseRemoteTrackingRef(ref: string): { remote: string; branch: string }
   return { remote, branch };
 }
 
-export async function refreshRemoteTrackingBaseRef(
-  repoRoot: string,
-  baseRef: string,
-  resolveGitAuth?: GitRemoteAuthProvider | null,
-): Promise<string[]> {
+async function refreshRemoteTrackingBaseRef(repoRoot: string, baseRef: string): Promise<string[]> {
   const remoteTracking = parseRemoteTrackingRef(baseRef);
   if (!remoteTracking) return [];
 
-  const remoteUrl = await runGit(["remote", "get-url", remoteTracking.remote], repoRoot)
-    .then((value) => value.trim() || null)
-    .catch(() => null);
-  if (!remoteUrl) return [];
+  const remoteExists = await runGit(["remote", "get-url", remoteTracking.remote], repoRoot)
+    .then(() => true)
+    .catch(() => false);
+  if (!remoteExists) return [];
 
-  const auth = resolveGitAuth ? await resolveGitAuth(remoteUrl).catch(() => null) : null;
   try {
     await runGit([
-      ...(auth?.configArgs ?? []),
       "fetch",
       "--prune",
       remoteTracking.remote,
       `+refs/heads/${remoteTracking.branch}:refs/remotes/${remoteTracking.remote}/${remoteTracking.branch}`,
-    ], repoRoot, auth ? { env: { ...process.env, ...auth.env } } : undefined);
+    ], repoRoot);
     return [];
   } catch (error) {
-    const rawMessage = error instanceof Error ? error.message : String(error);
-    // Mask URL userinfo (any scheme) and whole URL query strings before the message rides
-    // warnings that reach run logs.
-    const message = rawMessage
-      .replace(/([a-z][a-z0-9+.-]*:\/\/)[^/@\s]+@/gi, "$1***@")
-      .replace(/([a-z][a-z0-9+.-]*:\/\/[^\s"'?]*)\?[^\s"']*/gi, "$1?***");
-    const authNote = auth
-      ? ` The fetch authenticated with ${auth.secretName ? `the ${auth.secretName} company-secret GitHub credential` : "the server-environment GitHub credential"}, which may have been rejected.`
-      : "";
-    return [`Could not refresh base ref ${baseRef} before preparing the execution workspace: ${message}${authNote}`];
+    const message = error instanceof Error ? error.message : String(error);
+    return [`Could not refresh base ref ${baseRef} before preparing the execution workspace: ${message}`];
   }
 }
 
@@ -698,7 +907,6 @@ export async function inspectExecutionWorkspaceBaseDrift(input: {
   baseRef: string | null;
   recordedBaseRefSha?: string | null;
   skipRefresh?: boolean;
-  resolveGitAuth?: GitRemoteAuthProvider | null;
 }): Promise<{
   warnings: string[];
   currentBaseRefSha: string | null;
@@ -709,9 +917,7 @@ export async function inspectExecutionWorkspaceBaseDrift(input: {
     return { warnings: [], currentBaseRefSha: null, branchBaseRefSha: null };
   }
 
-  const warnings = input.skipRefresh
-    ? []
-    : await refreshRemoteTrackingBaseRef(input.repoRoot, baseRef, input.resolveGitAuth);
+  const warnings = input.skipRefresh ? [] : await refreshRemoteTrackingBaseRef(input.repoRoot, baseRef);
   const currentBaseRefSha = await resolveBaseRefSha(input.repoRoot, baseRef);
   if (!currentBaseRefSha) {
     warnings.push(`Could not resolve base ref ${baseRef} while checking execution workspace freshness.`);
@@ -1833,24 +2039,14 @@ export async function ensureGitWorktreeBranchCoherent(input: {
     };
   }
 
-  // A recorded branch that no longer exists anywhere has no commits to lose, so
-  // adopting the clean checked-out branch is trivially forward-only. This is the
-  // steady state left behind when an agent renames its task branch (e.g. to a
-  // feat/* PR branch) and the recorded branch was never created or was deleted.
-  const recordedBranchMissingButAdoptable =
-    !evidence.provenance.expectedBranchExists &&
-    evidence.provenance.actualBranchExists === true &&
-    evidence.provenance.registeredBranchMatchesHead;
   if (
     input.enableWorkspaceBranchReconcileForward === true &&
+    evidence.provenance.ancestryVerdict === "ancestor" &&
+    !evidence.provenance.sameHead &&
     evidence.cleanliness === "clean" &&
-    currentBranch &&
-    ((evidence.provenance.ancestryVerdict === "ancestor" && !evidence.provenance.sameHead) ||
-      recordedBranchMissingButAdoptable)
+    currentBranch
   ) {
-    const reason = evidence.provenance.expectedBranchExists
-      ? "Automatic forward reconciliation: recorded branch is an ancestor of the checked-out branch."
-      : "Automatic forward reconciliation: the recorded branch no longer exists, so Paperclip adopted the clean checked-out branch.";
+    const reason = "Automatic forward reconciliation: recorded branch is an ancestor of the checked-out branch.";
     if (input.executionWorkspaceId && input.persistForwardReconcile !== false) {
       if (!input.db) {
         evidence.safeRepair.reason = "forward reconciliation requires database access to update the execution workspace record";
@@ -2055,10 +2251,9 @@ export async function ensureGitWorktreeBranchCoherent(input: {
 async function resolveAuthoritativeBaseRef(
   repoRoot: string,
   configuredBaseRef: string | null,
-  resolveGitAuth?: GitRemoteAuthProvider | null,
 ): Promise<{ baseRef: string; warnings: string[]; refreshed: boolean }> {
   const warnings: string[] = [];
-  const detectOrHead = async () => (await detectDefaultBranch(repoRoot, resolveGitAuth)) ?? "HEAD";
+  const detectOrHead = async () => (await detectDefaultBranch(repoRoot)) ?? "HEAD";
 
   const configured = configuredBaseRef?.trim();
   if (!configured || configured === "HEAD") {
@@ -2073,7 +2268,7 @@ async function resolveAuthoritativeBaseRef(
     const remoteCandidate = `origin/${configured}`;
     // Refresh here and keep the warnings; the caller skips its own refresh of
     // the returned ref (see `refreshed`) so we never fetch the same ref twice.
-    warnings.push(...await refreshRemoteTrackingBaseRef(repoRoot, remoteCandidate, resolveGitAuth));
+    warnings.push(...await refreshRemoteTrackingBaseRef(repoRoot, remoteCandidate));
     if (await resolveBaseRefSha(repoRoot, remoteCandidate)) {
       return { baseRef: remoteCandidate, warnings, refreshed: true };
     }
@@ -2244,12 +2439,9 @@ async function isGitCheckout(cwd: string): Promise<boolean> {
   return Boolean(await runGit(["rev-parse", "--git-dir"], cwd).catch(() => null));
 }
 
-async function detectDefaultBranch(
-  repoRoot: string,
-  resolveGitAuth?: GitRemoteAuthProvider | null,
-): Promise<string | null> {
+async function detectDefaultBranch(repoRoot: string): Promise<string | null> {
   const originMasterRef = "origin/master";
-  await refreshRemoteTrackingBaseRef(repoRoot, originMasterRef, resolveGitAuth);
+  await refreshRemoteTrackingBaseRef(repoRoot, originMasterRef);
   if (await resolveBaseRefSha(repoRoot, originMasterRef)) {
     return originMasterRef;
   }
@@ -2261,7 +2453,7 @@ async function detectDefaultBranch(
       repoRoot,
     );
     if (remoteHead) {
-      await refreshRemoteTrackingBaseRef(repoRoot, remoteHead, resolveGitAuth);
+      await refreshRemoteTrackingBaseRef(repoRoot, remoteHead);
       if (await resolveBaseRefSha(repoRoot, remoteHead)) return remoteHead;
     }
   } catch {
@@ -2271,7 +2463,7 @@ async function detectDefaultBranch(
   // Fallback: check for common default branch names on the remote
   for (const candidate of ["origin/master", "origin/main", "main", "master"]) {
     try {
-      await refreshRemoteTrackingBaseRef(repoRoot, candidate, resolveGitAuth);
+      await refreshRemoteTrackingBaseRef(repoRoot, candidate);
       await runGit(["rev-parse", "--verify", `${candidate}^{commit}`], repoRoot);
       return candidate;
     } catch {
@@ -2426,33 +2618,6 @@ export function formatManagedGitWorktreeBranchInspection(input: ManagedGitWorktr
   };
 }
 
-async function terminateChildProcess(child: ChildProcess) {
-  if (!child.pid) return;
-  if (process.platform === "win32") {
-    // `child` is the shell wrapper (`spawn(shell, ["-lc", command], ...)`), not
-    // the real service process -- a bare SIGTERM to this one pid leaves the
-    // actual command (e.g. the node process a service's `command` starts)
-    // running as an orphan with the port still held. terminateLocalService
-    // already does a trusted, tree-aware Windows kill (double taskkill /T
-    // attempt with polling) for exactly this shape of process; reuse it
-    // instead of a single-pid signal that only reaches the wrapper.
-    await terminateLocalService(
-      { pid: child.pid, processGroupId: child.pid },
-      { trustedPid: true },
-    );
-    return;
-  }
-  try {
-    process.kill(-child.pid, "SIGTERM");
-    return;
-  } catch {
-    // Fall through to the direct child kill.
-  }
-  if (!child.killed) {
-    child.kill("SIGTERM");
-  }
-}
-
 function buildWorkspaceCommandEnv(input: {
   base: ExecutionWorkspaceInput;
   repoRoot: string;
@@ -2486,7 +2651,15 @@ function buildWorkspaceCommandEnv(input: {
 }
 
 function quoteShellArg(value: string) {
-  return shellQuotePath(value);
+  return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+function resolveWorkspaceShellPath(value: string) {
+  if (process.platform !== "win32") return value;
+  const normalized = path.resolve(value).replaceAll("\\", "/");
+  const driveMatch = normalized.match(/^([A-Za-z]):\/(.*)$/s);
+  if (!driveMatch) return normalized;
+  return `/${driveMatch[1]!.toLowerCase()}/${driveMatch[2]}`;
 }
 
 function resolveRepoManagedWorkspaceCommand(command: string, repoRoot: string) {
@@ -2503,38 +2676,17 @@ function resolveRepoManagedWorkspaceCommand(command: string, repoRoot: string) {
     const repoManagedPath = path.join(repoRoot, relativePath.slice(2));
     if (!existsSync(repoManagedPath)) continue;
 
-    const prefix = match.groups.prefix ?? "";
+    const configuredPrefix = match.groups.prefix ?? "";
+    const interpreter = configuredPrefix.trim().toLowerCase();
+    const prefix =
+      process.platform === "win32" && (interpreter === "bash" || interpreter === "sh")
+        ? `${quoteShellArg(resolveWorkspaceShellPath(resolveShell()))} `
+        : configuredPrefix;
     const suffix = match.groups.suffix ?? "";
-    // Resolve an explicit bash/sh prefix to the same shell used by Paperclip.
-    // On Windows, PATH lookup can otherwise select the WSL launcher instead of
-    // Git Bash, which cannot see the host worktree path.
-    const shellPrefix = prefix ? `${quoteShellArg(resolveShell())} ` : "";
-    return `${shellPrefix}${quoteShellArg(repoManagedPath)}${suffix}`;
+    return `${prefix}${quoteShellArg(resolveWorkspaceShellPath(repoManagedPath))}${suffix}`;
   }
 
   return command;
-}
-
-function buildWorkspaceShellEnv(env: NodeJS.ProcessEnv, shell: string): NodeJS.ProcessEnv {
-  if (process.platform !== "win32") return env;
-  const shellName = path.basename(shell).toLowerCase();
-  if (!["bash", "bash.exe", "sh", "sh.exe", "zsh", "zsh.exe"].includes(shellName)) return env;
-  // MSYS argument conversion rewrites the `-c` command string before Bash sees it,
-  // turning `/c/...` into `C:/...`. Keep the explicit Git-Bash path produced by
-  // shellQuotePath intact so repo-managed scripts remain executable on Windows.
-  const shellDir = path.dirname(shell);
-  const shellRoot = path.resolve(shellDir, "..", "..");
-  const shellPathEntries = [
-    shellDir,
-    path.join(shellRoot, "bin"),
-    path.join(shellRoot, "usr", "bin"),
-    env.PATH,
-  ].filter((entry): entry is string => Boolean(entry));
-  return {
-    ...env,
-    PATH: shellPathEntries.join(";"),
-    MSYS_NO_PATHCONV: "1",
-  };
 }
 
 async function runWorkspaceCommand(input: {
@@ -2543,17 +2695,14 @@ async function runWorkspaceCommand(input: {
   cwd: string;
   env: NodeJS.ProcessEnv;
   label: string;
-  onLog?: (stream: "stdout" | "stderr", chunk: string) => Promise<void>;
 }) {
   const shell = resolveShell();
   const proc = await executeProcess({
     command: shell,
     args: ["-c", input.resolvedCommand ?? input.command],
     cwd: input.cwd,
-    env: buildWorkspaceShellEnv(input.env, shell),
+    env: resolveShellEnvironment(shell, input.env),
   });
-  if (proc.stdout && input.onLog) await input.onLog("stdout", `[runtime-provision] ${proc.stdout}`);
-  if (proc.stderr && input.onLog) await input.onLog("stderr", `[runtime-provision] ${proc.stderr}`);
   if (proc.code === 0) return;
 
   const details = [proc.stderr.trim(), proc.stdout.trim()].filter(Boolean).join("\n");
@@ -2629,7 +2778,7 @@ async function recordGitOperation(
 async function recordWorkspaceCommandOperation(
   recorder: WorkspaceOperationRecorder | null | undefined,
   input: {
-    phase: "workspace_provision" | "workspace_runtime_provision" | "workspace_teardown";
+    phase: "workspace_provision" | "workspace_teardown";
     command: string;
     resolvedCommand?: string;
     cwd: string;
@@ -2637,7 +2786,6 @@ async function recordWorkspaceCommandOperation(
     label: string;
     metadata?: Record<string, unknown> | null;
     successMessage?: string | null;
-    onLog?: (stream: "stdout" | "stderr", chunk: string) => Promise<void>;
   },
 ) {
   if (!recorder) {
@@ -2659,13 +2807,11 @@ async function recordWorkspaceCommandOperation(
         command: shell,
         args: ["-c", input.resolvedCommand ?? input.command],
         cwd: input.cwd,
-        env: buildWorkspaceShellEnv(input.env, shell),
+        env: resolveShellEnvironment(shell, input.env),
       });
       stdout = result.stdout;
       stderr = result.stderr;
       code = result.code;
-      if (result.stdout && input.onLog) await input.onLog("stdout", `[runtime-provision] ${result.stdout}`);
-      if (result.stderr && input.onLog) await input.onLog("stderr", `[runtime-provision] ${result.stderr}`);
       return {
         status: result.code === 0 ? "succeeded" : "failed",
         exitCode: result.code,
@@ -2795,7 +2941,6 @@ export async function realizeExecutionWorkspace(input: {
   enableWorkspaceBranchReconcileForward?: boolean;
   enableWorkspaceDirtyQuarantineRepair?: boolean;
   recorder?: WorkspaceOperationRecorder | null;
-  resolveGitAuth?: GitRemoteAuthProvider | null;
 }): Promise<RealizedExecutionWorkspace> {
   const rawStrategy = parseObject(input.config.workspaceStrategy);
   const strategyType = asString(rawStrategy.type, "project_primary");
@@ -2834,10 +2979,10 @@ export async function realizeExecutionWorkspace(input: {
     baseRef,
     warnings: baseRefResolutionWarnings,
     refreshed: baseRefAlreadyRefreshed,
-  } = await resolveAuthoritativeBaseRef(repoRoot, configuredBaseRef, input.resolveGitAuth);
+  } = await resolveAuthoritativeBaseRef(repoRoot, configuredBaseRef);
   const baseRefreshWarnings = [
     ...baseRefResolutionWarnings,
-    ...(baseRefAlreadyRefreshed ? [] : await refreshRemoteTrackingBaseRef(repoRoot, baseRef, input.resolveGitAuth)),
+    ...(baseRefAlreadyRefreshed ? [] : await refreshRemoteTrackingBaseRef(repoRoot, baseRef)),
   ];
   const currentBaseRefSha = await resolveBaseRefSha(repoRoot, baseRef);
 
@@ -3060,7 +3205,6 @@ export async function ensurePersistedExecutionWorkspaceAvailable(input: {
     metadata?: Record<string, unknown> | null;
     config?: {
       provisionCommand?: string | null;
-      runtimeProvisionCommand?: string | null;
     } | null;
   };
   issue: ExecutionWorkspaceIssueRef | null;
@@ -3069,7 +3213,6 @@ export async function ensurePersistedExecutionWorkspaceAvailable(input: {
   enableWorkspaceBranchReconcileForward?: boolean;
   enableWorkspaceDirtyQuarantineRepair?: boolean;
   recorder?: WorkspaceOperationRecorder | null;
-  resolveGitAuth?: GitRemoteAuthProvider | null;
 }): Promise<RealizedExecutionWorkspace | null> {
   const cwd = asString(input.workspace.cwd ?? input.workspace.providerRef, "").trim();
   if (!cwd) return null;
@@ -3147,7 +3290,7 @@ export async function ensurePersistedExecutionWorkspaceAvailable(input: {
       );
     }
     const baseRefreshWarnings = reuseBaseRef
-      ? await refreshRemoteTrackingBaseRef(repoRoot, reuseBaseRef, input.resolveGitAuth)
+      ? await refreshRemoteTrackingBaseRef(repoRoot, reuseBaseRef)
       : [];
     const currentBaseRefSha = reuseBaseRef ? await resolveBaseRefSha(repoRoot, reuseBaseRef) : null;
     const refresh = reuseBaseRef && currentBaseRefSha
@@ -3198,9 +3341,7 @@ export async function ensurePersistedExecutionWorkspaceAvailable(input: {
   await fs.mkdir(path.dirname(worktreePath), { recursive: true });
   await runGit(["worktree", "prune"], repoRoot).catch(() => {});
   const restoreBaseRef = input.workspace.baseRef ?? input.base.repoRef ?? null;
-  const restoreRefreshWarnings = restoreBaseRef
-    ? await refreshRemoteTrackingBaseRef(repoRoot, restoreBaseRef, input.resolveGitAuth)
-    : [];
+  const restoreRefreshWarnings = restoreBaseRef ? await refreshRemoteTrackingBaseRef(repoRoot, restoreBaseRef) : [];
   const restoreCurrentBaseRefSha = restoreBaseRef ? await resolveBaseRefSha(repoRoot, restoreBaseRef) : null;
 
   let created = false;
@@ -3287,106 +3428,6 @@ export async function ensurePersistedExecutionWorkspaceAvailable(input: {
   };
 }
 
-export async function acquireGitWorktreeCleanupLock(worktreePath: string) {
-  const branchRef = await runGit(["symbolic-ref", "--quiet", "HEAD"], worktreePath).catch(() => null);
-  const rawLocks = await Promise.all([
-    runGit(["rev-parse", "--git-path", "index.lock"], worktreePath)
-      .then((lockPath) => ({ kind: "index" as const, lockPath })),
-    runGit(["rev-parse", "--git-path", "HEAD.lock"], worktreePath)
-      .then((lockPath) => ({ kind: "head" as const, lockPath })),
-    ...(branchRef
-      ? [runGit(["rev-parse", "--git-path", `${branchRef}.lock`], worktreePath)
-          .then((lockPath) => ({ kind: "branch" as const, lockPath }))]
-      : []),
-  ]);
-  const locks = [...new Map(rawLocks.map(({ kind, lockPath }) => {
-    const resolvedLockPath = path.isAbsolute(lockPath)
-      ? lockPath
-      : path.resolve(worktreePath, lockPath);
-    return [resolvedLockPath, { kind, lockPath: resolvedLockPath }];
-  })).values()];
-  const lockHandles: Array<{
-    handle: fs.FileHandle;
-    kind: "index" | "head" | "branch";
-    lockPath: string;
-  }> = [];
-
-  async function releaseLocks(kind?: "branch") {
-    for (let index = lockHandles.length - 1; index >= 0; index -= 1) {
-      const lock = lockHandles[index];
-      if (!lock || (kind && lock.kind !== kind)) continue;
-      lockHandles.splice(index, 1);
-      await lock.handle.close().catch(() => {});
-      await fs.rm(lock.lockPath, { force: true }).catch(() => {});
-    }
-  }
-
-  try {
-    for (const lock of locks) {
-      lockHandles.push({
-        ...lock,
-        handle: await fs.open(lock.lockPath, "wx", 0o600),
-      });
-    }
-  } catch (error) {
-    await releaseLocks();
-    if ((error as NodeJS.ErrnoException).code === "EEXIST") {
-      throw new Error("git worktree cleanup lock is already held");
-    }
-    throw error;
-  }
-
-  return {
-    // Branch deletion must acquire this native ref lock itself. Callers release
-    // only that lock after the guarded worktree removal, while retaining the
-    // index and HEAD locks until the whole cleanup transaction finishes.
-    releaseBranchRefLock: () => releaseLocks("branch"),
-    release: () => releaseLocks(),
-  };
-}
-
-async function deleteGitBranchAtVerifiedTip(input: {
-  repoRoot: string;
-  branchName: string;
-  expectedHeadSha: string;
-  recorder?: WorkspaceOperationRecorder | null;
-  metadata: Record<string, unknown>;
-}) {
-  const commonDirRaw = await runGit(["rev-parse", "--git-common-dir"], input.repoRoot);
-  const commonDir = path.isAbsolute(commonDirRaw)
-    ? commonDirRaw
-    : path.resolve(input.repoRoot, commonDirRaw);
-  const detachedGitDir = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-branch-delete-"));
-  const detachedWorktree = `${detachedGitDir}-worktree`;
-
-  try {
-    // `git branch -d` refuses branches checked out by another worktree and its
-    // ref transaction fails if the tip changes concurrently. A detached HEAD
-    // at the delivered SHA additionally lets squash/cross-branch deliveries
-    // delete only the exact branch history that was verified before cleanup.
-    await Promise.all([
-      fs.writeFile(path.join(detachedGitDir, "HEAD"), `${input.expectedHeadSha}\n`, "utf8"),
-      fs.writeFile(path.join(detachedGitDir, "commondir"), `${commonDir}\n`, "utf8"),
-    ]);
-    await recordGitOperation(input.recorder, {
-      phase: "worktree_cleanup",
-      args: [
-        `--git-dir=${detachedGitDir}`,
-        `--work-tree=${detachedWorktree}`,
-        "branch",
-        "-d",
-        input.branchName,
-      ],
-      cwd: input.repoRoot,
-      metadata: input.metadata,
-      successMessage: `Deleted branch ${input.branchName}\n`,
-      failureLabel: `git branch -d ${input.branchName}`,
-    });
-  } finally {
-    await fs.rm(detachedGitDir, { recursive: true, force: true }).catch(() => {});
-  }
-}
-
 export async function cleanupExecutionWorkspaceArtifacts(input: {
   workspace: {
     id: string;
@@ -3408,11 +3449,6 @@ export async function cleanupExecutionWorkspaceArtifacts(input: {
   cleanupCommand?: string | null;
   teardownCommand?: string | null;
   recorder?: WorkspaceOperationRecorder | null;
-  assertSafeToCleanup?: (() => Promise<void>) | null;
-  beforeBranchDelete?: (() => Promise<void>) | null;
-  expectedBranchHeadSha?: string | null;
-  runCleanupCommands?: boolean;
-  forceWorktreeRemoval?: boolean;
 }) {
   const warnings: string[] = [];
   const workspacePath = input.workspace.providerRef ?? input.workspace.cwd;
@@ -3426,30 +3462,14 @@ export async function cleanupExecutionWorkspaceArtifacts(input: {
     workspace: input.workspace,
     projectWorkspaceCwd: input.projectWorkspace?.cwd ?? null,
   });
-  // Callers can require the workspace to match an assessed snapshot before
-  // cleanup begins. Destructive paths recheck immediately before removal.
-  await input.assertSafeToCleanup?.();
-  let worktreeInstancePointer: WorktreeInstancePointer | null = null;
-  let expectedWorktreeInstanceId: string | null = null;
-  if (input.workspace.providerType === "git_worktree" && workspacePath) {
-    expectedWorktreeInstanceId = deriveWorktreeInstanceId(workspacePath);
-    try {
-      // Capture the pointer before custom cleanup commands can remove the repo-local env file.
-      worktreeInstancePointer = await readWorktreeInstancePointer(workspacePath);
-    } catch (err) {
-      warnings.push(`Could not read worktree instance pointer: ${err instanceof Error ? err.message : String(err)}`);
-    }
-  }
   const createdByRuntime = input.workspace.metadata?.createdByRuntime === true;
-  const cleanupCommands = input.runCleanupCommands === false
-    ? []
-    : [
-        input.cleanupCommand ?? null,
-        input.projectWorkspace?.cleanupCommand ?? null,
-        input.teardownCommand ?? null,
-      ]
-        .map((value) => asString(value, "").trim())
-        .filter(Boolean);
+  const cleanupCommands = [
+    input.cleanupCommand ?? null,
+    input.projectWorkspace?.cleanupCommand ?? null,
+    input.teardownCommand ?? null,
+  ]
+    .map((value) => asString(value, "").trim())
+    .filter(Boolean);
 
   for (const command of cleanupCommands) {
     try {
@@ -3477,25 +3497,6 @@ export async function cleanupExecutionWorkspaceArtifacts(input: {
     }
   }
 
-  if (worktreeInstancePointer && workspacePath && expectedWorktreeInstanceId) {
-    try {
-      const result = await cleanupWorktreeInstanceArtifacts({
-        pointer: worktreeInstancePointer,
-        workspaceId: input.workspace.id,
-        workspacePath,
-        expectedInstanceId: expectedWorktreeInstanceId,
-        expectedInstanceRoot:
-          typeof input.workspace.metadata?.[WORKTREE_INSTANCE_ROOT_METADATA_KEY] === "string"
-            ? input.workspace.metadata[WORKTREE_INSTANCE_ROOT_METADATA_KEY]
-            : null,
-        recorder: input.recorder,
-      });
-      if (result.status === "refused") warnings.push(result.warning);
-    } catch (err) {
-      warnings.push(`Failed to clean worktree instance: ${err instanceof Error ? err.message : String(err)}`);
-    }
-  }
-
   if (input.workspace.providerType === "git_worktree" && workspacePath) {
     const worktreeExists = await directoryExists(workspacePath);
     if (worktreeExists) {
@@ -3503,15 +3504,9 @@ export async function cleanupExecutionWorkspaceArtifacts(input: {
         warnings.push(`Could not resolve git repo root for "${workspacePath}".`);
       } else {
         try {
-          await input.assertSafeToCleanup?.();
           await recordGitOperation(input.recorder, {
             phase: "worktree_cleanup",
-            args: [
-              "worktree",
-              "remove",
-              ...(input.forceWorktreeRemoval === false ? [] : ["--force"]),
-              workspacePath,
-            ],
+            args: ["worktree", "remove", "--force", workspacePath],
             cwd: repoRoot,
             metadata: {
               workspaceId: input.workspace.id,
@@ -3532,31 +3527,19 @@ export async function cleanupExecutionWorkspaceArtifacts(input: {
         warnings.push(`Could not resolve git repo root to delete branch "${input.workspace.branchName}".`);
       } else {
         try {
-          await input.beforeBranchDelete?.();
-          const metadata = {
-            workspaceId: input.workspace.id,
-            workspacePath,
-            branchName: input.workspace.branchName,
-            cleanupAction: "branch_delete",
-          };
-          if (input.expectedBranchHeadSha) {
-            await deleteGitBranchAtVerifiedTip({
-              repoRoot,
+          await recordGitOperation(input.recorder, {
+            phase: "worktree_cleanup",
+            args: ["branch", "-d", input.workspace.branchName],
+            cwd: repoRoot,
+            metadata: {
+              workspaceId: input.workspace.id,
+              workspacePath,
               branchName: input.workspace.branchName,
-              expectedHeadSha: input.expectedBranchHeadSha,
-              recorder: input.recorder,
-              metadata,
-            });
-          } else {
-            await recordGitOperation(input.recorder, {
-              phase: "worktree_cleanup",
-              args: ["branch", "-d", input.workspace.branchName],
-              cwd: repoRoot,
-              metadata,
-              successMessage: `Deleted branch ${input.workspace.branchName}\n`,
-              failureLabel: `git branch -d ${input.workspace.branchName}`,
-            });
-          }
+              cleanupAction: "branch_delete",
+            },
+            successMessage: `Deleted branch ${input.workspace.branchName}\n`,
+            failureLabel: `git branch -d ${input.workspace.branchName}`,
+          });
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err);
           warnings.push(`Skipped deleting branch "${input.workspace.branchName}": ${message}`);
@@ -3575,7 +3558,6 @@ export async function cleanupExecutionWorkspaceArtifacts(input: {
     if (containsProjectWorkspace) {
       warnings.push(`Refusing to remove path "${workspacePath}" because it contains the project workspace.`);
     } else {
-      await input.assertSafeToCleanup?.();
       await fs.rm(resolvedWorkspacePath, { recursive: true, force: true });
       if (input.recorder) {
         await input.recorder.recordOperation({
@@ -3956,6 +3938,7 @@ function toPersistedWorkspaceRuntimeService(record: RuntimeServiceRecord): typeo
     url: record.url,
     provider: record.provider,
     providerRef: record.providerRef,
+    processGroupId: record.processGroupId,
     ownerAgentId: record.ownerAgentId,
     startedByRunId: record.startedByRunId,
     lastUsedAt: new Date(record.lastUsedAt),
@@ -3992,6 +3975,7 @@ async function persistRuntimeServiceRecord(db: Db | undefined, record: RuntimeSe
         url: values.url,
         provider: values.provider,
         providerRef: values.providerRef,
+        processGroupId: values.processGroupId,
         ownerAgentId: values.ownerAgentId,
         startedByRunId: values.startedByRunId,
         lastUsedAt: values.lastUsedAt,
@@ -4141,6 +4125,7 @@ export function normalizeAdapterManagedRuntimeServices(input: {
 
 type StartLocalRuntimeServiceInput = {
   db?: Db;
+  registryDb?: Db;
   runId: string;
   leaseRunId?: string | null;
   startedByRunId?: string | null;
@@ -4151,166 +4136,12 @@ type StartLocalRuntimeServiceInput = {
   adapterEnv: Record<string, string>;
   service: Record<string, unknown>;
   onLog?: (stream: "stdout" | "stderr", chunk: string) => Promise<void>;
-  runtimeProvisionCommand?: string | null;
-  recorder?: WorkspaceOperationRecorder | null;
-  provisionCoordinator?: RuntimeProvisionCoordinator;
-  preparedProvisioningRecord?: RuntimeServiceRecord | null;
-  runtimeServiceId?: string;
   reuseKey: string | null;
   scopeType: "project_workspace" | "execution_workspace" | "run" | "agent";
   scopeId: string | null;
+  deferLaunchClaimRelease?: boolean;
+  onSpawnRegistered?: (record: RuntimeServiceRecord) => void;
 };
-
-type RuntimeProvisionCoordinator = {
-  promise: Promise<void> | null;
-};
-
-function createRuntimeProvisionCoordinator(): RuntimeProvisionCoordinator {
-  return { promise: null };
-}
-
-function readRuntimeProvisionCommand(config: Record<string, unknown>) {
-  const workspaceStrategy = parseObject(config.workspaceStrategy);
-  return asString(
-    config.runtimeProvisionCommand,
-    asString(workspaceStrategy.runtimeProvisionCommand, ""),
-  ).trim();
-}
-
-export function resolveRuntimeProvisionCommand(input: {
-  config: Record<string, unknown>;
-  workspace: RealizedExecutionWorkspace;
-}) {
-  const configuredCommand = readRuntimeProvisionCommand(input.config);
-  if (configuredCommand) return configuredCommand;
-
-  if (input.workspace.strategy !== "git_worktree") return "";
-
-  const stateDir = path.join(input.workspace.cwd, ".paperclip");
-  const pendingMarker = path.join(stateDir, "seed-pending");
-  const completeMarker = path.join(stateDir, "seed-complete");
-  const provisionScript = path.join(
-    input.workspace.baseCwd,
-    "scripts",
-    "provision-worktree-runtime.sh",
-  );
-  if (
-    !existsSync(pendingMarker)
-    || existsSync(completeMarker)
-    || !existsSync(provisionScript)
-  ) {
-    return "";
-  }
-
-  return "bash ./scripts/provision-worktree-runtime.sh";
-}
-
-function runtimeProvisionWorkspaceKey(input: StartLocalRuntimeServiceInput) {
-  return input.executionWorkspaceId
-    ? `execution-workspace:${input.executionWorkspaceId}`
-    : input.workspace.workspaceId
-      ? `project-workspace:${input.workspace.workspaceId}`
-      : `cwd:${path.resolve(input.workspace.cwd)}`;
-}
-
-async function runRuntimeProvisionWithWorkspaceMutex(input: StartLocalRuntimeServiceInput) {
-  const command = asString(input.runtimeProvisionCommand, "").trim();
-  if (!command) return;
-
-  const workspaceKey = runtimeProvisionWorkspaceKey(input);
-  const existing = runtimeProvisionByWorkspace.get(workspaceKey);
-  if (existing) {
-    await existing;
-    return;
-  }
-
-  const recorder = input.recorder ?? (input.db
-    ? workspaceOperationService(input.db).createRecorder({
-        companyId: input.agent.companyId,
-        heartbeatRunId: input.startedByRunId === undefined ? input.runId : input.startedByRunId,
-        executionWorkspaceId: input.executionWorkspaceId ?? null,
-        issueId: input.issue?.id ?? null,
-      })
-    : null);
-  const resolvedCommand = resolveRepoManagedWorkspaceCommand(command, input.workspace.baseCwd);
-  const promise = recordWorkspaceCommandOperation(recorder, {
-    phase: "workspace_runtime_provision",
-    command,
-    resolvedCommand,
-    cwd: input.workspace.cwd,
-    env: buildWorkspaceCommandEnv({
-      base: input.workspace,
-      repoRoot: input.workspace.baseCwd,
-      worktreePath: input.workspace.cwd,
-      branchName: input.workspace.branchName ?? "",
-      issue: input.issue,
-      agent: input.agent,
-      created: input.workspace.created,
-    }),
-    label: `Runtime provision command "${command}"`,
-    metadata: {
-      executionWorkspaceId: input.executionWorkspaceId ?? null,
-      projectWorkspaceId: input.workspace.workspaceId,
-      serviceName: asString(input.service.name, "service"),
-      resolvedCommand: resolvedCommand === command ? null : resolvedCommand,
-    },
-    successMessage: `Provisioned runtime dependencies for ${input.workspace.cwd}\n`,
-    onLog: input.onLog,
-  }).then(() => undefined);
-
-  runtimeProvisionByWorkspace.set(workspaceKey, promise);
-  try {
-    await promise;
-  } finally {
-    if (runtimeProvisionByWorkspace.get(workspaceKey) === promise) {
-      runtimeProvisionByWorkspace.delete(workspaceKey);
-    }
-  }
-}
-
-function createProvisioningRuntimeServiceRecord(
-  input: StartLocalRuntimeServiceInput,
-  identity: ReturnType<typeof resolveRuntimeServiceReuseIdentity>,
-): RuntimeServiceRecord {
-  const nowIso = new Date().toISOString();
-  const id = input.runtimeServiceId ?? randomUUID();
-  return {
-    id,
-    companyId: input.agent.companyId,
-    projectId: input.workspace.projectId,
-    projectWorkspaceId: input.workspace.workspaceId,
-    executionWorkspaceId: input.executionWorkspaceId ?? null,
-    issueId: input.issue?.id ?? null,
-    serviceName: identity.serviceName,
-    status: "provisioning",
-    lifecycle: identity.lifecycle,
-    scopeType: input.scopeType,
-    scopeId: input.scopeId,
-    reuseKey: input.reuseKey,
-    command: identity.command,
-    cwd: identity.serviceCwd,
-    port: identity.identityPort,
-    url: null,
-    provider: "local_process",
-    providerRef: null,
-    ownerAgentId: input.agent.id ?? null,
-    startedByRunId: input.startedByRunId === undefined ? input.runId : input.startedByRunId,
-    lastUsedAt: nowIso,
-    startedAt: nowIso,
-    stoppedAt: null,
-    stopPolicy: parseObject(input.service.stopPolicy),
-    healthStatus: "unknown",
-    reused: false,
-    db: input.db,
-    child: null,
-    leaseRunIds: new Set(),
-    idleTimer: null,
-    envFingerprint: identity.envFingerprint,
-    serviceKey: `runtime-provision:${runtimeProvisionWorkspaceKey(input)}:${id}`,
-    profileKind: "workspace-runtime",
-    processGroupId: null,
-  };
-}
 
 async function spawnLocalRuntimeService(input: StartLocalRuntimeServiceInput): Promise<LocalRuntimeServiceStart> {
   const leaseRunId = input.leaseRunId === undefined ? input.runId : input.leaseRunId;
@@ -4401,7 +4232,7 @@ async function spawnLocalRuntimeService(input: StartLocalRuntimeServiceInput): P
       reuseKey: input.reuseKey,
     },
   });
-  const adoptedRecord = await findAdoptableLocalService({
+  const launchGate = await claimLocalServiceLaunchOrAdopt({
     serviceKey,
     profileKind: "workspace-runtime",
     serviceName,
@@ -4410,12 +4241,21 @@ async function spawnLocalRuntimeService(input: StartLocalRuntimeServiceInput): P
     envFingerprint: serviceIdentityFingerprint,
     port: port ?? identityPort,
     url,
+  }, {
+    evidenceLabel: `Runtime service "${serviceName}"`,
+    // Windows registry identities remain advisory without launch-time Job
+    // Object custody. POSIX reconciliation may remove a previously recorded
+    // service only after the native supervisor proves its process group dead.
+    requireRegistryAbsentBeforeReconciliation: process.platform === "win32",
   });
+  const adoptedRecord = launchGate.adopted;
+  let launchClaim = launchGate.launchClaim;
   if (adoptedRecord) {
     const adoptedUrl = adoptedRecord.url ?? url;
     if (!(await isRuntimeServiceUrlHealthy(adoptedUrl, { serviceName, command }))) {
-      await terminateLocalService(adoptedRecord);
-      await removeLocalServiceRegistryRecord(adoptedRecord.serviceKey);
+      throw new Error(
+        `Runtime service "${serviceName}" has an unhealthy restart-adopted registry process, but the registry lacks OS-stable process birth authority. The process and registry were retained for human review.`,
+      );
     } else {
       return {
         record: {
@@ -4453,62 +4293,115 @@ async function spawnLocalRuntimeService(input: StartLocalRuntimeServiceInput): P
           serviceKey,
           profileKind: "workspace-runtime",
           processGroupId: adoptedRecord.processGroupId ?? null,
+          launchClaim: null,
         },
         readiness: Promise.resolve(),
       };
     }
   }
-  if (identityPort) {
+  if (!launchClaim) {
+    throw new Error(
+      `Runtime service "${serviceName}" launch gate returned without adoption or an exclusive claim.`,
+    );
+  }
+  try {
+    if (identityPort) {
       const ownerPid = await readLocalServicePortOwner(identityPort);
-    if (ownerPid) {
-      const ownerCwd = await readLocalServiceProcessCwd(ownerPid);
-      const ownerIsInWorkspace = ownerCwd
-        ? await isLocalServiceProcessInWorkspace(ownerCwd, serviceCwd)
-        : null;
-      const ownerDescription = ownerCwd ? `pid ${ownerPid} (cwd: ${ownerCwd})` : `pid ${ownerPid} (cwd unavailable)`;
-      if (ownerIsInWorkspace === false) {
+      if (ownerPid) {
+        const ownerCwd = await readLocalServiceProcessCwd(ownerPid);
+        const ownerIsInWorkspace = ownerCwd
+          ? await isLocalServiceProcessInWorkspace(ownerCwd, serviceCwd)
+          : null;
+        const ownerDescription = ownerCwd ? `pid ${ownerPid} (cwd: ${ownerCwd})` : `pid ${ownerPid} (cwd unavailable)`;
+        if (ownerIsInWorkspace === false) {
+          throw new Error(
+            `Runtime service "${serviceName}" could not start because port ${identityPort} has a cross-workspace port conflict with ${ownerDescription}; requested workspace: ${serviceCwd}. Stop the other service or configure a different port.`,
+          );
+        }
         throw new Error(
-          `Runtime service "${serviceName}" could not start because port ${identityPort} has a cross-workspace port conflict with ${ownerDescription}; requested workspace: ${serviceCwd}. Stop the other service or configure a different port.`,
+          `Runtime service "${serviceName}" could not start because port ${identityPort} is already in use by ${ownerDescription}`,
         );
       }
-      throw new Error(
-        `Runtime service "${serviceName}" could not start because port ${identityPort} is already in use by ${ownerDescription}`,
+    }
+
+    await ensureServerWorkspaceLinksCurrent(serviceCwd, {
+      onLog: input.onLog,
+    });
+  } catch (error) {
+    try {
+      await launchClaim?.release();
+      launchClaim = null;
+    } catch (cleanupError) {
+      throw new AggregateError(
+        [error, cleanupError],
+        `Runtime service "${serviceName}" failed before spawn and its exact launch claim could not be released.`,
       );
     }
+    throw error;
   }
 
-  await ensureServerWorkspaceLinksCurrent(serviceCwd, {
-    onLog: input.onLog,
-  });
-
+  const runtimeServiceId = stoppedReuseCandidate?.id ?? randomUUID();
+  const nowIso = new Date().toISOString();
   const shell = resolveShell();
-  const child = spawn(shell, ["-lc", command], {
-    cwd: serviceCwd,
-    env,
-    detached: process.platform !== "win32",
-    stdio: ["ignore", "pipe", "pipe"],
-  });
+  // Win32 test runs only: gate the shell on one stdin line before it runs
+  // `command` at all, so Job Object custody (acquired below, right after
+  // spawn) is assigned to the shell BEFORE it can fork the real service --
+  // Windows Job Object membership only propagates to processes CREATED AFTER
+  // assignment, so a child forked during the async custody round-trip would
+  // otherwise escape the job invisibly. `exec` replaces the shell's own
+  // process image (no extra fork), so the already-custodied pid becomes the
+  // real service directly. Gated to test mode -- an always-on warden sidecar
+  // for every real server process is a separate, larger decision this fix
+  // does not make.
+  const useWindowsJobCustodyGate = process.platform === "win32" && process.env.VITEST === "true";
+  const spawnedCommand = useWindowsJobCustodyGate
+    ? `IFS= read -r __paperclip_job_custody_go && [ "$__paperclip_job_custody_go" = "go" ] && exec ${command}`
+    : command;
+  let child: ChildProcess;
+  try {
+    child = spawn(shell, ["-lc", spawnedCommand], {
+      cwd: serviceCwd,
+      env: resolveShellEnvironment(shell, env),
+      detached: process.platform !== "win32",
+      stdio: useWindowsJobCustodyGate ? ["pipe", "pipe", "pipe"] : ["ignore", "pipe", "pipe"],
+    });
+  } catch (error) {
+    try {
+      await launchClaim?.release();
+      launchClaim = null;
+    } catch (cleanupError) {
+      throw new AggregateError(
+        [error, cleanupError],
+        `Runtime service "${serviceName}" spawn failed and its exact launch claim could not be released.`,
+      );
+    }
+    throw error;
+  }
   const spawnErrorPromise = new Promise<never>((_, reject) => {
     child.once("error", (err) => {
       reject(err);
     });
   });
-  let stderrExcerpt = "";
-  let stdoutExcerpt = "";
-  child.stdout?.on("data", async (chunk) => {
-    const text = String(chunk);
-    stdoutExcerpt = (stdoutExcerpt + text).slice(-4096);
-    if (input.onLog) await input.onLog("stdout", `[service:${serviceName}] ${text}`);
+  const prematureExitPromise = new Promise<never>((_, reject) => {
+    child.once("exit", (code, signal) => {
+      reject(new Error(
+        `Runtime service "${serviceName}" exited before readiness completed (code=${code ?? "null"}, signal=${signal ?? "null"})`,
+      ));
+    });
   });
-  child.stderr?.on("data", async (chunk) => {
-    const text = String(chunk);
-    stderrExcerpt = (stderrExcerpt + text).slice(-4096);
-    if (input.onLog) await input.onLog("stderr", `[service:${serviceName}] ${text}`);
-  });
+  // Cleanup can terminate the child before readiness establishes its race.
+  // Attach handlers immediately so that an early exit/error is never reported
+  // as an unhandled rejection; the original promises remain inputs to the race.
+  spawnErrorPromise.catch(() => undefined);
+  prematureExitPromise.catch(() => undefined);
 
-  const nowIso = new Date().toISOString();
+  // A detached POSIX child establishes a process group whose ID is the child
+  // PID. Windows children are not detached; their required test custody is
+  // represented separately below.
+  const spawnedProcessGroupId = process.platform === "win32" ? null : child.pid ?? null;
+  let windowsJobCustody: WindowsTestJobCustody | null = null;
   const record: RuntimeServiceRecord = {
-    id: input.runtimeServiceId ?? stoppedReuseCandidate?.id ?? randomUUID(),
+    id: runtimeServiceId,
     companyId: input.agent.companyId,
     projectId: input.workspace.projectId,
     projectWorkspaceId: input.workspace.workspaceId,
@@ -4534,164 +4427,281 @@ async function spawnLocalRuntimeService(input: StartLocalRuntimeServiceInput): P
     stopPolicy,
     healthStatus: "unknown",
     reused: false,
-    db: input.db,
+    db: input.registryDb ?? input.db,
     child,
+    stopRequested: useWindowsJobCustodyGate,
     leaseRunIds: leaseRunId ? new Set([leaseRunId]) : new Set(),
     idleTimer: null,
     envFingerprint,
     serviceKey,
     profileKind: "workspace-runtime",
-    processGroupId: child.pid ?? null,
+    processGroupId: spawnedProcessGroupId,
+    launchClaim,
+    windowsJobCustody,
+    windowsJobCustodyRequired: useWindowsJobCustodyGate,
+    windowsJobCustodyGateState: useWindowsJobCustodyGate ? "blocked" : undefined,
   };
+  // Register the exact ChildProcess and claim before custody's first await.
+  // A warden denial or timeout therefore remains reachable by reset/retry.
+  registerRuntimeService(input.registryDb ?? input.db, record);
+  try {
+    input.onSpawnRegistered?.(record);
+    if (!child.pid) {
+      throw new Error(`Runtime service "${serviceName}" spawned without a process identity.`);
+    }
+    if (!useWindowsJobCustodyGate) {
+      launchClaim?.recordSpawn({
+        pid: child.pid,
+        processGroupId: spawnedProcessGroupId,
+        startedAt: nowIso,
+      });
+    }
+  } catch (error) {
+    try {
+      await stopRuntimeService(record.id, input.db);
+    } catch (cleanupError) {
+      throw new AggregateError(
+        [error, cleanupError],
+        `Runtime service "${serviceName}" failed to register its spawn identity and cleanup was not authoritative.`,
+      );
+    }
+    throw error;
+  }
+
+  let custodyAcquisitionError: unknown = null;
+  if (useWindowsJobCustodyGate) {
+    try {
+      windowsJobCustody = await acquireWindowsTestJobCustody(runtimeServiceId, child);
+    } catch (error) {
+      custodyAcquisitionError = error;
+    }
+    if (!windowsJobCustody) {
+      const custodyError = custodyAcquisitionError instanceof Error
+        ? custodyAcquisitionError
+        : new Error("Windows test Job Object custody could not be acquired.");
+      record.status = "failed";
+      record.healthStatus = "unhealthy";
+      record.stopRequested = true;
+      record.lastUsedAt = new Date().toISOString();
+      const confirmedTerminal = await terminateBlockedWindowsTestRuntimeChild(child);
+      if (!confirmedTerminal) {
+        record.stoppedAt = null;
+        throw new AggregateError(
+          [custodyError],
+          `Runtime service "${serviceName}" remained blocked without required Windows Job Object custody; its exact ChildProcess and launch claim remain registered for retry.`,
+        );
+      }
+      record.stoppedAt = new Date().toISOString();
+      try {
+        await releaseRuntimeServiceLaunchClaim(record);
+      } catch (cleanupError) {
+        throw new AggregateError(
+          [custodyError, cleanupError],
+          `Runtime service "${serviceName}" was stopped after Job Object custody failed, but its exact ChildProcess and launch claim remain registered because claim release failed.`,
+        );
+      }
+      runtimeServicesById.delete(record.id);
+      if (record.reuseKey && runtimeServicesByReuseKey.get(record.reuseKey) === record.id) {
+        runtimeServicesByReuseKey.delete(record.reuseKey);
+      }
+      throw custodyError;
+    }
+    record.windowsJobCustody = windowsJobCustody;
+    try {
+      launchClaim?.recordSpawn({
+        pid: child.pid!,
+        processGroupId: spawnedProcessGroupId,
+        startedAt: nowIso,
+      });
+    } catch (error) {
+      try {
+        await stopRuntimeService(record.id, input.db);
+      } catch (cleanupError) {
+        throw new AggregateError(
+          [error, cleanupError],
+          `Runtime service "${serviceName}" failed to record its spawn identity and cleanup was not authoritative.`,
+        );
+      }
+      throw error;
+    }
+  }
+  if (useWindowsJobCustodyGate) {
+    record.stopRequested = false;
+    child.stdin?.write("go\n");
+    // stdin's only purpose was releasing the gate above; leaving it open
+    // would let the child hold the pipe (an inherited handle) and change its
+    // stdio surface from the non-gated path.
+    child.stdin?.end();
+    record.windowsJobCustodyGateState = "released";
+  }
+  let stderrExcerpt = "";
+  let stdoutExcerpt = "";
+  child.stdout?.on("data", async (chunk) => {
+    const text = String(chunk);
+    stdoutExcerpt = (stdoutExcerpt + text).slice(-4096);
+    if (input.onLog) await input.onLog("stdout", `[service:${serviceName}] ${text}`);
+  });
+  child.stderr?.on("data", async (chunk) => {
+    const text = String(chunk);
+    stderrExcerpt = (stderrExcerpt + text).slice(-4096);
+    if (input.onLog) await input.onLog("stderr", `[service:${serviceName}] ${text}`);
+  });
+
+  try {
+    // Persist POSIX process-group identity before any readiness wait. Windows
+    // deliberately persists null until launch-time Job Object custody exists.
+    await persistRuntimeServiceRecord(input.db, record);
+  } catch (error) {
+    // Workspace-control starts may be inside a transaction that owns the
+    // parent workspace lock while record.db points at the outer connection.
+    // Persist cleanup through the same transaction to avoid self-blocking.
+    try {
+      await stopRuntimeService(record.id, input.db);
+    } catch (cleanupError) {
+      throw new AggregateError(
+        [error, cleanupError],
+        `Runtime service "${serviceName}" persistence failed and cleanup was not authoritative.`,
+      );
+    }
+    throw error;
+  }
 
   if (child.pid) {
-    await writeLocalServiceRegistryRecord({
-      version: 1,
-      serviceKey,
-      profileKind: "workspace-runtime",
-      serviceName,
-      command,
-      cwd: serviceCwd,
-      envFingerprint: serviceIdentityFingerprint,
-      port,
-      url,
-      pid: child.pid,
-      processGroupId: child.pid,
-      provider: "local_process",
-      runtimeServiceId: record.id,
-      reuseKey: input.reuseKey,
-      startedAt: record.startedAt,
-      lastSeenAt: record.lastUsedAt,
-      metadata: {
-        projectId: record.projectId,
-        projectWorkspaceId: record.projectWorkspaceId,
-        executionWorkspaceId: record.executionWorkspaceId,
-        issueId: record.issueId,
-        scopeType: record.scopeType,
-        scopeId: record.scopeId,
-      },
-    });
+    try {
+      const registryRecord: LocalServiceRegistryRecord = {
+        version: 1,
+        serviceKey,
+        profileKind: "workspace-runtime",
+        serviceName,
+        command,
+        cwd: serviceCwd,
+        envFingerprint: serviceIdentityFingerprint,
+        port,
+        url,
+        pid: child.pid,
+        processGroupId: spawnedProcessGroupId,
+        provider: "local_process",
+        runtimeServiceId: record.id,
+        reuseKey: input.reuseKey,
+        startedAt: record.startedAt,
+        lastSeenAt: record.lastUsedAt,
+        metadata: {
+          projectId: record.projectId,
+          projectWorkspaceId: record.projectWorkspaceId,
+          executionWorkspaceId: record.executionWorkspaceId,
+          issueId: record.issueId,
+          scopeType: record.scopeType,
+          scopeId: record.scopeId,
+          ...(launchClaim ? {
+            childPid: child.pid,
+            childGenerationId: launchClaim.generationId,
+            childGenerationStartedAt: nowIso,
+            childProcessGroupId: spawnedProcessGroupId,
+          } : {}),
+        },
+      };
+      if (launchClaim) {
+        await launchClaim.publishNextGeneration(registryRecord);
+      } else {
+        await writeLocalServiceRegistryRecord(registryRecord, { state: "absent" });
+      }
+    } catch (error) {
+      try {
+        await stopRuntimeService(record.id, input.db);
+      } catch (cleanupError) {
+        throw new AggregateError(
+          [error, cleanupError],
+          `Runtime service "${serviceName}" registry publication failed and cleanup was not authoritative.`,
+        );
+      }
+      throw error;
+    }
+    // A wrapper exit is not a process-tree exit receipt. Keep the just-written
+    // service-key registry evidence through readiness/failure reconciliation;
+    // a detached descendant may still be running on either platform.
+  }
+
+  if (!input.deferLaunchClaimRelease) {
+    try {
+      await releaseRuntimeServiceLaunchClaim(record);
+    } catch (error) {
+      try {
+        await stopRuntimeService(record.id, input.db);
+      } catch (cleanupError) {
+        throw new AggregateError(
+          [error, cleanupError],
+          `Runtime service "${serviceName}" published its registry but could not release its exact launch claim or prove cleanup.`,
+        );
+      }
+      throw error;
+    }
   }
 
   const readinessPromise = Promise.race([
     waitForReadiness({ service: input.service, serviceName, command, url, readinessUrl }),
     spawnErrorPromise,
+    prematureExitPromise,
   ]).then(async () => {
     record.status = "running";
     record.healthStatus = "healthy";
     record.lastUsedAt = new Date().toISOString();
     record.stoppedAt = null;
-    await touchLocalServiceRegistryRecord(record.serviceKey, {
-      runtimeServiceId: record.id,
-      lastSeenAt: record.lastUsedAt,
-    });
+    // Workspace-control transactions deliberately retain their launch claim
+    // through commit. A claim-less touch here would contend with our own guard;
+    // the transaction owner performs it after releasing that exact claim.
+    if (!record.launchClaim) {
+      await touchLocalServiceRegistryRecord(record.serviceKey, {
+        runtimeServiceId: record.id,
+        lastSeenAt: record.lastUsedAt,
+      });
+    }
   }).catch(async (err) => {
-    await terminateChildProcess(child);
-    record.status = "stopped";
-    record.healthStatus = "unhealthy";
-    record.lastUsedAt = new Date().toISOString();
-    record.stoppedAt = new Date().toISOString();
-    await removeLocalServiceRegistryRecord(record.serviceKey).catch(() => undefined);
-    throw new Error(
+    const startFailure = new Error(
       `Failed to start runtime service "${serviceName}": ${err instanceof Error ? err.message : String(err)}${stderrExcerpt ? ` | stderr: ${stderrExcerpt.trim()}` : ""}`,
     );
+    // A transaction rollback or explicit stop can terminate the child while
+    // this deferred readiness race is still pending. That stop already owns
+    // custody and durable finalization; do not start a second termination or
+    // overwrite its terminal row with a late failed/unhealthy projection.
+    if (record.launchClaim || record.stopRequested) throw startFailure;
+    record.stopRequested = true;
+    const termination = await terminateRuntimeServiceProcess(record);
+    record.status = termination?.confirmedStopped === true ? "stopped" : "failed";
+    record.healthStatus = "unhealthy";
+    record.lastUsedAt = new Date().toISOString();
+    record.stoppedAt = termination?.confirmedStopped === true
+      ? new Date().toISOString()
+      : null;
+    if (termination?.confirmedStopped === true) {
+      try {
+        await finalizeConfirmedRuntimeServiceStop(record, record.db);
+      } catch (cleanupError) {
+        throw new AggregateError(
+          [startFailure, cleanupError],
+          `Runtime service "${serviceName}" readiness failed and confirmed-stop finalization did not complete.`,
+        );
+      }
+    } else {
+      record.stopRequested = false;
+      try {
+        await persistRuntimeServiceRecord(record.db, record);
+      } catch (persistenceError) {
+        throw new AggregateError(
+          [startFailure, persistenceError],
+          `Runtime service "${serviceName}" readiness failed and unverified custody state could not be persisted.`,
+        );
+      }
+    }
+    throw startFailure;
   });
 
   return { record, readiness: readinessPromise };
 }
 
-async function prepareRuntimeProvisioning(
-  input: StartLocalRuntimeServiceInput,
-): Promise<RuntimeServiceRecord | null> {
-  const runtimeProvisionCommand = asString(input.runtimeProvisionCommand, "").trim();
-  if (!runtimeProvisionCommand) return null;
-  const coordinator = input.provisionCoordinator ?? createRuntimeProvisionCoordinator();
-  if (coordinator.promise) {
-    await coordinator.promise;
-    return null;
-  }
-
-  const identity = resolveRuntimeServiceReuseIdentity({
-    service: input.service,
-    workspace: input.workspace,
-    agent: input.agent,
-    issue: input.issue,
-    adapterEnv: input.adapterEnv,
-    scopeType: input.scopeType,
-    scopeId: input.scopeId,
-  });
-  if (!identity.command) throw new Error(`Runtime service "${identity.serviceName}" is missing command`);
-  const provisioningRecord = createProvisioningRuntimeServiceRecord(input, identity);
-  await persistRuntimeServiceRecord(input.db, provisioningRecord);
-  if (input.onLog) {
-    await input.onLog(
-      "stdout",
-      `[service:${identity.serviceName}] provisioning runtime dependencies...\n`,
-    );
-  }
-
-  try {
-    coordinator.promise = runRuntimeProvisionWithWorkspaceMutex(input);
-    await coordinator.promise;
-    provisioningRecord.status = "starting";
-    provisioningRecord.lastUsedAt = new Date().toISOString();
-    await persistRuntimeServiceRecord(input.db, provisioningRecord);
-    return provisioningRecord;
-  } catch (error) {
-    const nowIso = new Date().toISOString();
-    provisioningRecord.status = "failed";
-    provisioningRecord.healthStatus = "unhealthy";
-    provisioningRecord.lastUsedAt = nowIso;
-    provisioningRecord.stoppedAt = nowIso;
-    await persistRuntimeServiceRecord(input.db, provisioningRecord).catch(() => undefined);
-    if (input.onLog) {
-      await input.onLog(
-        "stderr",
-        `[service:${provisioningRecord.serviceName}] runtime provisioning failed: ${error instanceof Error ? error.message : String(error)}\n`,
-      );
-    }
-    throw error;
-  }
-}
-
-async function startLocalRuntimeService(
-  input: StartLocalRuntimeServiceInput,
-  options?: { deferReadiness?: boolean },
-): Promise<LocalRuntimeServiceStart> {
-  const runtimeProvisionCommand = asString(input.runtimeProvisionCommand, "").trim();
-  const provisioningRecord = input.preparedProvisioningRecord === undefined
-    ? await prepareRuntimeProvisioning(input)
-    : input.preparedProvisioningRecord;
-  let started: LocalRuntimeServiceStart | null = null;
-
-  try {
-    started = await spawnLocalRuntimeService({
-      ...input,
-      runtimeServiceId: provisioningRecord?.id ?? input.runtimeServiceId,
-    });
-    if (runtimeProvisionCommand) {
-      await persistRuntimeServiceRecord(input.db, started.record);
-    }
-    if (provisioningRecord && started.record.id !== provisioningRecord.id && input.db) {
-      await input.db
-        .delete(workspaceRuntimeServices)
-        .where(eq(workspaceRuntimeServices.id, provisioningRecord.id));
-    }
-    if (!options?.deferReadiness) {
-      await started.readiness;
-    }
-    return started;
-  } catch (error) {
-    if (!started && provisioningRecord && provisioningRecord.status === "starting") {
-      const nowIso = new Date().toISOString();
-      provisioningRecord.status = "failed";
-      provisioningRecord.healthStatus = "unhealthy";
-      provisioningRecord.lastUsedAt = nowIso;
-      provisioningRecord.stoppedAt = nowIso;
-      await persistRuntimeServiceRecord(input.db, provisioningRecord).catch(() => undefined);
-    }
-    throw error;
-  }
+async function startLocalRuntimeService(input: StartLocalRuntimeServiceInput): Promise<RuntimeServiceRecord> {
+  const started = await spawnLocalRuntimeService(input);
+  await started.readiness;
+  return started.record;
 }
 
 function scheduleIdleStop(record: RuntimeServiceRecord) {
@@ -4704,77 +4714,418 @@ function scheduleIdleStop(record: RuntimeServiceRecord) {
   }, idleSeconds * 1000);
 }
 
-async function stopRuntimeService(serviceId: string) {
+function windowsSnapshotContainsRuntimeDescendant(
+  rootPid: number | null,
+  startedAt: Date | string,
+  snapshot: Awaited<ReturnType<typeof snapshotWindowsTestProcesses>>,
+): boolean {
+  if (rootPid === null) return true;
+  const startedAtMs = new Date(startedAt).getTime();
+  if (!Number.isFinite(startedAtMs)) return true;
+  const candidates = snapshot.filter((entry) => {
+    const createdAtMs = Date.parse(entry.createdAt);
+    return Number.isFinite(createdAtMs) && createdAtMs >= startedAtMs - 5_000;
+  });
+  const ownedPids = new Set([rootPid]);
+  for (let depth = 0; depth < 64; depth += 1) {
+    let changed = false;
+    for (const entry of candidates) {
+      if (ownedPids.has(entry.pid) || !ownedPids.has(entry.parentPid)) continue;
+      ownedPids.add(entry.pid);
+      changed = true;
+    }
+    if (!changed) break;
+  }
+  if ([...ownedPids].some((pid) => pid !== rootPid)) return true;
+  return false;
+}
+
+async function runtimeServiceHasObservedDescendantsForTestCleanup(
+  record: RuntimeServiceRecord,
+): Promise<boolean> {
+  if (record.port && await readLocalServicePortOwner(record.port)) return true;
+  if (process.platform !== "win32") {
+    return isLocalServiceProcessGroupAlive(record.processGroupId);
+  }
+  try {
+    const rootPid = normalizeLocalServicePid(record.child?.pid ?? record.processGroupId);
+    const first = await snapshotWindowsTestProcesses(5_000);
+    const firstObserved = windowsSnapshotContainsRuntimeDescendant(rootPid, record.startedAt, first);
+    await delay(250);
+    const second = await snapshotWindowsTestProcesses(5_000);
+    const secondObserved = windowsSnapshotContainsRuntimeDescendant(rootPid, record.startedAt, second);
+    return firstObserved && secondObserved;
+  } catch {
+    return true;
+  }
+}
+
+async function runtimeServiceHasLiveOrUnprovenDescendants(
+  record: RuntimeServiceRecord,
+): Promise<boolean> {
+  // Negative PID/PGID/port/CIM observations are not process-tree absence
+  // proof. An unobserved intermediate can leave detached descendants, and
+  // numeric identifiers can be reused. Keep active runtime ownership and
+  // leases until launch-time pidfd/cgroup/namespace or Windows Job custody can
+  // issue an OS-backed tree-exit receipt.
+  void record;
+  return true;
+}
+
+async function persistedRuntimeServiceHasLiveOrUnprovenDescendants(
+  row: PersistedRuntimeServiceRow,
+): Promise<boolean> {
+  if (row.port && await readLocalServicePortOwner(row.port)) return true;
+  // A row already marked stopped is durable control-plane state. Active rows
+  // cannot be promoted to stopped from negative numeric/user-space probes on
+  // any platform without a kernel tree-exit receipt.
+  return row.status !== "stopped";
+}
+
+async function terminateRuntimeServiceProcess(
+  record: RuntimeServiceRecord,
+): Promise<LocalServiceTerminationResult | null> {
+  const custodyTermination = await terminateRuntimeServiceWithWindowsTestJobCustody(record);
+  if (custodyTermination) return custodyTermination;
+
+  const childPid = normalizeLocalServicePid(record.child?.pid);
+  const childIsLive =
+    childPid !== null
+    && record.child?.exitCode === null
+    && record.child?.signalCode === null;
+  const registryRecord = childIsLive
+    ? null
+    : await findLocalServiceRegistryRecordByRuntimeServiceId({
+        runtimeServiceId: record.id,
+        profileKind: record.profileKind,
+      }).catch(() => null);
+  const registryPid = normalizeLocalServicePid(registryRecord?.pid);
+  if (!childIsLive && registryRecord) {
+    return persistedRuntimeServiceUntrustedResult(
+      registryPid,
+      "runtime_service_registry_requires_stable_process_birth_identity",
+    );
+  }
+  if (!childIsLive && !registryRecord && record.child) {
+    const ownerPid = record.port
+      ? await readLocalServicePortOwner(record.port)
+      : null;
+    return {
+      pid: ownerPid ?? childPid,
+      attempted: false,
+      confirmedStopped: false,
+      outcome: "untrusted_identity",
+      error: "runtime_service_registry_identity_missing",
+    };
+  }
+  const pid = childIsLive
+    ? childPid
+    : registryPid ?? childPid;
+  if (pid === null || pid === process.pid) {
+    if (record.port) {
+      const ownerPid = await readLocalServicePortOwner(record.port);
+      if (!ownerPid) {
+        return persistedRuntimeServiceUntrustedResult(
+          pid,
+          process.platform === "win32"
+            ? "windows_process_tree_absence_unproven_without_job_object"
+            : "posix_process_tree_absence_unproven_without_kernel_custody",
+        );
+      }
+    }
+    return null;
+  }
+  const processGroupId = childIsLive
+    ? normalizeLocalServicePid(record.processGroupId)
+    : normalizeLocalServicePid(registryRecord?.processGroupId)
+      ?? normalizeLocalServicePid(record.processGroupId);
+  if (!registryRecord && !record.child) return null;
+  if (!registryRecord && !childIsLive && processGroupId === null) {
+    if (record.port && !(await readLocalServicePortOwner(record.port))) {
+      return persistedRuntimeServiceUntrustedResult(
+        pid,
+        process.platform === "win32"
+          ? "windows_process_tree_absence_unproven_without_job_object"
+          : "posix_process_tree_absence_unproven_without_kernel_custody",
+      );
+    }
+    return null;
+  }
+
+  return await terminateLocalService(
+    {
+      pid,
+      processGroupId,
+    },
+    {
+      // Persisted registry PIDs remain observation-only even when fuzzy
+      // command/cwd checks still match: a recycled PID has no stable birth
+      // identity. Only the exact live ChildProcess object grants signal authority.
+      trustedPid: childIsLive,
+      // A retained ChildProcess object is authority only while that exact child
+      // is still live. Once it exits, a numeric historical PGID can be reused;
+      // the object must not authorize descendant-only group signaling.
+      trustedProcessGroup: childIsLive,
+      childProcess: childIsLive ? record.child : null,
+      expectedStartedAt: registryRecord?.startedAt ?? record.startedAt,
+    },
+  );
+}
+
+async function releaseRuntimeServiceLaunchClaim(record: RuntimeServiceRecord) {
+  const launchClaim = record.launchClaim;
+  if (!launchClaim) return;
+  await launchClaim.release();
+  record.launchClaim = null;
+}
+
+async function finalizeConfirmedRuntimeServiceStop(
+  record: RuntimeServiceRecord,
+  db: Db | undefined,
+) {
+  // Durable state and the native registry are finalized before releasing the
+  // pre-spawn claim. In-memory ownership is removed last so a failed cleanup
+  // remains retryable and cannot make a still-live tree look absent.
+  await persistRuntimeServiceRecord(db, record);
+  await removeLocalServiceRegistryRecord(
+    record.serviceKey,
+    record.launchClaim
+      ? { launchClaimNonce: record.launchClaim.generationId }
+      : undefined,
+  );
+  await releaseRuntimeServiceLaunchClaim(record);
+  runtimeServicesById.delete(record.id);
+  if (record.reuseKey && runtimeServicesByReuseKey.get(record.reuseKey) === record.id) {
+    runtimeServicesByReuseKey.delete(record.reuseKey);
+  }
+}
+
+async function stopRuntimeService(serviceId: string, persistenceDb?: Db) {
   const record = runtimeServicesById.get(serviceId);
   if (!record) return;
+  const db = persistenceDb ?? record.db;
   clearIdleTimer(record);
+  record.stopRequested = true;
+  const termination = await terminateRuntimeServiceProcess(record);
+  if (termination?.confirmedStopped !== true) {
+    record.stopRequested = false;
+    record.status = "failed";
+    record.healthStatus = "unhealthy";
+    record.lastUsedAt = new Date().toISOString();
+    record.stoppedAt = null;
+    await persistRuntimeServiceRecord(db, record);
+    throw new Error(
+      `Runtime service process termination could not be verified (${termination?.outcome ?? "identity_unavailable"}); tracking and registry were retained.`,
+    );
+  }
   record.status = "stopped";
   record.healthStatus = "unknown";
   record.lastUsedAt = new Date().toISOString();
   record.stoppedAt = new Date().toISOString();
-  runtimeServicesById.delete(serviceId);
-  if (record.reuseKey && runtimeServicesByReuseKey.get(record.reuseKey) === record.id) {
-    runtimeServicesByReuseKey.delete(record.reuseKey);
-  }
-  if (record.child && record.child.pid) {
-    // record.child is the ChildProcess object this service was spawned into;
-    // Node retains its process handle for the object's whole lifetime, so its
-    // pid cannot have been reused underneath us -- trustedPid is warranted
-    // (unlike an adopted record.providerRef below, whose pid came from a
-    // string and must earn trust via matchesWindowsProcessCreationIdentity).
-    // Without it, terminateLocalService's Windows branch returns
-    // outcome:"untrusted_identity" and never attempts a kill at all.
-    await terminateLocalService(
-      {
-        pid: record.child.pid,
-        processGroupId: record.processGroupId ?? record.child.pid,
-      },
-      { trustedPid: true },
-    );
-  } else if (record.providerRef) {
-    const pid = Number.parseInt(record.providerRef, 10);
-    if (Number.isInteger(pid) && pid > 0) {
-      // record.providerRef came from an adopted local-service registry entry
-      // (a bare pid string, not a ChildProcess this process holds a handle
-      // to), so it cannot carry trustedPid. record.startedAt is the same
-      // registry entry's own recorded creation moment, established when the
-      // service was first spawned -- passing it lets terminateLocalService
-      // verify the live process's actual creation time still matches before
-      // attempting a kill. Without either, the Windows branch always returns
-      // outcome:"untrusted_identity" and never attempts a kill at all.
-      await terminateLocalService(
-        {
-          pid,
-          processGroupId: record.processGroupId,
-        },
-        { expectedStartedAt: record.startedAt },
-      );
-    }
-  }
-  await removeLocalServiceRegistryRecord(record.serviceKey);
-  await persistRuntimeServiceRecord(record.db, record);
+  await finalizeConfirmedRuntimeServiceStop(record, db);
 }
 
-async function markPersistedRuntimeServicesStoppedForExecutionWorkspace(input: {
+type PersistedRuntimeServiceRow = typeof workspaceRuntimeServices.$inferSelect;
+
+/** Test-reset-only receipt after a separately owned cleanup proves no observed descendants. */
+function testRuntimeServiceNotRunningResult(pid: number | null): LocalServiceTerminationResult {
+  return {
+    pid,
+    attempted: false,
+    confirmedStopped: true,
+    outcome: "not_running",
+  };
+}
+
+function persistedRuntimeServiceUntrustedResult(
+  pid: number | null,
+  error: string,
+): LocalServiceTerminationResult {
+  return {
+    pid,
+    attempted: false,
+    confirmedStopped: false,
+    outcome: "untrusted_identity",
+    error,
+  };
+}
+
+async function resolvePersistedRuntimeServiceRegistryRecord(
+  row: PersistedRuntimeServiceRow,
+) {
+  let registryRecord = await findLocalServiceRegistryRecordByRuntimeServiceId({
+    runtimeServiceId: row.id,
+    profileKind: "workspace-runtime",
+  }).catch(() => null);
+  if (registryRecord || !row.command || !row.cwd) return registryRecord;
+
+  registryRecord = await findAdoptableLocalService({
+    serviceKey: createLocalServiceKey({
+      profileKind: "workspace-runtime",
+      serviceName: row.serviceName,
+      cwd: row.cwd,
+      command: row.command,
+      envFingerprint: row.reuseKey ?? "",
+      port: row.port ?? null,
+      scope: {
+        scopeType: row.scopeType,
+        scopeId: row.scopeId ?? null,
+        executionWorkspaceId: row.executionWorkspaceId ?? null,
+        reuseKey: row.reuseKey ?? null,
+      },
+    }),
+    profileKind: "workspace-runtime",
+    serviceName: row.serviceName,
+    command: row.command,
+    cwd: row.cwd,
+    envFingerprint: row.reuseKey ?? "",
+    port: row.port ?? null,
+    url: row.url ?? null,
+    expectedPid: normalizeLocalServicePid(row.providerRef),
+    expectedStartedAt: row.startedAt,
+  }).catch(() => null);
+  if (registryRecord) {
+    await touchLocalServiceRegistryRecord(registryRecord.serviceKey, {
+      runtimeServiceId: row.id,
+      lastSeenAt: new Date().toISOString(),
+    });
+  }
+  return registryRecord;
+}
+
+async function terminatePersistedRuntimeServiceRow(
+  row: PersistedRuntimeServiceRow,
+): Promise<{
+  registryServiceKey: string | null;
+  termination: LocalServiceTerminationResult;
+}> {
+  if (row.provider !== "local_process") {
+    return {
+      registryServiceKey: null,
+      termination: persistedRuntimeServiceUntrustedResult(
+        normalizeLocalServicePid(row.providerRef),
+        "provider_managed_runtime_requires_provider_termination",
+      ),
+    };
+  }
+
+  const registryRecord = await resolvePersistedRuntimeServiceRegistryRecord(row);
+  if (registryRecord) {
+    return {
+      registryServiceKey: registryRecord.serviceKey,
+      termination: persistedRuntimeServiceUntrustedResult(
+        registryRecord.pid,
+        "persisted_runtime_service_registry_requires_stable_process_birth_identity",
+      ),
+    };
+  }
+
+  const persistedPid = normalizeLocalServicePid(row.providerRef);
+  const persistedProcessGroupId = normalizeLocalServicePid(row.processGroupId);
+  const ownerPid = row.port
+    ? await readLocalServicePortOwner(row.port)
+    : null;
+  const persistedPidAlive =
+    persistedPid !== null && isLocalServicePidAlive(persistedPid);
+  const persistedProcessGroupAlive =
+    process.platform !== "win32"
+    && isLocalServiceProcessGroupAlive(persistedProcessGroupId);
+  if (persistedProcessGroupAlive && persistedProcessGroupId !== null) {
+    return {
+      registryServiceKey: null,
+      termination: persistedRuntimeServiceUntrustedResult(
+        persistedPid ?? persistedProcessGroupId,
+        "persisted_runtime_service_process_group_requires_stable_member_identity",
+      ),
+    };
+  }
+  if (
+    !ownerPid
+    && !persistedPidAlive
+    && await persistedRuntimeServiceHasLiveOrUnprovenDescendants(row)
+  ) {
+    return {
+      registryServiceKey: null,
+      termination: persistedRuntimeServiceUntrustedResult(
+        persistedPid,
+        "persisted_runtime_service_descendant_identity_unverified",
+      ),
+    };
+  }
+  if (!ownerPid && !persistedPidAlive) {
+    return {
+      registryServiceKey: null,
+      termination: persistedRuntimeServiceUntrustedResult(
+        persistedPid,
+        process.platform === "win32"
+          ? "windows_process_tree_absence_unproven_without_job_object"
+          : "posix_process_tree_absence_unproven_without_kernel_custody",
+      ),
+    };
+  }
+
+  return {
+    registryServiceKey: null,
+    termination: persistedRuntimeServiceUntrustedResult(
+      ownerPid ?? persistedPid,
+      "persisted_runtime_service_identity_unverified",
+    ),
+  };
+}
+
+async function stopPersistedRuntimeServiceRows(input: {
   db: Db;
-  executionWorkspaceId: string;
+  rows: PersistedRuntimeServiceRow[];
 }) {
   const now = new Date();
-  await input.db
-    .update(workspaceRuntimeServices)
-    .set({
-      status: "stopped",
-      healthStatus: "unknown",
-      stoppedAt: now,
-      lastUsedAt: now,
-      updatedAt: now,
-    })
-    .where(
-      and(
-        eq(workspaceRuntimeServices.executionWorkspaceId, input.executionWorkspaceId),
-        inArray(workspaceRuntimeServices.status, ["provisioning", "starting", "running"]),
-      ),
+  const unverified: Array<{
+    id: string;
+    serviceName: string;
+    outcome: LocalServiceTerminationResult["outcome"];
+  }> = [];
+
+  for (const row of input.rows) {
+    const { registryServiceKey, termination } =
+      await terminatePersistedRuntimeServiceRow(row);
+    if (termination.confirmedStopped) {
+      await input.db
+        .update(workspaceRuntimeServices)
+        .set({
+          status: "stopped",
+          healthStatus: "unknown",
+          stoppedAt: now,
+          lastUsedAt: now,
+          updatedAt: now,
+        })
+        .where(eq(workspaceRuntimeServices.id, row.id));
+      if (registryServiceKey) {
+        await removeLocalServiceRegistryRecord(registryServiceKey);
+      }
+      continue;
+    }
+
+    await input.db
+      .update(workspaceRuntimeServices)
+      .set({
+        status: row.status,
+        healthStatus: "unhealthy",
+        stoppedAt: null,
+        lastUsedAt: now,
+        updatedAt: now,
+      })
+      .where(eq(workspaceRuntimeServices.id, row.id));
+    unverified.push({
+      id: row.id,
+      serviceName: row.serviceName,
+      outcome: termination.outcome,
+    });
+  }
+
+  if (unverified.length > 0) {
+    throw new Error(
+      `Runtime service termination could not be verified for ${unverified.map((item) => `${item.serviceName} (${item.id}: ${item.outcome})`).join(", ")}; active rows and ownership evidence were retained for human review.`,
     );
+  }
 }
 
 function registerRuntimeService(db: Db | undefined, record: RuntimeServiceRecord) {
@@ -4784,21 +5135,37 @@ function registerRuntimeService(db: Db | undefined, record: RuntimeServiceRecord
     runtimeServicesByReuseKey.set(record.reuseKey, record.id);
   }
 
-  record.child?.on("exit", (code, signal) => {
+  let exitHandled = false;
+  const handleExit = (code: number | null, signal: NodeJS.Signals | null) => {
+    if (exitHandled) return;
+    exitHandled = true;
     const current = runtimeServicesById.get(record.id);
-    if (!current) return;
-    clearIdleTimer(current);
-    current.status = code === 0 || signal === "SIGTERM" ? "stopped" : "failed";
-    current.healthStatus = current.status === "failed" ? "unhealthy" : "unknown";
-    current.lastUsedAt = new Date().toISOString();
-    current.stoppedAt = new Date().toISOString();
-    runtimeServicesById.delete(current.id);
-    if (current.reuseKey && runtimeServicesByReuseKey.get(current.reuseKey) === current.id) {
-      runtimeServicesByReuseKey.delete(current.reuseKey);
-    }
-    void removeLocalServiceRegistryRecord(current.serviceKey);
-    void persistRuntimeServiceRecord(db, current);
-  });
+    if (!current || current.stopRequested) return;
+    void (async () => {
+      clearIdleTimer(current);
+      current.lastUsedAt = new Date().toISOString();
+      if (await runtimeServiceHasLiveOrUnprovenDescendants(current)) {
+        current.status = "failed";
+        current.healthStatus = "unhealthy";
+        current.stoppedAt = null;
+        await persistRuntimeServiceRecord(db, current);
+        return;
+      }
+      current.status = code === 0 || signal === "SIGTERM" ? "stopped" : "failed";
+      current.healthStatus = current.status === "failed" ? "unhealthy" : "unknown";
+      current.stoppedAt = new Date().toISOString();
+      await finalizeConfirmedRuntimeServiceStop(current, db);
+    })().catch(async () => {
+      current.status = "failed";
+      current.healthStatus = "unhealthy";
+      current.stoppedAt = null;
+      await persistRuntimeServiceRecord(db, current).catch(() => undefined);
+    });
+  };
+  record.child?.once("exit", handleExit);
+  if (record.child && (record.child.exitCode !== null || record.child.signalCode !== null)) {
+    handleExit(record.child.exitCode, record.child.signalCode);
+  }
 }
 
 function readRuntimeServiceEntries(config: Record<string, unknown>) {
@@ -4901,7 +5268,6 @@ export async function ensureRuntimeServicesForRun(input: {
   config: Record<string, unknown>;
   adapterEnv: Record<string, string>;
   onLog?: (stream: "stdout" | "stderr", chunk: string) => Promise<void>;
-  recorder?: WorkspaceOperationRecorder | null;
 }): Promise<RuntimeServiceRef[]> {
   const rawServices = selectRuntimeServiceEntries({
     config: input.config,
@@ -4911,8 +5277,6 @@ export async function ensureRuntimeServicesForRun(input: {
   });
   const acquiredServiceIds: string[] = [];
   const refs: RuntimeServiceRef[] = [];
-  const runtimeProvisionCommand = resolveRuntimeProvisionCommand(input);
-  const provisionCoordinator = createRuntimeProvisionCoordinator();
   runtimeServiceLeasesByRun.set(input.runId, acquiredServiceIds);
 
   try {
@@ -4943,7 +5307,7 @@ export async function ensureRuntimeServicesForRun(input: {
           existing.lastUsedAt = new Date().toISOString();
           existing.stoppedAt = null;
           clearIdleTimer(existing);
-          void touchLocalServiceRegistryRecord(existing.serviceKey, {
+          await touchLocalServiceRegistryRecord(existing.serviceKey, {
             runtimeServiceId: existing.id,
             lastSeenAt: existing.lastUsedAt,
           });
@@ -4954,7 +5318,7 @@ export async function ensureRuntimeServicesForRun(input: {
         }
       }
 
-      const started = await startLocalRuntimeService({
+      const record = await startLocalRuntimeService({
         db: input.db,
         runId: input.runId,
         agent: input.agent,
@@ -4964,15 +5328,10 @@ export async function ensureRuntimeServicesForRun(input: {
         adapterEnv: input.adapterEnv,
         service,
         onLog: input.onLog,
-        runtimeProvisionCommand,
-        recorder: input.recorder,
-        provisionCoordinator,
         reuseKey,
         scopeType,
         scopeId,
       });
-      const record = started.record;
-      registerRuntimeService(input.db, record);
       await persistRuntimeServiceRecord(input.db, record);
       acquiredServiceIds.push(record.id);
       refs.push(toRuntimeServiceRef(record));
@@ -4995,7 +5354,6 @@ type StartRuntimeServicesForWorkspaceControlInput = {
   config: Record<string, unknown>;
   adapterEnv: Record<string, string>;
   onLog?: (stream: "stdout" | "stderr", chunk: string) => Promise<void>;
-  recorder?: WorkspaceOperationRecorder | null;
   serviceIndex?: number | null;
   respectDesiredStates?: boolean;
 };
@@ -5004,6 +5362,7 @@ type WorkspaceControlStartBatch = {
   refs: RuntimeServiceRef[];
   pendingReadiness: LocalRuntimeServiceStart[];
   startedServiceIds: string[];
+  commitHeldRecords: RuntimeServiceRecord[];
 };
 
 async function startRuntimeServicesForWorkspaceControlUnlocked(
@@ -5014,17 +5373,17 @@ async function startRuntimeServicesForWorkspaceControlUnlocked(
   registryDb = input.db,
   options?: {
     deferReadiness?: boolean;
-    runtimeProvisionCommand?: string;
-    provisionCoordinator?: RuntimeProvisionCoordinator;
-    preparedProvisioning?: {
-      service: Record<string, unknown>;
-      record: RuntimeServiceRecord;
-    } | null;
+    deferLaunchClaimRelease?: boolean;
+    batch?: WorkspaceControlStartBatch;
   },
 ): Promise<WorkspaceControlStartBatch> {
-  const refs: RuntimeServiceRef[] = [];
-  const pendingReadiness: LocalRuntimeServiceStart[] = [];
-  const startedServiceIds: string[] = [];
+  const batch = options?.batch ?? {
+    refs: [],
+    pendingReadiness: [],
+    startedServiceIds: [],
+    commitHeldRecords: [],
+  };
+  const { refs, pendingReadiness, startedServiceIds, commitHeldRecords } = batch;
 
   for (const service of rawServices) {
     const { scopeType, scopeId } = resolveServiceScopeId({
@@ -5049,16 +5408,10 @@ async function startRuntimeServicesForWorkspaceControlUnlocked(
       const existingId = runtimeServicesByReuseKey.get(reuseKey);
       const existing = existingId ? runtimeServicesById.get(existingId) : null;
       if (existing && existing.status === "running") {
-        const prepared = options?.preparedProvisioning;
-        if (prepared?.service === service && prepared.record.id !== existing.id && persistenceDb) {
-          await persistenceDb
-            .delete(workspaceRuntimeServices)
-            .where(eq(workspaceRuntimeServices.id, prepared.record.id));
-        }
         existing.lastUsedAt = new Date().toISOString();
         existing.stoppedAt = null;
         clearIdleTimer(existing);
-        void touchLocalServiceRegistryRecord(existing.serviceKey, {
+        await touchLocalServiceRegistryRecord(existing.serviceKey, {
           runtimeServiceId: existing.id,
           lastSeenAt: existing.lastUsedAt,
         });
@@ -5070,6 +5423,7 @@ async function startRuntimeServicesForWorkspaceControlUnlocked(
 
     const startInput: StartLocalRuntimeServiceInput = {
       db: persistenceDb,
+      registryDb,
       runId: invocationId,
       leaseRunId: null,
       startedByRunId: null,
@@ -5080,37 +5434,42 @@ async function startRuntimeServicesForWorkspaceControlUnlocked(
       adapterEnv: input.adapterEnv,
       service,
       onLog: input.onLog,
-      runtimeProvisionCommand: options?.runtimeProvisionCommand,
-      recorder: input.recorder,
-      provisionCoordinator: options?.provisionCoordinator,
-      preparedProvisioningRecord:
-        options?.preparedProvisioning?.service === service
-          ? options.preparedProvisioning.record
-          : undefined,
       reuseKey,
       scopeType,
       scopeId,
+      deferLaunchClaimRelease: options?.deferLaunchClaimRelease,
+      onSpawnRegistered: options?.deferLaunchClaimRelease
+        ? (record) => {
+            if (!startedServiceIds.includes(record.id)) startedServiceIds.push(record.id);
+            if (!commitHeldRecords.some((candidate) => candidate.id === record.id)) {
+              commitHeldRecords.push(record);
+            }
+          }
+        : undefined,
     };
 
     // Manually controlled services are not tied to a heartbeat run lifecycle, so they do not
     // retain a run lease and never persist a startedByRunId foreign key.
-    const started = await startLocalRuntimeService(startInput, {
-      deferReadiness: options?.deferReadiness,
-    });
-    registerRuntimeService(registryDb, started.record);
-    await persistRuntimeServiceRecord(persistenceDb, started.record);
-    refs.push(toRuntimeServiceRef(started.record));
-
+    const started = options?.deferReadiness
+      ? await spawnLocalRuntimeService(startInput)
+      : {
+          record: await startLocalRuntimeService(startInput),
+          readiness: Promise.resolve(),
+        };
     if (options?.deferReadiness && !started.record.reused) {
       // Attach a rejection handler immediately; the caller awaits the same promise after
       // the DB transaction commits, but transaction failures may skip that wait path.
       started.readiness.catch(() => undefined);
       pendingReadiness.push(started);
-      startedServiceIds.push(started.record.id);
+      if (!startedServiceIds.includes(started.record.id)) {
+        startedServiceIds.push(started.record.id);
+      }
     }
+    await persistRuntimeServiceRecord(persistenceDb, started.record);
+    refs.push(toRuntimeServiceRef(started.record));
   }
 
-  return { refs, pendingReadiness, startedServiceIds };
+  return batch;
 }
 
 export async function startRuntimeServicesForWorkspaceControl(
@@ -5124,78 +5483,19 @@ export async function startRuntimeServicesForWorkspaceControl(
     serviceStates: readConfiguredServiceStates(input.config),
   });
   const invocationId = input.invocationId ?? randomUUID();
-  const runtimeProvisionCommand = resolveRuntimeProvisionCommand(input);
-  const provisionCoordinator = createRuntimeProvisionCoordinator();
 
   if (rawServices.length === 0 || !input.db || (!input.executionWorkspaceId && !input.workspace.workspaceId)) {
-    const batch = await startRuntimeServicesForWorkspaceControlUnlocked(
-      input,
-      rawServices,
-      invocationId,
-      input.db,
-      input.db,
-      { runtimeProvisionCommand, provisionCoordinator },
-    );
+    const batch = await startRuntimeServicesForWorkspaceControlUnlocked(input, rawServices, invocationId);
     return batch.refs;
   }
 
-  let startBatch: WorkspaceControlStartBatch = {
+  const startBatch: WorkspaceControlStartBatch = {
     refs: [],
     pendingReadiness: [],
     startedServiceIds: [],
+    commitHeldRecords: [],
   };
-  let preparedProvisioning: {
-    service: Record<string, unknown>;
-    record: RuntimeServiceRecord;
-  } | null = null;
   try {
-    if (runtimeProvisionCommand) {
-      for (const service of rawServices) {
-        const { scopeType, scopeId } = resolveServiceScopeId({
-          service,
-          workspace: input.workspace,
-          executionWorkspaceId: input.executionWorkspaceId,
-          issue: input.issue,
-          runId: invocationId,
-          agent: input.actor,
-        });
-        const reuseKey = resolveRuntimeServiceReuseIdentity({
-          service,
-          workspace: input.workspace,
-          agent: input.actor,
-          issue: input.issue,
-          adapterEnv: input.adapterEnv,
-          scopeType,
-          scopeId,
-        }).reuseKey;
-        const existingId = reuseKey ? runtimeServicesByReuseKey.get(reuseKey) : null;
-        const existing = existingId ? runtimeServicesById.get(existingId) : null;
-        if (existing?.status === "running") continue;
-
-        const record = await prepareRuntimeProvisioning({
-          db: input.db,
-          runId: invocationId,
-          leaseRunId: null,
-          startedByRunId: null,
-          agent: input.actor,
-          issue: input.issue,
-          workspace: input.workspace,
-          executionWorkspaceId: input.executionWorkspaceId,
-          adapterEnv: input.adapterEnv,
-          service,
-          onLog: input.onLog,
-          runtimeProvisionCommand,
-          recorder: input.recorder,
-          provisionCoordinator,
-          reuseKey,
-          scopeType,
-          scopeId,
-        });
-        if (record) preparedProvisioning = { service, record };
-        break;
-      }
-    }
-
     await input.db.transaction(async (tx) => {
       const txDb = tx as unknown as Db;
 
@@ -5230,7 +5530,7 @@ export async function startRuntimeServicesForWorkspaceControl(
       // Branch reconciliation takes these same parent row locks before mutating
       // a recorded branch. Persisting a `starting` service row before commit closes
       // the process-start window without holding the DB transaction for readiness.
-      startBatch = await startRuntimeServicesForWorkspaceControlUnlocked(
+      await startRuntimeServicesForWorkspaceControlUnlocked(
         { ...input, db: txDb },
         rawServices,
         invocationId,
@@ -5238,16 +5538,26 @@ export async function startRuntimeServicesForWorkspaceControl(
         input.db,
         {
           deferReadiness: true,
-          runtimeProvisionCommand,
-          provisionCoordinator,
-          preparedProvisioning,
+          deferLaunchClaimRelease: true,
+          batch: startBatch,
         },
       );
     });
 
+    // Transaction commit is the durable DB publication boundary. Registry
+    // publication happened before each service entered this list, so the exact
+    // pre-spawn claims may now be released before readiness waits.
+    for (const record of startBatch.commitHeldRecords) {
+      await releaseRuntimeServiceLaunchClaim(record);
+    }
+
     for (const pending of startBatch.pendingReadiness) {
       try {
         await pending.readiness;
+        await touchLocalServiceRegistryRecord(pending.record.serviceKey, {
+          runtimeServiceId: pending.record.id,
+          lastSeenAt: pending.record.lastUsedAt,
+        });
         await persistRuntimeServiceRecord(input.db, pending.record);
       } catch (error) {
         await persistRuntimeServiceRecord(input.db, pending.record).catch(() => undefined);
@@ -5260,16 +5570,19 @@ export async function startRuntimeServicesForWorkspaceControl(
       return record ? toRuntimeServiceRef(record, { reused: ref.reused }) : ref;
     });
   } catch (error) {
-    for (const serviceId of startBatch.startedServiceIds) {
-      await stopRuntimeService(serviceId).catch(() => undefined);
+    const cleanupErrors: unknown[] = [];
+    for (const serviceId of [...new Set(startBatch.startedServiceIds)].reverse()) {
+      try {
+        await stopRuntimeService(serviceId);
+      } catch (cleanupError) {
+        cleanupErrors.push(cleanupError);
+      }
     }
-    if (preparedProvisioning && startBatch.startedServiceIds.length === 0) {
-      const nowIso = new Date().toISOString();
-      preparedProvisioning.record.status = "failed";
-      preparedProvisioning.record.healthStatus = "unhealthy";
-      preparedProvisioning.record.lastUsedAt = nowIso;
-      preparedProvisioning.record.stoppedAt = nowIso;
-      await persistRuntimeServiceRecord(input.db, preparedProvisioning.record).catch(() => undefined);
+    if (cleanupErrors.length > 0) {
+      throw new AggregateError(
+        [error, ...cleanupErrors],
+        "Workspace runtime startup failed and one or more spawned service trees could not be authoritatively finalized.",
+      );
     }
     throw error;
   }
@@ -5277,22 +5590,41 @@ export async function startRuntimeServicesForWorkspaceControl(
 
 export async function releaseRuntimeServicesForRun(runId: string) {
   const acquired = runtimeServiceLeasesByRun.get(runId) ?? [];
-  runtimeServiceLeasesByRun.delete(runId);
-  for (const serviceId of acquired) {
-    const record = runtimeServicesById.get(serviceId);
-    if (!record) continue;
-    record.leaseRunIds.delete(runId);
-    record.lastUsedAt = new Date().toISOString();
-    const stopType = asString(record.stopPolicy?.type, record.lifecycle === "ephemeral" ? "on_run_finish" : "manual");
-    await persistRuntimeServiceRecord(record.db, record);
-    if (record.leaseRunIds.size === 0) {
-      if (record.lifecycle === "ephemeral" || stopType === "on_run_finish") {
+  try {
+    for (const serviceId of acquired) {
+      const record = runtimeServicesById.get(serviceId);
+      if (!record || !record.leaseRunIds.has(runId)) continue;
+      const stopType = asString(record.stopPolicy?.type, record.lifecycle === "ephemeral" ? "on_run_finish" : "manual");
+      const isFinalLease = record.leaseRunIds.size === 1;
+      if (isFinalLease && (record.lifecycle === "ephemeral" || stopType === "on_run_finish")) {
+        // Keep the final lease attached until process-tree termination is
+        // authoritative. In particular, an advisory Windows taskkill/snapshot
+        // result must not make a failed release look complete or unowned.
         await stopRuntimeService(serviceId);
         continue;
       }
-      scheduleIdleStop(record);
+
+      record.leaseRunIds.delete(runId);
+      record.lastUsedAt = new Date().toISOString();
+      try {
+        await persistRuntimeServiceRecord(record.db, record);
+      } catch (error) {
+        record.leaseRunIds.add(runId);
+        throw error;
+      }
+      if (record.leaseRunIds.size === 0) {
+        scheduleIdleStop(record);
+      }
     }
+  } catch (error) {
+    const stillHeld = acquired.filter((serviceId) =>
+      runtimeServicesById.get(serviceId)?.leaseRunIds.has(runId) === true
+    );
+    if (stillHeld.length > 0) runtimeServiceLeasesByRun.set(runId, stillHeld);
+    else runtimeServiceLeasesByRun.delete(runId);
+    throw error;
   }
+  runtimeServiceLeasesByRun.delete(runId);
 }
 
 export async function stopRuntimeServicesForExecutionWorkspace(input: {
@@ -5320,24 +5652,21 @@ export async function stopRuntimeServicesForExecutionWorkspace(input: {
   }
 
   if (input.db) {
-    if (input.runtimeServiceId) {
-      const now = new Date();
-      await input.db
-        .update(workspaceRuntimeServices)
-        .set({
-          status: "stopped",
-          healthStatus: "unknown",
-          stoppedAt: now,
-          lastUsedAt: now,
-          updatedAt: now,
-        })
-        .where(eq(workspaceRuntimeServices.id, input.runtimeServiceId));
-    } else {
-      await markPersistedRuntimeServicesStoppedForExecutionWorkspace({
-        db: input.db,
-        executionWorkspaceId: input.executionWorkspaceId,
-      });
-    }
+    const persistedRows = await input.db
+      .select()
+      .from(workspaceRuntimeServices)
+      .where(
+        and(
+          input.runtimeServiceId
+            ? eq(workspaceRuntimeServices.id, input.runtimeServiceId)
+            : eq(workspaceRuntimeServices.executionWorkspaceId, input.executionWorkspaceId),
+          inArray(workspaceRuntimeServices.status, ["starting", "running", "failed"]),
+        ),
+      );
+    await stopPersistedRuntimeServiceRows({
+      db: input.db,
+      rows: persistedRows,
+    });
   }
 }
 
@@ -5358,25 +5687,24 @@ export async function stopRuntimeServicesForProjectWorkspace(input: {
   }
 
   if (input.db) {
-    const now = new Date();
-    await input.db
-      .update(workspaceRuntimeServices)
-      .set({
-        status: "stopped",
-        healthStatus: "unknown",
-        stoppedAt: now,
-        lastUsedAt: now,
-        updatedAt: now,
-      })
+    const persistedRows = await input.db
+      .select()
+      .from(workspaceRuntimeServices)
       .where(
         input.runtimeServiceId
           ? eq(workspaceRuntimeServices.id, input.runtimeServiceId)
           : and(
               eq(workspaceRuntimeServices.projectWorkspaceId, input.projectWorkspaceId),
               eq(workspaceRuntimeServices.scopeType, "project_workspace"),
-              inArray(workspaceRuntimeServices.status, ["provisioning", "starting", "running"]),
+              inArray(workspaceRuntimeServices.status, ["starting", "running", "failed"]),
             ),
       );
+    await stopPersistedRuntimeServiceRows({
+      db: input.db,
+      rows: persistedRows.filter((row) =>
+        row.status === "starting" || row.status === "running" || row.status === "failed"
+      ),
+    });
   }
 }
 
@@ -5415,15 +5743,21 @@ export async function reconcilePersistedRuntimeServicesOnStartup(db: Db) {
     .where(
       and(
         eq(workspaceRuntimeServices.provider, "local_process"),
-        inArray(workspaceRuntimeServices.status, ["provisioning", "starting", "running", "stopped"]),
+        inArray(workspaceRuntimeServices.status, ["starting", "running", "stopped", "failed"]),
       ),
     );
 
-  if (rows.length === 0) return { reconciled: 0, adopted: 0, stopped: 0 };
+  if (rows.length === 0) return {
+    reconciled: 0,
+    adopted: 0,
+    stopped: 0,
+    needsHuman: 0,
+  };
 
   let reconciled = 0;
   let adopted = 0;
   let stopped = 0;
+  let needsHuman = 0;
   for (const row of rows) {
     let adoptedRecord = await findLocalServiceRegistryRecordByRuntimeServiceId({
       runtimeServiceId: row.id,
@@ -5439,8 +5773,23 @@ export async function reconcilePersistedRuntimeServicesOnStartup(db: Db) {
         || (row.cwd !== null && path.resolve(adoptedRecord.cwd) !== path.resolve(row.cwd))
       )
     ) {
-      await removeLocalServiceRegistryRecord(adoptedRecord.serviceKey);
-      adoptedRecord = null;
+      // A registry/DB mismatch does not prove the process tree is absent.
+      // Retain both sources on every platform for operator reconciliation;
+      // numeric PID/PGID observations are not stable custody receipts.
+      const now = new Date();
+      await db
+        .update(workspaceRuntimeServices)
+        .set({
+          status: "failed",
+          healthStatus: "unhealthy",
+          stoppedAt: null,
+          lastUsedAt: now,
+          updatedAt: now,
+        })
+        .where(eq(workspaceRuntimeServices.id, row.id));
+      reconciled += 1;
+      needsHuman += 1;
+      continue;
     }
     if (!adoptedRecord && row.command && row.cwd) {
       adoptedRecord = await findAdoptableLocalService({
@@ -5450,7 +5799,7 @@ export async function reconcilePersistedRuntimeServicesOnStartup(db: Db) {
           cwd: row.cwd,
           command: row.command,
           envFingerprint: row.reuseKey ?? "",
-          port: null,
+          port: row.port ?? null,
           scope: {
             scopeType: row.scopeType as RuntimeServiceRecord["scopeType"],
             scopeId: row.scopeId ?? null,
@@ -5465,12 +5814,14 @@ export async function reconcilePersistedRuntimeServicesOnStartup(db: Db) {
         envFingerprint: row.reuseKey ?? "",
         port: row.port ?? null,
         url: row.url ?? null,
+        expectedPid: normalizeLocalServicePid(row.providerRef),
+        expectedStartedAt: row.startedAt,
       });
     }
     if (adoptedRecord) {
       const adoptedUrl = adoptedRecord.url ?? row.url ?? null;
       if (!(await isRuntimeServiceUrlHealthy(adoptedUrl, { serviceName: row.serviceName, command: row.command }))) {
-        await removeLocalServiceRegistryRecord(adoptedRecord.serviceKey);
+        adoptedRecord = null;
       } else {
         const record: RuntimeServiceRecord = {
           id: row.id,
@@ -5506,7 +5857,8 @@ export async function reconcilePersistedRuntimeServicesOnStartup(db: Db) {
           envFingerprint: row.reuseKey ?? "",
           serviceKey: adoptedRecord.serviceKey,
           profileKind: "workspace-runtime",
-          processGroupId: adoptedRecord.processGroupId ?? null,
+          processGroupId: adoptedRecord.processGroupId ?? row.processGroupId ?? null,
+          launchClaim: null,
         };
         registerRuntimeService(db, record);
         await touchLocalServiceRegistryRecord(adoptedRecord.serviceKey, {
@@ -5518,6 +5870,33 @@ export async function reconcilePersistedRuntimeServicesOnStartup(db: Db) {
         adopted += 1;
         continue;
       }
+    }
+
+    const persistedPid = normalizeLocalServicePid(row.providerRef);
+    const liveOwnerPid = row.port
+      ? await readLocalServicePortOwner(row.port)
+      : persistedPid && isLocalServicePidAlive(persistedPid)
+        ? persistedPid
+        : null;
+    const liveOrUnprovenDescendants = liveOwnerPid
+      ? false
+      : await persistedRuntimeServiceHasLiveOrUnprovenDescendants(row);
+    if (liveOwnerPid || liveOrUnprovenDescendants) {
+      const now = new Date();
+      await db
+        .update(workspaceRuntimeServices)
+        .set({
+          status: liveOwnerPid ? "running" : "failed",
+          healthStatus: "unhealthy",
+          providerRef: liveOwnerPid ? String(liveOwnerPid) : row.providerRef,
+          stoppedAt: null,
+          lastUsedAt: now,
+          updatedAt: now,
+        })
+        .where(eq(workspaceRuntimeServices.id, row.id));
+      reconciled += 1;
+      needsHuman += 1;
+      continue;
     }
 
     if (row.status === "stopped") {
@@ -5546,7 +5925,7 @@ export async function reconcilePersistedRuntimeServicesOnStartup(db: Db) {
     stopped += 1;
   }
 
-  return { reconciled, adopted, stopped };
+  return { reconciled, adopted, stopped, needsHuman };
 }
 
 export async function restartDesiredRuntimeServicesOnStartup(db: Db) {
@@ -5638,7 +6017,6 @@ export async function restartDesiredRuntimeServicesOnStartup(db: Db) {
         executionWorkspaceId: row.id,
         config: {
           workspaceRuntime: effectiveRuntimeConfig,
-          runtimeProvisionCommand: config.runtimeProvisionCommand,
           desiredState: config.desiredState,
           serviceStates: config.serviceStates ?? null,
         },
@@ -5742,73 +6120,10 @@ export async function persistAdapterManagedRuntimeServices(input: {
   return refs;
 }
 
-type WorkspaceReadyCommentInput = {
+export function buildWorkspaceReadyComment(input: {
   workspace: RealizedExecutionWorkspace;
   runtimeServices: RuntimeServiceRef[];
-};
-
-const COMMENT_METADATA_LABEL_MAX_LENGTH = 120;
-
-function workspaceReadyServiceLabel(serviceName: string): string {
-  const label = serviceName.trim() || "Service";
-  return label.length > COMMENT_METADATA_LABEL_MAX_LENGTH
-    ? `${label.slice(0, COMMENT_METADATA_LABEL_MAX_LENGTH - 1)}…`
-    : label;
-}
-
-export function buildWorkspaceReadyPresentation(
-  input: WorkspaceReadyCommentInput,
-): IssueCommentPresentation {
-  const workspaceLabel = input.workspace.branchName ?? input.workspace.strategy;
-  const title = `Workspace ready · ${workspaceLabel}`;
-  const hasWarnings = input.workspace.warnings.length > 0;
-
-  return {
-    kind: "system_notice",
-    tone: hasWarnings ? "warning" : "info",
-    title: title.length > 160 ? `${title.slice(0, 159)}…` : title,
-    density: "compact",
-    detailsDefaultOpen: hasWarnings,
-  };
-}
-
-export function buildWorkspaceReadyMetadata(
-  input: WorkspaceReadyCommentInput,
-): IssueCommentMetadata {
-  const workspaceRows: IssueCommentMetadata["sections"][number]["rows"] = [
-    { type: "key_value", label: "Strategy", value: input.workspace.strategy },
-    ...(input.workspace.branchName
-      ? [{ type: "key_value" as const, label: "Branch", value: input.workspace.branchName }]
-      : []),
-    { type: "key_value", label: "CWD", value: input.workspace.cwd },
-    ...(input.workspace.worktreePath && input.workspace.worktreePath !== input.workspace.cwd
-      ? [{ type: "key_value" as const, label: "Worktree", value: input.workspace.worktreePath }]
-      : []),
-  ];
-  const serviceRows: IssueCommentMetadata["sections"][number]["rows"] = input.runtimeServices.map(
-    (service) => ({
-      type: "key_value",
-      label: workspaceReadyServiceLabel(service.serviceName),
-      value: `${service.url ?? "running"}${service.reused ? " (reused)" : ""}`,
-    }),
-  );
-
-  return {
-    version: 1,
-    sections: [
-      { title: "Workspace", rows: workspaceRows },
-      ...(serviceRows.length > 0 ? [{ title: "Services", rows: serviceRows }] : []),
-      ...(input.workspace.warnings.length > 0
-        ? [{
-            title: "Warnings",
-            rows: input.workspace.warnings.map((warning) => ({ type: "text" as const, text: warning })),
-          }]
-        : []),
-    ],
-  };
-}
-
-export function buildWorkspaceReadyComment(input: WorkspaceReadyCommentInput) {
+}) {
   const lines = ["## Workspace Ready", ""];
   lines.push(`- Strategy: \`${input.workspace.strategy}\``);
   if (input.workspace.branchName) lines.push(`- Branch: \`${input.workspace.branchName}\``);

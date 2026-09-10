@@ -6,20 +6,25 @@ import type { RunProcessResult } from "@paperclipai/adapter-utils/server-utils";
 import { joinPortablePath } from "@paperclipai/adapter-utils/shell-path";
 import {
   adapterExecutionTargetIsRemote,
+  adapterExecutionTargetPaperclipBridgeLaunchEvent,
   adapterExecutionTargetRemoteCwd,
   overrideAdapterExecutionTargetRemoteCwd,
   adapterExecutionTargetSessionIdentity,
   adapterExecutionTargetSessionMatches,
   adapterExecutionTargetUsesManagedHome,
   adapterExecutionTargetUsesPaperclipBridge,
+  assertPaperclipCallbackBridgeEnabled,
   describeAdapterExecutionTarget,
   ensureAdapterExecutionTargetCommandResolvable,
   ensureAdapterExecutionTargetRuntimeCommandInstalled,
   prepareAdapterExecutionTargetRuntime,
   readAdapterExecutionTarget,
+  readAdapterExecutionTargetFailClosed,
   resolveAdapterExecutionTargetTimeoutSec,
   resolveAdapterExecutionTargetCommandForLogs,
   runAdapterExecutionTargetProcess,
+  isAdapterExecutionTargetPaperclipBridgeLaunchAmbiguousError,
+  retainAndSealAdapterExecutionTargetPaperclipBridgeDependentResources,
   startAdapterExecutionTargetPaperclipBridge,
 } from "@paperclipai/adapter-utils/execution-target";
 import {
@@ -393,6 +398,15 @@ export async function runClaudeLogin(input: {
 }
 
 export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExecutionResult> {
+  const executionTarget = readAdapterExecutionTargetFailClosed({
+    executionTarget: ctx.executionTarget,
+    legacyRemoteExecution: ctx.executionTransport?.remoteExecution,
+  });
+  const executionTargetIsRemote = adapterExecutionTargetIsRemote(executionTarget);
+  if (executionTargetIsRemote && adapterExecutionTargetUsesPaperclipBridge(executionTarget)) {
+    assertPaperclipCallbackBridgeEnabled();
+  }
+
   const engineSelection = await resolveClaudeExecutionEngineForRun(ctx);
   if (engineSelection.engine === "acp") {
     try {
@@ -411,11 +425,6 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   }
 
   const { runId, agent, runtime, config, context, onLog, onMeta, onSpawn, authToken } = ctx;
-  const executionTarget = readAdapterExecutionTarget({
-    executionTarget: ctx.executionTarget,
-    legacyRemoteExecution: ctx.executionTransport?.remoteExecution,
-  });
-  const executionTargetIsRemote = adapterExecutionTargetIsRemote(executionTarget);
   const executionTargetIsSandbox = executionTarget?.kind === "remote" && executionTarget.transport === "sandbox";
 
   const promptTemplate = asString(
@@ -678,8 +687,26 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     });
   }
   let paperclipBridge: Awaited<ReturnType<typeof startAdapterExecutionTargetPaperclipBridge>> = null;
+  const retainPaperclipDependentCleanup = (error: unknown) => {
+    if (!isAdapterExecutionTargetPaperclipBridgeLaunchAmbiguousError(error)) return false;
+    return retainAndSealAdapterExecutionTargetPaperclipBridgeDependentResources({
+      error,
+      registrationId: `adapter:claude:${runId}`,
+      cleanupSteps: [
+        ...(restoreRemoteWorkspace
+          ? [{ label: "claude-restore-remote-workspace", run: restoreRemoteWorkspace }]
+          : []),
+      ],
+    });
+  };
   if (executionTargetIsRemote && adapterExecutionTargetUsesPaperclipBridge(runtimeExecutionTarget)) {
-    paperclipBridge = await startAdapterExecutionTargetPaperclipBridge({
+    if (!ctx.onEvent) {
+      throw new Error(
+        "Remote Claude callback execution requires a durable adapter event sink before provider dispatch.",
+      );
+    }
+    try {
+      paperclipBridge = await startAdapterExecutionTargetPaperclipBridge({
       runId,
       target: runtimeExecutionTarget,
       runtimeRootDir: preparedExecutionTargetRuntime?.runtimeRootDir,
@@ -687,7 +714,15 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       timeoutSec,
       hostApiToken: env.PAPERCLIP_API_KEY,
       onLog,
-    });
+      deferDependentResourceRegistration: true,
+      onLaunchState: async (state) => {
+        await ctx.onEvent!(adapterExecutionTargetPaperclipBridgeLaunchEvent(state));
+      },
+      });
+    } catch (error) {
+      retainPaperclipDependentCleanup(error);
+      throw error;
+    }
     if (paperclipBridge) {
       Object.assign(env, paperclipBridge.env);
       const runtimeEnv = ensurePathInEnv({ ...process.env, ...env });
@@ -1258,7 +1293,12 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     return toAdapterResult(initial, { fallbackSessionId: runtimeSessionId || runtime.sessionId });
   } finally {
     if (paperclipBridge) {
-      await paperclipBridge.stop();
+      try {
+        await paperclipBridge.stop();
+      } catch (error) {
+        retainPaperclipDependentCleanup(error);
+        throw error;
+      }
     }
     if (restoreRemoteWorkspace) {
       await onLog(

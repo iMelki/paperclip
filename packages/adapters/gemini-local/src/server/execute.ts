@@ -6,22 +6,26 @@ import { fileURLToPath } from "node:url";
 import type { AdapterExecutionContext, AdapterExecutionResult } from "@paperclipai/adapter-utils";
 import {
   adapterExecutionTargetIsRemote,
+  adapterExecutionTargetPaperclipBridgeLaunchEvent,
   adapterExecutionTargetRemoteCwd,
   overrideAdapterExecutionTargetRemoteCwd,
   adapterExecutionTargetSessionIdentity,
   adapterExecutionTargetSessionMatches,
   adapterExecutionTargetUsesManagedHome,
   adapterExecutionTargetUsesPaperclipBridge,
+  assertPaperclipCallbackBridgeEnabled,
   describeAdapterExecutionTarget,
   ensureAdapterExecutionTargetCommandResolvable,
   ensureAdapterExecutionTargetRuntimeCommandInstalled,
   prepareAdapterExecutionTargetRuntime,
-  readAdapterExecutionTarget,
+  readAdapterExecutionTargetFailClosed,
   readAdapterExecutionTargetHomeDir,
   resolveAdapterExecutionTargetTimeoutSec,
   resolveAdapterExecutionTargetCommandForLogs,
   runAdapterExecutionTargetProcess,
   runAdapterExecutionTargetShellCommand,
+  isAdapterExecutionTargetPaperclipBridgeLaunchAmbiguousError,
+  retainAndSealAdapterExecutionTargetPaperclipBridgeDependentResources,
   startAdapterExecutionTargetPaperclipBridge,
 } from "@paperclipai/adapter-utils/execution-target";
 import {
@@ -202,6 +206,15 @@ async function buildGeminiSkillsDir(
 }
 
 export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExecutionResult> {
+  const executionTarget = readAdapterExecutionTargetFailClosed({
+    executionTarget: ctx.executionTarget,
+    legacyRemoteExecution: ctx.executionTransport?.remoteExecution,
+  });
+  const executionTargetIsRemote = adapterExecutionTargetIsRemote(executionTarget);
+  if (executionTargetIsRemote && adapterExecutionTargetUsesPaperclipBridge(executionTarget)) {
+    assertPaperclipCallbackBridgeEnabled();
+  }
+
   const engineSelection = await resolveGeminiExecutionEngineForRun(ctx);
   if (engineSelection.engine === "acp") {
     try {
@@ -220,11 +233,6 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   }
 
   const { runId, agent, runtime, config, context, onLog, onMeta, onSpawn, authToken } = ctx;
-  const executionTarget = readAdapterExecutionTarget({
-    executionTarget: ctx.executionTarget,
-    legacyRemoteExecution: ctx.executionTransport?.remoteExecution,
-  });
-  const executionTargetIsRemote = adapterExecutionTargetIsRemote(executionTarget);
 
   const promptTemplate = asString(
     config.promptTemplate,
@@ -346,6 +354,26 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   let localSkillsDir: string | null = null;
   let remoteRuntimeRootDir: string | null = null;
   let paperclipBridge: Awaited<ReturnType<typeof startAdapterExecutionTargetPaperclipBridge>> = null;
+  const retainPaperclipDependentCleanup = (error: unknown) => {
+    if (!isAdapterExecutionTargetPaperclipBridgeLaunchAmbiguousError(error)) return false;
+    return retainAndSealAdapterExecutionTargetPaperclipBridgeDependentResources({
+      error,
+      registrationId: `adapter:gemini:${runId}`,
+      cleanupSteps: [
+        ...(restoreRemoteWorkspace
+          ? [{ label: "gemini-restore-remote-workspace", run: restoreRemoteWorkspace }]
+          : []),
+        ...(localSkillsDir
+          ? [{
+              label: "gemini-remove-local-skills",
+              run: async () => {
+                await fs.rm(path.dirname(localSkillsDir!), { recursive: true, force: true });
+              },
+            }]
+          : []),
+      ],
+    });
+  };
 
   if (executionTargetIsRemote) {
     try {
@@ -455,7 +483,13 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   }
   const runtimeExecutionTarget = overrideAdapterExecutionTargetRemoteCwd(executionTarget, effectiveExecutionCwd);
   if (executionTargetIsRemote && adapterExecutionTargetUsesPaperclipBridge(executionTarget)) {
-    paperclipBridge = await startAdapterExecutionTargetPaperclipBridge({
+    if (!ctx.onEvent) {
+      throw new Error(
+        "Remote Gemini callback execution requires a durable adapter event sink before provider dispatch.",
+      );
+    }
+    try {
+      paperclipBridge = await startAdapterExecutionTargetPaperclipBridge({
       runId,
       target: runtimeExecutionTarget,
       runtimeRootDir: remoteRuntimeRootDir,
@@ -463,7 +497,15 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       timeoutSec,
       hostApiToken: env.PAPERCLIP_API_KEY,
       onLog,
-    });
+      deferDependentResourceRegistration: true,
+      onLaunchState: async (state) => {
+        await ctx.onEvent!(adapterExecutionTargetPaperclipBridgeLaunchEvent(state));
+      },
+      });
+    } catch (error) {
+      retainPaperclipDependentCleanup(error);
+      throw error;
+    }
     if (paperclipBridge) {
       Object.assign(env, paperclipBridge.env);
     }
@@ -750,8 +792,13 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
 
     return toResult(initial);
   } finally {
+    try {
+      await paperclipBridge?.stop();
+    } catch (error) {
+      retainPaperclipDependentCleanup(error);
+      throw error;
+    }
     await Promise.all([
-      paperclipBridge?.stop(),
       restoreRemoteWorkspace?.(),
       localSkillsDir ? fs.rm(path.dirname(localSkillsDir), { recursive: true, force: true }).catch(() => undefined) : Promise.resolve(),
     ]);

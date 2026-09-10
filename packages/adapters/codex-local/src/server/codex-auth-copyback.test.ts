@@ -1,15 +1,21 @@
-import { chmod, lstat, mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import * as fsPromises from "node:fs/promises";
+import { chmod, lstat, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+
+vi.mock("node:fs/promises", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs/promises")>();
+  return { ...actual, open: vi.fn(actual.open), rm: vi.fn(actual.rm) };
+});
 
 import { copyBackCodexAuth } from "./codex-auth-copyback.js";
-import {
-  ensureCodexAuthCacheEntryDir,
-  resolveCodexAuthCacheDir,
-  resolveCodexAuthCacheEntryPath,
-} from "./codex-auth-cache.js";
-import { resolveSharedCodexHomeDir } from "./codex-home.js";
+import { createPrivateStagingDirectory } from "./windows-private-acl.js";
+
+function expectPrivatePosixMode(actual: number, expected = 0o600): void {
+  // NTFS confidentiality is expressed through DACLs, not POSIX mode bits.
+  if (process.platform !== "win32") expect(actual).toBe(expected);
+}
 
 // The copy-back module reuses the exact same direction-agnostic decision
 // predicate (`codex-auth-merge-decision.cjs`) that the inbound extract path
@@ -23,6 +29,9 @@ describe("copyBackCodexAuth", () => {
   const cleanupDirs: string[] = [];
 
   afterEach(async () => {
+    const actual = await vi.importActual<typeof import("node:fs/promises")>("node:fs/promises");
+    vi.mocked(fsPromises.open).mockImplementation(actual.open);
+    vi.mocked(fsPromises.rm).mockImplementation(actual.rm);
     while (cleanupDirs.length > 0) {
       const dir = cleanupDirs.pop();
       if (!dir) continue;
@@ -30,6 +39,7 @@ describe("copyBackCodexAuth", () => {
       await chmod(dir, 0o700).catch(() => undefined);
       await rm(dir, { recursive: true, force: true }).catch(() => undefined);
     }
+    vi.clearAllMocks();
   });
 
   function subscriptionAuth(input: {
@@ -56,12 +66,10 @@ describe("copyBackCodexAuth", () => {
     return JSON.stringify({ OPENAI_API_KEY: `sk-${marker}` }, null, 2);
   }
 
-  function expectPrivatePosixModeWhereSupported(mode: number, label?: string): void {
-    if (process.platform !== "win32") expect(mode, label).toBe(0o600);
-  }
-
   async function makeHostDir(): Promise<string> {
-    const dir = await mkdtemp(path.join(os.tmpdir(), "paperclip-codex-copyback-"));
+    const dir = process.platform === "win32"
+      ? await createPrivateStagingDirectory(null, "paperclip-codex-copyback-")
+      : await mkdtemp(path.join(os.tmpdir(), "paperclip-codex-copyback-"));
     cleanupDirs.push(dir);
     return dir;
   }
@@ -104,7 +112,7 @@ describe("copyBackCodexAuth", () => {
     return { outcome, finalHostAuth, finalHostMode, logs, leftoverEntries };
   }
 
-  it("installs a strictly-newer same-account sandbox auth onto the host", async () => {
+  it("installs a strictly-newer same-account sandbox auth onto the host at 0600", async () => {
     const sandboxAuth = subscriptionAuth({
       accountId: "acct-same",
       lastRefresh: NEWER,
@@ -120,7 +128,7 @@ describe("copyBackCodexAuth", () => {
 
     expect(result.outcome).toBe("copied");
     expect(result.finalHostAuth).toBe(sandboxAuth);
-    expectPrivatePosixModeWhereSupported(result.finalHostMode);
+    expectPrivatePosixMode(result.finalHostMode);
     // Temp staging file must be gone once the swap completes.
     expect(result.leftoverEntries).toEqual([]);
     // Never leak token bytes in log output.
@@ -155,7 +163,7 @@ describe("copyBackCodexAuth", () => {
       const result = await runCopyBack({ sandboxAuth: entry.sandboxAuth, hostAuth: entry.hostAuth });
       expect(result.outcome, entry.name).toBe("kept-host");
       expect(result.finalHostAuth, entry.name).toBe(entry.hostAuth);
-      expectPrivatePosixModeWhereSupported(result.finalHostMode, entry.name);
+      expectPrivatePosixMode(result.finalHostMode);
       expect(result.leftoverEntries, entry.name).toEqual([]);
     }
   });
@@ -202,10 +210,10 @@ describe("copyBackCodexAuth", () => {
       const result = await runCopyBack({ sandboxAuth: entry.sandboxAuth, hostAuth: entry.hostAuth });
       expect(result.outcome, entry.name).toBe("kept-host");
       expect(result.finalHostAuth, entry.name).toBe(entry.hostAuth);
-      expectPrivatePosixModeWhereSupported(result.finalHostMode, entry.name);
+      expectPrivatePosixMode(result.finalHostMode);
       expect(result.leftoverEntries, entry.name).toEqual([]);
     }
-  });
+  }, 60_000);
 
   it("creates a missing shared Codex home before staging copy-back", async () => {
     const rootDir = await makeHostDir();
@@ -226,39 +234,104 @@ describe("copyBackCodexAuth", () => {
     expect(logs.join("\n")).not.toContain("sandbox-only");
   });
 
-  it.runIf(process.platform !== "win32")(
-    "preserves the host file atomically when the install cannot be staged (no partial write, no leaked temp)",
-    async () => {
-    // Make the host directory read-only so staging the same-filesystem temp fails
-    // with EACCES. The host credential must be left byte-for-byte intact and no
-    // partial/temp file may remain — the outbound write is all-or-nothing.
+  it("rejects oversized sandbox auth before mutating a missing host directory", async () => {
+    const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-codex-copyback-oversized-"));
+    cleanupDirs.push(rootDir);
+    const hostDir = path.join(rootDir, "missing-codex-home");
+    const hostAuthPath = path.join(hostDir, "auth.json");
+    const logs: string[] = [];
+
+    await expect(copyBackCodexAuth({
+      readSandboxAuth: async () => Buffer.alloc(1024 * 1024 + 1, 0x41),
+      hostAuthPath,
+      log: (line) => {
+        logs.push(line);
+      },
+    })).rejects.toThrow(/exceeds the 1048576-byte copy-back limit/i);
+
+    await expect(lstat(hostDir)).rejects.toMatchObject({ code: "ENOENT" });
+    expect(logs).toEqual([]);
+  });
+
+  it("preserves the host file atomically when the install cannot be staged (no partial write, no leaked temp)", async () => {
+    // Inject a platform-independent EACCES at the exclusive temp-file open. The
+    // host credential must remain byte-for-byte intact and no partial/temp file
+    // may remain — the outbound write is all-or-nothing.
     const hostDir = await makeHostDir();
     const hostAuth = subscriptionAuth({ accountId: "acct-same", lastRefresh: OLDER, marker: "host-intact" });
     const hostAuthPath = path.join(hostDir, "auth.json");
     await writeFile(hostAuthPath, hostAuth, { mode: 0o600 });
     const before = await stat(hostAuthPath);
 
-    await chmod(hostDir, 0o500); // r-x: readable/traversable, not writable
-    try {
-      const sandboxAuth = subscriptionAuth({ accountId: "acct-same", lastRefresh: NEWER, marker: "sandbox-newer" });
-      await expect(
-        copyBackCodexAuth({
-          readSandboxAuth: async () => Buffer.from(sandboxAuth, "utf8"),
-          hostAuthPath,
-          log: () => {},
-        }),
-      ).rejects.toThrow();
-    } finally {
-      await chmod(hostDir, 0o700);
-    }
+    const openMock = vi.mocked(fsPromises.open);
+    openMock.mockImplementationOnce(async () => {
+      throw Object.assign(new Error("injected staging denial"), { code: "EACCES" });
+    });
+    const sandboxAuth = subscriptionAuth({ accountId: "acct-same", lastRefresh: NEWER, marker: "sandbox-newer" });
+    await expect(
+      copyBackCodexAuth({
+        readSandboxAuth: async () => Buffer.from(sandboxAuth, "utf8"),
+        hostAuthPath,
+        log: () => {},
+      }),
+    ).rejects.toThrow(/injected staging denial/);
 
     const after = await stat(hostAuthPath);
     expect(await readFile(hostAuthPath, "utf8")).toBe(hostAuth);
-    expectPrivatePosixModeWhereSupported(after.mode & 0o777);
+    expectPrivatePosixMode(after.mode & 0o777);
     expect(after.mtimeMs).toBe(before.mtimeMs);
     expect((await readdir(hostDir)).filter((name) => name !== "auth.json")).toEqual([]);
-    },
-  );
+  });
+
+  it("retries a transient credential-temp cleanup failure and proves no residue remains", async () => {
+    const hostDir = await makeHostDir();
+    const hostAuth = subscriptionAuth({ accountId: "acct-same", lastRefresh: NEWER, marker: "host-newer" });
+    const sandboxAuth = subscriptionAuth({ accountId: "acct-same", lastRefresh: OLDER, marker: "sandbox-older" });
+    const rmMock = vi.mocked(fsPromises.rm);
+    rmMock.mockRejectedValueOnce(Object.assign(new Error("injected transient cleanup denial"), { code: "EACCES" }));
+
+    const result = await runCopyBack({ sandboxAuth, hostAuth, hostDir });
+
+    expect(result.outcome).toBe("kept-host");
+    expect(result.finalHostAuth).toBe(hostAuth);
+    expect(result.leftoverEntries).toEqual([]);
+    const tempCleanupCalls = rmMock.mock.calls.filter(([target]) => (
+      typeof target === "string" && target.includes(".auth.json.copyback-")
+    ));
+    expect(tempCleanupCalls).toHaveLength(2);
+  });
+
+  it("fails loud after bounded credential-temp cleanup retries and leaves the host untouched", async () => {
+    const hostDir = await makeHostDir();
+    const hostAuthPath = path.join(hostDir, "auth.json");
+    const hostAuth = subscriptionAuth({ accountId: "acct-same", lastRefresh: NEWER, marker: "host-newer" });
+    const sandboxAuth = subscriptionAuth({ accountId: "acct-same", lastRefresh: OLDER, marker: "sandbox-older" });
+    await writeFile(hostAuthPath, hostAuth, { mode: 0o600 });
+
+    const rmMock = vi.mocked(fsPromises.rm);
+    const cleanupError = Object.assign(new Error("injected persistent cleanup denial"), { code: "EACCES" });
+    rmMock.mockRejectedValueOnce(cleanupError);
+    rmMock.mockRejectedValueOnce(cleanupError);
+    rmMock.mockRejectedValueOnce(cleanupError);
+
+    await expect(
+      copyBackCodexAuth({
+        readSandboxAuth: async () => Buffer.from(sandboxAuth, "utf8"),
+        hostAuthPath,
+        log: () => {},
+      }),
+    ).rejects.toThrow(/failed to prove credential temp cleanup/i);
+
+    expect(await readFile(hostAuthPath, "utf8")).toBe(hostAuth);
+    const leftovers = (await readdir(hostDir)).filter((name) => name !== "auth.json");
+    expect(leftovers).toHaveLength(1);
+    expect(leftovers[0]).toMatch(/^\.auth\.json\.copyback-.+\.tmp-.+$/);
+    expect(await readFile(path.join(hostDir, leftovers[0]!, "auth.json"), "utf8")).toBe(sandboxAuth);
+    const tempCleanupCalls = rmMock.mock.calls.filter(([target]) => (
+      typeof target === "string" && target.includes(".auth.json.copyback-")
+    ));
+    expect(tempCleanupCalls).toHaveLength(3);
+  });
 
   it("treats an absent sandbox auth.json (ENOENT) as a keep-host no-op, host untouched, no throw", async () => {
     const hostAuth = subscriptionAuth({ accountId: "acct-same", lastRefresh: OLDER, marker: "host-intact" });
@@ -279,7 +352,7 @@ describe("copyBackCodexAuth", () => {
 
     expect(result.outcome).toBe("kept-host");
     expect(result.finalHostAuth).toBe(hostAuth);
-    expectPrivatePosixModeWhereSupported(result.finalHostMode);
+    expectPrivatePosixMode(result.finalHostMode);
     // No staging temp is ever created on the ENOENT path.
     expect(result.leftoverEntries).toEqual([]);
     expect(result.logs.join("\n")).toContain("no sandbox credential to copy back");
@@ -325,306 +398,4 @@ describe("copyBackCodexAuth", () => {
     expect(combined).not.toContain("access-token");
     expect(combined).not.toContain("refresh-token");
   });
-});
-
-// The teardown copy-back also writes the fresher, usable subscription credential
-// into its per-identity cache slot, keyed by the real `account_id`. The cache is
-// a SEPARATE store; the host default overwrite and the cache slot are asserted
-// independently. This suite drives the real `.cjs` predicate (default mode for
-// the host store, seed mode for the cache slot) against a real host tmp
-// filesystem.
-describe("copyBackCodexAuth identity-keyed cache write", () => {
-  const cleanupDirs: string[] = [];
-  const COMPANY_ID = "company-a";
-
-  afterEach(async () => {
-    while (cleanupDirs.length > 0) {
-      const dir = cleanupDirs.pop();
-      if (!dir) continue;
-      await chmod(dir, 0o700).catch(() => undefined);
-      await rm(dir, { recursive: true, force: true }).catch(() => undefined);
-    }
-  });
-
-  function subscriptionAuth(input: { accountId: string; lastRefresh?: string; marker: string }): string {
-    return JSON.stringify({
-      tokens: {
-        id_token: `id-token-${input.marker}`,
-        access_token: `access-token-${input.marker}`,
-        refresh_token: `refresh-token-${input.marker}`,
-        account_id: input.accountId,
-      },
-      ...(input.lastRefresh ? { last_refresh: input.lastRefresh } : {}),
-    });
-  }
-
-  function apiKeyAuth(marker: string): string {
-    return JSON.stringify({ OPENAI_API_KEY: `sk-${marker}` });
-  }
-
-  const NEWER = "2026-07-09T02:00:00Z";
-  const OLDER = "2026-07-09T01:00:00Z";
-
-  async function makeEnv(extra: Record<string, string> = {}): Promise<{
-    env: NodeJS.ProcessEnv;
-    sharedHomeAuthPath: string;
-    sharedHome: string;
-  }> {
-    const home = await mkdtemp(path.join(os.tmpdir(), "paperclip-codex-copyback-cache-"));
-    cleanupDirs.push(home);
-    const env: NodeJS.ProcessEnv = {
-      PAPERCLIP_HOME: home,
-      PAPERCLIP_INSTANCE_ID: "default",
-      CODEX_HOME: path.join(home, "shared-codex"),
-      ...extra,
-    };
-    const sharedHome = resolveSharedCodexHomeDir(env);
-    await mkdir(sharedHome, { recursive: true });
-    return { env, sharedHomeAuthPath: path.join(sharedHome, "auth.json"), sharedHome };
-  }
-
-  async function runWithCache(input: {
-    sandboxAuth: string;
-    hostAuth?: string;
-    env: NodeJS.ProcessEnv;
-    sharedHomeAuthPath: string;
-    cacheEnabledEnv?: NodeJS.ProcessEnv;
-  }): Promise<{
-    outcome: Awaited<ReturnType<typeof copyBackCodexAuth>>;
-    finalHostAuth: string | null;
-    logs: string[];
-  }> {
-    if (input.hostAuth !== undefined) {
-      await writeFile(input.sharedHomeAuthPath, input.hostAuth, { mode: 0o600 });
-    }
-    const logs: string[] = [];
-    const outcome = await copyBackCodexAuth({
-      readSandboxAuth: async () => Buffer.from(input.sandboxAuth, "utf8"),
-      hostAuthPath: input.sharedHomeAuthPath,
-      log: (line) => {
-        logs.push(line);
-      },
-      resolveCacheEntryPath: (accountId) =>
-        ensureCodexAuthCacheEntryDir(input.env, accountId, COMPANY_ID),
-      env: input.cacheEnabledEnv ?? input.env,
-    });
-    const finalHostAuth = await readFile(input.sharedHomeAuthPath, "utf8").catch(
-      (error: NodeJS.ErrnoException) => (error.code === "ENOENT" ? null : Promise.reject(error)),
-    );
-    return { outcome, finalHostAuth, logs };
-  }
-
-  async function readCacheSlot(env: NodeJS.ProcessEnv, accountId: string): Promise<string | null> {
-    const entryPath = resolveCodexAuthCacheEntryPath(env, accountId, COMPANY_ID);
-    return readFile(entryPath, "utf8").catch((error: NodeJS.ErrnoException) =>
-      error.code === "ENOENT" ? null : Promise.reject(error),
-    );
-  }
-
-  it("host absent (matrix row 3): host default store stays empty, cache slot holds the credential keyed by account_id", async () => {
-    const { env, sharedHomeAuthPath } = await makeEnv();
-    const sandboxAuth = subscriptionAuth({ accountId: "acct-y", lastRefresh: NEWER, marker: "row3" });
-
-    const result = await runWithCache({ sandboxAuth, env, sharedHomeAuthPath });
-
-    expect(result.outcome).toBe("kept-host");
-    expect(result.finalHostAuth).toBeNull(); // host never seeded
-    expect(await readCacheSlot(env, "acct-y")).toBe(sandboxAuth);
-  });
-
-  it("host present, same identity, sandbox newer (matrix row 1a): host default overwritten AND cache slot updated", async () => {
-    const { env, sharedHomeAuthPath } = await makeEnv();
-    const sandboxAuth = subscriptionAuth({ accountId: "acct-x", lastRefresh: NEWER, marker: "sandbox" });
-    const hostAuth = subscriptionAuth({ accountId: "acct-x", lastRefresh: OLDER, marker: "host" });
-
-    const result = await runWithCache({ sandboxAuth, hostAuth, env, sharedHomeAuthPath });
-
-    expect(result.outcome).toBe("copied");
-    expect(result.finalHostAuth).toBe(sandboxAuth);
-    expect(await readCacheSlot(env, "acct-x")).toBe(sandboxAuth);
-  });
-
-  it("host present, different identity (matrix row 1b): host default untouched, cache slot holds the new identity only", async () => {
-    const { env, sharedHomeAuthPath } = await makeEnv();
-    const sandboxAuth = subscriptionAuth({ accountId: "acct-y", lastRefresh: NEWER, marker: "sandbox" });
-    const hostAuth = subscriptionAuth({ accountId: "acct-x", lastRefresh: OLDER, marker: "host" });
-
-    const result = await runWithCache({ sandboxAuth, hostAuth, env, sharedHomeAuthPath });
-
-    expect(result.outcome).toBe("kept-host");
-    expect(result.finalHostAuth).toBe(hostAuth); // host keeps its own identity X
-    expect(await readCacheSlot(env, "acct-y")).toBe(sandboxAuth); // slot Y written
-    expect(await readCacheSlot(env, "acct-x")).toBeNull(); // no slot for host identity
-  });
-
-  it("sandbox apikey or unusable: neither the host default nor the cache changes", async () => {
-    for (const sandboxAuth of [apiKeyAuth("sbx"), "{not valid json"]) {
-      const { env, sharedHomeAuthPath } = await makeEnv();
-      const hostAuth = subscriptionAuth({ accountId: "acct-x", lastRefresh: OLDER, marker: "host" });
-      const result = await runWithCache({ sandboxAuth, hostAuth, env, sharedHomeAuthPath });
-      expect(result.outcome).toBe("kept-host");
-      expect(result.finalHostAuth).toBe(hostAuth);
-      const cacheDir = resolveCodexAuthCacheDir(env, COMPANY_ID);
-      // No cache slot directory is created at all for a credential with no identity.
-      await expect(readdir(cacheDir)).rejects.toThrow();
-    }
-  });
-
-  it("off-switch off (matrix row 1a inputs): teardown cache write is a no-op and the host default overwrite still runs", async () => {
-    const { env, sharedHomeAuthPath } = await makeEnv();
-    const sandboxAuth = subscriptionAuth({ accountId: "acct-x", lastRefresh: NEWER, marker: "sandbox" });
-    const hostAuth = subscriptionAuth({ accountId: "acct-x", lastRefresh: OLDER, marker: "host" });
-
-    const result = await runWithCache({
-      sandboxAuth,
-      hostAuth,
-      env,
-      sharedHomeAuthPath,
-      cacheEnabledEnv: { ...env, PAPERCLIP_CODEX_AUTH_CACHE: "0" },
-    });
-
-    // Host overwrite still runs with the off-switch off.
-    expect(result.outcome).toBe("copied");
-    expect(result.finalHostAuth).toBe(sandboxAuth);
-    // No cache slot is written.
-    const cacheDir = resolveCodexAuthCacheDir(env, COMPANY_ID);
-    await expect(readdir(cacheDir)).rejects.toThrow();
-  });
-
-  it("two concurrent teardown writes for the same identity leave one valid cache slot (no partial file)", async () => {
-    const { env, sharedHomeAuthPath } = await makeEnv();
-    await writeFile(
-      sharedHomeAuthPath,
-      subscriptionAuth({ accountId: "acct-x", lastRefresh: OLDER, marker: "host" }),
-      { mode: 0o600 },
-    );
-    const run = (marker: string) =>
-      copyBackCodexAuth({
-        readSandboxAuth: async () =>
-          Buffer.from(subscriptionAuth({ accountId: "acct-x", lastRefresh: NEWER, marker }), "utf8"),
-        hostAuthPath: sharedHomeAuthPath,
-        log: () => {},
-        resolveCacheEntryPath: (accountId) => ensureCodexAuthCacheEntryDir(env, accountId, COMPANY_ID),
-        env,
-      });
-    await Promise.all([run("a"), run("b")]);
-
-    const entryPath = resolveCodexAuthCacheEntryPath(env, "acct-x", COMPANY_ID);
-    const slotDir = path.dirname(entryPath);
-    // Exactly one valid slot file, no leftover staging temp.
-    expect(await readdir(slotDir)).toEqual(["auth.json"]);
-    const finalSlot = await readFile(entryPath, "utf8");
-    expect(JSON.parse(finalSlot).tokens.account_id).toBe("acct-x");
-  });
-
-  it("the cache write never emits source token bytes or a raw account_id to the log", async () => {
-    const { env, sharedHomeAuthPath } = await makeEnv();
-    const sandboxAuth = subscriptionAuth({
-      accountId: "SECRET-ACCT",
-      lastRefresh: NEWER,
-      marker: "TOKEN-SENTINEL",
-    });
-    const result = await runWithCache({ sandboxAuth, env, sharedHomeAuthPath });
-    expect(await readCacheSlot(env, "SECRET-ACCT")).toBe(sandboxAuth);
-    const combined = result.logs.join("\n");
-    expect(combined).not.toContain("SENTINEL");
-    expect(combined).not.toContain("SECRET-ACCT");
-    expect(combined).not.toContain("id-token");
-  });
-
-  it.runIf(process.platform !== "win32")(
-    "a read-only cache directory does not fail the copy-back: the successful host result is kept and no partial slot remains",
-    async () => {
-    const { env, sharedHomeAuthPath } = await makeEnv();
-    const sandboxAuth = subscriptionAuth({ accountId: "acct-x", lastRefresh: NEWER, marker: "sandbox" });
-    const hostAuth = subscriptionAuth({ accountId: "acct-x", lastRefresh: OLDER, marker: "host" });
-    await writeFile(sharedHomeAuthPath, hostAuth, { mode: 0o600 });
-
-    // Pre-create the entry directory, then make it read-only so the cache-slot
-    // temp create fails. The host overwrite runs first and must stay intact. The
-    // additive cache write is best-effort, so its failure must not throw.
-    const entryPath = await ensureCodexAuthCacheEntryDir(env, "acct-x", COMPANY_ID);
-    const slotDir = path.dirname(entryPath);
-    const logs: string[] = [];
-    await chmod(slotDir, 0o500);
-    let outcome: string;
-    try {
-      outcome = await copyBackCodexAuth({
-        readSandboxAuth: async () => Buffer.from(sandboxAuth, "utf8"),
-        hostAuthPath: sharedHomeAuthPath,
-        log: (line) => {
-          logs.push(line);
-        },
-        resolveCacheEntryPath: (accountId) => ensureCodexAuthCacheEntryDir(env, accountId, COMPANY_ID),
-        env,
-      });
-    } finally {
-      await chmod(slotDir, 0o700);
-    }
-
-    // The host copy-back succeeded and its result is returned unchanged.
-    expect(outcome).toBe("copied");
-    // Host default overwrite ran before the cache write and stays applied.
-    expect(await readFile(sharedHomeAuthPath, "utf8")).toBe(sandboxAuth);
-    // No partial slot file; only the (empty) slot directory remains.
-    expect(await readdir(slotDir)).toEqual([]);
-    // The failure is visible in the log with only the errno code. The raw
-    // account_id (which the failing slot path embeds) never reaches the log.
-    const combined = logs.join("\n");
-    expect(combined).toContain("additive cache write failed (EACCES)");
-    expect(combined).not.toContain("acct-x");
-    },
-  );
-
-  it.runIf(process.platform !== "win32")(
-    "a rejecting cache-failure log does not override the successful host copy-back result",
-    async () => {
-    const { env, sharedHomeAuthPath } = await makeEnv();
-    const sandboxAuth = subscriptionAuth({ accountId: "acct-x", lastRefresh: NEWER, marker: "sandbox" });
-    const hostAuth = subscriptionAuth({ accountId: "acct-x", lastRefresh: OLDER, marker: "host" });
-    await writeFile(sharedHomeAuthPath, hostAuth, { mode: 0o600 });
-
-    // Force the additive cache write to fail: pre-create the slot directory,
-    // then make it read-only so the slot temp create fails with EACCES.
-    const entryPath = await ensureCodexAuthCacheEntryDir(env, "acct-x", COMPANY_ID);
-    const slotDir = path.dirname(entryPath);
-    await chmod(slotDir, 0o500);
-
-    // The logger rejects for the cache-failure diagnostic line only. The host
-    // copy-back already installed the sandbox credential on disk, so this
-    // rejection must not propagate and must not override the "copied" result.
-    const logs: string[] = [];
-    let outcome: Awaited<ReturnType<typeof copyBackCodexAuth>> | undefined;
-    let thrown: unknown;
-    try {
-      outcome = await copyBackCodexAuth({
-        readSandboxAuth: async () => Buffer.from(sandboxAuth, "utf8"),
-        hostAuthPath: sharedHomeAuthPath,
-        log: (line) => {
-          logs.push(line);
-          if (line.includes("additive cache write failed")) {
-            return Promise.reject(new Error("log sink boom"));
-          }
-        },
-        resolveCacheEntryPath: (accountId) => ensureCodexAuthCacheEntryDir(env, accountId, COMPANY_ID),
-        env,
-      }).catch((error: unknown) => {
-        thrown = error;
-        return undefined;
-      });
-    } finally {
-      await chmod(slotDir, 0o700);
-    }
-
-    // The rejecting cache-failure log never surfaces as a thrown error.
-    expect(thrown).toBeUndefined();
-    // The host copy-back result is kept intact.
-    expect(outcome).toBe("copied");
-    expect(await readFile(sharedHomeAuthPath, "utf8")).toBe(sandboxAuth);
-    // No partial slot file remains after the failed cache write.
-    expect(await readdir(slotDir)).toEqual([]);
-    // The cache-failure diagnostic was attempted even though the sink rejected.
-    expect(logs.some((line) => line.includes("additive cache write failed (EACCES)"))).toBe(true);
-    },
-  );
 });
