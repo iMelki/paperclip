@@ -28,10 +28,10 @@ diff --git a/dist/index.js b/dist/index.js
              // Optionally retrieve the uid and gid
              const permissionIds = yield this.getUidAndGid()
                  .catch(() => {
-@@ -168,6 +168,97 @@ class EmbeddedPostgres {
+@@ -168,6 +168,121 @@ class EmbeddedPostgres {
              });
              // Make the file executable, in case it is not
-             ensureBinIsExecutable(postgres);
+-            ensureBinIsExecutable(postgres);
 +            // GUARD: postgres.exe hard-refuses to run under a Windows token
 +            // that carries the Administrators group ("Execution of
 +            // PostgreSQL by a user with administrative permissions is not
@@ -44,16 +44,39 @@ diff --git a/dist/index.js b/dist/index.js
 +            // @see https://github.com/zonkyio/embedded-postgres/issues/66 (same failure, JVM port)
 +            // @see iMelki/paperclip#35
 +            if (platform() === 'win32') {
-+                ensureBinIsExecutable(pg_ctl);
++                // pg_ctl uses CMD internally. This is a restricted input contract,
++                // not CMD escaping or a guarantee for all Windows path forms.
++                const requireSafePath = (value, label) => {
++                    if (typeof value !== 'string' || !/^[A-Za-z]:[\\/]/.test(value)
++                        || /[\x00-\x1f\x7f"'%!&|<>^()`;*?]/.test(value)
++                        || value.slice(2).includes(':')) {
++                        throw new Error(`Unsupported Windows ${label}: requires a safe absolute drive path`);
++                    }
++                    return value;
++                };
++                if (!Number.isInteger(this.options.port) || this.options.port < 1 || this.options.port > 65535) {
++                    throw new Error('Windows PostgreSQL port must be an integer from 1 to 65535');
++                }
++                if (!Array.isArray(this.options.postgresFlags) || this.options.postgresFlags.length !== 0) {
++                    throw new Error('Custom postgresFlags are unsupported on Windows; use an empty array');
++                }
++                requireSafePath(this.options.databaseDir, 'databaseDir');
++                requireSafePath(postgres, 'postgres path');
++                requireSafePath(pg_ctl, 'pg_ctl path');
++                const systemRoot = requireSafePath(globalThis.process.env.SystemRoot, 'SystemRoot');
 +                const logFile = path.join(this.options.databaseDir, 'server.log');
-+                // NOTE: pg_ctl's OWN `-p` flag means "path to the postgres
-+                // executable", NOT "port". The port (and any extra
-+                // postgresFlags) must be forwarded through `-o` instead, or
-+                // pg_ctl will try to exec the port number as a binary path.
-+                const serverOptions = [
-+                    `-p ${this.options.port.toString()}`,
-+                    ...this.options.postgresFlags,
-+                ].join(' ');
++                requireSafePath(logFile, 'log path');
++                const comspec = requireSafePath(path.join(systemRoot, 'System32', 'cmd.exe'), 'COMSPEC path');
++                const env = Object.assign({}, globalThis.process.env);
++                for (const key of Object.keys(env)) {
++                    if (key.toUpperCase() === 'COMSPEC') delete env[key];
++                }
++                env.COMSPEC = comspec;
++                env.LC_MESSAGES = LC_MESSAGES_LOCALE;
++                ensureBinIsExecutable(postgres);
++                ensureBinIsExecutable(pg_ctl);
++                // pg_ctl -p is the executable; the validated port goes in -o.
++                const serverOptions = `-p ${this.options.port}`;
 +                // `-l` appends rather than truncates, so on a persistent
 +                // (not wiped) data directory a prior run's log would
 +                // otherwise get re-emitted through onLog on every restart.
@@ -72,7 +95,8 @@ diff --git a/dist/index.js b/dist/index.js
 +                        '-l', logFile,
 +                        '-w',
 +                        '-o', serverOptions,
-+                    ], Object.assign(Object.assign({}, permissionIds), { windowsHide: true, env: Object.assign(Object.assign({}, globalThis.process.env), { LC_MESSAGES: LC_MESSAGES_LOCALE }) }));
++                        '-p', postgres,
++                    ], Object.assign(Object.assign({}, permissionIds), { windowsHide: true, env }));
 +                    this.process.once('error', reject);
 +                    let pgCtlOutput = '';
 +                    (_a = this.process.stdout) === null || _a === void 0 ? void 0 : _a.on('data', (chunk) => {
@@ -123,10 +147,11 @@ diff --git a/dist/index.js b/dist/index.js
 +                });
 +                return;
 +            }
++            ensureBinIsExecutable(postgres);
              yield new Promise((resolve, reject) => {
                  var _a;
                  // Spawn a postgres server
-@@ -177,7 +268,7 @@ class EmbeddedPostgres {
+@@ -177,7 +292,7 @@ class EmbeddedPostgres {
                      '-p',
                      this.options.port.toString(),
                      ...this.options.postgresFlags,
@@ -135,7 +160,7 @@ diff --git a/dist/index.js b/dist/index.js
                  // Connect to stderr, as that is where the messages get sent
                  (_a = this.process.stderr) === null || _a === void 0 ? void 0 : _a.on('data', (chunk) => {
                      // Parse the data as a string and log it
-@@ -208,26 +299,53 @@ class EmbeddedPostgres {
+@@ -208,26 +323,53 @@ class EmbeddedPostgres {
                  return;
              }
              // Kill the existing postgres process

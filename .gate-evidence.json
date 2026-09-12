@@ -46,6 +46,25 @@
   },
   "gates": [
     {
+      "id": "embedded-postgres-windows-start-input-guard",
+      "path": "patches/embedded-postgres@18.1.0-beta.16.patch",
+      "description": "Reject unsupported Windows start inputs before executable preparation, log removal, or spawn; replace inherited COMSPEC variants.",
+      "negativeFixture": "scripts/embedded-postgres-pgctl.test.mjs",
+      "observedFailure": {
+        "date": "2026-09-13",
+        "command": "C:/nvm4w/nodejs/node.exe --test --test-isolation=none scripts/embedded-postgres-pgctl.test.mjs",
+        "brokenInput": "Owned private worktree only: replaced port and flag conditions with false, unsafe-character regex with /$a/, and COMSPEC deletion condition with false. Readback showed all four bypasses before execution; no hunk line counts changed.",
+        "reason": "Three guard tests failed with Missing expected rejection (port, flags, unsafe paths); environment test failed because ComSpec, comspec, cOmSpEc survived. Exactly 4 failed and 11 passed, exit 1; no syntax or dependency failure.",
+        "exitCode": 1,
+        "artifactPath": "doc/evidence/pr117/guard-negative.log",
+        "restoredPass": "Same exact Node v24.18.0 caller after restoration: 15 passed, 0 failed, 0 skipped, exit 0, 122.725 ms. Pre-mutation and restored raw SHA256 match.",
+        "restoredExitCode": 0,
+        "restoredArtifactPath": "doc/evidence/pr117/guard-restored.log",
+        "restoredPatchSha256": "38956adc68dc390d096cb27ace051bc3a6bdf053834eb01c97f9d1ee82e5c19d",
+        "scope": "VM execution of patch blocks only. Native CMD parsing, restricted-token startup, windows/descendants, package application and failure cleanup lifecycle remain unproven or out of scope."
+      }
+    },
+    {
       "id": "embedded-postgres-pgctl-lifecycle",
       "path": ".github/workflows/pr.yml",
       "description": "The policy job invokes the no-DB Node lifecycle tests explicitly; scripts are outside root Vitest projects.",

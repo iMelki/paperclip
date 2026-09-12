@@ -1,6 +1,21 @@
 # Paperclip Open Tasks
 
+- [#118 — Assess inherited PostgreSQL 18.1 security-version exposure](https://github.com/iMelki/paperclip/issues/118):
+  official CVE-2026-16239 advisory affects PostgreSQL 18 before 18.6. Binary
+  version applicability only; runtime exposure/backports and safe upgrade remain
+  unverified. Separate focused dependency change; superior review requested.
+
 - [#35 — Windows embedded PostgreSQL startup](https://github.com/iMelki/paperclip/issues/35):
+  Latest 2026-09-13 checkpoint: published `4f2abb969` passed hosted build/test/
+  typecheck/e2e jobs; trusted dependency review remains red. Independent review
+  found CMD input handling and failed-start process ownership blockers.
+  Follow-up Windows input guard has 15 mocked passes and deliberate-bypass
+  negative proof; independent publication-only review approved patch SHA256
+  `38956adc68dc390d096cb27ace051bc3a6bdf053834eb01c97f9d1ee82e5c19d`.
+  This does not resolve native
+  acceptance or cleanup. See [guard receipt](doc/evidence/pr117/guard-review.md)
+  and [review checkpoint](doc/plans/2026-09-13-pr117-review-checkpoint.md).
+  Earlier recovery history follows; its nine-test counts are historical.
   PR #117 is not superseded by dev `9f4a7e0aa`. Bounded correction committed
   on its existing branch: both pg_ctl spawn error listeners, windowsHide,
   nine no-DB mocked tests, explicit CI invocation, and base-identical lockfile.
