@@ -22,7 +22,7 @@ Compared base: `9f4a7e0aa99cd964fe7cd8913981500cc8f13d2f`.
 - `node --check scripts/embedded-postgres-pgctl.test.mjs`,
   `git apply --numstat patches/embedded-postgres@18.1.0-beta.16.patch`,
   and `git diff --check` passed.
-  No dependency install, database, elevated process, build, or broad suite ran.
+  That focused run needed no dependencies, database, elevated process, or build.
 - The existing policy job now explicitly invokes the same Node test command.
   Root Vitest projects do not discover scripts. Node 24 is already configured
   in that job; no new dependency, matrix, or workflow is introduced.
@@ -50,23 +50,24 @@ metacharacters. The proposed quote map was removed; no custom escaping is added.
 
 [Independent parent review](https://github.com/iMelki/paperclip/pull/117#issuecomment-5648622603)
 confirms the original patch is not superseded. Current dev still uses direct
-postgres startup and taskkill shutdown. The correction remains uncommitted on
-the existing PR branch, now approved by the parent for commit/push only.
+postgres startup and taskkill shutdown. The correction is committed on
+the existing PR branch, approved by the parent for publication only.
 Canonical dev remains clean and unchanged (0 ahead / 0 behind origin/dev).
-The worker will use command-scoped `core.hooksPath=.husky` to invoke tracked
-original hooks because this worktree lacks `.husky/_pre-commit`; shared Git
-configuration is unchanged. The worker ran the commit hook; no push hook ran.
+Command-scoped `core.hooksPath=.husky` invokes tracked original hooks because
+this worktree lacks `.husky/_/pre-commit`; shared Git configuration is unchanged.
+
+### Historical prerequisite failures
 
 Publication attempt on 2026-09-13: the normal tracked pre-commit hook ran via
 `git -c core.hooksPath=.husky commit` and exited 1. Its workspace-link preflight
-requires `cli/node_modules/tsx/dist/cli.mjs`, which is absent in this worktree.
+requires `cli/node_modules/tsx/dist/cli.mjs`, which was absent in this worktree.
 Token and pinned Gitleaks checks passed. No commit was created and push was not
 attempted. No bypass, dependency install, or shared configuration change occurred.
 Durable log: sibling directory `../paperclip-pr117-publication-logs/commit.log`;
 exit receipt: `../paperclip-pr117-publication-logs/commit-status.log` (exit 1).
 The pre-push hook also requires workspace dependencies and full `pnpm -r typecheck`.
 Read-only admission snapshot: 17,954,072 KiB free of 66,786,036 KiB total
-(73.1 percent used). Dependency availability, not memory alone, blocks publication.
+(73.1 percent used). Missing dependencies blocked that attempt, not authorization.
 Captured Node logs have whitespace-only blank lines normalized for Git diff checks;
 assertion text and results are unchanged.
 
@@ -78,8 +79,8 @@ It exited 1 after 5.027 seconds with `ERR_PNPM_NO_OFFLINE_META`:
 `Failed to resolve hono@>=4.11.4 <5.0.0-0` while resolving dependencies of
 `@modelcontextprotocol/sdk@1.29.0` in the claude-local adapter closure.
 Observed peak RAM 71.0644 percent; minimum S free 10.8630 GiB. Downloaded 0,
-added 0. Worktree root node_modules and CLI tsx remain absent. Working and staged
-lockfile blobs both remain `b8265b395be328934b4cdba5d4c527fa8fa5df90`, so no
+added 0. Worktree root node_modules and CLI tsx were still absent. Working and staged
+lockfile blobs both remained `b8265b395be328934b4cdba5d4c527fa8fa5df90`, so no
 restoration was needed. No fallback, network fetch, lifecycle build, canonical
 dependency junction, commit retry, or push occurred.
 Evidence in sibling `../paperclip-pr117-publication-logs/`: `offline-install.log`,
@@ -106,6 +107,20 @@ Evidence under the sibling publication-log directory: `registry-result.json`,
 `commit-20260912T212033Z.log`. Generated installation-only lockfile changes are
 excluded from publication; the committed lockfile remains the base blob.
 Push and hosted checks remain separate gates; no merge approval is implied.
+
+Full-workspace provisioning then succeeded in 27.7419 seconds (724 cached
+packages added, zero downloads). The normal pre-push full TypeScript gate passed
+in 198.3 seconds. Its exact-test-plan gate correctly rejected the attempt because
+the parent edited these documentation checkpoints while the hook ran. This was
+an agent sequencing error, not a code or dependency failure. Commit the docs,
+verify a pristine worktree/index, and leave them unchanged for the entire retry.
+Evidence: `push-20260912T212352Z.log` (exit 1, 213.1086 seconds).
+
+An independent second agent reviewed exact head
+`6ce1b282d247fbd2fb88ddc71b2bf5ae366fcbbd` against the original PR head and
+approved the narrow correction for publication with no blocking code findings.
+The reviewer explicitly retained every merge hold and noted that mock extraction
+does not establish surrounding module or cleanup integration.
 
 The dependency label is absent and must not be added by this correction.
 The parent reports branch-protection API 404; the user's all-green condition
