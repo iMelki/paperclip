@@ -13,14 +13,21 @@
   build helper. Normal pre-commit passed; correction `36182c123`, documented
   by `6ce1b282d`. Independent second-agent review approved that exact head for
   publication with no blocking code findings. Full-workspace provisioning also
-  succeeded and normal pre-push full typecheck passed (198.3s). Exact-plan gate
-  rejected concurrent documentation edits; retry requires a pristine worktree.
+  succeeded and normal pre-push full typecheck passed twice (198.3s / 168.1s).
+  Exact-plan checks exposed concurrent docs edits, then missing dev ancestry;
+  notes committed and dev `9f4a7e0aa` merged before a pristine retry.
   No hook bypass.
   Elevated Windows
   acceptance, descendant-window proof, trusted dependency review, final amended-head
   merge approval, and all-green CI remain open. No dependency label added.
   See [correction receipt](doc/plans/2026-09-12-pr117-correction.md) and
   [parent review](https://github.com/iMelki/paperclip/pull/117#issuecomment-5648622603).
+  Preserved dev provenance (2026-09-10): the original author recorded a live
+  unelevated initialise/start/createDatabase/stop pass with pg_ctl routing and
+  cited zonkyio/embedded-postgres#66 for the restricted-token mechanism.
+  This is historical evidence, not a fresh native rerun. Elevated acceptance
+  was explicitly unverified; inspect server.log for data-directory ACL failures
+  because initialise() still invokes initdb directly.
 
 - #48 / #94 / #89 Historical gauntlet stash evidence preserved with a verified private archive; [dated provenance](docs/uiux/browser-evidence-2026-08-27/HISTORICAL-ARCHIVE-2026-09-08.md).
 

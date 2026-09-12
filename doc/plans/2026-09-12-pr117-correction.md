@@ -116,6 +116,12 @@ an agent sequencing error, not a code or dependency failure. Commit the docs,
 verify a pristine worktree/index, and leave them unchanged for the entire retry.
 Evidence: `push-20260912T212352Z.log` (exit 1, 213.1086 seconds).
 
+The pristine retry passed typechecking again (168.1s), then correctly rejected
+missing advertised dev ancestry (`9f4a7e0aa`); receipt
+`push-20260912T212812Z.log` (exit 1, 183.3623s). That dev commit changes only
+OPEN_TASKS.md. It is merged without rewriting history, retaining its historical
+unelevated proof and elevated-acceptance caveat in the consolidated issue entry.
+
 An independent second agent reviewed exact head
 `6ce1b282d247fbd2fb88ddc71b2bf5ae366fcbbd` against the original PR head and
 approved the narrow correction for publication with no blocking code findings.
