@@ -46,6 +46,26 @@
   },
   "gates": [
     {
+      "id": "embedded-postgres-pgctl-lifecycle",
+      "path": ".github/workflows/pr.yml",
+      "description": "The policy job invokes the no-DB Node lifecycle tests explicitly; scripts are outside root Vitest projects.",
+      "negativeFixture": "scripts/embedded-postgres-pgctl.test.mjs",
+      "observedFailure": {
+        "date": "2026-09-13",
+        "command": "node --test --test-isolation=none scripts/embedded-postgres-pgctl.test.mjs",
+        "brokenInput": "In the isolated PR117 worktree only, changed both added pg_ctl spawn windowsHide values from true to false; asserted exactly two false occurrences before execution.",
+        "reason": "Exit 1: six assertions failed with start must set windowsHide or stop must set windowsHide, actual false, expected true; three other tests passed. Both reason strings were asserted in the captured output.",
+        "exitCode": 1,
+        "artifactPath": "doc/evidence/pr117/negative-final.log",
+        "restoredPass": "After removing the quote map, restored both flags; exact same command exited 0 with 9 passed, 0 failed, 0 skipped (28.6977 ms). SHA256 matched the pre-mutation final patch hash.",
+        "restoredExitCode": 0,
+        "restoredArtifactPath": "doc/evidence/pr117/pass-final.log",
+        "restoredPatchSha256": "877090d1d366543689eedcc5d2f96256ff4c38c5f0adb11237638706b027ea3f",
+        "runtime": "Node v24.18.0 on unelevated Windows; CI declares Node 24. No native database or elevated process ran.",
+        "scope": "Proves the added command locally; hosted CI and elevated Windows acceptance remain unproven. Existing policy-job checks can still block this step."
+      }
+    },
+    {
       "id": "cost-source-identity-contract",
       "path": "packages/shared/src/validators/cost.ts",
       "description": "Require a complete company/system/account/event identity and reject immutable-payload conflicts without overwriting cost history.",

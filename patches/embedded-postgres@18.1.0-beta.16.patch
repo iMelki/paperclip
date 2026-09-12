@@ -1,5 +1,4 @@
 diff --git a/dist/index.js b/dist/index.js
-index ccfe17a82f4879bf20cc345c579a987d9eba5309..d8b213315b442e1310ef30a70eece33cc555615a 100644
 --- a/dist/index.js
 +++ b/dist/index.js
 @@ -23,7 +23,7 @@ const { Client } = pg;
@@ -29,7 +28,7 @@ index ccfe17a82f4879bf20cc345c579a987d9eba5309..d8b213315b442e1310ef30a70eece33c
              // Optionally retrieve the uid and gid
              const permissionIds = yield this.getUidAndGid()
                  .catch(() => {
-@@ -168,6 +168,96 @@ class EmbeddedPostgres {
+@@ -168,6 +168,97 @@ class EmbeddedPostgres {
              });
              // Make the file executable, in case it is not
              ensureBinIsExecutable(postgres);
@@ -73,7 +72,8 @@ index ccfe17a82f4879bf20cc345c579a987d9eba5309..d8b213315b442e1310ef30a70eece33c
 +                        '-l', logFile,
 +                        '-w',
 +                        '-o', serverOptions,
-+                    ], Object.assign(Object.assign({}, permissionIds), { env: Object.assign(Object.assign({}, globalThis.process.env), { LC_MESSAGES: LC_MESSAGES_LOCALE }) }));
++                    ], Object.assign(Object.assign({}, permissionIds), { windowsHide: true, env: Object.assign(Object.assign({}, globalThis.process.env), { LC_MESSAGES: LC_MESSAGES_LOCALE }) }));
++                    this.process.once('error', reject);
 +                    let pgCtlOutput = '';
 +                    (_a = this.process.stdout) === null || _a === void 0 ? void 0 : _a.on('data', (chunk) => {
 +                        const message = chunk.toString('utf-8');
@@ -126,7 +126,7 @@ index ccfe17a82f4879bf20cc345c579a987d9eba5309..d8b213315b442e1310ef30a70eece33c
              yield new Promise((resolve, reject) => {
                  var _a;
                  // Spawn a postgres server
-@@ -177,7 +267,7 @@ class EmbeddedPostgres {
+@@ -177,7 +268,7 @@ class EmbeddedPostgres {
                      '-p',
                      this.options.port.toString(),
                      ...this.options.postgresFlags,
@@ -135,7 +135,7 @@ index ccfe17a82f4879bf20cc345c579a987d9eba5309..d8b213315b442e1310ef30a70eece33c
                  // Connect to stderr, as that is where the messages get sent
                  (_a = this.process.stderr) === null || _a === void 0 ? void 0 : _a.on('data', (chunk) => {
                      // Parse the data as a string and log it
-@@ -208,26 +298,52 @@ class EmbeddedPostgres {
+@@ -208,26 +299,53 @@ class EmbeddedPostgres {
                  return;
              }
              // Kill the existing postgres process
@@ -178,7 +178,8 @@ index ccfe17a82f4879bf20cc345c579a987d9eba5309..d8b213315b442e1310ef30a70eece33c
 +                        '-D', this.options.databaseDir,
 +                        '-m', 'fast',
 +                        '-w',
-+                    ]);
++                    ], { windowsHide: true });
++                    stopProcess.once('error', reject);
 +                    let stopOutput = '';
 +                    (_a = stopProcess.stdout) === null || _a === void 0 ? void 0 : _a.on('data', (chunk) => { stopOutput += chunk.toString('utf-8'); });
 +                    (_b = stopProcess.stderr) === null || _b === void 0 ? void 0 : _b.on('data', (chunk) => { stopOutput += chunk.toString('utf-8'); });

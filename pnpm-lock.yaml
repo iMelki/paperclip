@@ -24,7 +24,7 @@ patchedDependencies:
     hash: x3fethhotv43zektyl5prdwf54
     path: patches/acpx@0.12.0.patch
   embedded-postgres@18.1.0-beta.16:
-    hash: gnnozlfamvc7qjqxvdv4t76d6y
+    hash: hzyg7myapolgo4c5o4ov24hjm4
     path: patches/embedded-postgres@18.1.0-beta.16.patch
 
 importers:
@@ -105,7 +105,7 @@ importers:
         version: 0.45.2(@electric-sql/pglite@0.3.15)(@opentelemetry/api@1.9.1)(kysely@0.29.4)(pg@8.18.0)(postgres@3.4.9)
       embedded-postgres:
         specifier: ^18.1.0-beta.16
-        version: 18.1.0-beta.16(patch_hash=gnnozlfamvc7qjqxvdv4t76d6y)
+        version: 18.1.0-beta.16(patch_hash=hzyg7myapolgo4c5o4ov24hjm4)
       picocolors:
         specifier: ^1.1.1
         version: 1.1.1
@@ -340,7 +340,7 @@ importers:
         version: 0.45.2(@electric-sql/pglite@0.3.15)(@opentelemetry/api@1.9.1)(kysely@0.29.4)(pg@8.18.0)(postgres@3.4.9)
       embedded-postgres:
         specifier: ^18.1.0-beta.16
-        version: 18.1.0-beta.16(patch_hash=gnnozlfamvc7qjqxvdv4t76d6y)
+        version: 18.1.0-beta.16(patch_hash=hzyg7myapolgo4c5o4ov24hjm4)
       postgres:
         specifier: ^3.4.9
         version: 3.4.9
@@ -799,7 +799,7 @@ importers:
         version: 0.45.2(@electric-sql/pglite@0.3.15)(@opentelemetry/api@1.9.1)(kysely@0.29.4)(pg@8.18.0)(postgres@3.4.9)
       embedded-postgres:
         specifier: ^18.1.0-beta.16
-        version: 18.1.0-beta.16(patch_hash=gnnozlfamvc7qjqxvdv4t76d6y)
+        version: 18.1.0-beta.16(patch_hash=hzyg7myapolgo4c5o4ov24hjm4)
       express:
         specifier: ^5.1.0
         version: 5.2.1
@@ -12915,7 +12915,7 @@ snapshots:
 
   electron-to-chromium@1.5.286: {}
 
-  embedded-postgres@18.1.0-beta.16(patch_hash=gnnozlfamvc7qjqxvdv4t76d6y):
+  embedded-postgres@18.1.0-beta.16(patch_hash=hzyg7myapolgo4c5o4ov24hjm4):
     dependencies:
       async-exit-hook: 2.0.1
       pg: 8.18.0
@@ -13619,7 +13619,7 @@ snapshots:
 
   json-schema-to-ts@3.1.1:
     dependencies:
-      '@babel/runtime': 7.29.7
+      '@babel/runtime': 7.28.6
       ts-algebra: 2.0.0
 
   json-schema-traverse@1.0.0: {}

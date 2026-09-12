@@ -1,5 +1,24 @@
 # Paperclip Open Tasks
 
+- [#35 — Windows embedded PostgreSQL startup](https://github.com/iMelki/paperclip/issues/35):
+  PR #117 is not superseded by dev `9f4a7e0aa`. Bounded correction prepared
+  on its existing branch: both pg_ctl spawn error listeners, windowsHide,
+  nine no-DB mocked tests, explicit CI invocation, and base-identical lockfile.
+  Existing pg_ctl -o CMD forwarding is an additional merge HOLD pending native
+  command-line proof; original join semantics remain unchanged.
+  Parent approved the narrow correction for publication on 2026-09-13;
+  this is not merge approval. Independent rerun: 9 pass, 0 skip, 35.2 ms,
+  with clean diff check. Normal commit hook subsequently exited 1: missing
+  worktree cli/node_modules/tsx dependency. One authorized offline install failed
+  in 5.03s with ERR_PNPM_NO_OFFLINE_META for hono@>=4.11.4 <5.0.0-0
+  via @modelcontextprotocol/sdk@1.29.0. Zero downloads/additions; no fallback.
+  No commit/push; base lockfile unchanged. Publication remains dependency-blocked.
+  Elevated Windows
+  acceptance, descendant-window proof, trusted dependency review, amended-head
+  independent review, and all-green CI remain open. No dependency label added.
+  See [correction receipt](doc/plans/2026-09-12-pr117-correction.md) and
+  [parent review](https://github.com/iMelki/paperclip/pull/117#issuecomment-5648622603).
+
 - #48 / #94 / #89 Historical gauntlet stash evidence preserved with a verified private archive; [dated provenance](docs/uiux/browser-evidence-2026-08-27/HISTORICAL-ARCHIVE-2026-09-08.md).
 
 Last updated: 2026-09-07
