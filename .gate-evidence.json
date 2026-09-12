@@ -46,6 +46,22 @@
   },
   "gates": [
     {
+      "id": "embedded-postgres-failed-stop-preserves-data",
+      "path": "packages/db/src/test-embedded-postgres.ts",
+      "description": "Only successful stop may reclaim data; unresolved failed-start cleanup prevents retry.",
+      "negativeFixture": "packages/db/src/test-embedded-postgres-stop.test.ts",
+      "observedFailure": {
+        "date": "2026-09-13",
+        "command": "node scripts/run-vitest-stable.mjs --files packages/db/src/test-embedded-postgres-stop.test.ts",
+        "breakApplied": "Readback confirmed success predicate widened to failed and retry guard disabled before execution.",
+        "reason": "Four attributable failures: cleanup callback invoked after rejected/synchronous/late failure and five startup retries instead of unresolved-cleanup error.",
+        "exitCode": 1,
+        "artifactPath": "doc/evidence/pr117/cleanup-negative.log",
+        "restoredPass": "Both exact predicates restored; same caller six pass, zero skip, exit 0,432ms. Restored source SHA25660942d38fe887622451ec45b3fb6783e6e97c723961ae8c2d68189321f61a1d7; no pre-break hash claim."
+      },
+      "maintainabilityReceipt": "doc/evidence/pr117/cleanup-review.md"
+    },
+    {
       "id": "embedded-postgres-windows-start-input-guard",
       "path": "patches/embedded-postgres@18.1.0-beta.16.patch",
       "description": "Reject unsupported Windows start inputs before executable preparation, log removal, or spawn; replace inherited COMSPEC variants.",

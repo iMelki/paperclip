@@ -1,5 +1,11 @@
 # Paperclip Open Tasks
 
+- [#33 — Preserve fixture data when stop is unresolved](https://github.com/iMelki/paperclip/issues/33):
+  Bounded PR117 follow-up rejects failed-stop reclamation and prevents further
+  startup retries. Six mocked tests pass; four deliberate-bypass failures prove
+  the controls. Independent bounded review approved. Native ownership is still unproven;
+  see [cleanup receipt](doc/evidence/pr117/cleanup-review.md).
+
 - [#118 — Assess inherited PostgreSQL 18.1 security-version exposure](https://github.com/iMelki/paperclip/issues/118):
   official CVE-2026-16239 advisory affects PostgreSQL 18 before 18.6. Binary
   version applicability only; runtime exposure/backports and safe upgrade remain
