@@ -84,7 +84,28 @@ restoration was needed. No fallback, network fetch, lifecycle build, canonical
 dependency junction, commit retry, or push occurred.
 Evidence in sibling `../paperclip-pr117-publication-logs/`: `offline-install.log`,
 `offline-result.json`, `offline-resources.log`, and the bounded launcher
-`offline-install.ps1`. Stop here pending a separately authorized dependency remedy.
+`offline-install.ps1`. This was a recoverable prerequisite, not a new authorization gate.
+
+### Dependency recovery and commit (2026-09-13)
+
+The subsequent bounded registry-enabled run succeeded in 15.5623 seconds:
+442 cached packages linked, zero package archives downloaded, S free 10.68 GiB.
+Lifecycle scripts remained disabled. A normal commit retry reached test discovery
+but failed because the plugin SDK had no generated entry point. The repository's
+existing `node scripts/ensure-plugin-build-deps.mjs` then succeeded in 18.6827
+seconds. No canonical dependency directory was shared or modified.
+
+The next normal tracked pre-commit completed in 52.7352 seconds and created
+`36182c123`. Workspace-link preflight, token checks, staged Gitleaks, and related
+suite discovery passed; discovery found no related Vitest suites. The separately
+run nine Node tests remain the focused test evidence. React Doctor returned its
+documented disabled/incomplete receipt (exit 2), not a passing audit.
+
+Evidence under the sibling publication-log directory: `registry-result.json`,
+`registry-install.log`, `build-20260912T212008Z.log`, and
+`commit-20260912T212033Z.log`. Generated installation-only lockfile changes are
+excluded from publication; the committed lockfile remains the base blob.
+Push and hosted checks remain separate gates; no merge approval is implied.
 
 The dependency label is absent and must not be added by this correction.
 The parent reports branch-protection API 404; the user's all-green condition
