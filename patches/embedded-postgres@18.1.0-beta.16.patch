@@ -1,7 +1,7 @@
 diff --git a/dist/index.js b/dist/index.js
 --- a/dist/index.js
 +++ b/dist/index.js
-@@ -23,7 +23,7 @@
+@@ -23,7 +23,7 @@ const { Client } = pg;
   * for a particular string, we need to force that string into the right locale.
   * @see https://github.com/leinelissen/embedded-postgres/issues/15
   */
@@ -10,7 +10,7 @@ diff --git a/dist/index.js b/dist/index.js
  // The default configuration options for the class
  const defaults = {
      databaseDir: path.join(process.cwd(), 'data', 'db'),
-@@ -133,7 +133,7 @@
+@@ -133,7 +133,7 @@ class EmbeddedPostgres {
                      `--pwfile=${passwordFile}`,
                      `--lc-messages=${LC_MESSAGES_LOCALE}`,
                      ...this.options.initdbFlags,
@@ -19,7 +19,139 @@ diff --git a/dist/index.js b/dist/index.js
                  // Connect to stderr, as that is where the messages get sent
                  (_a = process.stdout) === null || _a === void 0 ? void 0 : _a.on('data', (chunk) => {
                      // Parse the data as a string and log it
-@@ -177,7 +177,7 @@
+@@ -160,7 +160,7 @@ class EmbeddedPostgres {
+      */
+     start() {
+         return __awaiter(this, void 0, void 0, function* () {
+-            const { postgres } = yield bin;
++            const { postgres, pg_ctl } = yield bin;
+             // Optionally retrieve the uid and gid
+             const permissionIds = yield this.getUidAndGid()
+                 .catch(() => {
+@@ -168,6 +168,121 @@ class EmbeddedPostgres {
+             });
+             // Make the file executable, in case it is not
+-            ensureBinIsExecutable(postgres);
++            // GUARD: postgres.exe hard-refuses to run under a Windows token
++            // that carries the Administrators group ("Execution of
++            // PostgreSQL by a user with administrative permissions is not
++            // permitted"). pg_ctl works around this on Windows by calling
++            // CreateRestrictedProcess(), which builds a restricted token
++            // (Administrators/Power Users disabled) before exec'ing
++            // postgres, and only then hands off -- so route Windows starts
++            // through pg_ctl instead of spawning postgres directly.
++            // @see https://github.com/postgres/postgres/blob/master/src/bin/pg_ctl/pg_ctl.c (CreateRestrictedProcess)
++            // @see https://github.com/zonkyio/embedded-postgres/issues/66 (same failure, JVM port)
++            // @see iMelki/paperclip#35
++            if (platform() === 'win32') {
++                // pg_ctl uses CMD internally. This is a restricted input contract,
++                // not CMD escaping or a guarantee for all Windows path forms.
++                const requireSafePath = (value, label) => {
++                    if (typeof value !== 'string' || !/^[A-Za-z]:[\\/]/.test(value)
++                        || /[\x00-\x1f\x7f"'%!&|<>^()`;*?]/.test(value)
++                        || value.slice(2).includes(':')) {
++                        throw new Error(`Unsupported Windows ${label}: requires a safe absolute drive path`);
++                    }
++                    return value;
++                };
++                if (!Number.isInteger(this.options.port) || this.options.port < 1 || this.options.port > 65535) {
++                    throw new Error('Windows PostgreSQL port must be an integer from 1 to 65535');
++                }
++                if (!Array.isArray(this.options.postgresFlags) || this.options.postgresFlags.length !== 0) {
++                    throw new Error('Custom postgresFlags are unsupported on Windows; use an empty array');
++                }
++                requireSafePath(this.options.databaseDir, 'databaseDir');
++                requireSafePath(postgres, 'postgres path');
++                requireSafePath(pg_ctl, 'pg_ctl path');
++                const systemRoot = requireSafePath(globalThis.process.env.SystemRoot, 'SystemRoot');
++                const logFile = path.join(this.options.databaseDir, 'server.log');
++                requireSafePath(logFile, 'log path');
++                const comspec = requireSafePath(path.join(systemRoot, 'System32', 'cmd.exe'), 'COMSPEC path');
++                const env = Object.assign({}, globalThis.process.env);
++                for (const key of Object.keys(env)) {
++                    if (key.toUpperCase() === 'COMSPEC') delete env[key];
++                }
++                env.COMSPEC = comspec;
++                env.LC_MESSAGES = LC_MESSAGES_LOCALE;
++                ensureBinIsExecutable(postgres);
++                ensureBinIsExecutable(pg_ctl);
++                // pg_ctl -p is the executable; the validated port goes in -o.
++                const serverOptions = `-p ${this.options.port}`;
++                // `-l` appends rather than truncates, so on a persistent
++                // (not wiped) data directory a prior run's log would
++                // otherwise get re-emitted through onLog on every restart.
++                yield fs.rm(logFile, { force: true });
++                yield new Promise((resolve, reject) => {
++                    var _a, _b;
++                    // pg_ctl backgrounds postgres via CreateRestrictedProcess()
++                    // and exits once `-w` confirms readiness (or times out) --
++                    // it is NOT the long-lived server, unlike the POSIX path
++                    // below. The real postmaster PID is recovered afterwards
++                    // from postmaster.pid, which postgres always writes on
++                    // startup regardless of how it was launched.
++                    this.process = spawn(pg_ctl, [
++                        'start',
++                        '-D', this.options.databaseDir,
++                        '-l', logFile,
++                        '-w',
++                        '-o', serverOptions,
++                        '-p', postgres,
++                    ], Object.assign(Object.assign({}, permissionIds), { windowsHide: true, env }));
++                    this.process.once('error', reject);
++                    let pgCtlOutput = '';
++                    (_a = this.process.stdout) === null || _a === void 0 ? void 0 : _a.on('data', (chunk) => {
++                        const message = chunk.toString('utf-8');
++                        pgCtlOutput += message;
++                        this.options.onLog(message);
++                    });
++                    (_b = this.process.stderr) === null || _b === void 0 ? void 0 : _b.on('data', (chunk) => {
++                        const message = chunk.toString('utf-8');
++                        pgCtlOutput += message;
++                        this.options.onLog(message);
++                    });
++                    this.process.on('exit', (code) => __awaiter(this, void 0, void 0, function* () {
++                        // The real postgres server output goes to `-l
++                        // logFile`, not to pg_ctl's own stdio -- surface it
++                        // best-effort so failure diagnostics still see it.
++                        // This must never fail start() itself.
++                        try {
++                            const serverLog = yield fs.readFile(logFile, 'utf-8');
++                            if (serverLog) {
++                                this.options.onLog(serverLog);
++                            }
++                        }
++                        catch (_c) {
++                            // Log file not created yet (e.g. pg_ctl failed before exec'ing postgres)
++                        }
++                        if (code !== 0) {
++                            reject(new Error(`pg_ctl start exited with code ${code}. ${pgCtlOutput}`.trim()));
++                            return;
++                        }
++                        // Recover the real postmaster PID so stop() and any
++                        // external monitoring see the actual server process,
++                        // not pg_ctl's (already-exited) one.
++                        try {
++                            const pidFileContents = yield fs.readFile(path.join(this.options.databaseDir, 'postmaster.pid'), 'utf-8');
++                            const pid = Number.parseInt(pidFileContents.split(/\r?\n/)[0], 10);
++                            if (Number.isFinite(pid)) {
++                                this.serverPid = pid;
++                            }
++                        }
++                        catch (err) {
++                            // Non-fatal: pg_ctl -w already confirmed the
++                            // server is accepting connections.
++                            this.options.onError(err);
++                        }
++                        resolve();
++                    }));
++                });
++                return;
++            }
++            ensureBinIsExecutable(postgres);
+             yield new Promise((resolve, reject) => {
+                 var _a;
+                 // Spawn a postgres server
+@@ -177,7 +292,7 @@ class EmbeddedPostgres {
                      '-p',
                      this.options.port.toString(),
                      ...this.options.postgresFlags,
@@ -28,18 +160,75 @@ diff --git a/dist/index.js b/dist/index.js
                  // Connect to stderr, as that is where the messages get sent
                  (_a = this.process.stderr) === null || _a === void 0 ? void 0 : _a.on('data', (chunk) => {
                      // Parse the data as a string and log it
-@@ -218,9 +218,12 @@
-                     if (!((_b = this.process) === null || _b === void 0 ? void 0 : _b.pid)) {
-                         throw new Error('Could not find process PID');
-                     }
+@@ -208,26 +323,53 @@ class EmbeddedPostgres {
+                 return;
+             }
+             // Kill the existing postgres process
+-            yield new Promise((resolve) => {
+-                var _a, _b, _c;
+-                // Register a handler for when the process finally exists
+-                (_a = this.process) === null || _a === void 0 ? void 0 : _a.on('exit', resolve);
+-                // GUARD: Check if we're on Windows, since Windows doesn't support SIGINT
+-                if (platform() === 'win32') {
+-                    // GUARD: Double check the pid is there to keep TypeScript happy
+-                    if (!((_b = this.process) === null || _b === void 0 ? void 0 : _b.pid)) {
+-                        throw new Error('Could not find process PID');
+-                    }
 -                    // Actually kill the process using the Windows taskkill command
 -                    spawn('taskkill', ['/pid', this.process.pid.toString(), '/f', '/t']);
-+                    // Actually kill the process using the Windows taskkill command,
-+                    // resolved via SystemRoot rather than PATH so a host with a
-+                    // damaged Machine PATH cannot fail the spawn with ENOENT.
-+                    const systemRoot = globalThis.process.env.SystemRoot || globalThis.process.env.windir;
-+                    spawn(systemRoot ? path.join(systemRoot, 'System32', 'taskkill.exe') : 'taskkill', ['/pid', this.process.pid.toString(), '/f', '/t']);
-                 }
-                 else {
-                     // If on a sane OS, simply kill using SIGINT
-                     (_c = this.process) === null || _c === void 0 ? void 0 : _c.kill('SIGINT');
+-                }
+-                else {
+-                    // If on a sane OS, simply kill using SIGINT
+-                    (_c = this.process) === null || _c === void 0 ? void 0 : _c.kill('SIGINT');
+-                }
+-            });
++            // GUARD: Check if we're on Windows, since Windows doesn't support SIGINT
++            if (platform() === 'win32') {
++                // NOTE: on Windows, start() above launches postgres via
++                // pg_ctl, which backgrounds the real server and then exits
++                // itself once ready -- so `this.process` here is that
++                // already-exited pg_ctl handle, not the live server, and its
++                // 'exit' event already fired (taskkill-by-its-pid would have
++                // nothing left to kill). Use `pg_ctl stop` instead, which
++                // locates the real postmaster via postmaster.pid in the data
++                // directory and asks it to shut down; this also incidentally
++                // fixes leinelissen/embedded-postgres#38 (the previous
++                // taskkill /f force-kill prevented a clean shutdown and
++                // caused ~4s of crash recovery on next start).
++                const { pg_ctl } = yield bin;
++                yield new Promise((resolve, reject) => {
++                    var _a, _b;
++                    const stopProcess = spawn(pg_ctl, [
++                        'stop',
++                        '-D', this.options.databaseDir,
++                        '-m', 'fast',
++                        '-w',
++                    ], { windowsHide: true });
++                    stopProcess.once('error', reject);
++                    let stopOutput = '';
++                    (_a = stopProcess.stdout) === null || _a === void 0 ? void 0 : _a.on('data', (chunk) => { stopOutput += chunk.toString('utf-8'); });
++                    (_b = stopProcess.stderr) === null || _b === void 0 ? void 0 : _b.on('data', (chunk) => { stopOutput += chunk.toString('utf-8'); });
++                    stopProcess.on('exit', (code) => {
++                        if (code === 0) {
++                            resolve();
++                        }
++                        else {
++                            reject(new Error(`pg_ctl stop exited with code ${code}. ${stopOutput}`.trim()));
++                        }
++                    });
++                });
++            }
++            else {
++                // If on a sane OS, simply kill using SIGINT and wait for exit
++                yield new Promise((resolve) => {
++                    var _a, _b;
++                    (_a = this.process) === null || _a === void 0 ? void 0 : _a.on('exit', resolve);
++                    (_b = this.process) === null || _b === void 0 ? void 0 : _b.kill('SIGINT');
++                });
++            }
+             // Clean up process
+             this.process = undefined;
++            this.serverPid = undefined;
+             // GUARD: Additional work if database is not persistent
+             if (this.options.persistent === false) {
+                 // Delete the data directory
