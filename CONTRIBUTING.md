@@ -172,6 +172,36 @@ typecheck, deterministic exact suites, and the direct-protected-branch CI policy
 missing `.husky/pre-push` looks exactly like a pass because the Husky shim exits 0 when the
 hook file is absent.
 
+#### Linked worktrees start with no hooks at all
+
+`core.hooksPath` is set to `.husky/_` in the shared `.git/config`, so every linked worktree
+inherits it. `.husky/_` is the Husky dispatcher. It is self-ignored (`.husky/_/.gitignore`
+contains `*`) and Husky is not a dependency of this repo, so nothing creates it in a new
+worktree: not `git worktree add`, not `pnpm install`, and not `paperclipai worktree init`
+(its hook mirror copies into the worktree's private git dir, which git never reads while
+`core.hooksPath` is set). Git does not warn when `core.hooksPath` points at a directory that
+does not exist. `git commit` and `git push` then run zero hooks and print nothing, which is
+indistinguishable from a pass. This is how the PR
+[#117](https://github.com/iMelki/paperclip/pull/117) correction worktree pushed unhooked,
+and how [mission-control#103](https://github.com/iMelki/mission-control/issues/103)
+recorded six ungated pushes.
+
+Before the first commit in a linked worktree, copy the dispatcher from the primary checkout
+and verify it:
+
+```bash
+# run inside the new worktree; <primary> is the checkout that owns .git/
+cp -R <primary>/.husky/_ .husky/_        # stays ignored; git status remains clean
+git config core.hooksPath                # expect: .husky/_
+ls .husky/_/h .husky/_/pre-commit .husky/_/pre-push   # expect: all three listed
+```
+
+Then confirm the hook actually ran: a commit prints the pre-commit stage output, and a push
+prints the pre-push stage output before the remote's response. A commit or push that
+completes in a second with no stage output ran no hooks. If a commit already went out that
+way, run the gates against the pushed range by hand and say so in the PR; hosted PR CI stays
+the authoritative signal.
+
 To reproduce the full sweep on demand:
 
 ```bash

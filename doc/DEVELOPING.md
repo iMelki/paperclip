@@ -441,7 +441,7 @@ This command:
 
 - writes repo-local files at `.paperclip/config.json` and `.paperclip/.env`
 - creates an isolated instance under `~/.paperclip-worktrees/instances/<worktree-id>/`
-- when run inside a linked git worktree, mirrors the effective git hooks into that worktree's private git dir
+- when run inside a linked git worktree, mirrors the effective git hooks into that worktree's private git dir (`<git-dir>/hooks`). This does not make hooks run: git ignores that directory while `core.hooksPath` is set (it is, to `.husky/_`), and the mirror source `.husky/_` does not exist in a fresh worktree. Copy `.husky/_` from the primary checkout before the first commit; see "Linked worktrees start with no hooks at all" in [CONTRIBUTING.md](../CONTRIBUTING.md)
 - picks a free app port and embedded PostgreSQL port
 - disables automatic database backups for the isolated instance
 - by default seeds the isolated DB in `minimal` mode from the current effective Paperclip instance/config (repo-local worktree config when present, otherwise the default instance) via a logical SQL snapshot
