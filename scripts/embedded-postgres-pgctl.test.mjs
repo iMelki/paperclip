@@ -35,6 +35,8 @@ function harness(outcome = { code: 0 }, platform = 'win32') {
   const logs = [];
   const errors = [];
   const mutations = [];
+  const probes = [];
+  const state = { postmasterPidPresent: true };
   const context = {
     path: path.win32, platform: () => platform,
     postgres: 'C:\\Postgres Bin\\postgres.exe', pg_ctl: 'C:\\Postgres Bin\\pg_ctl.exe',
@@ -45,6 +47,12 @@ function harness(outcome = { code: 0 }, platform = 'win32') {
     __awaiter: (self, args, ignored, generator) => runGenerator(generator.call(self)),
     fs: {
       async rm(file) { mutations.push(['rm', file]); },
+      async access(file) {
+        probes.push(file);
+        if (!state.postmasterPidPresent) {
+          throw Object.assign(new Error(`ENOENT: no such file or directory, access '${file}'`), { code: 'ENOENT' });
+        }
+      },
       async readFile(file) {
         reads.push(file);
         return file.endsWith('postmaster.pid') ? '4321\r\n' : 'database ready';
@@ -76,7 +84,7 @@ function harness(outcome = { code: 0 }, platform = 'win32') {
   const execute = (source) => runGenerator(
     new vm.Script(`(function* () { ${source} })`).runInNewContext(context).call(instance),
   );
-  return { calls, reads, logs, errors, mutations, context, instance,
+  return { calls, reads, probes, state, logs, errors, mutations, context, instance,
     start: () => execute(startSource), stop: () => execute(stopSource) };
 }
 
@@ -102,9 +110,9 @@ test('start without custom flags preserves spaces and recovers the server PID', 
   await subject.start();
   const call = subject.calls[0];
   assert.equal(call.file, 'C:\\Postgres Bin\\pg_ctl.exe');
-  assert.deepEqual(call.args.slice(0, 7), ['start', '-D', 'C:\\DB Dir', '-l', 'C:\\DB Dir\\server.log', '-w', '-o']);
-  assert.equal(call.args[7], '-p 54329');
-  assert.deepEqual(call.args.slice(8), ['-p', 'C:\\Postgres Bin\\postgres.exe']);
+  assert.deepEqual(call.args.slice(0, 9), ['start', '-D', 'C:\\DB Dir', '-l', 'C:\\DB Dir\\server.log', '-w', '-t', '60', '-o']);
+  assert.equal(call.args[9], '-p 54329');
+  assert.deepEqual(call.args.slice(10), ['-p', 'C:\\Postgres Bin\\postgres.exe']);
   assert.equal(call.options.windowsHide, true, 'start must set windowsHide');
   assert.equal(call.options.shell, undefined);
   assert.equal(call.options.env.SystemRoot, 'C:\\Windows');
@@ -139,7 +147,7 @@ test('Windows guard rejects all custom flags and malformed flag types before sid
 
 test('Windows guard rejects unsafe path characters and types before side effects', async () => {
   const badPaths = [null, undefined, 1, {}, '', 'relative', 'C:relative', '\\rooted', '\\\\host\\share',
-    ...Array.from('\u0000\u0001\t\r\n\u001f\u007f"\'%!&|<>^()`;*?:', (char) => `C:\\secret${char}path`)];
+    ...Array.from('\u0000\u0001\t\r\n\u001f\u007f"%!&|<>^`;*?:', (char) => `C:\\secret${char}path`)];
   for (const field of ['databaseDir', 'postgres', 'pg_ctl', 'SystemRoot', 'log']) {
     for (const value of badPaths) {
       const subject = harness();
@@ -149,6 +157,26 @@ test('Windows guard rejects unsafe path characters and types before side effects
       else subject.context[field] = value;
       await rejectsBeforeEffects(subject, /^Error: Unsupported Windows [\w ]+: requires a safe absolute drive path$/);
     }
+  }
+});
+
+test('Windows guard accepts parentheses and apostrophes, which are inert in pg_ctl\'s quoted cmd string', async () => {
+  const subject = harness();
+  subject.context.postgres = 'C:\\Program Files (x86)\\PostgreSQL\\bin\\postgres.exe';
+  subject.context.pg_ctl = 'C:\\Program Files (x86)\\PostgreSQL\\bin\\pg_ctl.exe';
+  subject.instance.options.databaseDir = "C:\\Users\\O'Test\\AppData\\Local\\Temp\\db";
+  await subject.start();
+  const call = subject.calls[0];
+  assert.equal(call.file, 'C:\\Program Files (x86)\\PostgreSQL\\bin\\pg_ctl.exe');
+  assert.deepEqual(call.args.slice(1, 5), ['-D', "C:\\Users\\O'Test\\AppData\\Local\\Temp\\db",
+    '-l', "C:\\Users\\O'Test\\AppData\\Local\\Temp\\db\\server.log"]);
+  assert.deepEqual(call.args.slice(-2), ['-p', 'C:\\Program Files (x86)\\PostgreSQL\\bin\\postgres.exe']);
+  // The relaxed class must still reject characters that carry meaning in cmd.exe.
+  for (const value of ['C:\\Program Files (x86) & Co\\pg_ctl.exe', 'C:\\Program Files (x86)|pg_ctl.exe',
+    'C:\\Program Files (x86)\npg_ctl.exe']) {
+    const rejected = harness();
+    rejected.context.pg_ctl = value;
+    await rejectsBeforeEffects(rejected, /^Error: Unsupported Windows pg_ctl path: requires a safe absolute drive path$/);
   }
 });
 
@@ -170,7 +198,7 @@ test('Windows guard accepts both port boundaries', async () => {
     const subject = harness();
     subject.instance.options.port = port;
     await subject.start();
-    assert.equal(subject.calls[0].args[7], `-p ${port}`);
+    assert.equal(subject.calls[0].args[9], `-p ${port}`);
   }
 });
 
@@ -187,9 +215,19 @@ test('POSIX start bypasses Windows-only validation and retains executable prepar
 test('stop waits for pg_ctl fast shutdown instead of the old child exit', async () => {
   const subject = harness();
   await subject.stop();
+  assert.deepEqual(subject.probes, ['C:\\DB Dir\\postmaster.pid'], 'stop must probe the pidfile before spawning');
   assert.deepEqual(subject.calls[0].args, ['stop', '-D', 'C:\\DB Dir', '-m', 'fast', '-w']);
   assert.equal(subject.calls[0].options.windowsHide, true, 'stop must set windowsHide');
   assert.equal(subject.calls[0].options.shell, undefined);
+});
+
+test('stop resolves without spawning pg_ctl when postmaster.pid is absent', async () => {
+  // A nonzero outcome proves the resolve did not come from a successful spawn.
+  const subject = harness({ code: 1 });
+  subject.state.postmasterPidPresent = false;
+  await subject.stop();
+  assert.deepEqual(subject.probes, ['C:\\DB Dir\\postmaster.pid']);
+  assert.deepEqual(subject.calls, [], 'no postmaster means nothing to stop; pg_ctl must not run');
 });
 
 test('POSIX stop still signals and waits for the server', async () => {
@@ -200,4 +238,5 @@ test('POSIX stop still signals and waits for the server', async () => {
   };
   await subject.stop();
   assert.equal(subject.calls.length, 0);
+  assert.deepEqual(subject.probes, [], 'POSIX stop must not probe for a Windows pidfile');
 });

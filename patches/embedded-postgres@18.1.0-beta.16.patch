@@ -28,7 +28,7 @@ diff --git a/dist/index.js b/dist/index.js
              // Optionally retrieve the uid and gid
              const permissionIds = yield this.getUidAndGid()
                  .catch(() => {
-@@ -168,6 +168,121 @@ class EmbeddedPostgres {
+@@ -168,6 +168,129 @@ class EmbeddedPostgres {
              });
              // Make the file executable, in case it is not
 -            ensureBinIsExecutable(postgres);
@@ -46,9 +46,12 @@ diff --git a/dist/index.js b/dist/index.js
 +            if (platform() === 'win32') {
 +                // pg_ctl uses CMD internally. This is a restricted input contract,
 +                // not CMD escaping or a guarantee for all Windows path forms.
++                // Parentheses and apostrophes are inert inside pg_ctl's
++                // double-quoted `cmd /C "..."` string and are common on Windows
++                // (`Program Files (x86)`, apostrophe user names), so they pass.
 +                const requireSafePath = (value, label) => {
 +                    if (typeof value !== 'string' || !/^[A-Za-z]:[\\/]/.test(value)
-+                        || /[\x00-\x1f\x7f"'%!&|<>^()`;*?]/.test(value)
++                        || /[\x00-\x1f\x7f"%!&|<>^`;*?]/.test(value)
 +                        || value.slice(2).includes(':')) {
 +                        throw new Error(`Unsupported Windows ${label}: requires a safe absolute drive path`);
 +                    }
@@ -94,6 +97,11 @@ diff --git a/dist/index.js b/dist/index.js
 +                        '-D', this.options.databaseDir,
 +                        '-l', logFile,
 +                        '-w',
++                        // Explicit wait bound. pg_ctl's default of 60s only
++                        // holds while PGCTLTIMEOUT is unset, and the parent's
++                        // full environment is forwarded above. Matches the
++                        // Windows EMBEDDED_POSTGRES_TEST_SETUP_TIMEOUT_MS.
++                        '-t', '60',
 +                        '-o', serverOptions,
 +                        '-p', postgres,
 +                    ], Object.assign(Object.assign({}, permissionIds), { windowsHide: true, env }));
@@ -151,7 +159,7 @@ diff --git a/dist/index.js b/dist/index.js
              yield new Promise((resolve, reject) => {
                  var _a;
                  // Spawn a postgres server
-@@ -177,7 +292,7 @@ class EmbeddedPostgres {
+@@ -177,7 +300,7 @@ class EmbeddedPostgres {
                      '-p',
                      this.options.port.toString(),
                      ...this.options.postgresFlags,
@@ -160,7 +168,7 @@ diff --git a/dist/index.js b/dist/index.js
                  // Connect to stderr, as that is where the messages get sent
                  (_a = this.process.stderr) === null || _a === void 0 ? void 0 : _a.on('data', (chunk) => {
                      // Parse the data as a string and log it
-@@ -208,26 +323,53 @@ class EmbeddedPostgres {
+@@ -208,26 +331,64 @@ class EmbeddedPostgres {
                  return;
              }
              // Kill the existing postgres process
@@ -195,28 +203,39 @@ diff --git a/dist/index.js b/dist/index.js
 +                // fixes leinelissen/embedded-postgres#38 (the previous
 +                // taskkill /f force-kill prevented a clean shutdown and
 +                // caused ~4s of crash recovery on next start).
-+                const { pg_ctl } = yield bin;
-+                yield new Promise((resolve, reject) => {
-+                    var _a, _b;
-+                    const stopProcess = spawn(pg_ctl, [
-+                        'stop',
-+                        '-D', this.options.databaseDir,
-+                        '-m', 'fast',
-+                        '-w',
-+                    ], { windowsHide: true });
-+                    stopProcess.once('error', reject);
-+                    let stopOutput = '';
-+                    (_a = stopProcess.stdout) === null || _a === void 0 ? void 0 : _a.on('data', (chunk) => { stopOutput += chunk.toString('utf-8'); });
-+                    (_b = stopProcess.stderr) === null || _b === void 0 ? void 0 : _b.on('data', (chunk) => { stopOutput += chunk.toString('utf-8'); });
-+                    stopProcess.on('exit', (code) => {
-+                        if (code === 0) {
-+                            resolve();
-+                        }
-+                        else {
-+                            reject(new Error(`pg_ctl stop exited with code ${code}. ${stopOutput}`.trim()));
-+                        }
++                // `pg_ctl stop` exits 1 when postmaster.pid is absent ("PID
++                // file does not exist / Is server running?"). The old taskkill
++                // path never rejected here, and the vendor's exit hook calls
++                // stop() on every instance at process exit, so a postmaster
++                // that has already gone away counts as "already stopped"
++                // instead of surfacing an unhandled rejection. A real pg_ctl
++                // stop failure below still rejects.
++                const pidFile = path.join(this.options.databaseDir, 'postmaster.pid');
++                const postmasterRunning = yield fs.access(pidFile).then(() => true, () => false);
++                if (postmasterRunning) {
++                    const { pg_ctl } = yield bin;
++                    yield new Promise((resolve, reject) => {
++                        var _a, _b;
++                        const stopProcess = spawn(pg_ctl, [
++                            'stop',
++                            '-D', this.options.databaseDir,
++                            '-m', 'fast',
++                            '-w',
++                        ], { windowsHide: true });
++                        stopProcess.once('error', reject);
++                        let stopOutput = '';
++                        (_a = stopProcess.stdout) === null || _a === void 0 ? void 0 : _a.on('data', (chunk) => { stopOutput += chunk.toString('utf-8'); });
++                        (_b = stopProcess.stderr) === null || _b === void 0 ? void 0 : _b.on('data', (chunk) => { stopOutput += chunk.toString('utf-8'); });
++                        stopProcess.on('exit', (code) => {
++                            if (code === 0) {
++                                resolve();
++                            }
++                            else {
++                                reject(new Error(`pg_ctl stop exited with code ${code}. ${stopOutput}`.trim()));
++                            }
++                        });
 +                    });
-+                });
++                }
 +            }
 +            else {
 +                // If on a sane OS, simply kill using SIGINT and wait for exit
