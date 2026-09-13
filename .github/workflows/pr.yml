@@ -85,6 +85,9 @@ jobs:
       - name: Validate Dockerfile deps stage
         run: node ./scripts/check-docker-deps-stage.mjs
 
+      - name: Test embedded PostgreSQL pg_ctl lifecycle without a database
+        run: node --test --test-isolation=none scripts/embedded-postgres-pgctl.test.mjs
+
       - name: Reject git push in adapter/runtime code
         run: node ./scripts/check-no-git-push.mjs
 

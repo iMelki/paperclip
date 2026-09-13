@@ -1,16 +1,54 @@
 # Paperclip Open Tasks
 
-- [#35 — embedded-postgres fails under an elevated Windows token](https://github.com/iMelki/paperclip/issues/35):
-  2026-09-10, [PR #117](https://github.com/iMelki/paperclip/pull/117) patches
-  embedded-postgres's start()/stop() to route through pg_ctl on Windows
-  (CreateRestrictedProcess drops the Administrators SID before exec'ing
-  postgres — the same mechanism zonkyio/embedded-postgres#66 independently
-  traced for the identical failure). Verified live end-to-end unelevated
-  (initialise/start/createDatabase/stop, full pass, pg_ctl-routed). The
-  elevated-token scenario itself — the actual acceptance criterion — is
-  NOT yet verified from this session; watch for a data-directory-ACL
-  failure in server.log if it still fails elevated (initialise() still
-  spawns initdb directly under the elevated token).
+- [#33 — Preserve fixture data when stop is unresolved](https://github.com/iMelki/paperclip/issues/33):
+  Bounded PR117 follow-up rejects failed-stop reclamation and prevents further
+  startup retries. Six mocked tests pass; four deliberate-bypass failures prove
+  the controls. Independent bounded review approved. Native ownership is still unproven;
+  see [cleanup receipt](doc/evidence/pr117/cleanup-review.md).
+
+- [#118 — Assess inherited PostgreSQL 18.1 security-version exposure](https://github.com/iMelki/paperclip/issues/118):
+  official CVE-2026-16239 advisory affects PostgreSQL 18 before 18.6. Binary
+  version applicability only; runtime exposure/backports and safe upgrade remain
+  unverified. Separate focused dependency change; superior review requested.
+
+- [#35 — Windows embedded PostgreSQL startup](https://github.com/iMelki/paperclip/issues/35):
+  Latest 2026-09-13 checkpoint: published `4f2abb969` passed hosted build/test/
+  typecheck/e2e jobs; trusted dependency review remains red. Independent review
+  found CMD input handling and failed-start process ownership blockers.
+  Follow-up Windows input guard has 15 mocked passes and deliberate-bypass
+  negative proof; independent publication-only review approved patch SHA256
+  `38956adc68dc390d096cb27ace051bc3a6bdf053834eb01c97f9d1ee82e5c19d`.
+  This does not resolve native
+  acceptance or cleanup. See [guard receipt](doc/evidence/pr117/guard-review.md)
+  and [review checkpoint](doc/plans/2026-09-13-pr117-review-checkpoint.md).
+  Earlier recovery history follows; its nine-test counts are historical.
+  PR #117 is not superseded by dev `9f4a7e0aa`. Bounded correction committed
+  on its existing branch: both pg_ctl spawn error listeners, windowsHide,
+  nine no-DB mocked tests, explicit CI invocation, and base-identical lockfile.
+  Existing pg_ctl -o CMD forwarding is an additional merge HOLD pending native
+  command-line proof; original join semantics remain unchanged.
+  Parent approved the narrow correction for publication on 2026-09-13;
+  this is not merge approval. Independent rerun: 9 pass, 0 skip, 35.2 ms,
+  with clean diff check. Earlier missing-dependency and offline-metadata failures
+  were recovered through bounded registry provisioning and the existing plugin
+  build helper. Normal pre-commit passed; correction `36182c123`, documented
+  by `6ce1b282d`. Independent second-agent review approved that exact head for
+  publication with no blocking code findings. Full-workspace provisioning also
+  succeeded and normal pre-push full typecheck passed twice (198.3s / 168.1s).
+  Exact-plan checks exposed concurrent docs edits, then missing dev ancestry;
+  notes committed and dev `9f4a7e0aa` merged before a pristine retry.
+  No hook bypass.
+  Elevated Windows
+  acceptance, descendant-window proof, trusted dependency review, final amended-head
+  merge approval, and all-green CI remain open. No dependency label added.
+  See [correction receipt](doc/plans/2026-09-12-pr117-correction.md) and
+  [parent review](https://github.com/iMelki/paperclip/pull/117#issuecomment-5648622603).
+  Preserved dev provenance (2026-09-10): the original author recorded a live
+  unelevated initialise/start/createDatabase/stop pass with pg_ctl routing and
+  cited zonkyio/embedded-postgres#66 for the restricted-token mechanism.
+  This is historical evidence, not a fresh native rerun. Elevated acceptance
+  was explicitly unverified; inspect server.log for data-directory ACL failures
+  because initialise() still invokes initdb directly.
 
 - #48 / #94 / #89 Historical gauntlet stash evidence preserved with a verified private archive; [dated provenance](docs/uiux/browser-evidence-2026-08-27/HISTORICAL-ARCHIVE-2026-09-08.md).
 

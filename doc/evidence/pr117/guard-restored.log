@@ -1,0 +1,26 @@
+Caller: C:/nvm4w/nodejs/node.exe --test --test-isolation=none scripts/embedded-postgres-pgctl.test.mjs
+Exit code: 0
+Restored SHA256: 38956ADC68DC390D096CB27ACE051BC3A6BDF053834EB01C97F9D1EE82E5C19D
+✔ start rejects the original ENOENT spawn error (2.6642ms)
+✔ start rejects the original EACCES spawn error (0.9468ms)
+✔ start rejects nonzero exit with diagnostics (1.4577ms)
+✔ stop rejects the original ENOENT spawn error (1.807ms)
+✔ stop rejects the original EACCES spawn error (0.8215ms)
+✔ stop rejects nonzero exit with diagnostics (0.9147ms)
+✔ start without custom flags preserves spaces and recovers the server PID (1.5487ms)
+✔ Windows guard rejects invalid port values and types before side effects (6.0276ms)
+✔ Windows guard rejects all custom flags and malformed flag types before side effects (3.4116ms)
+✔ Windows guard rejects unsafe path characters and types before side effects (80.3222ms)
+✔ Windows guard replaces inherited mixed-case COMSPEC without mutating the parent environment (0.9521ms)
+✔ Windows guard accepts both port boundaries (1.2739ms)
+✔ POSIX start bypasses Windows-only validation and retains executable preparation (0.5738ms)
+✔ stop waits for pg_ctl fast shutdown instead of the old child exit (0.5672ms)
+✔ POSIX stop still signals and waits for the server (0.6656ms)
+ℹ tests 15
+ℹ suites 0
+ℹ pass 15
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 122.725

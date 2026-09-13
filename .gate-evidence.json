@@ -46,6 +46,61 @@
   },
   "gates": [
     {
+      "id": "embedded-postgres-failed-stop-preserves-data",
+      "path": "packages/db/src/test-embedded-postgres.ts",
+      "description": "Only successful stop may reclaim data; unresolved failed-start cleanup prevents retry.",
+      "negativeFixture": "packages/db/src/test-embedded-postgres-stop.test.ts",
+      "observedFailure": {
+        "date": "2026-09-13",
+        "command": "node scripts/run-vitest-stable.mjs --files packages/db/src/test-embedded-postgres-stop.test.ts",
+        "breakApplied": "Readback confirmed success predicate widened to failed and retry guard disabled before execution.",
+        "reason": "Four attributable failures: cleanup callback invoked after rejected/synchronous/late failure and five startup retries instead of unresolved-cleanup error.",
+        "exitCode": 1,
+        "artifactPath": "doc/evidence/pr117/cleanup-negative.log",
+        "restoredPass": "Both exact predicates restored; same caller six pass, zero skip, exit 0,432ms. Restored source SHA25660942d38fe887622451ec45b3fb6783e6e97c723961ae8c2d68189321f61a1d7; no pre-break hash claim."
+      },
+      "maintainabilityReceipt": "doc/evidence/pr117/cleanup-review.md"
+    },
+    {
+      "id": "embedded-postgres-windows-start-input-guard",
+      "path": "patches/embedded-postgres@18.1.0-beta.16.patch",
+      "description": "Reject unsupported Windows start inputs before executable preparation, log removal, or spawn; replace inherited COMSPEC variants.",
+      "negativeFixture": "scripts/embedded-postgres-pgctl.test.mjs",
+      "observedFailure": {
+        "date": "2026-09-13",
+        "command": "C:/nvm4w/nodejs/node.exe --test --test-isolation=none scripts/embedded-postgres-pgctl.test.mjs",
+        "brokenInput": "Owned private worktree only: replaced port and flag conditions with false, unsafe-character regex with /$a/, and COMSPEC deletion condition with false. Readback showed all four bypasses before execution; no hunk line counts changed.",
+        "reason": "Three guard tests failed with Missing expected rejection (port, flags, unsafe paths); environment test failed because ComSpec, comspec, cOmSpEc survived. Exactly 4 failed and 11 passed, exit 1; no syntax or dependency failure.",
+        "exitCode": 1,
+        "artifactPath": "doc/evidence/pr117/guard-negative.log",
+        "restoredPass": "Same exact Node v24.18.0 caller after restoration: 15 passed, 0 failed, 0 skipped, exit 0, 122.725 ms. Pre-mutation and restored raw SHA256 match.",
+        "restoredExitCode": 0,
+        "restoredArtifactPath": "doc/evidence/pr117/guard-restored.log",
+        "restoredPatchSha256": "38956adc68dc390d096cb27ace051bc3a6bdf053834eb01c97f9d1ee82e5c19d",
+        "scope": "VM execution of patch blocks only. Native CMD parsing, restricted-token startup, windows/descendants, package application and failure cleanup lifecycle remain unproven or out of scope."
+      }
+    },
+    {
+      "id": "embedded-postgres-pgctl-lifecycle",
+      "path": ".github/workflows/pr.yml",
+      "description": "The policy job invokes the no-DB Node lifecycle tests explicitly; scripts are outside root Vitest projects.",
+      "negativeFixture": "scripts/embedded-postgres-pgctl.test.mjs",
+      "observedFailure": {
+        "date": "2026-09-13",
+        "command": "node --test --test-isolation=none scripts/embedded-postgres-pgctl.test.mjs",
+        "brokenInput": "In the isolated PR117 worktree only, changed both added pg_ctl spawn windowsHide values from true to false; asserted exactly two false occurrences before execution.",
+        "reason": "Exit 1: six assertions failed with start must set windowsHide or stop must set windowsHide, actual false, expected true; three other tests passed. Both reason strings were asserted in the captured output.",
+        "exitCode": 1,
+        "artifactPath": "doc/evidence/pr117/negative-final.log",
+        "restoredPass": "After removing the quote map, restored both flags; exact same command exited 0 with 9 passed, 0 failed, 0 skipped (28.6977 ms). SHA256 matched the pre-mutation final patch hash.",
+        "restoredExitCode": 0,
+        "restoredArtifactPath": "doc/evidence/pr117/pass-final.log",
+        "restoredPatchSha256": "877090d1d366543689eedcc5d2f96256ff4c38c5f0adb11237638706b027ea3f",
+        "runtime": "Node v24.18.0 on unelevated Windows; CI declares Node 24. No native database or elevated process ran.",
+        "scope": "Proves the added command locally; hosted CI and elevated Windows acceptance remain unproven. Existing policy-job checks can still block this step."
+      }
+    },
+    {
       "id": "cost-source-identity-contract",
       "path": "packages/shared/src/validators/cost.ts",
       "description": "Require a complete company/system/account/event identity and reject immutable-payload conflicts without overwriting cost history.",

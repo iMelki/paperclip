@@ -179,10 +179,10 @@ async function stopEmbeddedPostgresBounded(
   instance: EmbeddedPostgresInstance | null,
   dataDir: string | null,
   cleanupFn?: () => void,
-): Promise<void> {
+): Promise<boolean> {
   if (!instance) {
     cleanupFn?.();
-    return;
+    return true;
   }
   let cleaned = false;
   const cleanupOnce = () => {
@@ -194,7 +194,7 @@ async function stopEmbeddedPostgresBounded(
       // Best-effort reclaim; ignore removal errors.
     }
   };
-  const stopped = instance.stop().then(
+  const stopped = Promise.resolve().then(() => instance.stop()).then(
     () => "stopped" as const,
     () => "failed" as const,
   );
@@ -214,21 +214,26 @@ async function stopEmbeddedPostgresBounded(
 
   if (outcome === "stopped") {
     cleanupOnce();
-    return;
+    return true;
   }
 
   if (process.platform === "win32" && dataDir) {
     const terminated = await terminateWindowsPostgresProcessTree(dataDir);
     if (terminated) {
       cleanupOnce();
-      return;
+      return true;
     }
   }
 
   // Never remove the data directory under a process that may still be alive.
-  // The raw stop promise owns cleanup once it eventually settles.
-  void stopped.finally(cleanupOnce);
+  // A rejected stop is not termination proof. Only late success may reclaim.
+  void stopped.then((result) => {
+    if (result === "stopped") cleanupOnce();
+  });
+  return false;
 }
+
+export const __stopEmbeddedPostgresBoundedForTests = stopEmbeddedPostgresBounded;
 
 const EMBEDDED_POSTGRES_START_MAX_ATTEMPTS = 5;
 
@@ -247,9 +252,14 @@ async function startEmbeddedPostgresWithRetry(tempDirPrefix: string): Promise<{
       return created;
     } catch (error) {
       lastError = new Error(formatEmbeddedPostgresError(error, created.getRecentLogs()));
-      await stopEmbeddedPostgresBounded(created.instance, created.dataDir, () => {
+      const stopped = await stopEmbeddedPostgresBounded(created.instance, created.dataDir, () => {
         cleanupEmbeddedPostgresTestDirs(created.dataDir);
       });
+      if (!stopped) {
+        throw new Error(
+          `Embedded PostgreSQL cleanup unresolved; no retry; data preserved at ${created.dataDir}: ${lastError.message}`,
+        );
+      }
     }
   }
   throw new Error(

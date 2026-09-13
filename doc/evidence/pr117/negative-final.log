@@ -1,0 +1,121 @@
+✖ start rejects the original ENOENT spawn error (3.08ms)
+✖ start rejects the original EACCES spawn error (0.9603ms)
+✔ start rejects nonzero exit with diagnostics (1.951ms)
+✖ stop rejects the original ENOENT spawn error (1.0919ms)
+✖ stop rejects the original EACCES spawn error (0.7492ms)
+✔ stop rejects nonzero exit with diagnostics (1.623ms)
+✖ start forwards ordinary flags and recovers the server PID (1.6523ms)
+✖ stop waits for pg_ctl fast shutdown instead of the old child exit (0.8128ms)
+✔ POSIX stop still signals and waits for the server (0.8381ms)
+ℹ tests 9
+ℹ suites 0
+ℹ pass 3
+ℹ fail 6
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 29.8704
+
+✖ failing tests:
+
+test at scripts\embedded-postgres-pgctl.test.mjs:84:5
+✖ start rejects the original ENOENT spawn error (3.08ms)
+  AssertionError [ERR_ASSERTION]: start must set windowsHide
+
+  false !== true
+
+      at TestContext.<anonymous> (file:///S:/source/CCAI/Assistants/.tmp/paperclip-pr117-correction-20260912/scripts/embedded-postgres-pgctl.test.mjs:89:14)
+      at async Test.run (node:internal/test_runner/test:1332:7)
+      at async startSubtestAfterBootstrap (node:internal/test_runner/harness:385:3) {
+    generatedMessage: false,
+    code: 'ERR_ASSERTION',
+    actual: false,
+    expected: true,
+    operator: 'strictEqual',
+    diff: 'simple'
+  }
+
+test at scripts\embedded-postgres-pgctl.test.mjs:84:5
+✖ start rejects the original EACCES spawn error (0.9603ms)
+  AssertionError [ERR_ASSERTION]: start must set windowsHide
+
+  false !== true
+
+      at TestContext.<anonymous> (file:///S:/source/CCAI/Assistants/.tmp/paperclip-pr117-correction-20260912/scripts/embedded-postgres-pgctl.test.mjs:89:14)
+      at async Test.run (node:internal/test_runner/test:1332:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:911:7) {
+    generatedMessage: false,
+    code: 'ERR_ASSERTION',
+    actual: false,
+    expected: true,
+    operator: 'strictEqual',
+    diff: 'simple'
+  }
+
+test at scripts\embedded-postgres-pgctl.test.mjs:84:5
+✖ stop rejects the original ENOENT spawn error (1.0919ms)
+  AssertionError [ERR_ASSERTION]: stop must set windowsHide
+
+  false !== true
+
+      at TestContext.<anonymous> (file:///S:/source/CCAI/Assistants/.tmp/paperclip-pr117-correction-20260912/scripts/embedded-postgres-pgctl.test.mjs:89:14)
+      at async Test.run (node:internal/test_runner/test:1332:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:911:7) {
+    generatedMessage: false,
+    code: 'ERR_ASSERTION',
+    actual: false,
+    expected: true,
+    operator: 'strictEqual',
+    diff: 'simple'
+  }
+
+test at scripts\embedded-postgres-pgctl.test.mjs:84:5
+✖ stop rejects the original EACCES spawn error (0.7492ms)
+  AssertionError [ERR_ASSERTION]: stop must set windowsHide
+
+  false !== true
+
+      at TestContext.<anonymous> (file:///S:/source/CCAI/Assistants/.tmp/paperclip-pr117-correction-20260912/scripts/embedded-postgres-pgctl.test.mjs:89:14)
+      at async Test.run (node:internal/test_runner/test:1332:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:911:7) {
+    generatedMessage: false,
+    code: 'ERR_ASSERTION',
+    actual: false,
+    expected: true,
+    operator: 'strictEqual',
+    diff: 'simple'
+  }
+
+test at scripts\embedded-postgres-pgctl.test.mjs:99:1
+✖ start forwards ordinary flags and recovers the server PID (1.6523ms)
+  AssertionError [ERR_ASSERTION]: start must set windowsHide
+
+  false !== true
+
+      at TestContext.<anonymous> (file:///S:/source/CCAI/Assistants/.tmp/paperclip-pr117-correction-20260912/scripts/embedded-postgres-pgctl.test.mjs:106:10)
+      at async Test.run (node:internal/test_runner/test:1332:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:911:7) {
+    generatedMessage: false,
+    code: 'ERR_ASSERTION',
+    actual: false,
+    expected: true,
+    operator: 'strictEqual',
+    diff: 'simple'
+  }
+
+test at scripts\embedded-postgres-pgctl.test.mjs:114:1
+✖ stop waits for pg_ctl fast shutdown instead of the old child exit (0.8128ms)
+  AssertionError [ERR_ASSERTION]: stop must set windowsHide
+
+  false !== true
+
+      at TestContext.<anonymous> (file:///S:/source/CCAI/Assistants/.tmp/paperclip-pr117-correction-20260912/scripts/embedded-postgres-pgctl.test.mjs:118:10)
+      at async Test.run (node:internal/test_runner/test:1332:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:911:7) {
+    generatedMessage: false,
+    code: 'ERR_ASSERTION',
+    actual: false,
+    expected: true,
+    operator: 'strictEqual',
+    diff: 'simple'
+  }
