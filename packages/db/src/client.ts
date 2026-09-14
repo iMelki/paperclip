@@ -5,6 +5,7 @@ import { readFile, readdir } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import postgres from "postgres";
 import * as schema from "./schema/index.js";
+import { withTransientWriteRetry } from "./transient-write-retry.js";
 
 const MIGRATIONS_FOLDER = fileURLToPath(new URL("./migrations", import.meta.url));
 const DRIZZLE_MIGRATIONS_TABLE = "__drizzle_migrations";
@@ -175,7 +176,8 @@ export function postgresJsOptions(options: DatabaseClientOptions): Record<string
 export function createDb(url: string, options?: DatabaseClientOptions) {
   const resolved = resolveDatabaseClientOptions(options ?? databaseClientOptionsFromEnv());
   const sql = postgres(url, postgresJsOptions(resolved));
-  return drizzlePg(sql, { schema });
+  // A pooler-recycled socket replays the query instead of failing the request that drew it.
+  return drizzlePg(withTransientWriteRetry(sql), { schema });
 }
 
 export async function getPostgresDataDirectory(url: string): Promise<string | null> {
