@@ -82,6 +82,14 @@ const DECLARED_SOURCE_TESTS = new Map([
     "packages/db/src/schema/issues.ts",
     ["packages/db/src/coordination-schema.test.ts"],
   ],
+  [
+    "scripts/prepare-package-for-publish.mjs",
+    ["scripts/package-lifecycle.test.mjs"],
+  ],
+  [
+    "scripts/restore-package-after-publish.mjs",
+    ["scripts/package-lifecycle.test.mjs"],
+  ],
 ]);
 
 export class TestSelectionIntegrityError extends Error {
