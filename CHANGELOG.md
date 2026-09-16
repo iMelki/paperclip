@@ -352,6 +352,11 @@ All notable changes to this repository should be recorded here.
 - Normalized release-package discovery directories to forward-slash manifest
   paths, with a Windows-separator regression, so release-map validation does
   not report every package as missing on native Windows.
+- Replaced nine published-package POSIX prepack/postpack fragments with shared
+  Node prepare/restore helpers that preserve package bytes and fail safely on
+  backup collisions or generator errors.
+- Fixed a Windows portability edge found while validating the release batch:
+  host-native Codex sandbox home paths for local sandbox fixtures.
 
 - Bounded the POSIX runtime-service adoption fallback for #20: the `ps`
   command/parent-lineage walk now has a two-second total deadline and explicit

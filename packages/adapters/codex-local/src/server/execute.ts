@@ -48,6 +48,7 @@ import {
   DEFAULT_PAPERCLIP_AGENT_PROMPT_TEMPLATE,
   joinPromptSections,
 } from "@paperclipai/adapter-utils/server-utils";
+import { isWindowsAbsolutePath } from "@paperclipai/adapter-utils/shell-path";
 import {
   parseLocalProcessFilesystemScope,
   parseLocalProcessSandboxExtraPaths,
@@ -829,8 +830,19 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       : null;
     let paperclipBridge: Awaited<ReturnType<typeof startAdapterExecutionTargetPaperclipBridge>> = null;
     const remoteCodexHome = executionTargetIsRemote
-      ? preparedExecutionTargetRuntime?.assetDirs.home ??
-        path.posix.join(effectiveExecutionCwd, ".paperclip-runtime", "codex", "home")
+      ? (() => {
+          const stagedHome = preparedExecutionTargetRuntime?.assetDirs.home;
+          if (!stagedHome) {
+            return path.join(effectiveExecutionCwd, ".paperclip-runtime", "codex", "home");
+          }
+          // Local sandbox fixtures use host-native Windows paths while real remote
+          // sandboxes use POSIX paths. The shared runtime builder intentionally
+          // emits POSIX joins, so normalize only when the authoritative remote cwd
+          // is a Windows absolute path; never rewrite a genuine POSIX remote path.
+          return isWindowsAbsolutePath(effectiveExecutionCwd)
+            ? path.win32.normalize(stagedHome)
+            : stagedHome;
+        })()
       : null;
     await emitSandboxAuthPrecedenceWarningIfNeeded({
       runId,
