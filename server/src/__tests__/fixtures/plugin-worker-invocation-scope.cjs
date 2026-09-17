@@ -47,6 +47,8 @@ function sendNestedHostRequest(originalRequest, invocationId, detached = false) 
         init: { method: params.method || "GET" },
         companyId: requestedCompanyId,
       }
+    : hostMethod === "config.get"
+    ? (params.omitCompanyId ? {} : { companyId: requestedCompanyId })
     : {
         companyId: requestedCompanyId,
       };
@@ -57,9 +59,9 @@ function sendNestedHostRequest(originalRequest, invocationId, detached = false) 
     params: nestedParams,
   };
 
-  if (mode === "echo" || mode === "late") {
+  if (mode === "echo" || mode === "late" || mode === "late-failed") {
     nestedRequest.paperclipInvocationId = invocationId;
-  } else if (mode === "unknown") {
+  } else if (mode === "unknown" || mode === "late-forged") {
     nestedRequest.paperclipInvocationId = "unknown-invocation";
   }
 
@@ -118,17 +120,26 @@ rl.on("line", (line) => {
   }
 
   if (method === "getData" || method === "performAction") {
-    if (message.params?.params?.mode === "late") {
+    const mode = message.params?.params?.mode;
+    if (mode === "late" || mode === "late-forged" || mode === "late-failed" || mode === "late-omit") {
       // Model a non-blocking action which returns immediately while an async
       // continuation later calls the host with the now-stale invocation id.
-      send({
-        jsonrpc: "2.0",
-        id: message.id,
-        result: { queued: true },
-      });
+      send(mode === "late-failed"
+        ? {
+            jsonrpc: "2.0",
+            id: message.id,
+            error: { code: -32000, message: "simulated action failure" },
+          }
+        : {
+            jsonrpc: "2.0",
+            id: message.id,
+            result: { queued: true },
+          });
+      const requestedDelay = Number(message.params?.params?.lateDelayMs);
+      const delayMs = Number.isFinite(requestedDelay) && requestedDelay >= 0 ? requestedDelay : 10;
       setTimeout(() => {
         sendNestedHostRequest(message, message.paperclipInvocation?.id, true);
-      }, 10);
+      }, delayMs);
       return;
     }
     sendNestedHostRequest(message, message.paperclipInvocation?.id);

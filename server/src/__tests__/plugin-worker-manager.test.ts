@@ -582,15 +582,18 @@ describe("plugin proactive company scope (LOOA-629)", () => {
   // worker manager's context resolution, not just the SDK gate in isolation.
   function makeHandle(overrides?: {
     companiesGet?: ReturnType<typeof vi.fn>;
+    configGet?: ReturnType<typeof vi.fn>;
     stateGet?: ReturnType<typeof vi.fn>;
   }) {
     const companiesGet = overrides?.companiesGet ?? vi.fn(async () => ({ id: "company-1", name: "Co" }));
+    const configGet = overrides?.configGet ?? vi.fn(async () => ({ enabled: true }));
     const stateGet = overrides?.stateGet ?? vi.fn(async () => ({ value: "ok" }));
     const hostHandlers = createHostClientHandlers({
       pluginId: "test.plugin",
       capabilities: ["companies.read", "plugin.state.read"],
       services: {
         companies: { get: companiesGet },
+        config: { get: configGet },
         state: { get: stateGet },
       } as unknown as HostServices,
     });
@@ -602,7 +605,7 @@ describe("plugin proactive company scope (LOOA-629)", () => {
       apiVersion: 1,
       hostHandlers,
     });
-    return { handle, companiesGet, stateGet };
+    return { handle, companiesGet, configGet, stateGet };
   }
 
   it("denies a proactive company-scoped call when no company is authorized", async () => {
@@ -691,11 +694,10 @@ describe("plugin proactive company scope (LOOA-629)", () => {
     }
   });
 
-  it("admits a stale action invocation only through configured proactive scope", async () => {
+  it("admits a successful detached action continuation for its original company", async () => {
     const { handle, companiesGet } = makeHandle();
     try {
       await handle.start();
-      handle.setProactiveCompanyScopes(["company-1"]);
 
       await expect(handle.call("performAction", {
         key: "queue-work",
@@ -722,11 +724,11 @@ describe("plugin proactive company scope (LOOA-629)", () => {
     }
   });
 
-  it("denies a stale action invocation for a company outside configured proactive scope", async () => {
+  it("denies a detached action continuation that switches between configured companies", async () => {
     const { handle, companiesGet } = makeHandle();
     try {
       await handle.start();
-      handle.setProactiveCompanyScopes(["company-a"]);
+      handle.setProactiveCompanyScopes(["company-a", "company-b"]);
 
       await expect(handle.call("performAction", {
         key: "queue-work",
@@ -754,6 +756,199 @@ describe("plugin proactive company scope (LOOA-629)", () => {
         }
         expect(companiesGet).not.toHaveBeenCalled();
       }, { interval: 10, timeout: 250 });
+    } finally {
+      await handle.stop().catch(() => undefined);
+    }
+  });
+
+  it("denies a headerless detached continuation while a retained action scope exists", async () => {
+    const { handle, companiesGet } = makeHandle();
+    try {
+      await handle.start();
+      handle.setProactiveCompanyScopes(["company-a", "company-b"]);
+
+      await expect(handle.call("performAction", {
+        key: "queue-work",
+        params: {
+          mode: "late-omit",
+          hostMethod: "companies.get",
+          requestedCompanyId: "company-b",
+        },
+        actorContext: {
+          type: "agent",
+          userId: null,
+          agentId: "agent-1",
+          runId: "run-1",
+          companyId: "company-a",
+        },
+        renderEnvironment: null,
+      })).resolves.toEqual({ queued: true });
+
+      const noEarlierThan = Date.now() + 50;
+      await vi.waitFor(() => {
+        if (Date.now() < noEarlierThan) {
+          throw new Error("waiting for headerless detached nested request");
+        }
+        expect(companiesGet).not.toHaveBeenCalled();
+      }, { interval: 10, timeout: 250 });
+    } finally {
+      await handle.stop().catch(() => undefined);
+    }
+  });
+
+  it("denies a detached action continuation with a forged invocation id", async () => {
+    const { handle, companiesGet } = makeHandle();
+    try {
+      await handle.start();
+      handle.setProactiveCompanyScopes(["company-a", "company-b"]);
+
+      await expect(handle.call("performAction", {
+        key: "queue-work",
+        params: {
+          mode: "late-forged",
+          hostMethod: "companies.get",
+          requestedCompanyId: "company-b",
+        },
+        actorContext: {
+          type: "agent",
+          userId: null,
+          agentId: "agent-1",
+          runId: "run-1",
+          companyId: "company-a",
+        },
+        renderEnvironment: null,
+      })).resolves.toEqual({ queued: true });
+
+      const noEarlierThan = Date.now() + 50;
+      await vi.waitFor(() => {
+        if (Date.now() < noEarlierThan) {
+          throw new Error("waiting for forged detached nested request");
+        }
+        expect(companiesGet).not.toHaveBeenCalled();
+      }, { interval: 10, timeout: 250 });
+    } finally {
+      await handle.stop().catch(() => undefined);
+    }
+  });
+
+  it("denies a detached action continuation after its retained scope expires", async () => {
+    const { handle, companiesGet } = makeHandle();
+    try {
+      await handle.start();
+
+      await expect(handle.call("performAction", {
+        key: "queue-work",
+        params: {
+          mode: "late",
+          hostMethod: "companies.get",
+          requestedCompanyId: "company-a",
+          lateDelayMs: 550,
+        },
+        actorContext: {
+          type: "agent",
+          userId: null,
+          agentId: "agent-1",
+          runId: "run-1",
+          companyId: "company-a",
+        },
+        renderEnvironment: null,
+      })).resolves.toEqual({ queued: true });
+
+      const noEarlierThan = Date.now() + 600;
+      await vi.waitFor(() => {
+        if (Date.now() < noEarlierThan) {
+          throw new Error("waiting for retained scope to expire");
+        }
+        expect(companiesGet).not.toHaveBeenCalled();
+      }, { interval: 20, timeout: 900 });
+    } finally {
+      await handle.stop().catch(() => undefined);
+    }
+  });
+
+  it("denies a detached continuation from a failed action", async () => {
+    const { handle, companiesGet } = makeHandle();
+    try {
+      await handle.start();
+
+      await expect(handle.call("performAction", {
+        key: "queue-work",
+        params: {
+          mode: "late-failed",
+          hostMethod: "companies.get",
+          requestedCompanyId: "company-a",
+        },
+        actorContext: {
+          type: "agent",
+          userId: null,
+          agentId: "agent-1",
+          runId: "run-1",
+          companyId: "company-a",
+        },
+        renderEnvironment: null,
+      })).rejects.toMatchObject({
+        code: -32000,
+        message: "simulated action failure",
+      });
+
+      const noEarlierThan = Date.now() + 50;
+      await vi.waitFor(() => {
+        if (Date.now() < noEarlierThan) {
+          throw new Error("waiting for failed detached nested request");
+        }
+        expect(companiesGet).not.toHaveBeenCalled();
+      }, { interval: 10, timeout: 250 });
+    } finally {
+      await handle.stop().catch(() => undefined);
+    }
+  });
+
+  it("uses the retained action scope for config.get without a company argument", async () => {
+    const { handle, configGet } = makeHandle();
+    try {
+      await handle.start();
+
+      await expect(handle.call("performAction", {
+        key: "queue-work",
+        params: {
+          mode: "late",
+          hostMethod: "config.get",
+          omitCompanyId: true,
+        },
+        actorContext: {
+          type: "agent",
+          userId: null,
+          agentId: "agent-1",
+          runId: "run-1",
+          companyId: "company-a",
+        },
+        renderEnvironment: null,
+      })).resolves.toEqual({ queued: true });
+
+      await vi.waitFor(() => {
+        expect(configGet).toHaveBeenCalledWith(
+          { companyId: "company-a" },
+          { invocationScope: { companyId: "company-a" } },
+        );
+      });
+    } finally {
+      await handle.stop().catch(() => undefined);
+    }
+  });
+
+  it("does not guess a company for proactive config.get without a company argument", async () => {
+    const { handle, configGet } = makeHandle();
+    try {
+      await handle.start();
+      handle.setProactiveCompanyScopes(["company-a", "company-b"]);
+
+      await expect(handle.call("getData", {
+        params: { mode: "omit", hostMethod: "config.get", omitCompanyId: true },
+      } as unknown as HostToWorkerMethods["getData"][0])).rejects.toMatchObject({
+        code: PLUGIN_RPC_ERROR_CODES.INVOCATION_SCOPE_DENIED,
+        message: expect.stringContaining("company context is required"),
+      });
+      expect(configGet).not.toHaveBeenCalled();
     } finally {
       await handle.stop().catch(() => undefined);
     }
