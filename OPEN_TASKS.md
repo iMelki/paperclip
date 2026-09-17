@@ -7,9 +7,19 @@
   see [cleanup receipt](doc/evidence/pr117/cleanup-review.md).
 
 - [#118 — Assess inherited PostgreSQL 18.1 security-version exposure](https://github.com/iMelki/paperclip/issues/118):
-  official CVE-2026-16239 advisory affects PostgreSQL 18 before 18.6. Binary
-  version applicability only; runtime exposure/backports and safe upgrade remain
-  unverified. Separate focused dependency change; superior review requested.
+  current `dev` locks every embedded PostgreSQL artifact at 18.1.0-beta.16;
+  the official CVE-2026-16239 fix is PostgreSQL 18.6. The latest wrapper line
+  available to this project is 18.4.0-beta.17, so an ordinary dependency bump
+  is not remediation. Runtime exposure remains unknown until listener and role
+  inventory; select a verified >=18.6 supplier or external patched PostgreSQL,
+  then prove migration, lifecycle, rollback, and a negative path.
+
+- [#121 — Reconcile trusted fork-review execution authority](https://github.com/iMelki/paperclip/issues/121):
+  `pull_request_target` executes its trusted wrapper from default `master`,
+  while normal development targets `dev`. Treat `master` as the authority until
+  the release model changes; add a cross-ref contract guard, protect `dev` with
+  required review/security checks, and prove deliberate drift fails. Do not
+  check out untrusted PR-head code in the privileged workflow.
 
 - [#35 — Windows embedded PostgreSQL startup](https://github.com/iMelki/paperclip/issues/35):
   Latest 2026-09-13 checkpoint: published `4f2abb969` passed hosted build/test/
@@ -52,15 +62,12 @@
 
 - #48 / #94 / #89 Historical gauntlet stash evidence preserved with a verified private archive; [dated provenance](docs/uiux/browser-evidence-2026-08-27/HISTORICAL-ARCHIVE-2026-09-08.md).
 
-Last updated: 2026-09-07
+Last updated: 2026-09-17
 
 - [#114 — Replay-safe cost imports](https://github.com/iMelki/paperclip/issues/114):
   scoped source identities, immutable replay conflicts and budget retry recovery
   implemented; heartbeat producer conversion remains open. See
   [contract](doc/cost-event-source-identity.md).
-- [#115 — Honest provider and biller budgets](https://github.com/iMelki/paperclip/issues/115):
-  removed proportional allowances and invented weekly quota; recorded spend and
-  provider-reported quota remain separate. Delivery validation in progress.
 - [#116 — Reconcile historical migration snapshots](https://github.com/iMelki/paperclip/issues/116):
   generation exposes unrelated existing-schema drift; 0214 is scoped to cost
   identities. Snapshot reconciliation needs isolated upgrade proof.
@@ -74,20 +81,24 @@ Drizzle journal lagged the existing schema. Ledger repaired in `client.ts`
 without wiping the factory DB. The current gate is post-PR #108 no-loss
 fast-forward of the clean isolated factory checkout, then a governed wrapper
 pin/path update and fresh owner/listener/version/health proof on port 5113.
-2026-09-07 reconciliation: the isolated factory checkout is clean on `dev`
-at `1e3a74847f46691e8027fc55cf8deedd230223eb`, exactly matching Paperclip
-`origin/dev`; dependencies are present; and the shared
-`PaperclipFactory.Common.ps1` pin is already the same SHA. The provenance gate
-therefore passes. The latest governed start still ended `status=degraded` with
-no listener on port 5113 because embedded PostgreSQL was launched from an
-elevated Windows token and refused to start (paperclip#35). No orphan process
-or listener remains. The next gate is a separately authorized non-elevated
-governed start, or the durable `pg_ctl`-based fix tracked in #35; do not bypass
-provenance or fall back to the canonical checkout.
+2026-09-17 reconciliation: the isolated factory checkout is clean on current
+`dev` `65291c05068c8581ab975b39e50ffddf4908e6db`, but the shared
+`PaperclipFactory.Common.ps1` pin remains
+`1e3a74847f46691e8027fc55cf8deedd230223eb`. The `-WhatIf` provenance gate
+correctly returns `blocked` with `head-mismatch, remote-dev-mismatch`; no start
+was attempted. Repair #121's trusted-review authority before a reviewed pin
+update, then re-run the no-start gate and a separately authorized lifecycle
+test. Do not bypass provenance or fall back to the canonical checkout.
 
 This file is the durable local index for active `paperclip` issues.
 
 ## Recently Closed Issues
+
+- [#115 — Honest provider and biller budgets](https://github.com/iMelki/paperclip/issues/115) — **closed 2026-09-17 after fresh focused UI validation**
+  - `ProviderQuotaCard.test.tsx` passed 3/3 on current `dev`: recorded spend
+    remains visible, provider and biller budgets render as Unallocated rather
+    than fabricated company-budget shares, and provider-reported quota remains
+    separate. No new UI component package was introduced.
 
 - [#57 - Mixed-separator Windows paths broke tar sandbox commands](https://github.com/iMelki/paperclip/issues/57) — **closed 2026-09-01 after exact ancestry and current-tree audit**
   - The original diagnosis was too broad: the `ce906e60f` baseline already
