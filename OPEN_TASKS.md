@@ -10,9 +10,11 @@
   current `dev` locks every embedded PostgreSQL artifact at 18.1.0-beta.16;
   the official CVE-2026-16239 fix is PostgreSQL 18.6. The latest wrapper line
   available to this project is 18.4.0-beta.17, so an ordinary dependency bump
-  is not remediation. Runtime exposure remains unknown until listener and role
-  inventory; select a verified >=18.6 supplier or external patched PostgreSQL,
-  then prove migration, lifecycle, rollback, and a negative path.
+  is not remediation. The installed Windows `pg_ctl.exe` is PostgreSQL 18.1
+  (SHA-256 `4D51E03E…790FB1BEF`). Runtime exposure remains unknown because
+  #95 blocks launch before listener/role inventory; select a verified >=18.6
+  supplier or external patched PostgreSQL, then prove migration, lifecycle,
+  rollback, and a negative path.
 
 - [#121 — Reconcile trusted fork-review execution authority](https://github.com/iMelki/paperclip/issues/121):
   `pull_request_target` executes its trusted wrapper from default `master`,
@@ -22,6 +24,11 @@
   check out untrusted PR-head code in the privileged workflow.
 
 - [#35 — Windows embedded PostgreSQL startup](https://github.com/iMelki/paperclip/issues/35):
+  2026-09-17 static confirmation shows the installed vendor patch uses
+  restricted-process `pg_ctl` start and fast `pg_ctl` stop; focused mocked
+  lifecycle tests passed 9/9 in 2.84s. This is not elevated native proof. A
+  controlled, separately authorized disposable-cluster lifecycle receipt with
+  final cleanup is still required.
   Latest 2026-09-13 checkpoint: published `4f2abb969` passed hosted build/test/
   typecheck/e2e jobs; trusted dependency review remains red. Independent review
   found CMD input handling and failed-start process ownership blockers.
@@ -70,6 +77,10 @@ Last updated: 2026-09-17
   [#124](https://github.com/iMelki/paperclip/issues/124) and remains open until
   its stable-identity, atomic-counter, replay, concurrency, and negative-proof
   criteria are delivered. See [contract](doc/cost-event-source-identity.md).
+  Independent 2026-09-17 review requires the #124 contract to name the terminal
+  identity tuple and eligibility predicate, atomically gate all runtime counters
+  on a created cost event, supply a reconciliation entry point, and preserve
+  newer runtime-state fields under out-of-order replay before implementation.
 - [#116 — Reconcile historical migration snapshots](https://github.com/iMelki/paperclip/issues/116):
   generation exposes unrelated existing-schema drift; 0214 is scoped to cost
   identities. Snapshot reconciliation needs isolated upgrade proof.
@@ -84,7 +95,7 @@ without wiping the factory DB. The current gate is post-PR #108 no-loss
 fast-forward of the clean isolated factory checkout, then a governed wrapper
 pin/path update and fresh owner/listener/version/health proof on port 5113.
 2026-09-17 reconciliation: the isolated factory checkout is clean on current
-`dev` `65291c05068c8581ab975b39e50ffddf4908e6db`, but the shared
+`dev` `c497b1592649a068a58974365d4c6ccfcdcb7a2a`, but the shared
 `PaperclipFactory.Common.ps1` pin remains
 `1e3a74847f46691e8027fc55cf8deedd230223eb`. The `-WhatIf` provenance gate
 correctly returns `blocked` with `head-mismatch, remote-dev-mismatch`; no start
@@ -486,9 +497,13 @@ This file is the durable local index for active `paperclip` issues.
   - Commit `124a48cc` removed the floating `npx react-doctor@latest` path and
     added bounded local resolution, minimized child environment, normalized
     receipts, timeout/termination handling, and negative-proof evidence. The
-    quality gate remains explicitly disabled until React Doctor is declared in
-    the manifest/lockfile and receives license, dependency-closure,
-    offline/Windows/Linux, and authenticated-consumer qualification evidence.
+    quality gate remains explicitly disabled. Exact `react-doctor@0.7.8` is
+    Modified MIT (not SPDX MIT) and requires written permission for automated
+    ML/AI pipeline use and certain hosted offerings. Do not declare it in the
+    manifest/lockfile until usage approval, dependency/advisory closure,
+    offline/Windows/Linux, and authenticated-consumer qualification evidence
+    are all recorded. The unavailable package must keep producing its visible
+    incomplete receipt rather than silently passing.
 
 - [#68 - Deep gitleaks history scan fails; no pushed-range mode](https://github.com/iMelki/paperclip/issues/68)
   - `verify-gitleaks.mjs --history` exits 2 with 24 pre-existing findings across 7837
