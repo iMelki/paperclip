@@ -730,6 +730,17 @@ This file is the durable local index for active `paperclip` issues.
 
 ## Active GitHub Issues
 
+- [#129 - Factory host modernization for secured GitHub plugin rollout](https://github.com/iMelki/paperclip/issues/129)
+  - The active Windows Factory remains usable on the legacy `0.8.12` plugin. Do
+    not install the secured current-main plugin until an isolated data-copy
+    qualification proves the matching host, private Node runtime, backup/restore,
+    and import-only single-repository smoke path.
+
+- [#130 - Fix Windows GitHub-plugin E2E harness npx launcher](https://github.com/iMelki/paperclip/issues/130)
+  - Fixed in `paperclip-github-plugin` PR #3 (`2cff6ee`): Windows harnesses now
+    invoke npm's bundled npx CLI through Node without a shell. The full local
+    aggregate suite still has a separate CRLF assertion on an unchanged file.
+
 - [#48 Expand UI/UX Awwwards report (2026-08-09) into practical tasks](https://github.com/iMelki/paperclip/issues/48)
   - Fleet-wide code-only audit scored this app 7.8/10 against the shared
     Awwwards rubric. Full report: `docs/uiux-awwwards-report-2026-08-09.md`.
