@@ -66,8 +66,10 @@ Last updated: 2026-09-17
 
 - [#114 — Replay-safe cost imports](https://github.com/iMelki/paperclip/issues/114):
   scoped source identities, immutable replay conflicts and budget retry recovery
-  implemented; heartbeat producer conversion remains open. See
-  [contract](doc/cost-event-source-identity.md).
+  implemented; heartbeat producer conversion is now tracked separately in
+  [#124](https://github.com/iMelki/paperclip/issues/124) and remains open until
+  its stable-identity, atomic-counter, replay, concurrency, and negative-proof
+  criteria are delivered. See [contract](doc/cost-event-source-identity.md).
 - [#116 — Reconcile historical migration snapshots](https://github.com/iMelki/paperclip/issues/116):
   generation exposes unrelated existing-schema drift; 0214 is scoped to cost
   identities. Snapshot reconciliation needs isolated upgrade proof.
