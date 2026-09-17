@@ -23,6 +23,14 @@
   required review/security checks, and prove deliberate drift fails. Do not
   check out untrusted PR-head code in the privileged workflow.
 
+- [#126 — Adopt GitHub-to-Paperclip sync connector through observer-first rollout](https://github.com/iMelki/paperclip/issues/126):
+  the bounded import pilot exposed an expired invocation scope after the action
+  response returned. PR #128 permits a detached continuation only for a company
+  already stored in the plugin's scoped configuration; positive and cross-company
+  negative coverage pass. The companion v0.8.12-compatible plugin backport is
+  tracked in `iMelki/paperclip-github-plugin` PR #1. Keep broad discovery blocked
+  until resumable, time-bounded batching is implemented and both PRs are reviewed.
+
 - [#35 — Windows embedded PostgreSQL startup](https://github.com/iMelki/paperclip/issues/35):
   2026-09-17 static confirmation shows the installed vendor patch uses
   restricted-process `pg_ctl` start and fast `pg_ctl` stop; focused mocked

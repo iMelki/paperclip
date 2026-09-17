@@ -138,6 +138,14 @@ const MAX_EXECUTE_LOG_TOTAL_CHARS = 128 * 1024 * 1024;
  * per window with a running count. */
 const EXECUTE_LOG_DROP_LOG_INTERVAL_MS = 1_000;
 
+/**
+ * A successful UI action may deliberately return before its detached
+ * continuation has completed. Keep its host-issued scope briefly so that
+ * continuation can finish, without turning an unknown invocation id into a
+ * new proactive authorization.
+ */
+const RETIRED_ACTION_INVOCATION_GRACE_MS = 500;
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -308,6 +316,12 @@ interface ActiveInvocation {
   // The host-minted W3C `traceparent` for the active startup span, or undefined
   // when no startup span is active. The span host handler reads it to mint the
   // parentage, so a worker never supplies the parent itself.
+  traceparent?: string;
+}
+
+interface RetiredActionInvocation {
+  scope: PluginInvocationScope;
+  timer: ReturnType<typeof setTimeout>;
   traceparent?: string;
 }
 
@@ -541,6 +555,7 @@ export function createPluginWorkerHandle(
   const pendingRequests = new Map<string | number, PendingRequest>();
   let nextRequestId = 1;
   const activeInvocations = new Map<string, ActiveInvocation>();
+  const retiredActionInvocations = new Map<string, RetiredActionInvocation>();
   // Host-owned execute routes, keyed by the host-issued invocation id. Only an
   // `environmentExecute` call with a log sink registers a route here. The
   // `execute.log` router delivers only through this map — never through the
@@ -769,6 +784,24 @@ export function createPluginWorkerHandle(
     activeInvocations.delete(invocation.id);
   }
 
+  function retireCompletedActionInvocation(invocation: PluginInvocationContext | null): void {
+    if (!invocation) return;
+    const entry = activeInvocations.get(invocation.id);
+    if (!entry) return;
+    if (entry.timer) clearTimeout(entry.timer);
+    activeInvocations.delete(invocation.id);
+
+    const retired: RetiredActionInvocation = {
+      scope: entry.scope,
+      traceparent: entry.traceparent,
+      timer: setTimeout(() => {
+        retiredActionInvocations.delete(invocation.id);
+      }, RETIRED_ACTION_INVOCATION_GRACE_MS),
+    };
+    if (retired.timer.unref) retired.timer.unref();
+    retiredActionInvocations.set(invocation.id, retired);
+  }
+
   // Store the host-owned execute route for one active execute call. The host
   // holds the exact company id and log sink; the worker never supplies them.
   function registerExecuteRoute(
@@ -960,13 +993,18 @@ export function createPluginWorkerHandle(
       (message as { paperclipInvocationId?: unknown }).paperclipInvocationId,
     );
     if (!invocationId) {
-      // No host-issued invocation is being echoed. This is a genuinely
-      // proactive worker→host call (timer/loop). If it references a company the
-      // plugin is authorized to act on proactively, resolve it to that
-      // company's scope so the governed-access gate admits it. This never
-      // widens access beyond the plugin's configured companies, and only
-      // applies when the worker is NOT inside a host-issued invocation (which
-      // would carry an id and keep its strict single-company match below).
+      // A headerless company call during an active or retained invocation is
+      // ambiguous on this shared worker pipe. Fail closed instead of allowing
+      // a detached continuation to shed its original company provenance and
+      // be reclassified as proactive.
+      const hasActiveInvocation = activeInvocations.size > 0 ||
+        retiredActionInvocations.size > 0 ||
+        Array.from(pendingRequests.values()).some((pending) => pending.invocationId);
+      if (hasActiveInvocation) return { invalidInvocationScope: true };
+
+      // With no live host-issued invocation, this is a genuinely proactive
+      // worker→host call (timer/loop). If it references a configured company,
+      // resolve it to that exact scope so the governed-access gate admits it.
       const proactiveCompanyId = referencedCompanyId(
         message.method,
         (message as { params?: unknown }).params,
@@ -974,12 +1012,19 @@ export function createPluginWorkerHandle(
       if (proactiveCompanyId && proactiveCompanyScopes.has(proactiveCompanyId)) {
         return { invocationScope: { companyId: proactiveCompanyId } };
       }
-      const hasActiveInvocation = activeInvocations.size > 0 ||
-        Array.from(pendingRequests.values()).some((pending) => pending.invocationId);
-      return hasActiveInvocation ? { invalidInvocationScope: true } : {};
+      return {};
     }
     const entry = activeInvocations.get(invocationId);
-    if (!entry) return { invalidInvocationScope: true };
+    if (!entry) {
+      // A successful non-blocking action can return before a detached
+      // continuation has completed. The host retains its original scope only
+      // for this brief, host-minted record; an unknown, failed, or expired id
+      // remains denied and can never be rebound from worker-controlled params.
+      const retired = retiredActionInvocations.get(invocationId);
+      return retired
+        ? { invocationScope: retired.scope, traceparent: retired.traceparent }
+        : { invalidInvocationScope: true };
+    }
     return { invocationScope: entry.scope, traceparent: entry.traceparent };
   }
 
@@ -1295,6 +1340,10 @@ export function createPluginWorkerHandle(
       if (invocation.timer) clearTimeout(invocation.timer);
     }
     activeInvocations.clear();
+    for (const invocation of retiredActionInvocations.values()) {
+      clearTimeout(invocation.timer);
+    }
+    retiredActionInvocations.clear();
   }
 
   // -----------------------------------------------------------------------
@@ -1572,12 +1621,20 @@ export function createPluginWorkerHandle(
       // an already-settled promise, producing an unhandled rejection.
       let settled = false;
 
-      const settle = <T>(fn: (value: T) => void, value: T): void => {
+      const settle = <T>(
+        fn: (value: T) => void,
+        value: T,
+        retainCompletedActionInvocation = false,
+      ): void => {
         if (settled) return;
         settled = true;
         clearTimeout(timer);
         pendingRequests.delete(id);
-        clearInvocation(invocation);
+        if (retainCompletedActionInvocation) {
+          retireCompletedActionInvocation(invocation);
+        } else {
+          clearInvocation(invocation);
+        }
         clearExecuteRoute(invocation?.id);
         fn(value);
       };
@@ -1597,7 +1654,11 @@ export function createPluginWorkerHandle(
         method,
         resolve: (response: JsonRpcResponse) => {
           if (isJsonRpcSuccessResponse(response)) {
-            settle(resolve, response.result as HostToWorkerMethods[M][1]);
+            settle(
+              resolve,
+              response.result as HostToWorkerMethods[M][1],
+              method === "performAction",
+            );
           } else if ("error" in response && response.error) {
             settle(reject, new JsonRpcCallError(response.error));
           } else {

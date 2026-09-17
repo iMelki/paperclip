@@ -71,6 +71,10 @@ const DECLARED_SOURCE_TESTS = new Map([
     ["server/src/__tests__/http-log-redaction.test.ts"],
   ],
   [
+    "server/src/__tests__/fixtures/plugin-worker-invocation-scope.cjs",
+    ["server/src/__tests__/plugin-worker-manager.test.ts"],
+  ],
+  [
     "ui/src/hooks/useOnboardingAgentConfigReview.ts",
     ["ui/src/components/OnboardingWizard.config-persistence.test.tsx"],
   ],

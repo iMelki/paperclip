@@ -7,7 +7,7 @@ function send(message) {
   process.stdout.write(`${JSON.stringify(message)}\n`);
 }
 
-function sendNestedHostRequest(originalRequest, invocationId) {
+function sendNestedHostRequest(originalRequest, invocationId, detached = false) {
   const nestedId = `nested-${nextRequestId++}`;
   const params = originalRequest.params?.params ?? {};
   const mode = params.mode;
@@ -47,6 +47,8 @@ function sendNestedHostRequest(originalRequest, invocationId) {
         init: { method: params.method || "GET" },
         companyId: requestedCompanyId,
       }
+    : hostMethod === "config.get"
+    ? (params.omitCompanyId ? {} : { companyId: requestedCompanyId })
     : {
         companyId: requestedCompanyId,
       };
@@ -57,13 +59,15 @@ function sendNestedHostRequest(originalRequest, invocationId) {
     params: nestedParams,
   };
 
-  if (mode === "echo") {
+  if (mode === "echo" || mode === "late" || mode === "late-failed") {
     nestedRequest.paperclipInvocationId = invocationId;
-  } else if (mode === "unknown") {
+  } else if (mode === "unknown" || mode === "late-forged") {
     nestedRequest.paperclipInvocationId = "unknown-invocation";
   }
 
-  pendingNested.set(nestedId, originalRequest.id);
+  if (!detached) {
+    pendingNested.set(nestedId, originalRequest.id);
+  }
   send(nestedRequest);
 }
 
@@ -96,6 +100,11 @@ rl.on("line", (line) => {
     return;
   }
 
+  // Detached probe calls intentionally do not await the host response.
+  if (message.id && !message.method) {
+    return;
+  }
+
   const method = message && typeof message.method === "string" ? message.method : null;
 
   if (method === "initialize") {
@@ -111,6 +120,28 @@ rl.on("line", (line) => {
   }
 
   if (method === "getData" || method === "performAction") {
+    const mode = message.params?.params?.mode;
+    if (mode === "late" || mode === "late-forged" || mode === "late-failed" || mode === "late-omit") {
+      // Model a non-blocking action which returns immediately while an async
+      // continuation later calls the host with the now-stale invocation id.
+      send(mode === "late-failed"
+        ? {
+            jsonrpc: "2.0",
+            id: message.id,
+            error: { code: -32000, message: "simulated action failure" },
+          }
+        : {
+            jsonrpc: "2.0",
+            id: message.id,
+            result: { queued: true },
+          });
+      const requestedDelay = Number(message.params?.params?.lateDelayMs);
+      const delayMs = Number.isFinite(requestedDelay) && requestedDelay >= 0 ? requestedDelay : 10;
+      setTimeout(() => {
+        sendNestedHostRequest(message, message.paperclipInvocation?.id, true);
+      }, delayMs);
+      return;
+    }
     sendNestedHostRequest(message, message.paperclipInvocation?.id);
     return;
   }
