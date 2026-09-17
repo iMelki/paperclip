@@ -7,7 +7,7 @@ function send(message) {
   process.stdout.write(`${JSON.stringify(message)}\n`);
 }
 
-function sendNestedHostRequest(originalRequest, invocationId) {
+function sendNestedHostRequest(originalRequest, invocationId, detached = false) {
   const nestedId = `nested-${nextRequestId++}`;
   const params = originalRequest.params?.params ?? {};
   const mode = params.mode;
@@ -57,13 +57,15 @@ function sendNestedHostRequest(originalRequest, invocationId) {
     params: nestedParams,
   };
 
-  if (mode === "echo") {
+  if (mode === "echo" || mode === "late") {
     nestedRequest.paperclipInvocationId = invocationId;
   } else if (mode === "unknown") {
     nestedRequest.paperclipInvocationId = "unknown-invocation";
   }
 
-  pendingNested.set(nestedId, originalRequest.id);
+  if (!detached) {
+    pendingNested.set(nestedId, originalRequest.id);
+  }
   send(nestedRequest);
 }
 
@@ -96,6 +98,11 @@ rl.on("line", (line) => {
     return;
   }
 
+  // Detached probe calls intentionally do not await the host response.
+  if (message.id && !message.method) {
+    return;
+  }
+
   const method = message && typeof message.method === "string" ? message.method : null;
 
   if (method === "initialize") {
@@ -111,6 +118,19 @@ rl.on("line", (line) => {
   }
 
   if (method === "getData" || method === "performAction") {
+    if (message.params?.params?.mode === "late") {
+      // Model a non-blocking action which returns immediately while an async
+      // continuation later calls the host with the now-stale invocation id.
+      send({
+        jsonrpc: "2.0",
+        id: message.id,
+        result: { queued: true },
+      });
+      setTimeout(() => {
+        sendNestedHostRequest(message, message.paperclipInvocation?.id, true);
+      }, 10);
+      return;
+    }
     sendNestedHostRequest(message, message.paperclipInvocation?.id);
     return;
   }

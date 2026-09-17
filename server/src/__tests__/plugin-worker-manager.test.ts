@@ -690,6 +690,74 @@ describe("plugin proactive company scope (LOOA-629)", () => {
       await handle.stop().catch(() => undefined);
     }
   });
+
+  it("admits a stale action invocation only through configured proactive scope", async () => {
+    const { handle, companiesGet } = makeHandle();
+    try {
+      await handle.start();
+      handle.setProactiveCompanyScopes(["company-1"]);
+
+      await expect(handle.call("performAction", {
+        key: "queue-work",
+        params: {
+          mode: "late",
+          hostMethod: "companies.get",
+          requestedCompanyId: "company-1",
+        },
+        actorContext: {
+          type: "agent",
+          userId: null,
+          agentId: "agent-1",
+          runId: "run-1",
+          companyId: "company-1",
+        },
+        renderEnvironment: null,
+      })).resolves.toEqual({ queued: true });
+
+      await vi.waitFor(() => {
+        expect(companiesGet).toHaveBeenCalledTimes(1);
+      });
+    } finally {
+      await handle.stop().catch(() => undefined);
+    }
+  });
+
+  it("denies a stale action invocation for a company outside configured proactive scope", async () => {
+    const { handle, companiesGet } = makeHandle();
+    try {
+      await handle.start();
+      handle.setProactiveCompanyScopes(["company-a"]);
+
+      await expect(handle.call("performAction", {
+        key: "queue-work",
+        params: {
+          mode: "late",
+          hostMethod: "companies.get",
+          requestedCompanyId: "company-b",
+        },
+        actorContext: {
+          type: "agent",
+          userId: null,
+          agentId: "agent-1",
+          runId: "run-1",
+          companyId: "company-a",
+        },
+        renderEnvironment: null,
+      })).resolves.toEqual({ queued: true });
+
+      // The fixture sends its detached nested request after 10ms. Wait past
+      // that point, then prove the governed host service was never reached.
+      const noEarlierThan = Date.now() + 50;
+      await vi.waitFor(() => {
+        if (Date.now() < noEarlierThan) {
+          throw new Error("waiting for detached nested request");
+        }
+        expect(companiesGet).not.toHaveBeenCalled();
+      }, { interval: 10, timeout: 250 });
+    } finally {
+      await handle.stop().catch(() => undefined);
+    }
+  });
 });
 
 describe("plugin proactive events.subscribe: options-seeded scope + filter parity (LOOA-695)", () => {

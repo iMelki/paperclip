@@ -979,7 +979,24 @@ export function createPluginWorkerHandle(
       return hasActiveInvocation ? { invalidInvocationScope: true } : {};
     }
     const entry = activeInvocations.get(invocationId);
-    if (!entry) return { invalidInvocationScope: true };
+    if (!entry) {
+      // A non-blocking action can start work under its invocation context and
+      // return before that work has finished. Node's AsyncLocalStorage keeps
+      // the host-issued id on the detached continuation, but the host has
+      // already retired the invocation when the action response settled. Treat
+      // that stale id exactly like a proactive call only when the nested request
+      // names one of this plugin's configured companies. This does not grant a
+      // new company: proactiveCompanyScopes is derived solely from stored plugin
+      // configuration, while unknown ids for every other company remain denied.
+      const proactiveCompanyId = referencedCompanyId(
+        message.method,
+        (message as { params?: unknown }).params,
+      );
+      if (proactiveCompanyId && proactiveCompanyScopes.has(proactiveCompanyId)) {
+        return { invocationScope: { companyId: proactiveCompanyId } };
+      }
+      return { invalidInvocationScope: true };
+    }
     return { invocationScope: entry.scope, traceparent: entry.traceparent };
   }
 
