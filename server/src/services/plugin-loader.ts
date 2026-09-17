@@ -53,8 +53,25 @@ import { pluginDatabaseService } from "./plugin-database.js";
 
 const execFileAsync = promisify(execFile);
 
-export function resolveWindowsPluginLauncher(file: string): string {
-  return ["pnpm", "npm"].includes(file.toLowerCase()) ? `${file}.cmd` : file;
+export function resolveNpmCliPath(nodeExecutable = process.execPath): string {
+  return path.join(path.dirname(nodeExecutable), "node_modules", "npm", "bin", "npm-cli.js");
+}
+
+export function resolveNpmInvocation(
+  args: readonly string[],
+  options: {
+    platform?: NodeJS.Platform;
+    nodeExecutable?: string;
+  } = {},
+): { file: string; args: readonly string[] } {
+  const platform = options.platform ?? process.platform;
+  if (platform !== "win32") return { file: "npm", args };
+
+  const nodeExecutable = options.nodeExecutable ?? process.execPath;
+  return {
+    file: nodeExecutable,
+    args: [resolveNpmCliPath(nodeExecutable), ...args],
+  };
 }
 
 async function execLocalPluginCommand(
@@ -74,14 +91,23 @@ async function execLocalPluginCommand(
     "System32",
     "cmd.exe",
   );
-  // Both package managers ship as Windows batch launchers. Route either one
-  // through cmd.exe rather than asking Node to execute the batch file.
-  const windowsFile = resolveWindowsPluginLauncher(file);
+  const windowsFile = file.toLowerCase() === "pnpm" ? "pnpm.cmd" : file;
   return execFileAsync(
     windowsShell,
     ["/d", "/s", "/c", windowsFile, ...args],
     options,
   );
+}
+
+async function execNpmCommand(
+  args: readonly string[],
+  options: { cwd?: string; timeout: number },
+) {
+  const invocation = resolveNpmInvocation(args);
+  if (process.platform === "win32" && !existsSync(invocation.args[0]!)) {
+    throw new Error(`npm CLI was not found at ${invocation.args[0]}`);
+  }
+  return execFileAsync(invocation.file, invocation.args, options);
 }
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 export const REPO_ROOT = path.resolve(__dirname, "../../..");
@@ -1216,8 +1242,7 @@ export function pluginLoader(
         // Use execFile (not exec) to avoid shell injection from package name/version.
         // --ignore-scripts prevents preinstall/install/postinstall hooks from
         // executing arbitrary code on the host before manifest validation.
-        await execLocalPluginCommand(
-          "npm",
+        await execNpmCommand(
           ["install", spec, "--prefix", targetInstallDir, "--save", "--ignore-scripts"],
           { timeout: 120_000 }, // 2 minute timeout for npm install
         );
