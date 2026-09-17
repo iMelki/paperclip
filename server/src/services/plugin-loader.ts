@@ -53,10 +53,14 @@ import { pluginDatabaseService } from "./plugin-database.js";
 
 const execFileAsync = promisify(execFile);
 
+export function resolveWindowsPluginLauncher(file: string): string {
+  return ["pnpm", "npm"].includes(file.toLowerCase()) ? `${file}.cmd` : file;
+}
+
 async function execLocalPluginCommand(
   file: string,
   args: readonly string[],
-  options: { cwd: string; timeout: number },
+  options: { cwd?: string; timeout: number },
 ) {
   if (process.platform !== "win32") {
     return execFileAsync(file, args, options);
@@ -70,7 +74,9 @@ async function execLocalPluginCommand(
     "System32",
     "cmd.exe",
   );
-  const windowsFile = file.toLowerCase() === "pnpm" ? "pnpm.cmd" : file;
+  // Both package managers ship as Windows batch launchers. Route either one
+  // through cmd.exe rather than asking Node to execute the batch file.
+  const windowsFile = resolveWindowsPluginLauncher(file);
   return execFileAsync(
     windowsShell,
     ["/d", "/s", "/c", windowsFile, ...args],
@@ -1210,7 +1216,7 @@ export function pluginLoader(
         // Use execFile (not exec) to avoid shell injection from package name/version.
         // --ignore-scripts prevents preinstall/install/postinstall hooks from
         // executing arbitrary code on the host before manifest validation.
-        await execFileAsync(
+        await execLocalPluginCommand(
           "npm",
           ["install", spec, "--prefix", targetInstallDir, "--save", "--ignore-scripts"],
           { timeout: 120_000 }, // 2 minute timeout for npm install
@@ -2260,7 +2266,7 @@ export function pluginLoader(
       // (for example @paperclipai/shared exports). Run those workers through
       // the tsx loader so first-party example plugins work in development.
       if (activePlugin.packagePath && existsSync(DEV_TSX_LOADER_PATH)) {
-        workerOptions.execArgv = ["--import", DEV_TSX_LOADER_PATH];
+        workerOptions.execArgv = ["--import", pathToFileURL(DEV_TSX_LOADER_PATH).href];
       }
 
       await workerManager.startWorker(pluginId, workerOptions);
