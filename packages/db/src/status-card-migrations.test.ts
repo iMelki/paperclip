@@ -19,7 +19,8 @@ const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : 
 
 describeEmbeddedPostgres("status card migrations", () => {
   afterEach(async () => {
-    await Promise.all(cleanups.splice(0).map((cleanup) => cleanup()));
+    // Drain the raw SQL client before stopping its embedded database.
+    for (const cleanup of cleanups.splice(0).reverse()) await cleanup();
   });
 
   // Same reason as every other embedded-Postgres migration test here: starting

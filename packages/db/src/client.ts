@@ -409,6 +409,9 @@ async function applyPendingMigrationsManually(
 
       await runInTransaction(sql, async () => {
         for (const statement of splitMigrationStatements(migrationContent)) {
+          if (await migrationStatementAlreadyApplied(sql, statement)) {
+            continue;
+          }
           await sql.unsafe(statement);
         }
 

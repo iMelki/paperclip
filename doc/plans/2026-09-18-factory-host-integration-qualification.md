@@ -83,7 +83,35 @@ SQL that would recreate already-applied upstream/fork changes.
   Preserve create defaults but do not synthesize absent PATCH keys.
 - Restored 26 upstream resource-concealment checks and OAuth company checking.
   Repaired all six tool-access PATCH schemas. Targeted failing routes now pass
-  5/5; validator suite passes 38/38. Full tool-access rerun remains pending.
+  5/5; validator suite passes 38/38; full tool-access suite passes 139/139.
+  These were rechecked together under explicit private Node 24.21: 177 passed,
+  no failures or skips. Runtime regressions were also rechecked under 24.21:
+  11 passed, 5 platform-specific skips. Earlier sidecar receipts used ambient
+  Node 24.18; the explicit-target reruns supersede them for these cases.
+- Short-root full DB diagnostic: 114 passed, 8 failed, 2 skipped. Corrected four
+  references to relocated migration SQL and restored the existing replay-safe
+  statement classifier call. Sequential SQL-client drain precedes DB shutdown;
+  the DB hook budget is 30 seconds to accommodate bounded Windows teardown.
+  Five focused migration files now pass all 6 tests under Node 24.21 (193.06s).
+  The two client replay regressions also pass under explicit Node 24.21
+  (64.24s; 14 unrelated cases not selected). A fresh complete frozen-head DB
+  run is still required; these focused receipts do not replace it.
+- Synthetic logical backup/restore of non-public schemas and journal history
+  passed. The auto/COPY restore case still fails without `psql`; its JavaScript
+  fallback cannot execute COPY data as ordinary SQL. This is inherited upstream
+  behavior, not a new parser. Track it under
+  [#125](https://github.com/iMelki/paperclip/issues/125#issuecomment-5724418210).
+- Draft PR #133 has a failing dependency-policy check because 44 dependency
+  files lack trusted `dependency-review-approved` approval. Do not self-apply
+  that label, weaken the policy, or infer approval from unrelated slice reviews.
+
+Local report SHA-256 receipts (reports stay in private validation storage):
+
+| Report | SHA-256 |
+| --- | --- |
+| Target security/validator JSON | `707f2c3f19a0b35fc58ddaea554c3aee87f2cfa63fa40f31be5502bc8acefa9b` |
+| Target runtime JSON | `a89f29c46a6aef4562b4964c2563406f8897504c2bb191970f998b32a191b34c` |
+| Mixed-source DB diagnostic JSON | `088c905789d1ccd2daefd487a04d3220b2b931d14ef73b29912a4accfbc5de59` |
 
 ## Separate delivery gates
 
