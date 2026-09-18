@@ -731,6 +731,10 @@ This file is the durable local index for active `paperclip` issues.
 ## Active GitHub Issues
 
 - [#129 - Factory host modernization for secured GitHub plugin rollout](https://github.com/iMelki/paperclip/issues/129)
+  - Candidate qualification and reproduced merge regressions are recorded in
+    [the dated integration checkpoint](doc/plans/2026-09-18-factory-host-integration-qualification.md).
+    Source integration is not live rollout approval. Task-index repair is
+    separately reviewed in PR #132; preserve that repair when integrating.
   - The active Windows Factory remains usable on the legacy `0.8.12` plugin. Do
     not install the secured current-main plugin until an isolated data-copy
     qualification proves the matching host, private Node runtime, backup/restore,
