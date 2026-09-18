@@ -6,6 +6,12 @@ All notable changes to this repository should be recorded here.
 
 ## Unreleased
 
+- **[#129, candidate only]** Integrate upstream `v2026.831.1` with the fork's
+  deployed migration history, company-scoped contracts, and Windows process
+  ownership safeguards. Add regression proof for the restored Git Bash fallback
+  and verified runtime shutdown. Live migration and deployment remain gated;
+  see the dated Factory host integration qualification checkpoint.
+
 - **[#114]** Added optional company/system/account-scoped source identities to
   cost events. Identical imports replay without duplicating spend; changed
   payloads return HTTP 409. Company totals and budget pauses are transactional,

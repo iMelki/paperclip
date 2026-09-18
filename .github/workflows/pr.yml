@@ -4,49 +4,13 @@ on:
   pull_request:
     branches:
       - master
-      - dev
 
 concurrency:
   group: pr-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
 jobs:
-  secret-scan:
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    permissions:
-      contents: read
-
-    steps:
-      - name: Checkout complete history
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-
-      - name: Install pinned Gitleaks
-        shell: bash
-        run: |
-          set -euo pipefail
-          version="8.30.1"
-          asset="gitleaks_${version}_linux_x64.tar.gz"
-          expected="551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"
-          install_dir="$RUNNER_TEMP/gitleaks-$version"
-          mkdir -p "$install_dir"
-          curl --fail --location --retry 3 --output "$install_dir/$asset" \
-            "https://github.com/gitleaks/gitleaks/releases/download/v${version}/${asset}"
-          printf '%s  %s\n' "$expected" "$install_dir/$asset" | sha256sum --check --strict
-          tar -xzf "$install_dir/$asset" -C "$install_dir" gitleaks
-          echo "PAPERCLIP_GITLEAKS_BIN=$install_dir/gitleaks" >> "$GITHUB_ENV"
-          "$install_dir/gitleaks" version
-
-      - name: Scan pull-request commit range
-        run: >-
-          node scripts/verify-gitleaks.mjs --range
-          "${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }}"
-
   policy:
-    needs: [secret-scan]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
@@ -82,8 +46,17 @@ jobs:
         with:
           node-version: 24
 
+      - name: Validate migration ordering against target branch
+        run: >-
+          node .github/scripts/check-pr-migration-order.mjs
+          "${{ github.event.pull_request.base.sha }}"
+          "${{ github.event.pull_request.head.sha }}"
+
       - name: Validate Dockerfile deps stage
         run: node ./scripts/check-docker-deps-stage.mjs
+
+      - name: Validate Node version policy
+        run: pnpm check:node-version
 
       - name: Test embedded PostgreSQL pg_ctl lifecycle without a database
         run: node --test --test-isolation=none scripts/embedded-postgres-pgctl.test.mjs
@@ -97,23 +70,11 @@ jobs:
           ./scripts/check-no-git-push-source.test.mjs
           ./scripts/git-push-scan-integrity.test.mjs
           ./scripts/check-no-git-push.test.mjs
-
-      - name: Validate PR workflow trigger policy
-        run: node ./scripts/check-pr-workflow-trigger.mjs
-
-      - name: Test PR workflow trigger policy
-        run: node --test ./scripts/check-pr-workflow-trigger.test.mjs
-
-      - name: Test deterministic pre-push selection and protocol
-        run: >-
-          node --test
-          ./scripts/is-main-module.test.mjs
-          ./scripts/pre-push-callers.test.mjs
-          ./scripts/pre-push-test-selection.test.mjs
-          ./scripts/run-vitest-direct.test.mjs
           ./scripts/scan-pre-push-secrets.test.mjs
           ./scripts/run-pre-push-tests.test.mjs
           ./scripts/verify-gitleaks.test.mjs
+      - name: Test PR quality-gate scripts
+        run: node --test '.github/scripts/tests/*.test.mjs'
 
       - name: Test general-server shard partition
         run: node --test ./scripts/__tests__/run-vitest-stable-shard.test.mjs
@@ -126,9 +87,6 @@ jobs:
 
       - name: Test standalone package build concurrency
         run: node --test ./scripts/__tests__/build-standalone-concurrency.test.mjs
-
-      - name: Test cross-platform build filesystem helper
-        run: node --test ./scripts/__tests__/build-filesystem.test.mjs
 
       - name: Validate release package manifest
         run: node ./scripts/release-package-map.mjs check
@@ -237,8 +195,20 @@ jobs:
             group_label: server (5/5)
             shard_index: 4
             shard_count: 5
+          # workspaces-a was the slowest check in the fully-green PR run
+          # 31371439296 (2026-08-10) at 319s, with the ui project's single
+          # vitest invocation accounting for ~224s and the paperclipai CLI
+          # ~37s. Two shards use Vitest's native --shard on each project's
+          # file list (ui: 439 files, cli: 54), bringing each job to roughly
+          # half the suite time (~130s + setup) without a duration manifest.
           - group: general-workspaces-a
-            group_label: workspaces-a
+            group_label: workspaces-a (1/2)
+            shard_index: 0
+            shard_count: 2
+          - group: general-workspaces-a
+            group_label: workspaces-a (2/2)
+            shard_index: 1
+            shard_count: 2
           - group: general-workspaces-b
             group_label: workspaces-b
 
@@ -326,6 +296,9 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Verify Paperclip Runner
+        run: pnpm --filter @paperclipai/paperclip-runner check:all
+
       - name: Build
         run: pnpm build
 
@@ -338,9 +311,11 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # A successful PR run on 2026-08-04 (30876682788) spent 256s in
-          # serialized shard 2/4, making its 305s job the run's slowest check.
-          # Five shards reduce the measured 739s suite total to about 148s per
+          # A successful PR run on 2026-08-17 (32012408876) spent 291s in
+          # serialized shard 1/5 while its siblings ran 170-201s: round-robin
+          # clustered the heavy suites on one runner. Shards are now balanced
+          # by recorded duration (scripts/serialized-shard-durations.json),
+          # which levels the measured 968s suite total to about 194s per
           # runner before setup overhead.
           - shard_index: 0
             shard_count: 5
