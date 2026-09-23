@@ -161,6 +161,12 @@ function createServerEnv(
   env.SERVE_UI = "false";
   env.PAPERCLIP_DB_BACKUP_ENABLED = "false";
   env.PAPERCLIP_DECISION_SIGNING_SECRET = "company-import-export-decision-signing-secret";
+  // createBasePaperclipEnv strips every inherited PAPERCLIP_* var, and the
+  // server refuses to boot without BETTER_AUTH_SECRET or this one. The test
+  // never set either, so it only started where the developer's ambient env
+  // happened to supply BETTER_AUTH_SECRET; everywhere else the server exited
+  // and the healthcheck timed out in beforeAll. Provision it explicitly.
+  env.PAPERCLIP_AGENT_JWT_SECRET = "company-import-export-agent-jwt-secret";
   env.HEARTBEAT_SCHEDULER_ENABLED = "false";
   env.PAPERCLIP_MIGRATION_AUTO_APPLY = "true";
   env.PAPERCLIP_UI_DEV_MIDDLEWARE = "false";
@@ -194,6 +200,22 @@ function collectTextFiles(root: string, current: string, files: Record<string, s
   }
 }
 
+function waitForChildExit(child: ServerProcess, timeoutMs: number): Promise<void> {
+  if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve();
+  return new Promise<void>((resolve) => {
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve();
+    };
+    const timer = setTimeout(finish, timeoutMs);
+    timer.unref?.();
+    child.once("exit", finish);
+  });
+}
+
 async function stopServerProcess(
   child: ServerProcess | null,
   ownerMarkers: string[],
@@ -201,15 +223,46 @@ async function stopServerProcess(
 ) {
   if (!child) return;
   if (process.platform === "win32" && child.pid) {
+    // reapWindowsTestProcessTree no longer signals anything without launch-time
+    // Job Object custody: it only observes. So the server must be stopped
+    // through the child handle this test still holds. A retained handle is not
+    // a bare PID -- libuv keeps the kernel process object alive while
+    // exitCode === null, so this cannot be aimed at a recycled process.
+    if (child.exitCode === null && child.signalCode === null) {
+      child.kill();
+      await waitForChildExit(child, 5_000);
+    }
+    // The child handle's exit event is a real kernel fact about the root, and
+    // it is the only stop this teardown can actually assert.
+    if (child.exitCode === null && child.signalCode === null) {
+      throw new Error(
+        `CLI E2E server process ${child.pid} did not exit after kill().`,
+      );
+    }
+
     const termination = await reapWindowsTestProcessTree({
       rootPid: child.pid,
       ownerMarkers,
       expectedRootIdentity: expectedRootIdentity ?? undefined,
       timeoutMs: 8_000,
     });
-    if (!termination.confirmedStopped) {
+
+    // The reap is now only an audit for descendants the root kill cannot reach.
+    // Grade the outcome by the evidence actually obtained:
+    //   - leftovers observed -> a real leak, fail.
+    //   - nothing observed   -> clean.
+    //   - no observation     -> the CIM instrument was unavailable (it shells
+    //     out to PowerShell and does fail under load). The root is already
+    //     confirmed dead, so an unavailable audit is reported, not fatal;
+    //     gating teardown on it would fail the suite over a diagnostic outage.
+    if (termination.remainingPids.length > 0) {
       throw new Error(
-        `CLI E2E server process tree cleanup failed (${termination.reason}); remaining PIDs: ${termination.remainingPids.join(",")}`,
+        `CLI E2E server left descendants running (${termination.reason}); remaining PIDs: ${termination.remainingPids.join(",")}`,
+      );
+    }
+    if (!termination.confirmedStopped && !termination.observedNoOwnedProcesses) {
+      console.warn(
+        `CLI E2E descendant audit unavailable (${termination.reason}); server root ${child.pid} exited, descendants unverified.`,
       );
     }
     return;
@@ -366,8 +419,11 @@ describeEmbeddedPostgres("paperclipai company import/export e2e", () => {
       },
     );
     serverProcess = child;
+    // Best-effort: this identity only sharpens teardown's ownership check. The
+    // CIM read shells out to PowerShell, which can fail or time out on a loaded
+    // host -- letting that reject would kill setup over a diagnostic aid.
     serverProcessIdentity = child.pid
-      ? await readWindowsTestProcessIdentity(child.pid)
+      ? await readWindowsTestProcessIdentity(child.pid).catch(() => null)
       : null;
     child.stdout?.on("data", (chunk) => {
       output.stdout.push(String(chunk));
