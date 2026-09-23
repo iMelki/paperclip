@@ -9,7 +9,7 @@ import {
   addManagedPathBlock,
   assertManagedShimWritable,
   buildNextManifest,
-  flipCurrentAtomic,
+  flipCurrent,
   payloadPathFor,
   pruneInstallPayloads,
   readInstallManifest,
@@ -373,8 +373,8 @@ export async function installCommand(
       const record: InstallRecord = { source: "git", version: payload.version, channel: "pinned", repo: gitRequest.repo, ref: gitRequest.ref, sha, payloadPath: payload.payloadPath, installedAt: (dependencies.now?.() ?? new Date()).toISOString() };
       const nextManifest = buildNextManifest(record, currentManifest);
       const oldTarget = fs.existsSync(paths.currentPath) ? fs.readlinkSync(paths.currentPath) : null;
-      flipCurrentAtomic(payload.payloadPath, paths);
-      try { writeInstallManifestAtomic(nextManifest, paths); } catch (error) { if (oldTarget) flipCurrentAtomic(path.resolve(paths.cliRoot, oldTarget), paths); else fs.rmSync(paths.currentPath, { force: true }); throw error; }
+      flipCurrent(payload.payloadPath, paths);
+      try { writeInstallManifestAtomic(nextManifest, paths); } catch (error) { if (oldTarget) flipCurrent(path.resolve(paths.cliRoot, oldTarget), paths); else fs.rmSync(paths.currentPath, { force: true }); throw error; }
       writeManagedShim(paths); pruneInstallPayloads(nextManifest, paths); return payload;
     }, paths);
     await ensureShimOnPath(options);
@@ -400,11 +400,11 @@ export async function installCommand(
     };
     const nextManifest = buildNextManifest(record, currentManifest);
     const oldTarget = fs.existsSync(paths.currentPath) ? fs.readlinkSync(paths.currentPath) : null;
-    flipCurrentAtomic(payload.payloadPath, paths);
+    flipCurrent(payload.payloadPath, paths);
     try {
       writeInstallManifestAtomic(nextManifest, paths);
     } catch (error) {
-      if (oldTarget) flipCurrentAtomic(path.resolve(paths.cliRoot, oldTarget), paths);
+      if (oldTarget) flipCurrent(path.resolve(paths.cliRoot, oldTarget), paths);
       else fs.rmSync(paths.currentPath, { force: true });
       throw error;
     }
