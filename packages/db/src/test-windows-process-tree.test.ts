@@ -8,6 +8,7 @@ import {
   parseWindowsTestProcessSnapshot,
   reapWindowsTestProcessTree,
   selectOwnedWindowsTestProcessTree,
+  signalVerifiedWindowsTestProcesses,
   type WindowsTestProcessIdentity,
 } from "./test-windows-process-tree.js";
 import {
@@ -17,6 +18,7 @@ import {
 } from "./windows-test-job-warden.js";
 
 const windowsOnly = process.platform === "win32" ? it : it.skip;
+const nonWindowsOnly = process.platform === "win32" ? it.skip : it;
 
 function identity(
   pid: number,
@@ -257,6 +259,382 @@ describe("Windows test process tree selection", () => {
     15_000,
   );
 
+  // --- no-custody (legacy caller) contract -----------------------------------
+  // The callers below pass no jobCustody: cli/src/__tests__/
+  // company-import-export-e2e.test.ts and packages/db/src/
+  // test-embedded-postgres.ts. Neither had any coverage of these paths, which
+  // is how an empty-tree result that reads like success reached main.
+
+  windowsOnly(
+    "reports an empty owned tree as an advisory observation, never as a confirmed stop",
+    async () => {
+      // An absolute marker that is well-formed (so ownership evidence is
+      // usable) but matches no live process, so the owned set is empty.
+      const marker = path.join(
+        os.tmpdir(),
+        `paperclip-absent-owner-${randomUUID()}`,
+      );
+
+      const result = await reapWindowsTestProcessTree({
+        rootPid: 2_000_011,
+        ownerMarkers: [marker],
+        timeoutMs: 8_000,
+      });
+
+      // The whole point: an empty enumeration is the case that FEELS like
+      // success. It must not be promoted to confirmedStopped without a kernel
+      // statement, and the advisory fact must still be reported separately so
+      // callers can act on it knowingly.
+      expect(result).toMatchObject({
+        attempted: false,
+        confirmedStopped: false,
+        observedNoOwnedProcesses: true,
+        stopEvidence: "advisory",
+        reason: "no_owned_processes",
+      });
+      expect(result.jobReceipt).toBeUndefined();
+      expect(result.capturedPids).toEqual([]);
+      expect(result.remainingPids).toEqual([]);
+      expect(result.snapshots).toBe(1);
+    },
+    20_000,
+  );
+
+  windowsOnly(
+    "separates unusable ownership evidence from an observed-empty owned tree",
+    async () => {
+      // No marker survives normalization (none is absolute), and no
+      // expectedRootIdentity is supplied, so nothing could have been
+      // attributed to this tree even if it were running. Reporting that as
+      // "no owned processes" would be a fail-open: it is the absence of an
+      // instrument, not the absence of processes.
+      const result = await reapWindowsTestProcessTree({
+        rootPid: 2_000_012,
+        ownerMarkers: ["short", "also-not-absolute"],
+        timeoutMs: 8_000,
+      });
+
+      expect(result).toMatchObject({
+        attempted: false,
+        confirmedStopped: false,
+        observedNoOwnedProcesses: false,
+        reason: "ownership_evidence_unusable",
+      });
+      expect(result.jobReceipt).toBeUndefined();
+    },
+    20_000,
+  );
+
+  windowsOnly(
+    "reports a live no-custody tree as observed-not-stopped",
+    async () => {
+      const marker = path.join(
+        os.tmpdir(),
+        `paperclip-live-no-custody-${randomUUID()}`,
+      );
+      const root = spawn(
+        process.execPath,
+        ["-e", "setInterval(() => {}, 1000);", marker],
+        { stdio: "ignore", windowsHide: true },
+      );
+      const rootExit = new Promise<void>((resolve) => {
+        root.once("exit", () => resolve());
+      });
+
+      try {
+        const rootIdentity = await readWindowsTestProcessIdentity(root.pid!);
+        expect(rootIdentity).not.toBeNull();
+
+        const result = await reapWindowsTestProcessTree({
+          rootPid: root.pid!,
+          ownerMarkers: [],
+          expectedRootIdentity: rootIdentity!,
+          timeoutMs: 8_000,
+        });
+
+        expect(result).toMatchObject({
+          attempted: false,
+          confirmedStopped: false,
+          observedNoOwnedProcesses: false,
+          stopEvidence: "advisory",
+          reason: "advisory_only_without_job_object",
+        });
+        expect(result.remainingPids).toContain(root.pid!);
+        expect(root.exitCode).toBeNull();
+      } finally {
+        if (root.exitCode === null && root.signalCode === null) {
+          root.kill("SIGKILL");
+        }
+        await waitForFixtureExit(rootExit);
+      }
+    },
+    20_000,
+  );
+
+  // --- explicit force opt-in (forceWithoutCustody) --------------------------
+  // For callers that can never hold custody. Pinned in both directions:
+  // without the opt-in a hung, identifiable tree is NOT signalled; with it,
+  // unusable or unproven ownership is refused, a marker-verified tree is
+  // forced, and the result is stopEvidence "forced" -- never confirmedStopped.
+
+
+  async function expectStillAlive(child: ReturnType<typeof spawn>) {
+    await new Promise((resolve) => setTimeout(resolve, 750));
+    expect(child.exitCode).toBeNull();
+    expect(child.signalCode).toBeNull();
+  }
+
+  function spawnIdle(args: string[]) {
+    const child = spawn(
+      process.execPath,
+      ["-e", "setInterval(() => {}, 1000);", ...args],
+      { stdio: "ignore", windowsHide: true },
+    );
+    const exited = new Promise<void>((resolve) => {
+      child.once("exit", () => resolve());
+    });
+    return { child, exited };
+  }
+
+  async function killFixture(fixture: ReturnType<typeof spawnIdle>) {
+    if (fixture.child.exitCode === null && fixture.child.signalCode === null) {
+      fixture.child.kill("SIGKILL");
+    }
+    await waitForFixtureExit(fixture.exited);
+  }
+
+  windowsOnly(
+    "does not signal a hung marker-verified tree unless force is requested by name",
+    async () => {
+      // Fully identifiable -- an absolute marker in its command line -- and
+      // still left alone, because nobody asked for force.
+      const marker = path.join(os.tmpdir(), `paperclip-no-force-${randomUUID()}`);
+      const fixture = spawnIdle([marker]);
+      try {
+        await expect.poll(
+          async () => (await readWindowsTestProcessIdentity(fixture.child.pid!)) !== null,
+          { timeout: 5_000 },
+        ).toBe(true);
+        const result = await reapWindowsTestProcessTree({
+          rootPid: fixture.child.pid!,
+          ownerMarkers: [marker],
+          timeoutMs: 10_000,
+        });
+        expect(result).toMatchObject({
+          attempted: false,
+          confirmedStopped: false,
+          observedNoOwnedProcesses: false,
+          stopEvidence: "advisory",
+          reason: "advisory_only_without_job_object",
+          attemptedPids: [],
+        });
+        expect(result.remainingPids).toContain(fixture.child.pid!);
+        await expectStillAlive(fixture.child);
+      } finally {
+        await killFixture(fixture);
+      }
+    },
+    30_000,
+  );
+
+  windowsOnly(
+    "signals a marker-verified tree without custody but never claims confirmedStopped",
+    async () => {
+      const marker = path.join(os.tmpdir(), `paperclip-advisory-signal-${randomUUID()}`);
+      // The root carries the marker; its child does not and is owned only by
+      // verified lineage. The root reports the child's PID so we can check it.
+      const root = spawn(
+        process.execPath,
+        [
+          "-e",
+          "const cp=require('child_process');"
+          + "const c=cp.spawn(process.execPath,['-e','setInterval(()=>{},1000);'],{stdio:'ignore',windowsHide:true});"
+          + "process.stdout.write(String(c.pid)+'\\n');setInterval(()=>{},1000);",
+          marker,
+        ],
+        { stdio: ["ignore", "pipe", "ignore"], windowsHide: true },
+      );
+      const rootExit = new Promise<void>((resolve) => {
+        root.once("exit", () => resolve());
+      });
+      const childPid = await new Promise<number>((resolve, reject) => {
+        let stdout = "";
+        root.stdout!.setEncoding("utf8");
+        root.stdout!.on("data", (chunk: string) => {
+          stdout += chunk;
+          const match = /^(\d+)\r?\n/.exec(stdout);
+          if (match) resolve(Number.parseInt(match[1]!, 10));
+        });
+        root.once("exit", () => reject(new Error("root exited before reporting its child")));
+      });
+
+      try {
+        await expect.poll(
+          async () => (await readWindowsTestProcessIdentity(childPid)) !== null,
+          { timeout: 5_000 },
+        ).toBe(true);
+
+        const result = await reapWindowsTestProcessTree({
+          rootPid: root.pid!,
+          ownerMarkers: [marker],
+          timeoutMs: 20_000,
+          forceWithoutCustody: true,
+        });
+
+        expect(result).toMatchObject({
+          attempted: true,
+          confirmedStopped: false,
+          observedNoOwnedProcesses: true,
+          stopEvidence: "forced",
+          reason: "forced_none_observed",
+          remainingPids: [],
+        });
+        expect(result.jobReceipt).toBeUndefined();
+        expect(result.attemptedPids).toEqual(
+          expect.arrayContaining([root.pid!, childPid]),
+        );
+        await waitForFixtureExit(rootExit, 5_000);
+        await expect.poll(
+          async () => (await readWindowsTestProcessIdentity(childPid)) === null,
+          { timeout: 5_000 },
+        ).toBe(true);
+      } finally {
+        if (root.exitCode === null && root.signalCode === null) root.kill("SIGKILL");
+        await waitForFixtureExit(rootExit);
+      }
+    },
+    45_000,
+  );
+
+  windowsOnly(
+    "never signals a live root that lacks the ownership marker",
+    async () => {
+      const fixture = spawnIdle([]);
+      try {
+        const result = await reapWindowsTestProcessTree({
+          rootPid: fixture.child.pid!,
+          ownerMarkers: [path.join(os.tmpdir(), `paperclip-not-this-${randomUUID()}`)],
+          timeoutMs: 10_000,
+          forceWithoutCustody: true,
+        });
+        expect(result).toMatchObject({
+          attempted: false,
+          confirmedStopped: false,
+          observedNoOwnedProcesses: false,
+          stopEvidence: "advisory",
+          reason: "untrusted_root",
+          attemptedPids: [],
+        });
+        await expectStillAlive(fixture.child);
+      } finally {
+        await killFixture(fixture);
+      }
+    },
+    30_000,
+  );
+
+  windowsOnly(
+    "never signals anything when ownership evidence is unusable, even where its text appears",
+    async () => {
+      // "paperclip-unusable-marker" is not absolute, so normalization drops it.
+      // The live process literally carries that text; it must still survive.
+      const fixture = spawnIdle(["paperclip-unusable-marker"]);
+      try {
+        const result = await reapWindowsTestProcessTree({
+          rootPid: 0,
+          ownerMarkers: ["paperclip-unusable-marker"],
+          timeoutMs: 10_000,
+          forceWithoutCustody: true,
+        });
+        expect(result).toMatchObject({
+          attempted: false,
+          confirmedStopped: false,
+          observedNoOwnedProcesses: false,
+          stopEvidence: "advisory",
+          reason: "ownership_evidence_unusable",
+          attemptedPids: [],
+        });
+        await expectStillAlive(fixture.child);
+      } finally {
+        await killFixture(fixture);
+      }
+    },
+    30_000,
+  );
+
+  windowsOnly(
+    "signals by absolute marker alone when the root PID is unknown, still advisory",
+    async () => {
+      // rootPid 0 is what the embedded-Postgres caller passes when
+      // postmaster.pid cannot be read. PID 0 exists in CIM (System Idle
+      // Process) and must not be mistaken for the root.
+      const marker = path.join(os.tmpdir(), `paperclip-unknown-root-${randomUUID()}`);
+      const fixture = spawnIdle([marker]);
+      try {
+        await expect.poll(
+          async () => (await readWindowsTestProcessIdentity(fixture.child.pid!)) !== null,
+          { timeout: 5_000 },
+        ).toBe(true);
+        const result = await reapWindowsTestProcessTree({
+          rootPid: 0,
+          ownerMarkers: [marker],
+          timeoutMs: 20_000,
+          forceWithoutCustody: true,
+        });
+        expect(result).toMatchObject({
+          attempted: true,
+          confirmedStopped: false,
+          observedNoOwnedProcesses: true,
+          stopEvidence: "forced",
+          reason: "forced_none_observed",
+          remainingPids: [],
+        });
+        expect(result.attemptedPids).toContain(fixture.child.pid!);
+        await waitForFixtureExit(fixture.exited, 5_000);
+      } finally {
+        await killFixture(fixture);
+      }
+    },
+    45_000,
+  );
+
+  windowsOnly(
+    "refuses to signal a PID whose creation time does not match the captured identity",
+    async () => {
+      const fixture = spawnIdle([]);
+      try {
+        const real = await readWindowsTestProcessIdentity(fixture.child.pid!);
+        expect(real).not.toBeNull();
+        // Same PID, different creation time: exactly what a recycled PID
+        // looks like. It must not be touched.
+        const recycled = new Date(Date.parse(real!.createdAt) - 3_600_000).toISOString();
+        expect(await signalVerifiedWindowsTestProcesses(
+          [{ pid: real!.pid, createdAt: recycled }],
+          10_000,
+        )).toEqual([]);
+        await expectStillAlive(fixture.child);
+
+        // Positive control in the same run: the exact identity IS signalled.
+        expect(await signalVerifiedWindowsTestProcesses([real!], 10_000)).toEqual([real!.pid]);
+        await waitForFixtureExit(fixture.exited, 5_000);
+      } finally {
+        await killFixture(fixture);
+      }
+    },
+    30_000,
+  );
+
+  nonWindowsOnly("never claims confirmedStopped off Windows, where it does nothing", async () => {
+    const result = await reapWindowsTestProcessTree({ rootPid: 12345, ownerMarkers: [] });
+    expect(result).toMatchObject({
+      attempted: false,
+      confirmedStopped: false,
+      observedNoOwnedProcesses: false,
+      stopEvidence: "advisory",
+      reason: "not_windows",
+    });
+  });
+
   afterEach(async () => {
     await shutdownWindowsTestJobWardenForTests();
   });
@@ -328,6 +706,7 @@ describe("Windows test process tree selection", () => {
       expect(result).toMatchObject({
         attempted: true,
         confirmedStopped: false,
+        stopEvidence: "forced",
         reason: "job_terminate_unconfirmed",
       });
       expect(result.jobReceipt).toBeUndefined();
@@ -376,6 +755,7 @@ describe("Windows test process tree selection", () => {
         expect(result).toMatchObject({
           attempted: true,
           confirmedStopped: true,
+          stopEvidence: "kernel",
           reason: "reaped",
           remainingPids: [],
           jobReceipt: {
@@ -475,6 +855,7 @@ describe("Windows test process tree selection", () => {
         expect(result).toMatchObject({
           attempted: true,
           confirmedStopped: true,
+          stopEvidence: "kernel",
           reason: "reaped",
           remainingPids: [],
           jobReceipt: {
