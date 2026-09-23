@@ -7,7 +7,8 @@ import {
   MANAGED_SHIM_MARKER,
   addManagedPathBlock,
   buildNextManifest,
-  flipCurrentAtomic,
+  FlipCurrentError,
+  flipCurrent,
   isManagedExecutable,
   payloadPathFor,
   pruneInstallPayloads,
@@ -30,6 +31,15 @@ function record(payloadPath: string, version: string): InstallRecord {
     payloadPath,
     installedAt: `2026-07-${version.padStart(2, "0")}T00:00:00.000Z`,
   };
+}
+
+// POSIX permission bits are not enforced on Windows: fs.chmod there only
+// toggles the read-only attribute, so a private 0o600 file still reports
+// 0o666. These mode assertions therefore run on POSIX only (paperclip CI is
+// Linux); every other assertion in these tests still runs on Windows.
+function expectPosixMode(filePath: string, mode: number): void {
+  if (process.platform === "win32") return;
+  expect(fs.statSync(filePath).mode & 0o777).toBe(mode);
 }
 
 describe("managed install store", () => {
@@ -66,7 +76,7 @@ describe("managed install store", () => {
     };
     writeInstallManifestAtomic(manifest, paths);
     expect(readInstallManifest(paths)).toEqual(manifest);
-    expect(fs.statSync(paths.manifestPath).mode & 0o777).toBe(0o600);
+    expectPosixMode(paths.manifestPath, 0o600);
   });
 
   it("leaves the old current payload working when interrupted before rename", () => {
@@ -74,10 +84,10 @@ describe("managed install store", () => {
     const newPayload = payloadPathFor(paths, "npm", "2.0.0");
     fs.mkdirSync(oldPayload, { recursive: true });
     fs.mkdirSync(newPayload, { recursive: true });
-    flipCurrentAtomic(oldPayload, paths);
+    flipCurrent(oldPayload, paths);
 
     expect(() =>
-      flipCurrentAtomic(newPayload, paths, {
+      flipCurrent(newPayload, paths, {
         beforeRename: () => {
           throw new Error("simulated crash");
         },
@@ -110,7 +120,7 @@ describe("managed install store", () => {
     expect(shim).toContain(process.execPath);
     expect(shim).toContain(paths.currentPath);
     expect(shim).not.toContain("PAPERCLIP_HOME");
-    expect(fs.statSync(paths.shimPath).mode & 0o777).toBe(0o755);
+    expectPosixMode(paths.shimPath, 0o755);
 
     const rcPath = path.join(root, "home", ".bashrc");
     expect(addManagedPathBlock(rcPath)).toBe(true);
@@ -118,7 +128,7 @@ describe("managed install store", () => {
     fs.chmodSync(rcPath, 0o640);
     expect(removeManagedPathBlock(rcPath)).toBe(true);
     expect(fs.readFileSync(rcPath, "utf8")).not.toContain("paperclipai managed PATH");
-    expect(fs.statSync(rcPath).mode & 0o777).toBe(0o640);
+    expectPosixMode(rcPath, 0o640);
   });
 
   it("rejects marker substrings that are not the exact managed shim format", () => {
@@ -156,7 +166,7 @@ describe("managed install store", () => {
     fs.mkdirSync(path.dirname(executable), { recursive: true });
     fs.writeFileSync(executable, "");
     fs.mkdirSync(currentPayload, { recursive: true });
-    flipCurrentAtomic(currentPayload, paths);
+    flipCurrent(currentPayload, paths);
     const manifest: InstallManifest = {
       schemaVersion: INSTALL_MANIFEST_VERSION,
       ...record(manifestPayload, "1.0.0"),
@@ -173,7 +183,7 @@ describe("managed install store", () => {
     fs.symlinkSync(outside, path.join(paths.installsRoot, "npm"), "dir");
     const escapedPayload = path.join(paths.installsRoot, "npm", "1.2.3");
     fs.mkdirSync(path.join(outside, "1.2.3"));
-    expect(() => flipCurrentAtomic(escapedPayload, paths)).toThrow("resolves outside");
+    expect(() => flipCurrent(escapedPayload, paths)).toThrow("resolves outside");
 
     fs.mkdirSync(path.dirname(paths.shimPath), { recursive: true });
     fs.writeFileSync(paths.shimPath, "#!/bin/sh\necho other-command\n");
@@ -202,5 +212,261 @@ describe("managed install store", () => {
     fs.writeFileSync(paths.shimPath, `# ${MANAGED_SHIM_MARKER}\n`);
     fs.linkSync(paths.shimPath, path.join(root, "linked-shim"));
     expect(() => writeManagedShim(paths)).toThrow("multiply linked shim");
+  });
+
+  // --- flipCurrent: atomic on POSIX, rename-aside with a brief gap on win32 --
+  // Tests that pass `platform: "win32"` exercise the rename-aside strategy on
+  // every OS (so Linux CI covers its logic); the native test proves the win32
+  // path really runs on Windows.
+
+  function payloadWithFiles(version: string): string {
+    const payload = payloadPathFor(paths, "npm", version);
+    fs.mkdirSync(path.join(payload, "nested", "deeper"), { recursive: true });
+    fs.writeFileSync(path.join(payload, "index.js"), `// payload ${version}\n`);
+    fs.writeFileSync(
+      path.join(payload, "nested", "deeper", "data.bin"),
+      Buffer.from([0, 1, 2, 3, 254, 255, ...Buffer.from(version)]),
+    );
+    return payload;
+  }
+
+  function treeBytes(dir: string): Map<string, string> {
+    const out = new Map<string, string>();
+    const walk = (current: string) => {
+      for (const entry of fs.readdirSync(current, { withFileTypes: true })) {
+        const full = path.join(current, entry.name);
+        if (entry.isDirectory()) walk(full);
+        else out.set(path.relative(dir, full), fs.readFileSync(full).toString("base64"));
+      }
+    };
+    walk(dir);
+    return out;
+  }
+
+  function strayEntries(): string[] {
+    return fs.readdirSync(paths.cliRoot).filter(
+      (entry) => entry.startsWith("current.prev-") || entry.startsWith(".current-"),
+    );
+  }
+
+  function errnoError(code: string): NodeJS.ErrnoException {
+    return Object.assign(new Error(`simulated ${code}`), { code });
+  }
+
+  function expectFlipError(fn: () => unknown, code: string): FlipCurrentError {
+    try {
+      fn();
+    } catch (error) {
+      expect(error).toBeInstanceOf(FlipCurrentError);
+      expect((error as FlipCurrentError).code).toBe(code);
+      return error as FlipCurrentError;
+    }
+    throw new Error(`expected FlipCurrentError ${code}, but nothing was thrown`);
+  }
+
+  it("runs the platform's own strategy natively and leaves current a directory symlink", () => {
+    const oldPayload = payloadWithFiles("1.0.0");
+    const newPayload = payloadWithFiles("2.0.0");
+    flipCurrent(oldPayload, paths);
+    const result = flipCurrent(newPayload, paths);
+
+    expect(result.strategy).toBe(process.platform === "win32" ? "rename-aside" : "atomic-rename");
+    expect(result.leftoverPrevPath).toBeNull();
+    // managed-install-check requires this: lstat(current).isSymbolicLink().
+    expect(fs.lstatSync(paths.currentPath).isSymbolicLink()).toBe(true);
+    expect(fs.realpathSync(paths.currentPath)).toBe(fs.realpathSync(newPayload));
+    expect(strayEntries()).toEqual([]);
+  });
+
+  it("has no gap on POSIX and the documented gap on win32", () => {
+    const oldPayload = payloadWithFiles("1.0.0");
+    const newPayload = payloadWithFiles("2.0.0");
+    flipCurrent(oldPayload, paths);
+    let currentPresentDuringRename: boolean | null = null;
+    flipCurrent(newPayload, paths, {
+      beforeRename: () => {
+        currentPresentDuringRename = fs.existsSync(paths.currentPath);
+      },
+    });
+    expect(currentPresentDuringRename).toBe(process.platform !== "win32");
+  });
+
+  it.each([
+    { label: "native", platform: undefined },
+    { label: "rename-aside", platform: "win32" as const },
+  ])("never traverses: the old payload and every file in it survive byte-identical ($label)", ({ platform }) => {
+    const oldPayload = payloadWithFiles("1.0.0");
+    const newPayload = payloadWithFiles("2.0.0");
+    const oldBefore = treeBytes(oldPayload);
+    const newBefore = treeBytes(newPayload);
+    expect(oldBefore.size).toBe(2);
+
+    flipCurrent(oldPayload, paths, { platform });
+    flipCurrent(newPayload, paths, { platform });
+
+    expect(fs.statSync(oldPayload).isDirectory()).toBe(true);
+    expect(treeBytes(oldPayload)).toEqual(oldBefore);
+    expect(treeBytes(newPayload)).toEqual(newBefore);
+    expect(fs.realpathSync(paths.currentPath)).toBe(fs.realpathSync(newPayload));
+    expect(strayEntries()).toEqual([]);
+  });
+
+  it("refuses to remove a previous entry that is no longer a symlink, and leaves it intact", () => {
+    const oldPayload = payloadWithFiles("1.0.0");
+    const newPayload = payloadWithFiles("2.0.0");
+    flipCurrent(oldPayload, paths, { platform: "win32" });
+    let planted = "";
+    const error = expectFlipError(() => flipCurrent(newPayload, paths, {
+      platform: "win32",
+      beforeRemovePrev: (prevPath) => {
+        // Something replaced the link with a real directory: it must survive.
+        fs.unlinkSync(prevPath);
+        fs.mkdirSync(path.join(prevPath, "inner"), { recursive: true });
+        fs.writeFileSync(path.join(prevPath, "inner", "keep.txt"), "not ours");
+        planted = prevPath;
+      },
+    }), "current-flip-unsafe-prev");
+
+    expect(error.step).toBe("remove-prev");
+    expect(fs.readFileSync(path.join(planted, "inner", "keep.txt"), "utf8")).toBe("not ours");
+    expect(fs.realpathSync(paths.currentPath)).toBe(fs.realpathSync(newPayload));
+  });
+
+  it("names both paths and the manual recovery when rename-in AND rollback fail", () => {
+    const oldPayload = payloadWithFiles("1.0.0");
+    const newPayload = payloadWithFiles("2.0.0");
+    flipCurrent(oldPayload, paths, { platform: "win32" });
+
+    const error = expectFlipError(() => flipCurrent(newPayload, paths, {
+      platform: "win32",
+      beforeRename: () => { throw new Error("rename-in boom"); },
+      beforeRollback: () => { throw new Error("rollback boom"); },
+    }), "current-flip-double-fault");
+
+    const prevLinks = strayEntries().filter((entry) => entry.startsWith("current.prev-"));
+    expect(prevLinks).toHaveLength(1);
+    const prevPath = path.join(paths.cliRoot, prevLinks[0]!);
+    expect(error.message).toContain(paths.currentPath);
+    expect(error.message).toContain(prevPath);
+    expect(error.message).toContain("rename-in boom");
+    expect(error.message).toContain("rollback boom");
+    expect(error.message).toMatch(/Rename-Item|mv /);
+    expect(fs.existsSync(paths.currentPath)).toBe(false);
+    // The last good payload is untouched and still reachable through the link.
+    expect(fs.realpathSync(prevPath)).toBe(fs.realpathSync(oldPayload));
+  });
+
+  it("restores the single stranded previous link before the next flip", () => {
+    const oldPayload = payloadWithFiles("1.0.0");
+    const newPayload = payloadWithFiles("2.0.0");
+    flipCurrent(oldPayload, paths, { platform: "win32" });
+    expectFlipError(() => flipCurrent(newPayload, paths, {
+      platform: "win32",
+      beforeRename: () => { throw new Error("crash between steps 2 and 3"); },
+      beforeRollback: () => { throw new Error("rollback also lost"); },
+    }), "current-flip-double-fault");
+    expect(fs.existsSync(paths.currentPath)).toBe(false);
+
+    const result = flipCurrent(newPayload, paths, { platform: "win32" });
+
+    expect(result.leftoverPrevPath).toBeNull();
+    expect(fs.realpathSync(paths.currentPath)).toBe(fs.realpathSync(newPayload));
+    expect(strayEntries()).toEqual([]);
+    expect(treeBytes(oldPayload).size).toBe(2);
+  });
+
+  it("refuses to guess when current is missing and more than one previous link exists", () => {
+    const oldPayload = payloadWithFiles("1.0.0");
+    const newPayload = payloadWithFiles("2.0.0");
+    fs.mkdirSync(paths.cliRoot, { recursive: true });
+    const prevA = path.join(paths.cliRoot, "current.prev-a");
+    const prevB = path.join(paths.cliRoot, "current.prev-b");
+    fs.symlinkSync(path.relative(paths.cliRoot, oldPayload), prevA, "dir");
+    fs.symlinkSync(path.relative(paths.cliRoot, newPayload), prevB, "dir");
+
+    expectFlipError(
+      () => flipCurrent(newPayload, paths, { platform: "win32" }),
+      "current-flip-ambiguous-recovery",
+    );
+    expect(fs.lstatSync(prevA).isSymbolicLink()).toBe(true);
+    expect(fs.lstatSync(prevB).isSymbolicLink()).toBe(true);
+    expect(fs.existsSync(paths.currentPath)).toBe(false);
+  });
+
+  it("stops on a concurrent flip without rolling back or touching the other prev link", () => {
+    const oldPayload = payloadWithFiles("1.0.0");
+    const newPayload = payloadWithFiles("2.0.0");
+    flipCurrent(oldPayload, paths, { platform: "win32" });
+    const foreignPrev = path.join(paths.cliRoot, "current.prev-other-process");
+
+    const error = expectFlipError(() => flipCurrent(newPayload, paths, {
+      platform: "win32",
+      beforeMoveAside: () => {
+        // Another process moved current aside first.
+        if (fs.existsSync(paths.currentPath)) fs.renameSync(paths.currentPath, foreignPrev);
+      },
+    }), "current-flip-concurrent");
+
+    expect(error.step).toBe("move-aside");
+    expect(fs.lstatSync(foreignPrev).isSymbolicLink()).toBe(true);
+    expect(fs.realpathSync(foreignPrev)).toBe(fs.realpathSync(oldPayload));
+    expect(fs.existsSync(paths.currentPath)).toBe(false);
+  });
+
+  it("retries transient EPERM/EBUSY/EACCES and then succeeds", () => {
+    const oldPayload = payloadWithFiles("1.0.0");
+    const newPayload = payloadWithFiles("2.0.0");
+    flipCurrent(oldPayload, paths, { platform: "win32" });
+    const transient = ["EPERM", "EBUSY", "EACCES"];
+    let attempts = 0;
+    flipCurrent(newPayload, paths, {
+      platform: "win32",
+      beforeRename: () => {
+        attempts += 1;
+        const code = transient[attempts - 1];
+        if (code) throw errnoError(code);
+      },
+    });
+    expect(attempts).toBe(4);
+    expect(fs.realpathSync(paths.currentPath)).toBe(fs.realpathSync(newPayload));
+  });
+
+  it("gives up within about one second, names the step, and rolls back", () => {
+    const oldPayload = payloadWithFiles("1.0.0");
+    const newPayload = payloadWithFiles("2.0.0");
+    flipCurrent(oldPayload, paths, { platform: "win32" });
+    let attempts = 0;
+    const started = Date.now();
+    const error = expectFlipError(() => flipCurrent(newPayload, paths, {
+      platform: "win32",
+      beforeRename: () => {
+        attempts += 1;
+        throw errnoError("EBUSY");
+      },
+    }), "current-flip-step-failed");
+    const elapsed = Date.now() - started;
+
+    expect(error.step).toBe("rename-in");
+    expect(error.message).toContain("step rename-in");
+    expect(attempts).toBe(6);
+    expect(elapsed).toBeGreaterThanOrEqual(900);
+    expect(elapsed).toBeLessThan(5_000);
+    expect(fs.realpathSync(paths.currentPath)).toBe(fs.realpathSync(oldPayload));
+    expect(strayEntries()).toEqual([]);
+  });
+
+  it("does not retry an error that is not transient", () => {
+    const oldPayload = payloadWithFiles("1.0.0");
+    const newPayload = payloadWithFiles("2.0.0");
+    flipCurrent(oldPayload, paths, { platform: "win32" });
+    let attempts = 0;
+    expectFlipError(() => flipCurrent(newPayload, paths, {
+      platform: "win32",
+      beforeRename: () => {
+        attempts += 1;
+        throw errnoError("ENOTDIR");
+      },
+    }), "current-flip-step-failed");
+    expect(attempts).toBe(1);
   });
 });

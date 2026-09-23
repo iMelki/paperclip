@@ -48,8 +48,9 @@ pnpm paperclipai run --instance dev
 ## Install, Update, And Uninstall
 
 Managed installs keep CLI payloads under `~/.paperclip/cli`, expose a stable
-`~/.local/bin/paperclipai` shim, switch versions atomically, and retain two
-previous payloads for rollback.
+`~/.local/bin/paperclipai` shim, switch versions atomically (on Windows, with a
+brief gap; see [INSTALLING.md](INSTALLING.md#managed-install-layout)), and retain
+two previous payloads for rollback.
 
 ```sh
 paperclipai install
