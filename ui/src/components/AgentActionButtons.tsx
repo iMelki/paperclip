@@ -1,4 +1,4 @@
-import { useCallback, useState, type ReactNode } from "react";
+import { useCallback, useRef, useState, type ReactNode } from "react";
 import { useNavigate } from "@/lib/router";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import {
@@ -36,7 +36,6 @@ import { agentRouteRef } from "../lib/utils";
 import { copyTextToClipboard } from "../lib/clipboard";
 import { useDialogActions } from "../context/DialogContext";
 import { useToastActions } from "../context/ToastContext";
-import { useConfirmDialog } from "@/hooks/useConfirmDialog";
 import {
   buildDuplicateAgentPayload,
   duplicateAgentName,
@@ -166,6 +165,8 @@ export function AgentActionButtons({
   workActionsDisabled = false,
   workActionsDisabledReason,
   navigateToRunOnInvoke = true,
+  hasPendingNavigationChanges = false,
+  onBeforeNavigate,
   onActionError,
   onTerminateSuccess,
   pauseConfirm,
@@ -183,6 +184,10 @@ export function AgentActionButtons({
   workActionsDisabled?: boolean;
   workActionsDisabledReason?: string;
   navigateToRunOnInvoke?: boolean;
+  /** Whether the caller currently has an unsaved draft that navigation would discard. */
+  hasPendingNavigationChanges?: boolean;
+  /** Return false to stop an action whose success would navigate away. */
+  onBeforeNavigate?: () => boolean;
   /**
    * When set, pausing prompts a confirmation dialog first (e.g. for built-in
    * agents that power a feature). Omit for the immediate-pause default.
@@ -208,7 +213,25 @@ export function AgentActionButtons({
   const { pushToast } = useToastActions();
   const [moreOpen, setMoreOpen] = useState(false);
   const [pauseConfirmOpen, setPauseConfirmOpen] = useState(false);
-  const { confirm, confirmDialog } = useConfirmDialog();
+  const pendingNavigationChangesRef = useRef(hasPendingNavigationChanges);
+  const beforeNavigateRef = useRef(onBeforeNavigate);
+  const agentActionStartedDirtyRef = useRef(false);
+  const duplicateStartedDirtyRef = useRef(false);
+  pendingNavigationChangesRef.current = hasPendingNavigationChanges;
+  beforeNavigateRef.current = onBeforeNavigate;
+
+  function confirmNavigationStart(startedDirtyRef: React.MutableRefObject<boolean>) {
+    startedDirtyRef.current = pendingNavigationChangesRef.current;
+    return beforeNavigateRef.current?.() !== false;
+  }
+
+  function confirmLateNavigationChanges(startedDirtyRef: React.MutableRefObject<boolean>) {
+    return (
+      !pendingNavigationChangesRef.current ||
+      startedDirtyRef.current ||
+      beforeNavigateRef.current?.() !== false
+    );
+  }
 
   const resolvedCompanyId = companyId ?? agent.companyId;
   const canonicalAgentRef = agentRouteRef(agent);
@@ -253,9 +276,11 @@ export function AgentActionButtons({
       onActionError?.(null);
       invalidateAgent();
       if (action === "terminate") {
+        if (!confirmLateNavigationChanges(agentActionStartedDirtyRef)) return;
         onTerminateSuccess?.(data as Agent);
       }
       if (action === "invoke" && navigateToRunOnInvoke && data && typeof data === "object" && "id" in data) {
+        if (!confirmLateNavigationChanges(agentActionStartedDirtyRef)) return;
         navigate(`/agents/${canonicalAgentRef}/runs/${(data as HeartbeatRun).id}`);
       }
     },
@@ -287,6 +312,7 @@ export function AgentActionButtons({
         await queryClient.invalidateQueries({ queryKey: queryKeys.agents.list(resolvedCompanyId) });
       }
       pushToast({ title: "Agent duplicated", body: createdAgent.name, tone: "success" });
+      if (!confirmLateNavigationChanges(duplicateStartedDirtyRef)) return;
       navigate(`/agents/${agentRouteRef(createdAgent)}/dashboard`);
     },
     onError: (err) => {
@@ -296,23 +322,14 @@ export function AgentActionButtons({
     },
   });
 
-  const handleDuplicateAgent = useCallback(async () => {
+  const handleDuplicateAgent = useCallback(() => {
     if (duplicateAgent.isPending) return;
     const nextName = duplicateAgentName(agent.name);
+    const confirmed = window.confirm(`Duplicate ${agent.name} as ${nextName}?`);
     setMoreOpen(false);
-    const confirmed = await confirm({
-      title: `Duplicate ${agent.name}?`,
-      confirmLabel: "Duplicate",
-      consequences: {
-        immediateEffect: `A new agent named ${nextName} is created from this agent's configuration.`,
-        confirmedEffect: "The copy is saved on the server, ready to review before it does any work.",
-        resultLocation: "You are taken to the new agent's dashboard; a toast confirms the copy.",
-        willNotHappen: `${agent.name} is not modified, and its run history is not copied.`,
-      },
-    });
-    if (!confirmed) return;
+    if (!confirmed || !confirmNavigationStart(duplicateStartedDirtyRef)) return;
     duplicateAgent.mutate();
-  }, [agent.name, confirm, duplicateAgent]);
+  }, [agent.name, duplicateAgent]);
 
   const resetTaskSession = useMutation({
     mutationFn: () => agentsApi.resetSession(agent.id, null, resolvedCompanyId ?? undefined),
@@ -345,7 +362,10 @@ export function AgentActionButtons({
         <span className="hidden sm:inline">{assignLabel}</span>
       </Button>
       <RunButton
-        onClick={() => agentAction.mutate("invoke")}
+        onClick={() => {
+          if (navigateToRunOnInvoke && !confirmNavigationStart(agentActionStartedDirtyRef)) return;
+          agentAction.mutate("invoke");
+        }}
         disabled={assignAndRunDisabled}
         label={runLabel}
         size={size}
@@ -383,7 +403,6 @@ export function AgentActionButtons({
           </AlertDialogContent>
         </AlertDialog>
       )}
-      {confirmDialog}
       {showStatus && (
         <span className="hidden sm:inline">
           <AgentStatusBadge status={agent.status} />
@@ -400,7 +419,7 @@ export function AgentActionButtons({
           <button
             className="flex items-center gap-2 w-full px-2 py-1.5 text-xs rounded hover:bg-accent/50"
             disabled={duplicateAgent.isPending}
-            onClick={() => void handleDuplicateAgent()}
+            onClick={handleDuplicateAgent}
           >
             {duplicateAgent.isPending ? (
               <Loader2 className="h-3 w-3 animate-spin" />
@@ -435,8 +454,9 @@ export function AgentActionButtons({
             <button
               className="flex items-center gap-2 w-full px-2 py-1.5 text-xs rounded hover:bg-accent/50 text-destructive"
               onClick={() => {
-                agentAction.mutate("terminate");
                 setMoreOpen(false);
+                if (onTerminateSuccess && !confirmNavigationStart(agentActionStartedDirtyRef)) return;
+                agentAction.mutate("terminate");
               }}
             >
               <Trash2 className="h-3 w-3" />

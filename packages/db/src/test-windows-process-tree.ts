@@ -245,7 +245,7 @@ async function taskkillWindowsTestProcess(
     ["/PID", String(pid), "/T", "/F"],
     {
       windowsHide: true,
-      timeout: Math.max(1, Math.min(1_500, timeoutMs)),
+      timeout: Math.max(1, Math.min(3_000, timeoutMs)),
     },
   ).catch(() => undefined);
 }

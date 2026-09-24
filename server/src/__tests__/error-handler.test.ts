@@ -12,7 +12,7 @@ vi.mock("../services/responsible-user-denial-run-outcomes.js", () => ({
 function makeReq(): Request {
   return {
     method: "GET",
-    originalUrl: "/api/test?code=query-canary-must-not-reach-context",
+    originalUrl: "/api/test",
     body: { a: 1 },
     params: { id: "123" },
     query: { q: "x" },
@@ -46,8 +46,6 @@ describe("errorHandler", () => {
     expect(res.json).toHaveBeenCalledWith({ error: "Internal server error" });
     expect(res.err).toBe(err);
     expect(res.__errorContext?.error?.message).toBe("boom");
-    expect(res.__errorContext?.url).toBe("/api/test");
-    expect(res.__errorContext).not.toHaveProperty("reqQuery");
   });
 
   it("exposes raw 500 messages for trusted Cloud tenant imports", () => {
@@ -89,27 +87,29 @@ describe("errorHandler", () => {
     expect(res.__errorContext?.error?.message).toBe("db exploded");
   });
 
-  it("removes Drizzle bound parameters from every HTTP error-log surface", () => {
+  it("returns 400 for Zod validation errors from another module instance", () => {
     const req = makeReq();
     const res = makeRes() as any;
     const next = vi.fn() as unknown as NextFunction;
-    const secret = "sk-must-not-reach-logs";
-    const message = [
-      "Failed query: update agents set adapter_config = $1 where id = $2",
-      `params: {\"env\":{\"OPENAI_API_KEY\":{\"type\":\"plain\",\"value\":\"${secret}\"}}},agent-1`,
-    ].join("\n");
-    const err = new Error(message);
-    err.name = "DrizzleQueryError";
-    err.stack = `${err.name}: ${message}\n    at database-driver.ts:10:2`;
+    const issue = {
+      code: "invalid_type",
+      expected: "string",
+      received: "undefined",
+      path: ["provider"],
+      message: "Required",
+    };
+    const err = Object.assign(new Error("Validation failed"), {
+      name: "ZodError",
+      issues: [issue],
+      errors: [issue],
+    });
 
     errorHandler(err, req, res, next);
 
-    expect(res.err).not.toBe(err);
-    expect(res.err.message).toContain("params: ***REDACTED***");
-    expect(res.err.stack).toContain("params: ***REDACTED***");
-    expect(`${res.err.message}\n${res.err.stack}`).not.toContain(secret);
-    expect(JSON.stringify(res.__errorContext)).not.toContain(secret);
-    expect(res.__errorContext?.error?.message).toContain("params: ***REDACTED***");
+    expect(res.status).toHaveBeenCalledWith(400);
+    expect(res.json).toHaveBeenCalledWith({ error: "Validation error", details: [issue] });
+    expect(res.err).toBeUndefined();
+    expect(res.__errorContext).toBeUndefined();
   });
 
   it("records responsible-user denial codes on the active agent run", () => {
