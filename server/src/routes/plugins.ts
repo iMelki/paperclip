@@ -93,8 +93,23 @@ import {
   isWithinBundledPluginRoot,
 } from "../services/plugin-install-guard.js";
 import { isCloudManagedInstance } from "../services/cloud-instance.js";
+import { getHiddenSettings } from "../services/settings-visibility.js";
 import { secretService } from "../services/secrets.js";
 import { badRequest, forbidden, notFound, unauthorized, unprocessable } from "../errors.js";
+
+/**
+ * Floor: when the hosting operator hides the Plugins settings surface
+ * (`instance.plugins` in PAPERCLIP_HIDDEN_SETTINGS), plugin lifecycle and
+ * configuration writes are rejected alongside it. Reads stay open — installed
+ * plugins keep running and `/plugins/ui-contributions` still powers their UI.
+ */
+function assertPluginManagementVisible() {
+  if (getHiddenSettings().has("instance.plugins")) {
+    throw forbidden("Plugin management is managed by the hosting operator on this instance", {
+      code: "settings_operator_managed",
+    });
+  }
+}
 
 /** UI slot declaration extracted from plugin manifest */
 type PluginUiSlotDeclaration = NonNullable<NonNullable<PaperclipPluginManifestV1["ui"]>["slots"]>[number];
@@ -1134,6 +1149,7 @@ export function pluginRoutes(
    */
   router.post("/plugins/install", async (req, res) => {
     assertInstanceAdmin(req);
+    assertPluginManagementVisible();
     const { packageName, version, isLocalPath } = req.body as PluginInstallRequest;
 
     // Input validation
@@ -1977,6 +1993,7 @@ export function pluginRoutes(
    */
   router.delete("/plugins/:pluginId", async (req, res) => {
     assertInstanceAdmin(req);
+    assertPluginManagementVisible();
     const { pluginId } = req.params;
     const purge = req.query.purge === "true";
 
@@ -2013,6 +2030,7 @@ export function pluginRoutes(
    */
   router.post("/plugins/:pluginId/enable", async (req, res) => {
     assertInstanceAdmin(req);
+    assertPluginManagementVisible();
     const { pluginId } = req.params;
 
     const plugin = await resolvePlugin(registry, pluginId);
@@ -2051,6 +2069,7 @@ export function pluginRoutes(
    */
   router.post("/plugins/:pluginId/disable", async (req, res) => {
     assertInstanceAdmin(req);
+    assertPluginManagementVisible();
     const { pluginId } = req.params;
     const body = req.body as { reason?: string } | undefined;
     const reason = body?.reason;
@@ -2225,6 +2244,7 @@ export function pluginRoutes(
    */
   router.post("/plugins/:pluginId/upgrade", async (req, res) => {
     assertInstanceAdmin(req);
+    assertPluginManagementVisible();
     const { pluginId } = req.params;
     const body = req.body as { version?: string } | undefined;
     const version = body?.version;
@@ -2306,6 +2326,7 @@ export function pluginRoutes(
    */
   router.post("/plugins/:pluginId/config", async (req, res) => {
     assertInstanceAdmin(req);
+    assertPluginManagementVisible();
     const { pluginId } = req.params;
 
     const plugin = await resolvePlugin(registry, pluginId);
@@ -2438,6 +2459,7 @@ export function pluginRoutes(
    */
   router.post("/plugins/:pluginId/config/test", async (req, res) => {
     assertBoardOrgAccess(req);
+    assertPluginManagementVisible();
 
     if (!bridgeDeps) {
       res.status(501).json({ error: "Plugin bridge is not enabled" });
@@ -2993,6 +3015,7 @@ export function pluginRoutes(
 
   router.put("/plugins/:pluginId/companies/:companyId/local-folders/:folderKey", async (req, res) => {
     assertBoardOrgAccess(req);
+    assertPluginManagementVisible();
     const { pluginId, companyId, folderKey } = req.params;
     assertCompanyAccess(req, companyId);
 

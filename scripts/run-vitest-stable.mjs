@@ -81,6 +81,7 @@ const commonVitestArgs = [
   "--reporter=default",
   "--reporter=hanging-process",
 ];
+const sourceOnlyVitestArgs = ["--exclude", "**/dist/**"];
 
 function walk(dir) {
   const entries = readdirSync(dir);
@@ -284,10 +285,11 @@ function parseCliOptions(argv) {
 
   const shardAllowed =
     mode === serializedModeName ||
-    (mode === generalModeName && group === generalServerGroupName);
+    (mode === generalModeName &&
+      (group === generalServerGroupName || group === generalWorkspacesAGroupName));
   if (!shardAllowed && shardIndex !== null) {
     fail(
-      "--shard-index/--shard-count are only valid with --mode serialized or --mode general --group general-server.",
+      "--shard-index/--shard-count are only valid with --mode serialized or the sharded general groups.",
     );
   }
 
@@ -351,7 +353,7 @@ function runVitest(args, label, { serverExcludes = [], subcommand = "run" } = {}
     writeFileSync(excludeFile, `${JSON.stringify(serverExcludes)}\n`, "utf8");
     env.PAPERCLIP_VITEST_EXCLUDE_FILE = excludeFile;
   }
-  const result = runVitestDirect([subcommand, ...commonVitestArgs, ...args], {
+  const result = runVitestDirect([subcommand, ...commonVitestArgs, ...sourceOnlyVitestArgs, ...args], {
     cwd: repoRoot,
     env,
     stdio: "inherit",
@@ -371,9 +373,12 @@ function runGeneralSuites(routeTests) {
   }
 }
 
-function runProjectGroup(projects, groupName) {
+function runProjectGroup(projects, groupName, shardIndex = null, shardCount = null) {
+  const shardArgs =
+    shardCount !== null && shardCount > 1 ? [`--shard=${shardIndex + 1}/${shardCount}`] : [];
+  const shardSuffix = shardArgs.length > 0 ? ` shard ${shardIndex + 1}/${shardCount}` : "";
   for (const project of projects) {
-    runVitest(["--project", project], `${groupName} project ${project}`);
+    runVitest(["--project", project, ...shardArgs], `${groupName} project ${project}${shardSuffix}`);
   }
 }
 
@@ -418,7 +423,7 @@ function runGeneralGroup(routeTests, groupName, shardIndex = null, shardCount = 
   }
 
   if (groupName === generalWorkspacesAGroupName) {
-    runProjectGroup(generalWorkspacesAProjects, groupName);
+    runProjectGroup(generalWorkspacesAProjects, groupName, shardIndex, shardCount);
     return;
   }
 
@@ -709,6 +714,18 @@ if (options.dryRun) {
             ...serializedServerVitestArgs,
           ],
         },
+        workspaceProjects:
+          options.group === generalWorkspacesAGroupName
+            ? generalWorkspacesAProjects
+            : options.group === generalWorkspacesBGroupName
+              ? generalWorkspacesBProjects
+              : null,
+        workspacesVitestShard:
+          options.group === generalWorkspacesAGroupName &&
+          options.shardCount !== null &&
+          options.shardCount > 1
+            ? `${options.shardIndex + 1}/${options.shardCount}`
+            : null,
       },
       null,
       2,

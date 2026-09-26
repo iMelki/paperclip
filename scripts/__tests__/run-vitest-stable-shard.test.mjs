@@ -101,9 +101,25 @@ test("the unsharded general-server lane transports exclusions outside Windows ar
   );
 });
 
-test("shard flags are rejected for the parallel workspace groups", () => {
-  const result = dryRun(["--mode", "general", "--group", "general-workspaces-a", "--shard-index", "0", "--shard-count", "3"]);
-  assert.notEqual(result.status, 0, "workspace groups must not accept shard flags");
+test("shard flags are rejected for the workspaces-b group", () => {
+  const result = dryRun(["--mode", "general", "--group", "general-workspaces-b", "--shard-index", "0", "--shard-count", "3"]);
+  assert.notEqual(result.status, 0, "workspaces-b must not accept shard flags");
+});
+
+test("workspaces-a shards map to Vitest native slices over a stable project list", () => {
+  const shards = [0, 1].map((index) =>
+    dryRunJson([
+      "--mode", "general", "--group", "general-workspaces-a",
+      "--shard-index", String(index), "--shard-count", "2",
+    ]),
+  );
+  for (const [index, plan] of shards.entries()) {
+    assert.equal(plan.workspacesVitestShard, `${index + 1}/2`);
+    assert.deepEqual(plan.workspaceProjects, ["@paperclipai/ui", "paperclipai"]);
+  }
+  const unsharded = dryRunJson(["--mode", "general", "--group", "general-workspaces-a"]);
+  assert.deepEqual(unsharded.workspaceProjects, shards[0].workspaceProjects);
+  assert.equal(unsharded.workspacesVitestShard, null);
 });
 
 test("shard count alone is rejected for related and exact-file modes", () => {

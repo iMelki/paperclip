@@ -2,7 +2,7 @@ import fs from "node:fs";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
-import { applyPendingMigrations, ensurePostgresDatabase } from "./client.js";
+import { applyPendingMigrations, closeRegisteredClients, ensurePostgresDatabase } from "./client.js";
 import { createEmbeddedPostgresLogBuffer, formatEmbeddedPostgresError as formatEmbeddedPostgresErrorDetails } from "./embedded-postgres-error.js";
 import { prepareEmbeddedPostgresNativeRuntime } from "./embedded-postgres-native.js";
 import { reapWindowsTestProcessTree } from "./test-windows-process-tree.js";
@@ -322,6 +322,9 @@ export async function startEmbeddedPostgresTestDatabase(
     return {
       connectionString,
       cleanup: async () => {
+        // Close callers' pooled clients before the bounded Windows-aware
+        // shutdown so queued writes cannot target a stopped backend socket.
+        await closeRegisteredClients(connectionString);
         await stopEmbeddedPostgresBounded(instance, dataDir, () => {
           if (dataDir) cleanupEmbeddedPostgresTestDirs(dataDir);
         });

@@ -42,7 +42,7 @@ import {
   updateToolProfileWithEntriesSchema,
 } from "@paperclipai/shared";
 import { validate } from "../middleware/validate.js";
-import { getActorInfo, assertBoard, assertCompanyAccess, hasCompanyAccess } from "./authz.js";
+import { getActorInfo, assertBoard, assertCompanyAccess, getAccessibleResource, hasCompanyAccess } from "./authz.js";
 import { badRequest, forbidden, notFound, unprocessable } from "../errors.js";
 import { accessService, googleSheetsRobotEmailFromEnv, logActivity, toolAccessPolicyService, toolAccessService } from "../services/index.js";
 import { ToolGatewayHttpError, type ToolGatewayService } from "../services/tool-gateway.js";
@@ -311,7 +311,8 @@ export function toolAccessRoutes(
   );
 
   router.post("/tools/oauth/:connectionId/start", async (req, res) => {
-    const existing = await svc.getConnection(req.params.connectionId as string);
+    const existing = await getAccessibleResource(req, res, svc.getConnection(req.params.connectionId as string), "Tool connection not found");
+    if (!existing) return;
     assertToolAppMutationAccess(req, existing.companyId);
     const result = await svc.startOAuth(existing.companyId, existing.id, {
       redirectUri: oauthRedirectUri(),
@@ -327,7 +328,7 @@ export function toolAccessRoutes(
     const error = typeof req.query.error === "string" ? req.query.error : null;
     const errorDescription = typeof req.query.error_description === "string" ? req.query.error_description : null;
     const pendingState = state ? await svc.peekOAuthState(state) : null;
-    if (!pendingState) {
+    if (!pendingState || !hasCompanyAccess(req, pendingState.companyId)) {
       throw badRequest("Invalid or expired OAuth state");
     }
     assertToolAppMutationAccess(req, pendingState.companyId);
@@ -492,7 +493,8 @@ export function toolAccessRoutes(
   });
 
   router.patch("/tool-applications/:applicationId", validate(updateToolApplicationSchema), async (req, res) => {
-    const existing = await svc.getApplication(req.params.applicationId as string);
+    const existing = await getAccessibleResource(req, res, svc.getApplication(req.params.applicationId as string), "Tool application not found");
+    if (!existing) return;
     assertToolAppMutationAccess(req, existing.companyId);
     try {
       const application = await svc.updateApplication(existing.id, req.body);
@@ -512,7 +514,8 @@ export function toolAccessRoutes(
   });
 
   router.delete("/tool-applications/:applicationId", async (req, res) => {
-    const existing = await svc.getApplication(req.params.applicationId as string);
+    const existing = await getAccessibleResource(req, res, svc.getApplication(req.params.applicationId as string), "Tool application not found");
+    if (!existing) return;
     assertToolAppMutationAccess(req, existing.companyId);
     const application = await svc.deleteApplication(existing.id);
     await logActivity(db, {
@@ -561,7 +564,8 @@ export function toolAccessRoutes(
 
   router.get("/tool-connections/:connectionId", async (req, res) => {
     assertBoard(req);
-    const connection = await svc.getConnection(req.params.connectionId as string);
+    const connection = await getAccessibleResource(req, res, svc.getConnection(req.params.connectionId as string), "Tool connection not found");
+    if (!connection) return;
     if (!hasCompanyAccess(req, connection.companyId)) throw notFound("Tool connection not found");
     assertCompanyAccess(req, connection.companyId);
     res.json(connection);
@@ -569,7 +573,8 @@ export function toolAccessRoutes(
 
   router.get("/tool-connections/:connectionId/grants", async (req, res) => {
     assertBoard(req);
-    const connection = await svc.getConnection(req.params.connectionId as string);
+    const connection = await getAccessibleResource(req, res, svc.getConnection(req.params.connectionId as string), "Tool connection not found");
+    if (!connection) return;
     if (!hasCompanyAccess(req, connection.companyId)) throw notFound("Tool connection not found");
     assertCompanyAccess(req, connection.companyId);
     res.json(await svc.listConnectionGrants(connection.id, connection.companyId));
@@ -577,7 +582,8 @@ export function toolAccessRoutes(
 
   router.post("/tool-connections/:connectionId/grants/installations", async (req, res) => {
     assertBoard(req);
-    const connection = await svc.getConnection(req.params.connectionId as string);
+    const connection = await getAccessibleResource(req, res, svc.getConnection(req.params.connectionId as string), "Tool connection not found");
+    if (!connection) return;
     await assertBoardToolPermission(req, connection.companyId, "tools:manage_connections");
     const body = req.body && typeof req.body === "object" ? req.body as Record<string, unknown> : {};
     const credentialSecretRefs = Array.isArray(body.credentialSecretRefs) ? body.credentialSecretRefs : [];
@@ -603,7 +609,8 @@ export function toolAccessRoutes(
 
   router.delete("/tool-connections/:connectionId/grants/:grantId", async (req, res) => {
     assertBoard(req);
-    const connection = await svc.getConnection(req.params.connectionId as string);
+    const connection = await getAccessibleResource(req, res, svc.getConnection(req.params.connectionId as string), "Tool connection not found");
+    if (!connection) return;
     await assertBoardToolPermission(req, connection.companyId, "tools:manage_connections");
     const grant = await svc.revokeConnectionGrant(connection.id, req.params.grantId as string, getActorInfo(req));
     await logActivity(db, {
@@ -620,7 +627,8 @@ export function toolAccessRoutes(
 
   router.get("/tool-connections/:connectionId/usage", async (req, res) => {
     assertBoard(req);
-    const connection = await svc.getConnection(req.params.connectionId as string);
+    const connection = await getAccessibleResource(req, res, svc.getConnection(req.params.connectionId as string), "Tool connection not found");
+    if (!connection) return;
     if (!hasCompanyAccess(req, connection.companyId)) throw notFound("Tool connection not found");
     assertCompanyAccess(req, connection.companyId);
     const range = req.query.range === "30d" ? "30d" : req.query.range === undefined || req.query.range === "7d" ? "7d" : null;
@@ -630,15 +638,15 @@ export function toolAccessRoutes(
 
   router.get("/tool-connections/:connectionId/installs", async (req, res) => {
     assertBoard(req);
-    const connection = await svc.getConnection(req.params.connectionId as string);
-    if (!hasCompanyAccess(req, connection.companyId)) throw notFound("Tool connection not found");
-    assertCompanyAccess(req, connection.companyId);
-    res.json(
-      await svc.getConnectionInstallSnapshot(
-        connection.id,
-        connection.companyId,
-      ),
+    const connection = await getAccessibleResource(
+      req,
+      res,
+      svc.getConnection(req.params.connectionId as string),
+      "Tool connection not found",
     );
+    if (!connection) return;
+    assertCompanyAccess(req, connection.companyId);
+    res.json(await svc.getConnectionInstallSnapshot(connection.id, connection.companyId));
   });
 
   router.put(
@@ -646,7 +654,8 @@ export function toolAccessRoutes(
     validate(putToolConnectionInstallsSchema),
     async (req, res) => {
       assertBoard(req);
-      const connection = await svc.getConnection(req.params.connectionId as string);
+      const connection = await getAccessibleResource(req, res, svc.getConnection(req.params.connectionId as string), "Tool connection not found");
+      if (!connection) return;
       await assertBoardToolPermission(req, connection.companyId, "tools:manage_connections");
       const snapshot = await svc.putConnectionInstalls(connection.id, req.body, getActorInfo(req));
       await logActivity(db, {
@@ -674,7 +683,8 @@ export function toolAccessRoutes(
       res.status(501).json({ error: "Tool gateway service is not configured" });
       return;
     }
-    const connection = await svc.getConnection(req.params.connectionId as string);
+    const connection = await getAccessibleResource(req, res, svc.getConnection(req.params.connectionId as string), "Tool connection not found");
+    if (!connection) return;
     await assertBoardAnyToolPermission(req, connection.companyId, ["tools:use", "tools:manage_connections"]);
     const rows = await db
       .select({
@@ -711,7 +721,8 @@ export function toolAccessRoutes(
       res.status(501).json({ error: "Tool gateway service is not configured" });
       return;
     }
-    const connection = await svc.getConnection(req.params.connectionId as string);
+    const connection = await getAccessibleResource(req, res, svc.getConnection(req.params.connectionId as string), "Tool connection not found");
+    if (!connection) return;
     await assertBoardAnyToolPermission(req, connection.companyId, ["tools:use", "tools:manage_connections"]);
     await assertCanTestAsAgent(req, connection.companyId, req.body.agentId);
     try {
@@ -735,7 +746,8 @@ export function toolAccessRoutes(
       res.status(501).json({ error: "Tool gateway service is not configured" });
       return;
     }
-    const connection = await svc.getConnection(req.params.connectionId as string);
+    const connection = await getAccessibleResource(req, res, svc.getConnection(req.params.connectionId as string), "Tool connection not found");
+    if (!connection) return;
     await assertBoardAnyToolPermission(req, connection.companyId, ["tools:use", "tools:manage_connections"]);
     try {
       const status = await options.toolGateway.getTestCallStatus({
@@ -750,7 +762,8 @@ export function toolAccessRoutes(
   });
 
   router.patch("/tool-connections/:connectionId", validate(updateToolConnectionSchema), async (req, res) => {
-    const existing = await svc.getConnection(req.params.connectionId as string);
+    const existing = await getAccessibleResource(req, res, svc.getConnection(req.params.connectionId as string), "Tool connection not found");
+    if (!existing) return;
     assertToolAppMutationAccess(req, existing.companyId);
     const connection = await svc.updateConnection(existing.id, req.body);
     const lifecycleChanges = classifyConnectionUpdate(
@@ -793,7 +806,8 @@ export function toolAccessRoutes(
   });
 
   router.delete("/tool-connections/:connectionId", async (req, res) => {
-    const existing = await svc.getConnection(req.params.connectionId as string);
+    const existing = await getAccessibleResource(req, res, svc.getConnection(req.params.connectionId as string), "Tool connection not found");
+    if (!existing) return;
     assertToolAppMutationAccess(req, existing.companyId);
     const applicationBefore = await svc.getApplication(existing.applicationId);
     const connection = await svc.archiveConnection(existing.id);
@@ -822,7 +836,8 @@ export function toolAccessRoutes(
   });
 
   router.post("/tool-connections/:connectionId/health-check", async (req, res) => {
-    const existing = await svc.getConnection(req.params.connectionId as string);
+    const existing = await getAccessibleResource(req, res, svc.getConnection(req.params.connectionId as string), "Tool connection not found");
+    if (!existing) return;
     assertToolAppMutationAccess(req, existing.companyId);
     res.json(await svc.checkHealth(existing.id, getActorInfo(req)));
   });
@@ -831,7 +846,8 @@ export function toolAccessRoutes(
     "/tool-connections/:connectionId/reconnect",
     validate(reconnectToolAppSchema),
     async (req, res) => {
-      const existing = await svc.getConnection(req.params.connectionId as string);
+      const existing = await getAccessibleResource(req, res, svc.getConnection(req.params.connectionId as string), "Tool connection not found");
+      if (!existing) return;
       assertToolAppMutationAccess(req, existing.companyId);
       const result = await svc.reconnectGalleryApp(
         existing.id,
@@ -853,7 +869,8 @@ export function toolAccessRoutes(
   );
 
   router.post("/tool-connections/:connectionId/catalog/refresh", async (req, res) => {
-    const existing = await svc.getConnection(req.params.connectionId as string);
+    const existing = await getAccessibleResource(req, res, svc.getConnection(req.params.connectionId as string), "Tool connection not found");
+    if (!existing) return;
     assertToolAppMutationAccess(req, existing.companyId);
     res.json(await svc.refreshCatalog(existing.id, getActorInfo(req)));
   });
@@ -902,15 +919,21 @@ export function toolAccessRoutes(
 
   router.get("/tool-connections/:connectionId/catalog", async (req, res) => {
     assertBoard(req);
-    const existing = await svc.getConnection(req.params.connectionId as string);
-    if (!hasCompanyAccess(req, existing.companyId)) throw notFound("Tool connection not found");
+    const existing = await getAccessibleResource(
+      req,
+      res,
+      svc.getConnection(req.params.connectionId as string),
+      "Tool connection not found",
+    );
+    if (!existing) return;
     assertCompanyAccess(req, existing.companyId);
     res.json({ catalog: await svc.listCatalog(existing.id, existing.companyId) });
   });
 
   router.get("/tool-connections/:connectionId/activity", async (req, res) => {
     assertBoard(req);
-    const existing = await svc.getConnection(req.params.connectionId as string);
+    const existing = await getAccessibleResource(req, res, svc.getConnection(req.params.connectionId as string), "Tool connection not found");
+    if (!existing) return;
     if (!hasCompanyAccess(req, existing.companyId)) throw notFound("Tool connection not found");
     assertCompanyAccess(req, existing.companyId);
     const limitRaw = Number(req.query.limit ?? 20);
@@ -927,7 +950,8 @@ export function toolAccessRoutes(
 
   router.get("/tool-profiles/:profileId/new-tools", async (req, res) => {
     assertBoard(req);
-    const existing = await svc.getProfile(req.params.profileId as string);
+    const existing = await getAccessibleResource(req, res, svc.getProfile(req.params.profileId as string), "Tool profile not found");
+    if (!existing) return;
     if (!hasCompanyAccess(req, existing.companyId)) throw notFound("Tool profile not found");
     assertCompanyAccess(req, existing.companyId);
     res.json(await svc.listProfileNewTools(existing.id, existing.companyId));
@@ -961,7 +985,8 @@ export function toolAccessRoutes(
   });
 
   router.patch("/tool-profiles/:profileId", validate(updateToolProfileWithEntriesSchema), async (req, res) => {
-    const existing = await svc.getProfile(req.params.profileId as string);
+    const existing = await getAccessibleResource(req, res, svc.getProfile(req.params.profileId as string), "Tool profile not found");
+    if (!existing) return;
     assertToolAppMutationAccess(req, existing.companyId);
     try {
       const profile = await svc.updateProfile(existing.id, req.body);
@@ -981,7 +1006,8 @@ export function toolAccessRoutes(
   });
 
   router.post("/tool-profiles/:profileId/duplicate", validate(duplicateToolProfileSchema), async (req, res) => {
-    const existing = await svc.getProfile(req.params.profileId as string);
+    const existing = await getAccessibleResource(req, res, svc.getProfile(req.params.profileId as string), "Tool profile not found");
+    if (!existing) return;
     assertToolAppMutationAccess(req, existing.companyId);
     try {
       const profile = await svc.duplicateProfile(existing.id, req.body);
@@ -1006,7 +1032,8 @@ export function toolAccessRoutes(
   });
 
   router.delete("/tool-profiles/:profileId", validate(deleteToolProfileSchema), async (req, res) => {
-    const existing = await svc.getProfile(req.params.profileId as string);
+    const existing = await getAccessibleResource(req, res, svc.getProfile(req.params.profileId as string), "Tool profile not found");
+    if (!existing) return;
     assertToolAppMutationAccess(req, existing.companyId);
     const result = await svc.deleteProfile(existing.id, req.body);
     await logActivity(db, {
@@ -1027,7 +1054,8 @@ export function toolAccessRoutes(
   });
 
   router.post("/tool-profiles/:profileId/new-tools/review", validate(reviewToolProfileNewToolsSchema), async (req, res) => {
-    const existing = await svc.getProfile(req.params.profileId as string);
+    const existing = await getAccessibleResource(req, res, svc.getProfile(req.params.profileId as string), "Tool profile not found");
+    if (!existing) return;
     assertToolAppMutationAccess(req, existing.companyId);
     const result = await svc.reviewProfileNewTools(existing.id, req.body, getActorInfo(req));
     await logActivity(db, {
@@ -1047,7 +1075,8 @@ export function toolAccessRoutes(
   });
 
   router.post("/tool-profiles/:profileId/entries", validate(createToolProfileEntryForProfileSchema), async (req, res) => {
-    const existing = await svc.getProfile(req.params.profileId as string);
+    const existing = await getAccessibleResource(req, res, svc.getProfile(req.params.profileId as string), "Tool profile not found");
+    if (!existing) return;
     assertToolAppMutationAccess(req, existing.companyId);
     const entry = await svc.addProfileEntry(existing.id, req.body);
     await logActivity(db, {
@@ -1063,7 +1092,8 @@ export function toolAccessRoutes(
   });
 
   router.patch("/tool-profile-entries/:entryId", validate(updateToolProfileEntrySchema), async (req, res) => {
-    const existing = await svc.getProfileEntry(req.params.entryId as string);
+    const existing = await getAccessibleResource(req, res, svc.getProfileEntry(req.params.entryId as string), "Tool profile entry not found");
+    if (!existing) return;
     assertToolAppMutationAccess(req, existing.companyId);
     const entry = await svc.updateProfileEntry(existing.id, req.body);
     await logActivity(db, {
@@ -1079,7 +1109,8 @@ export function toolAccessRoutes(
   });
 
   router.delete("/tool-profile-entries/:entryId", async (req, res) => {
-    const existing = await svc.getProfileEntry(req.params.entryId as string);
+    const existing = await getAccessibleResource(req, res, svc.getProfileEntry(req.params.entryId as string), "Tool profile entry not found");
+    if (!existing) return;
     assertToolAppMutationAccess(req, existing.companyId);
     const entry = await svc.deleteProfileEntry(existing.id);
     await logActivity(db, {

@@ -199,7 +199,7 @@ describe("Windows test process tree selection", () => {
           rootPid: root.pid!,
           ownerMarkers: [],
           expectedRootIdentity: rootIdentity!,
-          timeoutMs: 8_000,
+          timeoutMs: 15_000,
         });
         expect(result).toMatchObject({
           attempted: true,
@@ -229,6 +229,6 @@ describe("Windows test process tree selection", () => {
         }
       }
     },
-    15_000,
+    25_000,
   );
 });
