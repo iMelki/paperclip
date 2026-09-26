@@ -152,15 +152,61 @@ function readPostmasterPid(dataDir: string): number | null {
   }
 }
 
-async function terminateWindowsPostgresProcessTree(dataDir: string): Promise<boolean> {
+export type EmbeddedPostgresStopOptions = {
+  /**
+   * Explicit opt-in, OFF by default: when a graceful stop fails on Windows,
+   * terminate this cluster's own processes. Only processes proven to be this
+   * cluster's are touched -- the data directory is in the postmaster's command
+   * line, and descendants follow by verified lineage -- each re-verified by
+   * creation time on a pinned handle before Kill(), so a recycled PID is never
+   * hit. Nothing is signalled when ownership evidence is unusable. The outcome
+   * is reported as "forced", never as a confirmed stop.
+   */
+  forceStopWithoutCustody?: boolean;
+};
+
+/**
+ * No-custody handling of the Windows postmaster tree after a failed stop.
+ *
+ * `embedded-postgres` spawns the postmaster itself, so this process never
+ * holds that child's handle at launch and therefore can never place the tree
+ * under Job Object custody -- which means it can never obtain an authoritative
+ * `confirmedStopped` receipt for it.
+ *
+ * By default it signals nothing and only observes. With
+ * `forceStopWithoutCustody` it forces the identity-verified stop above. Either
+ * way the result gates exactly one decision: whether reclaiming the temp data
+ * directory would pull files out from under a live cluster. A cluster that is
+ * still observable is reported loudly, by name, with its PIDs and the reason.
+ */
+async function resolveWindowsPostgresTreeAfterFailedStop(
+  dataDir: string,
+  options: EmbeddedPostgresStopOptions,
+): Promise<boolean> {
   if (process.platform !== "win32") return false;
   const pid = readPostmasterPid(dataDir);
+  const force = options.forceStopWithoutCustody === true;
   const result = await reapWindowsTestProcessTree({
     rootPid: pid ?? 0,
     ownerMarkers: [dataDir],
-    timeoutMs: 5_000,
+    // Snapshot, signal and re-observe are three PowerShell round trips.
+    timeoutMs: 10_000,
+    forceWithoutCustody: force,
   });
-  return result.confirmedStopped;
+  // confirmedStopped is unreachable on this path today; it is checked first so
+  // that this caller upgrades by itself if custody ever becomes available.
+  const reclaimable = result.confirmedStopped || result.observedNoOwnedProcesses;
+  if (!reclaimable) {
+    const pids = result.remainingPids.length > 0
+      ? result.remainingPids.join(",")
+      : "unknown";
+    console.warn(
+      `Embedded PostgreSQL cluster NOT stopped: data directory ${dataDir} preserved; `
+      + `reason=${result.reason}; stopEvidence=${result.stopEvidence}; `
+      + `force=${force ? "requested" : "not requested"}; PIDs=${pids}.`,
+    );
+  }
+  return reclaimable;
 }
 
 // `embedded-postgres@18.1.0-beta.16` exposes only `stop(): Promise<void>` — no
@@ -169,16 +215,21 @@ async function terminateWindowsPostgresProcessTree(dataDir: string): Promise<boo
 // with no time bound of its own. Under the loaded serial server shard a slow
 // shutdown checkpoint can push that past vitest's hookTimeout and hang the
 // afterAll hook. So we bound the graceful stop. On Windows, a timeout or failed
-// stop falls back to taskkill for the exact postmaster process tree; other
+// stop is resolved by resolveWindowsPostgresTreeAfterFailedStop: by default it
+// observes only, and it terminates the cluster's own verified processes only
+// when the caller passes forceStopWithoutCustody. The bare-PID taskkill that
+// used to run here unconditionally could be aimed at a recycled PID. Other
 // platforms keep waiting asynchronously for the graceful stop to settle.
 //
-// Data-dir reclaim happens only after graceful stop or confirmed forced
-// termination. Removing it on the timeout path would pull files out from under
-// a still-running cluster and provoke checkpoint / WAL I/O errors.
+// Data-dir reclaim happens only after a graceful stop, or when no process of
+// this cluster is observable. Removing it while the cluster may still be
+// running would pull files out from under it and provoke checkpoint / WAL I/O
+// errors.
 async function stopEmbeddedPostgresBounded(
   instance: EmbeddedPostgresInstance | null,
   dataDir: string | null,
   cleanupFn?: () => void,
+  options: EmbeddedPostgresStopOptions = {},
 ): Promise<boolean> {
   if (!instance) {
     cleanupFn?.();
@@ -218,8 +269,11 @@ async function stopEmbeddedPostgresBounded(
   }
 
   if (process.platform === "win32" && dataDir) {
-    const terminated = await terminateWindowsPostgresProcessTree(dataDir);
-    if (terminated) {
+    // Reclaim gate, not a termination claim: no process of this cluster is
+    // observable (after a forced stop, if one was requested), so reclaiming
+    // the temp data directory cannot pull files from under a live postmaster.
+    // If one is still observable it has been reported and we preserve it.
+    if (await resolveWindowsPostgresTreeAfterFailedStop(dataDir, options)) {
       cleanupOnce();
       return true;
     }

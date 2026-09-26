@@ -1,0 +1,942 @@
+{
+  "schemaVersion": 1,
+  "generatedAt": "2026-09-17T11:46:00+03:00",
+  "sourcePullRequest": 45,
+  "trackingIssue": 80,
+  "totalCommits": 4,
+  "clusters": {
+    "pr45-preservation-and-tracking": [
+      {
+        "path": ".gitignore",
+        "changeType": "modified",
+        "disposition": "semantically rederive",
+        "hunkCount": 1,
+        "firstSeenIn": "36ba7d08"
+      },
+      {
+        "path": "CHANGELOG.md",
+        "changeType": "modified",
+        "disposition": "semantically rederive",
+        "hunkCount": 1,
+        "firstSeenIn": "36ba7d08"
+      },
+      {
+        "path": "OPEN_TASKS.md",
+        "changeType": "modified",
+        "disposition": "semantically rederive",
+        "hunkCount": 4,
+        "firstSeenIn": "36ba7d08"
+      },
+      {
+        "path": "pnpm-lock.yaml",
+        "changeType": "modified",
+        "disposition": "semantically rederive",
+        "hunkCount": 1415,
+        "firstSeenIn": "7bae4af2"
+      }
+    ],
+    "coordination-and-runtime-migrations": [
+      {
+        "path": "doc/DATABASE.md",
+        "changeType": "modified",
+        "disposition": "semantically rederive",
+        "hunkCount": 2,
+        "firstSeenIn": "36ba7d08"
+      },
+      {
+        "path": "packages/db/src/coordination-lease-credential-migration.test.ts",
+        "changeType": "added",
+        "disposition": "semantically rederive",
+        "hunkCount": 1,
+        "firstSeenIn": "36ba7d08"
+      },
+      {
+        "path": "packages/db/src/coordination-schema.test.ts",
+        "changeType": "modified",
+        "disposition": "semantically rederive",
+        "hunkCount": 4,
+        "firstSeenIn": "36ba7d08"
+      },
+      {
+        "path": "packages/db/src/issue-comment-derived-attribution-migration.test.ts",
+        "changeType": "modified",
+        "disposition": "semantically rederive",
+        "hunkCount": 3,
+        "firstSeenIn": "36ba7d08"
+      },
+      {
+        "path": "packages/db/src/migrations/0197_coordination_lease_credentials.sql",
+        "changeType": "added",
+        "disposition": "semantically rederive",
+        "hunkCount": 1,
+        "firstSeenIn": "36ba7d08"
+      },
+      {
+        "path": "packages/db/src/migrations/0198_workspace_runtime_service_process_group.sql",
+        "changeType": "added",
+        "disposition": "semantically rederive",
+        "hunkCount": 1,
+        "firstSeenIn": "36ba7d08"
+      },
+      {
+        "path": "packages/db/src/migrations/meta/_journal.json",
+        "changeType": "modified",
+        "disposition": "semantically rederive",
+        "hunkCount": 2,
+        "firstSeenIn": "36ba7d08"
+      },
+      {
+        "path": "packages/db/src/schema/coordination_claim_idempotency_keys.ts",
+        "changeType": "added",
+        "disposition": "semantically rederive",
+        "hunkCount": 1,
+        "firstSeenIn": "36ba7d08"
+      },
+      {
+        "path": "packages/db/src/schema/index.ts",
+        "changeType": "modified",
+        "disposition": "semantically rederive",
+        "hunkCount": 2,
+        "firstSeenIn": "36ba7d08"
+      },
+      {
+        "path": "packages/db/src/schema/mutation_leases.ts",
+        "changeType": "modified",
+        "disposition": "semantically rederive",
+        "hunkCount": 3,
+        "firstSeenIn": "36ba7d08"
+      },
+      {
+        "path": "packages/db/src/schema/workspace_runtime_services.ts",
+        "changeType": "modified",
+        "disposition": "semantically rederive",
+        "hunkCount": 1,
+        "firstSeenIn": "36ba7d08"
+      },
+      {
+        "path": "packages/db/src/workspace-runtime-process-group-migration.test.ts",
+        "changeType": "added",
+        "disposition": "semantically rederive",
+        "hunkCount": 1,
+        "firstSeenIn": "36ba7d08"
+      }
+    ],
+    "adapter-shell-path-and-workspace-portability": [
+      {
+        "path": "packages/adapter-utils/src/acpx-engine.ts",
+        "changeType": "added",
+        "disposition": "selective-extraction candidate",
+        "hunkCount": 1,
+        "firstSeenIn": "36ba7d08"
+      },
+      {
+        "path": "packages/adapter-utils/src/acpx-engine/execute.test.ts",
+        "changeType": "modified",
+        "disposition": "selective-extraction candidate",
+        "hunkCount": 54,
+        "firstSeenIn": "36ba7d08"
+      },
+      {
+        "path": "packages/adapter-utils/src/acpx-engine/execute.ts",
+        "changeType": "modified",
+        "disposition": "selective-extraction candidate",
+        "hunkCount": 34,
+        "firstSeenIn": "36ba7d08"
+      },
+      {
+        "path": "packages/adapter-utils/src/acpx-engine/index.ts",
+        "changeType": "modified",
+        "disposition": "selective-extraction candidate",
+        "hunkCount": 1,
+        "firstSeenIn": "36ba7d08"
+      },
+      {
+        "path": "packages/adapter-utils/src/command-managed-runtime.test.ts",
+        "changeType": "modified",
+        "disposition": "selective-extraction candidate",
+        "hunkCount": 15,
+        "firstSeenIn": "36ba7d08"
+      },
+      {
+        "path": "packages/adapter-utils/src/command-managed-runtime.ts",
+        "changeType": "modified",
+        "disposition": "selective-extraction candidate",
+        "hunkCount": 23,
+        "firstSeenIn": "36ba7d08"
+      },
+      {
+        "path": "packages/adapter-utils/src/execution-target-sandbox.test.ts",
+        "changeType": "modified",
+        "disposition": "selective-extraction candidate",
+        "hunkCount": 18,
+        "firstSeenIn": "36ba7d08"
+      },
+      {
+        "path": "packages/adapter-utils/src/execution-target.ts",
+        "changeType": "modified",
+        "disposition": "selective-extraction candidate",
+        "hunkCount": 45,
+        "firstSeenIn": "36ba7d08"
+      },
+      {
+        "path": "packages/adapter-utils/src/git-workspace-sync.test.ts",
+        "changeType": "modified",
+        "disposition": "selective-extraction candidate",
+        "hunkCount": 1,
+        "firstSeenIn": "36ba7d08"
+      },
+      {
+        "path": "packages/adapter-utils/src/git-workspace-sync.ts",
+        "changeType": "modified",
+        "disposition": "selective-extraction candidate",
+        "hunkCount": 1,
+        "firstSeenIn": "36ba7d08"
+      },
+      {
+        "path": "packages/adapter-utils/src/local-process-sandbox.test.ts",
+        "changeType": "modified",
+        "disposition": "selective-extraction candidate",
+        "hunkCount": 1,
+        "firstSeenIn": "36ba7d08"
+      },
+      {
+        "path": "packages/adapter-utils/src/mcp-isolation.integration.test.ts",
+        "changeType": "modified",
+        "disposition": "selective-extraction candidate",
+        "hunkCount": 1,
+        "firstSeenIn": "36ba7d08"
+      },
+      {
+        "path": "packages/adapter-utils/src/sandbox-callback-bridge.test.ts",
+        "changeType": "modified",
+        "disposition": "selective-extraction candidate",
+        "hunkCount": 2,
+        "firstSeenIn": "36ba7d08"
+      },
+      {
+        "path": "packages/adapter-utils/src/sandbox-callback-bridge.ts",
+        "changeType": "modified",
+        "disposition": "selective-extraction candidate",
+        "hunkCount": 8,
+        "firstSeenIn": "36ba7d08"
+      },
+      {
+        "path": "packages/adapter-utils/src/sandbox-file-sync.test.ts",
+        "changeType": "modified",
+        "disposition": "selective-extraction candidate",
+        "hunkCount": 9,
+        "firstSeenIn": "36ba7d08"
+      },
+      {
+        "path": "packages/adapter-utils/src/sandbox-managed-runtime.test.ts",
+        "changeType": "modified",
+        "disposition": "selective-extraction candidate",
+        "hunkCount": 2,
+        "firstSeenIn": "36ba7d08"
+      },
+      {
+        "path": "packages/adapter-utils/src/sandbox-managed-runtime.ts",
+        "changeType": "modified",
+        "disposition": "selective-extraction candidate",
+        "hunkCount": 1,
+        "firstSeenIn": "36ba7d08"
+      },
+      {
+        "path": "packages/adapter-utils/src/shell-path.ts",
+        "changeType": "modified",
+        "disposition": "selective-extraction candidate",
+        "hunkCount": 3,
+        "firstSeenIn": "36ba7d08"
+      },
+      {
+        "path": "packages/adapter-utils/src/test-shell.ts",
+        "changeType": "modified",
+        "disposition": "selective-extraction candidate",
+        "hunkCount": 1,
+        "firstSeenIn": "36ba7d08"
+      },
+      {
+        "path": "packages/adapter-utils/src/workspace-restore-merge.test.ts",
+        "changeType": "modified",
+        "disposition": "selective-extraction candidate",
+        "hunkCount": 4,
+        "firstSeenIn": "36ba7d08"
+      },
+      {
+        "path": "packages/adapter-utils/src/workspace-restore-merge.ts",
+        "changeType": "modified",
+        "disposition": "selective-extraction candidate",
+        "hunkCount": 26,
+        "firstSeenIn": "36ba7d08"
+      },
+      {
+        "path": "packages/adapter-utils/vitest.config.ts",
+        "changeType": "added",
+        "disposition": "selective-extraction candidate",
+        "hunkCount": 1,
+        "firstSeenIn": "36ba7d08"
+      },
+      {
+        "path": "packages/adapters/claude-local/src/server/acp.test.ts",
+        "changeType": "modified",
+        "disposition": "selective-extraction candidate",
+        "hunkCount": 8,
+        "firstSeenIn": "36ba7d08"
+      },
+      {
+        "path": "packages/adapters/claude-local/src/server/acp.ts",
+        "changeType": "modified",
+        "disposition": "selective-extraction candidate",
+        "hunkCount": 2,
+        "firstSeenIn": "36ba7d08"
+      },
+      {
+        "path": "packages/adapters/claude-local/vitest.config.ts",
+        "changeType": "modified",
+        "disposition": "selective-extraction candidate",
+        "hunkCount": 2,
+        "firstSeenIn": "36ba7d08"
+      },
+      {
+        "path": "packages/adapters/codex-local/src/server/acp.test.ts",
+        "changeType": "modified",
+        "disposition": "selective-extraction candidate",
+        "hunkCount": 34,
+        "firstSeenIn": "36ba7d08"
+      },
+      {
+        "path": "packages/adapters/codex-local/src/server/acp.ts",
+        "changeType": "modified",
+        "disposition": "selective-extraction candidate",
+        "hunkCount": 9,
+        "firstSeenIn": "36ba7d08"
+      },
+      {
+        "path": "packages/adapters/codex-local/src/server/codex-auth-copyback.test.ts",
+        "changeType": "modified",
+        "disposition": "selective-extraction candidate",
+        "hunkCount": 16,
+        "firstSeenIn": "36ba7d08"
+      },
+      {
+        "path": "packages/adapters/codex-local/src/server/codex-auth-copyback.ts",
+        "changeType": "modified",
+        "disposition": "selective-extraction candidate",
+        "hunkCount": 17,
+        "firstSeenIn": "36ba7d08"
+      },
+      {
+        "path": "packages/adapters/codex-local/src/server/codex-auth-merge.test.ts",
+        "changeType": "modified",
+        "disposition": "selective-extraction candidate",
+        "hunkCount": 12,
+        "firstSeenIn": "36ba7d08"
+      },
+      {
+        "path": "packages/adapters/codex-local/src/server/codex-home.test.ts",
+        "changeType": "modified",
+        "disposition": "selective-extraction candidate",
+        "hunkCount": 14,
+        "firstSeenIn": "36ba7d08"
+      },
+      {
+        "path": "packages/adapters/codex-local/src/server/codex-home.ts",
+        "changeType": "modified",
+        "disposition": "selective-extraction candidate",
+        "hunkCount": 9,
+        "firstSeenIn": "36ba7d08"
+      },
+      {
+        "path": "packages/adapters/codex-local/src/server/execute.test.ts",
+        "changeType": "modified",
+        "disposition": "selective-extraction candidate",
+        "hunkCount": 8,
+        "firstSeenIn": "36ba7d08"
+      },
+      {
+        "path": "packages/adapters/codex-local/src/server/output-inactivity-monitor.integration.test.ts",
+        "changeType": "modified",
+        "disposition": "selective-extraction candidate",
+        "hunkCount": 1,
+        "firstSeenIn": "36ba7d08"
+      },
+      {
+        "path": "packages/adapters/codex-local/src/server/test.remote.test.ts",
+        "changeType": "modified",
+        "disposition": "selective-extraction candidate",
+        "hunkCount": 7,
+        "firstSeenIn": "36ba7d08"
+      },
+      {
+        "path": "packages/adapters/codex-local/src/server/windows-private-acl.test.ts",
+        "changeType": "added",
+        "disposition": "selective-extraction candidate",
+        "hunkCount": 1,
+        "firstSeenIn": "36ba7d08"
+      },
+      {
+        "path": "packages/adapters/codex-local/src/server/windows-private-acl.ts",
+        "changeType": "added",
+        "disposition": "selective-extraction candidate",
+        "hunkCount": 1,
+        "firstSeenIn": "36ba7d08"
+      },
+      {
+        "path": "packages/adapters/codex-local/vitest.config.ts",
+        "changeType": "modified",
+        "disposition": "selective-extraction candidate",
+        "hunkCount": 2,
+        "firstSeenIn": "36ba7d08"
+      },
+      {
+        "path": "packages/adapters/gemini-local/src/server/acp.test.ts",
+        "changeType": "modified",
+        "disposition": "selective-extraction candidate",
+        "hunkCount": 12,
+        "firstSeenIn": "36ba7d08"
+      },
+      {
+        "path": "packages/adapters/gemini-local/src/server/acp.ts",
+        "changeType": "modified",
+        "disposition": "selective-extraction candidate",
+        "hunkCount": 2,
+        "firstSeenIn": "36ba7d08"
+      },
+      {
+        "path": "packages/adapters/gemini-local/vitest.config.ts",
+        "changeType": "modified",
+        "disposition": "selective-extraction candidate",
+        "hunkCount": 2,
+        "firstSeenIn": "36ba7d08"
+      },
+      {
+        "path": "server/src/__tests__/claude-local-adapter-environment.test.ts",
+        "changeType": "modified",
+        "disposition": "selective-extraction candidate",
+        "hunkCount": 2,
+        "firstSeenIn": "36ba7d08"
+      },
+      {
+        "path": "server/src/__tests__/claude-local-execute.test.ts",
+        "changeType": "modified",
+        "disposition": "selective-extraction candidate",
+        "hunkCount": 8,
+        "firstSeenIn": "36ba7d08"
+      },
+      {
+        "path": "server/src/__tests__/codex-local-execute.test.ts",
+        "changeType": "modified",
+        "disposition": "selective-extraction candidate",
+        "hunkCount": 2,
+        "firstSeenIn": "36ba7d08"
+      },
+      {
+        "path": "server/src/__tests__/cursor-local-adapter-environment.test.ts",
+        "changeType": "modified",
+        "disposition": "selective-extraction candidate",
+        "hunkCount": 2,
+        "firstSeenIn": "36ba7d08"
+      },
+      {
+        "path": "server/src/__tests__/cursor-local-execute.test.ts",
+        "changeType": "modified",
+        "disposition": "selective-extraction candidate",
+        "hunkCount": 2,
+        "firstSeenIn": "36ba7d08"
+      },
+      {
+        "path": "server/src/services/environment-execution-target.ts",
+        "changeType": "modified",
+        "disposition": "selective-extraction candidate",
+        "hunkCount": 2,
+        "firstSeenIn": "36ba7d08"
+      },
+      {
+        "path": "packages/adapters/claude-local/src/server/execute.remote.test.ts",
+        "changeType": "modified",
+        "disposition": "semantically rederive",
+        "hunkCount": 8,
+        "firstSeenIn": "7bae4af2"
+      },
+      {
+        "path": "packages/adapters/claude-local/src/server/execute.ts",
+        "changeType": "modified",
+        "disposition": "semantically rederive",
+        "hunkCount": 10,
+        "firstSeenIn": "7bae4af2"
+      },
+      {
+        "path": "packages/adapters/codex-local/src/server/execute.remote.test.ts",
+        "changeType": "modified",
+        "disposition": "semantically rederive",
+        "hunkCount": 7,
+        "firstSeenIn": "7bae4af2"
+      },
+      {
+        "path": "packages/adapters/codex-local/src/server/execute.ts",
+        "changeType": "modified",
+        "disposition": "semantically rederive",
+        "hunkCount": 14,
+        "firstSeenIn": "7bae4af2"
+      },
+      {
+        "path": "packages/adapters/cursor-local/src/server/execute.remote.test.ts",
+        "changeType": "modified",
+        "disposition": "semantically rederive",
+        "hunkCount": 7,
+        "firstSeenIn": "7bae4af2"
+      },
+      {
+        "path": "packages/adapters/cursor-local/src/server/execute.ts",
+        "changeType": "modified",
+        "disposition": "semantically rederive",
+        "hunkCount": 10,
+        "firstSeenIn": "7bae4af2"
+      },
+      {
+        "path": "packages/adapters/gemini-local/src/server/execute.remote.test.ts",
+        "changeType": "modified",
+        "disposition": "semantically rederive",
+        "hunkCount": 9,
+        "firstSeenIn": "7bae4af2"
+      },
+      {
+        "path": "packages/adapters/gemini-local/src/server/execute.ts",
+        "changeType": "modified",
+        "disposition": "semantically rederive",
+        "hunkCount": 11,
+        "firstSeenIn": "7bae4af2"
+      },
+      {
+        "path": "packages/adapters/opencode-local/src/server/execute.remote.test.ts",
+        "changeType": "modified",
+        "disposition": "semantically rederive",
+        "hunkCount": 7,
+        "firstSeenIn": "7bae4af2"
+      },
+      {
+        "path": "packages/adapters/opencode-local/src/server/execute.ts",
+        "changeType": "modified",
+        "disposition": "semantically rederive",
+        "hunkCount": 9,
+        "firstSeenIn": "7bae4af2"
+      },
+      {
+        "path": "packages/adapters/pi-local/src/server/execute.remote.test.ts",
+        "changeType": "modified",
+        "disposition": "semantically rederive",
+        "hunkCount": 7,
+        "firstSeenIn": "7bae4af2"
+      },
+      {
+        "path": "packages/adapters/pi-local/src/server/execute.ts",
+        "changeType": "modified",
+        "disposition": "semantically rederive",
+        "hunkCount": 9,
+        "firstSeenIn": "7bae4af2"
+      }
+    ],
+    "private-executable-asset-acl-bootstrap": [
+      {
+        "path": "packages/adapter-utils/src/private-executable-asset.test.ts",
+        "changeType": "added",
+        "disposition": "semantically rederive",
+        "hunkCount": 1,
+        "firstSeenIn": "36ba7d08"
+      },
+      {
+        "path": "packages/adapter-utils/src/private-executable-asset.ts",
+        "changeType": "added",
+        "disposition": "semantically rederive",
+        "hunkCount": 1,
+        "firstSeenIn": "36ba7d08"
+      }
+    ],
+    "windows-process-and-runtime-custody": [
+      {
+        "path": "packages/db/src/backup-lib.test.ts",
+        "changeType": "modified",
+        "disposition": "selective-extraction candidate",
+        "hunkCount": 5,
+        "firstSeenIn": "36ba7d08"
+      },
+      {
+        "path": "packages/db/src/backup-lib.ts",
+        "changeType": "modified",
+        "disposition": "selective-extraction candidate",
+        "hunkCount": 11,
+        "firstSeenIn": "36ba7d08"
+      },
+      {
+        "path": "packages/db/src/test-embedded-postgres-cleanup.test.ts",
+        "changeType": "added",
+        "disposition": "selective-extraction candidate",
+        "hunkCount": 1,
+        "firstSeenIn": "36ba7d08"
+      },
+      {
+        "path": "packages/db/src/test-embedded-postgres.ts",
+        "changeType": "modified",
+        "disposition": "selective-extraction candidate",
+        "hunkCount": 7,
+        "firstSeenIn": "36ba7d08"
+      },
+      {
+        "path": "packages/db/src/test-windows-process-tree.test.ts",
+        "changeType": "modified",
+        "disposition": "selective-extraction candidate",
+        "hunkCount": 13,
+        "firstSeenIn": "36ba7d08"
+      },
+      {
+        "path": "packages/db/src/test-windows-process-tree.ts",
+        "changeType": "modified",
+        "disposition": "selective-extraction candidate",
+        "hunkCount": 15,
+        "firstSeenIn": "36ba7d08"
+      },
+      {
+        "path": "scripts/dev-runner-lifecycle.ts",
+        "changeType": "added",
+        "disposition": "selective-extraction candidate",
+        "hunkCount": 1,
+        "firstSeenIn": "36ba7d08"
+      },
+      {
+        "path": "scripts/dev-runner-registry.ts",
+        "changeType": "added",
+        "disposition": "selective-extraction candidate",
+        "hunkCount": 1,
+        "firstSeenIn": "36ba7d08"
+      },
+      {
+        "path": "scripts/dev-runner.ts",
+        "changeType": "modified",
+        "disposition": "selective-extraction candidate",
+        "hunkCount": 47,
+        "firstSeenIn": "36ba7d08"
+      },
+      {
+        "path": "scripts/dev-service.ts",
+        "changeType": "modified",
+        "disposition": "selective-extraction candidate",
+        "hunkCount": 4,
+        "firstSeenIn": "36ba7d08"
+      },
+      {
+        "path": "scripts/kill-workspaces.sh",
+        "changeType": "modified",
+        "disposition": "selective-extraction candidate",
+        "hunkCount": 24,
+        "firstSeenIn": "36ba7d08"
+      },
+      {
+        "path": "server/package.json",
+        "changeType": "modified",
+        "disposition": "selective-extraction candidate",
+        "hunkCount": 1,
+        "firstSeenIn": "36ba7d08"
+      },
+      {
+        "path": "server/src/__tests__/dev-runner-lifecycle.test.ts",
+        "changeType": "added",
+        "disposition": "selective-extraction candidate",
+        "hunkCount": 1,
+        "firstSeenIn": "36ba7d08"
+      },
+      {
+        "path": "server/src/__tests__/dev-runner-registry.test.ts",
+        "changeType": "added",
+        "disposition": "selective-extraction candidate",
+        "hunkCount": 1,
+        "firstSeenIn": "36ba7d08"
+      },
+      {
+        "path": "server/src/__tests__/dev-service-control.test.ts",
+        "changeType": "added",
+        "disposition": "selective-extraction candidate",
+        "hunkCount": 1,
+        "firstSeenIn": "36ba7d08"
+      },
+      {
+        "path": "server/src/__tests__/heartbeat-active-run-output-watchdog.test.ts",
+        "changeType": "modified",
+        "disposition": "selective-extraction candidate",
+        "hunkCount": 8,
+        "firstSeenIn": "36ba7d08"
+      },
+      {
+        "path": "server/src/__tests__/heartbeat-process-recovery.test.ts",
+        "changeType": "modified",
+        "disposition": "selective-extraction candidate",
+        "hunkCount": 30,
+        "firstSeenIn": "36ba7d08"
+      },
+      {
+        "path": "server/src/__tests__/heartbeat-runtime-skills.test.ts",
+        "changeType": "modified",
+        "disposition": "selective-extraction candidate",
+        "hunkCount": 10,
+        "firstSeenIn": "36ba7d08"
+      },
+      {
+        "path": "server/src/__tests__/kill-workspaces-script.test.ts",
+        "changeType": "added",
+        "disposition": "selective-extraction candidate",
+        "hunkCount": 1,
+        "firstSeenIn": "36ba7d08"
+      },
+      {
+        "path": "server/src/__tests__/server-package-build-script.test.ts",
+        "changeType": "modified",
+        "disposition": "selective-extraction candidate",
+        "hunkCount": 1,
+        "firstSeenIn": "36ba7d08"
+      },
+      {
+        "path": "server/src/__tests__/workspace-runtime.test.ts",
+        "changeType": "modified",
+        "disposition": "selective-extraction candidate",
+        "hunkCount": 70,
+        "firstSeenIn": "36ba7d08"
+      },
+      {
+        "path": "server/src/index.ts",
+        "changeType": "modified",
+        "disposition": "selective-extraction candidate",
+        "hunkCount": 2,
+        "firstSeenIn": "36ba7d08"
+      },
+      {
+        "path": "server/src/services/dev-runner-lifecycle.ts",
+        "changeType": "added",
+        "disposition": "selective-extraction candidate",
+        "hunkCount": 1,
+        "firstSeenIn": "36ba7d08"
+      },
+      {
+        "path": "server/src/services/dev-runner-registry.ts",
+        "changeType": "added",
+        "disposition": "selective-extraction candidate",
+        "hunkCount": 1,
+        "firstSeenIn": "36ba7d08"
+      },
+      {
+        "path": "server/src/services/dev-service-control.ts",
+        "changeType": "added",
+        "disposition": "selective-extraction candidate",
+        "hunkCount": 1,
+        "firstSeenIn": "36ba7d08"
+      },
+      {
+        "path": "server/src/services/heartbeat.ts",
+        "changeType": "modified",
+        "disposition": "selective-extraction candidate",
+        "hunkCount": 48,
+        "firstSeenIn": "36ba7d08"
+      },
+      {
+        "path": "server/src/services/local-service-supervisor.registry.test.ts",
+        "changeType": "added",
+        "disposition": "selective-extraction candidate",
+        "hunkCount": 1,
+        "firstSeenIn": "36ba7d08"
+      },
+      {
+        "path": "server/src/services/local-service-supervisor.ts",
+        "changeType": "modified",
+        "disposition": "selective-extraction candidate",
+        "hunkCount": 84,
+        "firstSeenIn": "36ba7d08"
+      },
+      {
+        "path": "server/src/services/recovery/service.pause-durability.test.ts",
+        "changeType": "modified",
+        "disposition": "selective-extraction candidate",
+        "hunkCount": 1,
+        "firstSeenIn": "36ba7d08"
+      },
+      {
+        "path": "server/src/services/recovery/service.ts",
+        "changeType": "modified",
+        "disposition": "selective-extraction candidate",
+        "hunkCount": 12,
+        "firstSeenIn": "36ba7d08"
+      },
+      {
+        "path": "server/src/services/windows-process-tree.test.ts",
+        "changeType": "added",
+        "disposition": "selective-extraction candidate",
+        "hunkCount": 1,
+        "firstSeenIn": "36ba7d08"
+      },
+      {
+        "path": "server/src/services/windows-process-tree.ts",
+        "changeType": "added",
+        "disposition": "selective-extraction candidate",
+        "hunkCount": 1,
+        "firstSeenIn": "36ba7d08"
+      },
+      {
+        "path": "server/src/services/workspace-runtime.ts",
+        "changeType": "modified",
+        "disposition": "selective-extraction candidate",
+        "hunkCount": 91,
+        "firstSeenIn": "36ba7d08"
+      },
+      {
+        "path": "packages/db/src/index.ts",
+        "changeType": "modified",
+        "disposition": "selective-extraction candidate",
+        "hunkCount": 1,
+        "firstSeenIn": "5cba7569"
+      },
+      {
+        "path": "packages/db/src/windows-test-job-warden.ts",
+        "changeType": "added",
+        "disposition": "selective-extraction candidate",
+        "hunkCount": 1,
+        "firstSeenIn": "5cba7569"
+      },
+      {
+        "path": "cli/src/__tests__/company-import-export-e2e.test.ts",
+        "changeType": "modified",
+        "disposition": "semantically rederive",
+        "hunkCount": 3,
+        "firstSeenIn": "7bae4af2"
+      },
+      {
+        "path": "scripts/run-vitest-stable.mjs",
+        "changeType": "modified",
+        "disposition": "semantically rederive",
+        "hunkCount": 5,
+        "firstSeenIn": "7bae4af2"
+      }
+    ],
+    "runtime-integration-and-plugin-compatibility": [
+      {
+        "path": "packages/plugins/plugin-workspace-diff/src/ui/index.tsx",
+        "changeType": "modified",
+        "disposition": "semantically rederive",
+        "hunkCount": 2,
+        "firstSeenIn": "36ba7d08"
+      }
+    ],
+    "task-coordination-authority-and-evidence": [
+      {
+        "path": "server/src/__tests__/contracts/README.md",
+        "changeType": "added",
+        "disposition": "semantically rederive",
+        "hunkCount": 1,
+        "firstSeenIn": "36ba7d08"
+      },
+      {
+        "path": "server/src/__tests__/contracts/task-coordination.v1.schema.json",
+        "changeType": "added",
+        "disposition": "semantically rederive",
+        "hunkCount": 1,
+        "firstSeenIn": "36ba7d08"
+      },
+      {
+        "path": "server/src/__tests__/coordination-routes.test.ts",
+        "changeType": "modified",
+        "disposition": "semantically rederive",
+        "hunkCount": 14,
+        "firstSeenIn": "36ba7d08"
+      },
+      {
+        "path": "server/src/__tests__/coordination-service-isolation.test.ts",
+        "changeType": "added",
+        "disposition": "semantically rederive",
+        "hunkCount": 1,
+        "firstSeenIn": "36ba7d08"
+      },
+      {
+        "path": "server/src/routes/coordination.ts",
+        "changeType": "modified",
+        "disposition": "semantically rederive",
+        "hunkCount": 6,
+        "firstSeenIn": "36ba7d08"
+      },
+      {
+        "path": "server/src/services/coordination-lease-tokens.test.ts",
+        "changeType": "added",
+        "disposition": "semantically rederive",
+        "hunkCount": 1,
+        "firstSeenIn": "36ba7d08"
+      },
+      {
+        "path": "server/src/services/coordination-lease-tokens.ts",
+        "changeType": "added",
+        "disposition": "semantically rederive",
+        "hunkCount": 1,
+        "firstSeenIn": "36ba7d08"
+      },
+      {
+        "path": "server/src/services/coordination.test.ts",
+        "changeType": "added",
+        "disposition": "semantically rederive",
+        "hunkCount": 1,
+        "firstSeenIn": "36ba7d08"
+      },
+      {
+        "path": "server/src/services/coordination.ts",
+        "changeType": "modified",
+        "disposition": "semantically rederive",
+        "hunkCount": 24,
+        "firstSeenIn": "36ba7d08"
+      }
+    ],
+    "pr45-merge-resolution-manual-review": [
+      {
+        "path": "scripts/__tests__/run-vitest-stable-shard.test.mjs",
+        "changeType": "modified",
+        "disposition": "semantically rederive",
+        "hunkCount": 1,
+        "firstSeenIn": "7bae4af2"
+      },
+      {
+        "path": "server/src/__tests__/companies-service.test.ts",
+        "changeType": "modified",
+        "disposition": "semantically rederive",
+        "hunkCount": 5,
+        "firstSeenIn": "7bae4af2"
+      },
+      {
+        "path": "server/src/__tests__/execution-lock-orphan-cleanup.test.ts",
+        "changeType": "modified",
+        "disposition": "semantically rederive",
+        "hunkCount": 2,
+        "firstSeenIn": "7bae4af2"
+      },
+      {
+        "path": "server/src/__tests__/heartbeat-archived-company-guard.test.ts",
+        "changeType": "modified",
+        "disposition": "semantically rederive",
+        "hunkCount": 2,
+        "firstSeenIn": "7bae4af2"
+      },
+      {
+        "path": "server/src/__tests__/heartbeat-runtime-state.test.ts",
+        "changeType": "modified",
+        "disposition": "semantically rederive",
+        "hunkCount": 2,
+        "firstSeenIn": "7bae4af2"
+      },
+      {
+        "path": "ui/src/App.cases-routing.test.tsx",
+        "changeType": "modified",
+        "disposition": "semantically rederive",
+        "hunkCount": 1,
+        "firstSeenIn": "7bae4af2"
+      },
+      {
+        "path": "ui/src/components/RequestCollapsedSidebar.test.tsx",
+        "changeType": "modified",
+        "disposition": "semantically rederive",
+        "hunkCount": 9,
+        "firstSeenIn": "7bae4af2"
+      }
+    ]
+  }
+}

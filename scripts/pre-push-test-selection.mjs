@@ -87,6 +87,14 @@ const DECLARED_SOURCE_TESTS = new Map([
     ["packages/db/src/coordination-schema.test.ts"],
   ],
   [
+    // The job warden's contract is Job Object custody of a test-owned process
+    // tree, so it is exercised through the process-tree contract test rather
+    // than a sibling of its own: that suite imports acquireWindowsTestJobCustody
+    // directly and drives a real warden against a live grandchild.
+    "packages/db/src/windows-test-job-warden.ts",
+    ["packages/db/src/test-windows-process-tree.test.ts"],
+  ],
+  [
     "scripts/prepare-package-for-publish.mjs",
     ["scripts/package-lifecycle.test.mjs"],
   ],
