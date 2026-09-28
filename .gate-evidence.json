@@ -46,6 +46,20 @@
   },
   "gates": [
     {
+      "id": "hermes-local-strict-isolation-launch",
+      "path": "packages/adapters/hermes/src/server/strict-isolation.ts",
+      "description": "Reject unsafe Hermes Local profile/home/env/limit/API-host inputs before child spawn.",
+      "negativeFixture": "packages/adapters/hermes/scripts/strict-isolation-probe.mts",
+      "observedFailure": {
+        "date": "2026-09-28",
+        "command": "pnpm exec tsx scripts/strict-isolation-probe.mts --bad-profile; pnpm exec tsx scripts/strict-isolation-probe.mts --remote-api (from packages/adapters/hermes)",
+        "breakApplied": "The fixtures selected the default Hermes profile or an https://paperclip.example/api host; no live Hermes command ran.",
+        "reason": "The exact validator rejected the default profile and rejected the remote API host with 'Strict Hermes isolation requires a loopback Paperclip API URL'. Both exited 1.",
+        "exitCode": 1,
+        "restoredPass": "Without either negative flag, the same fixture printed 'accepted: named profile and isolated home' and exited 0."
+      }
+    },
+    {
       "id": "embedded-postgres-failed-stop-preserves-data",
       "path": "packages/db/src/test-embedded-postgres.ts",
       "description": "Only successful stop may reclaim data; unresolved failed-start cleanup prevents retry.",
@@ -207,6 +221,12 @@
         "command": "git push --set-upstream origin agent/codex/47-windows-path-hooks-and-review-governance-20260831; node --test scripts/pre-push-test-selection.test.mjs; node scripts/run-pre-push-tests.mjs --repo-root . --dry-run --changed-file <each of the five non-sibling production paths> --target-ref refs/heads/topic",
         "reason": "The real pre-push caller rejected five changed production files because their higher-level contract suites were not same-stem siblings. The missing-declaration fixture then named the absent http-logger contract test. A post-review control restored the old removed-source rule; the new declared-contract deletion fixture failed because it was incorrectly assigned to hosted CI despite its surviving exact contract test. Existing fixtures still reject uncovered production, untracked tests, malformed inputs, and escaping or linked paths.",
         "restoredPass": "With exact source-to-test declarations and the deletion ownership rule restored, the selector chose the existing generator, HTTP redaction, and onboarding persistence contract suites; its caller-shaped dry run reported zero uncovered files and zero selection errors. The selector suite passed 18/18 and the complete Node gate group passed 21/21. Negative/restored task receipts: 348a5530df404961b965ca48ee939bef and 6e9e1453d0144a00bd47cd5a041aab01."
+      },
+      "subsequentProof": {
+        "date": "2026-09-28",
+        "command": "node --test scripts/pre-push-test-selection.test.mjs",
+        "reason": "A new Hermes runner-classification assertion failed on the unregistered old selector with actual hosted-unregistered versus expected vitest; 19 passed, 1 failed, exit 1. The preceding real pre-push had already failed closed on two missing Hermes sibling tests after passing full typecheck.",
+        "restoredPass": "After adding Hermes to the selector, root Vitest projects, and grouped PR runner, the same selector suite passed 20/20, exit 0. The root exact runner executed both new Hermes sibling suites, 4/4 tests, exit 0; the complete Hermes package suite passed 78/78."
       }
     },
     {

@@ -6,6 +6,25 @@ All notable changes to this repository should be recorded here.
 
 ## Unreleased
 
+- **[#140]** Registered the Hermes adapter's Vitest project in the root test
+  workspace and grouped PR runner. Exact pre-push selection now runs its
+  sibling tests locally; the registration and test-policy changes still
+  require a topic-branch PR and hosted CI before publication to `dev`.
+
+- **[#20]** Moved the access-route permissions test's one-time module import
+  into bounded suite setup after timing showed it exceeded the test's 10-second
+  limit on Windows. Bounded the adapter-route suite's per-test reset/import
+  setup at 60 seconds after a 30-second hook timeout under the staged gate;
+  the focused suite passed 13/13. The self-lockout assertion and timeout are
+  unchanged; process-tree leak and full-suite validation remain open.
+
+- **[#140]** Added an opt-in, fail-closed Hermes Local launch boundary for a
+  separate named profile and scrubbed child environment, bounded strict runs to
+  900 seconds and three turns, removed unconditional `--yolo`, and made the
+  CLI fixture portable on Windows. Adapter tests pass; effective Hermes auth,
+  provider hard spending limits, sandboxing, and live dispatch remain separate
+  acceptance gates.
+
 - **[#114]** Added optional company/system/account-scoped source identities to
   cost events. Identical imports replay without duplicating spend; changed
   payloads return HTTP 409. Company totals and budget pauses are transactional,

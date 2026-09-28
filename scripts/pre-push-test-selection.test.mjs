@@ -158,6 +158,7 @@ test("routes each test family to its real runner", () => {
   assert.equal(classifyTestRunner("scripts/check-no-git-push.test.mjs"), "node-test");
   assert.equal(classifyTestRunner("tests/e2e/onboarding.spec.ts"), "hosted-playwright");
   assert.equal(classifyTestRunner("packages/adapter-utils/src/execution.test.ts"), "vitest");
+  assert.equal(classifyTestRunner("packages/adapters/hermes/src/server/test.test.ts"), "vitest");
   assert.equal(
     classifyTestRunner("packages/plugins/plugin-workspace-diff/tests/contracts.spec.ts"),
     "hosted-unregistered",
