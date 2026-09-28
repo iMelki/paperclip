@@ -6,6 +6,11 @@ All notable changes to this repository should be recorded here.
 
 ## Unreleased
 
+- **[#140]** Registered the Hermes adapter's Vitest project in the root test
+  workspace and grouped PR runner. Exact pre-push selection now runs its
+  sibling tests locally; the registration and test-policy changes still
+  require a topic-branch PR and hosted CI before publication to `dev`.
+
 - **[#20]** Moved the access-route permissions test's one-time module import
   into bounded suite setup after timing showed it exceeded the test's 10-second
   limit on Windows. Bounded the adapter-route suite's per-test reset/import

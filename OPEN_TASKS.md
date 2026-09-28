@@ -782,6 +782,14 @@ This file is the durable local index for active `paperclip` issues.
     the matching host, private Node runtime, backup/restore (including the
     intentional Codex credential-pointer contract), and import-only smoke path.
 
+- [#140 - Harden Hermes Local adapter isolation and test registration](https://github.com/iMelki/paperclip/issues/140)
+  - Local `dev` commit `99b3d604` is not published: the pre-push gate exposed
+    two missing sibling suites and an unregistered Hermes Vitest project.
+    Both sibling suites now pass; root selection and PR group registration are
+    prepared locally. The normal gate requires a topic-branch PR and hosted CI
+    for policy/config changes. Effective auth, provider hard stop, sandbox,
+    and bounded live-dispatch proof remain separate pilot gates.
+
 - [#130 - Fix Windows GitHub-plugin E2E harness npx launcher](https://github.com/iMelki/paperclip/issues/130)
   - Fixed in `paperclip-github-plugin` PR #3 (`2cff6ee`): Windows harnesses now
     invoke npm's bundled npx CLI through Node without a shell. The full local

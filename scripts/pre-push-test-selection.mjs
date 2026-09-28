@@ -24,6 +24,7 @@ const ROOT_VITEST_PROJECTS = [
   "packages/adapters/cursor-local",
   "packages/adapters/gemini-local",
   "packages/adapters/grok-local",
+  "packages/adapters/hermes",
   "packages/adapters/openclaw-gateway",
   "packages/adapters/opencode-local",
   "packages/adapters/pi-local",
