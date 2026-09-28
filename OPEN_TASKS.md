@@ -2,7 +2,7 @@
 
 ## Next 15 Focus Queue
 
-Refreshed 2026-09-18 against GitHub. The first four rows support the current GitHub
+Refreshed 2026-09-28 against GitHub. The first four rows support the current GitHub
 integration outcome; later rows remain queued and do not imply concurrent execution.
 
 1. [paperclip#129 - Modernize Factory host for GitHub integration](https://github.com/iMelki/paperclip/issues/129): Resolve the isolated upstream merge, preserve deployed migrations, and qualify recovery before replacing the live host.
@@ -52,6 +52,21 @@ integration outcome; later rows remain queued and do not imply concurrent execut
   in #129: private runtime, host integration, complete recovery rehearsal, and
   company-scoped secret validation precede one allowlisted import-only pilot.
   The current connector does not prove bounded no-dispatch import behavior.
+  A separate exact-one-issue action is the scoped pilot design; require a
+  company-bound secret reference and config path, one create-or-noop, no
+  reconciliation or wake, and a twice-idempotent outer violation ledger.
+  The plugin fork now has a clean local clone, but a scheduled full sync can
+  activate a neutral import on its next tick. Production no-dispatch needs a
+  reviewed durable company quarantine and explicit release; isolated-host
+  characterization is not live rollout proof. See the
+  [scoped design](https://github.com/iMelki/paperclip/issues/126#issuecomment-5865997370)
+  and [scheduled-wake gate](https://github.com/iMelki/paperclip/issues/126#issuecomment-5866289762).
+
+- [#140 — Harden Hermes Local launch boundaries](https://github.com/iMelki/paperclip/issues/140):
+  Strict named-profile isolation, approval-bypass rejection, and a fresh-session
+  prompt guard have focused tests; the final staged gate and publication must
+  be read back separately. No live worker, effective credential, or provider-
+  limit proof is claimed.
 
 - [#35 — Windows embedded PostgreSQL startup](https://github.com/iMelki/paperclip/issues/35):
   2026-09-17 static confirmation shows the installed vendor patch uses
@@ -99,7 +114,7 @@ integration outcome; later rows remain queued and do not imply concurrent execut
 
 - #48 / #94 / #89 Historical gauntlet stash evidence preserved with a verified private archive; [dated provenance](docs/uiux/browser-evidence-2026-08-27/HISTORICAL-ARCHIVE-2026-09-08.md).
 
-Last updated: 2026-09-17
+Last updated: 2026-09-28
 
 - [#114 — Replay-safe cost imports](https://github.com/iMelki/paperclip/issues/114):
   scoped source identities, immutable replay conflicts and budget retry recovery
@@ -117,6 +132,10 @@ Last updated: 2026-09-17
 - [#20 — Windows test process ownership](https://github.com/iMelki/paperclip/issues/20):
   embedded-Postgres vendor spawns omit windowless flags. Cost import tests use a
   private canonical process host; upstream harness repair remains open.
+  The access-route test's one-time import is now bounded suite setup (focused
+  2/2 pass). Under the staged pre-commit gate, adapter-route per-test setup
+  exceeded 30 seconds; its bounded 60-second setup passed focused 13/13.
+  Complete-suite and zero-survivor process proof remain open.
 
 ## Historical Factory recovery
 
@@ -756,10 +775,12 @@ This file is the durable local index for active `paperclip` issues.
 ## Active GitHub Issues
 
 - [#129 - Factory host modernization for secured GitHub plugin rollout](https://github.com/iMelki/paperclip/issues/129)
-  - The active Windows Factory remains usable on the legacy `0.8.12` plugin. Do
-    not install the secured current-main plugin until an isolated data-copy
-    qualification proves the matching host, private Node runtime, backup/restore,
-    and import-only single-repository smoke path.
+  - As of 2026-09-28, the Windows Factory on port 5113 is unavailable, and the
+    clean isolated checkout's old head differs from the governed wrapper pin.
+    Do not bypass provenance, restart into automatic migrations, or install the
+    secured current-main plugin until an isolated data-copy qualification proves
+    the matching host, private Node runtime, backup/restore (including the
+    intentional Codex credential-pointer contract), and import-only smoke path.
 
 - [#130 - Fix Windows GitHub-plugin E2E harness npx launcher](https://github.com/iMelki/paperclip/issues/130)
   - Fixed in `paperclip-github-plugin` PR #3 (`2cff6ee`): Windows harnesses now

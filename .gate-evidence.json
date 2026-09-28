@@ -46,6 +46,20 @@
   },
   "gates": [
     {
+      "id": "hermes-local-strict-isolation-launch",
+      "path": "packages/adapters/hermes/src/server/strict-isolation.ts",
+      "description": "Reject unsafe Hermes Local profile/home/env/limit/API-host inputs before child spawn.",
+      "negativeFixture": "packages/adapters/hermes/scripts/strict-isolation-probe.mts",
+      "observedFailure": {
+        "date": "2026-09-28",
+        "command": "pnpm exec tsx scripts/strict-isolation-probe.mts --bad-profile; pnpm exec tsx scripts/strict-isolation-probe.mts --remote-api (from packages/adapters/hermes)",
+        "breakApplied": "The fixtures selected the default Hermes profile or an https://paperclip.example/api host; no live Hermes command ran.",
+        "reason": "The exact validator rejected the default profile and rejected the remote API host with 'Strict Hermes isolation requires a loopback Paperclip API URL'. Both exited 1.",
+        "exitCode": 1,
+        "restoredPass": "Without either negative flag, the same fixture printed 'accepted: named profile and isolated home' and exited 0."
+      }
+    },
+    {
       "id": "embedded-postgres-failed-stop-preserves-data",
       "path": "packages/db/src/test-embedded-postgres.ts",
       "description": "Only successful stop may reclaim data; unresolved failed-start cleanup prevents retry.",

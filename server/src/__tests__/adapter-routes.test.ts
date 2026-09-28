@@ -118,12 +118,14 @@ describe("adapter routes", () => {
     unregisterServerAdapter("hermes_local");
     unregisterServerAdapter("claude_local");
     registerServerAdapter(overridingConfigSchemaAdapter);
-  });
+  }, 60_000);
 
   afterEach(() => {
-    setOverridePaused("claude_local", false);
-    unregisterServerAdapter("hermes_local");
-    unregisterServerAdapter("claude_local");
+    if (setOverridePaused && unregisterServerAdapter) {
+      setOverridePaused("claude_local", false);
+      unregisterServerAdapter("hermes_local");
+      unregisterServerAdapter("claude_local");
+    }
   });
 
   it("GET /api/adapters includes capabilities object for each adapter", async () => {
