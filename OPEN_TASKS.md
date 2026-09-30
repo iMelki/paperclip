@@ -130,6 +130,12 @@ Last updated: 2026-09-28
   generation exposes unrelated existing-schema drift; 0214 is scoped to cost
   identities. Snapshot reconciliation needs isolated upgrade proof.
 - [#20 — Windows test process ownership](https://github.com/iMelki/paperclip/issues/20):
+  The 2026-10-01 isolated DB discovery repair excludes compiled `dist` copies
+  while retaining authored `src` and maintenance `scripts` tests. The exact
+  CLI regression fails against the old config and passes after repair.
+  See [discovery receipt](doc/evidence/db-test-discovery-2026-10-01.md).
+  Topic PR review and hosted checks remain required; this is not native DB
+  startup, process cleanup, Factory recovery, or live import acceptance.
   embedded-Postgres vendor spawns omit windowless flags. Cost import tests use a
   private canonical process host; upstream harness repair remains open.
   The access-route test's one-time import is now bounded suite setup (focused

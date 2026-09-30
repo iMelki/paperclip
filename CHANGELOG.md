@@ -6,6 +6,13 @@ All notable changes to this repository should be recorded here.
 
 ## Unreleased
 
+- **[#20]** Limited DB Vitest discovery to authored `src` and `scripts`
+  suites. Compiled and stale `dist` tests no longer run a second time.
+  A CLI-backed regression runs through the root workspace and checks source
+  extensions, default exclusions, stale-file filters, and maintenance suites.
+  It reuses the pinned canonical scratch helper and confines child temp output.
+  This does not repair embedded PostgreSQL startup or process cleanup.
+
 - **[#140]** Registered the Hermes adapter's Vitest project in the root test
   workspace and grouped PR runner. Exact pre-push selection now runs its
   sibling tests locally; the registration and test-policy changes still
