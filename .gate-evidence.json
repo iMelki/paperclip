@@ -46,6 +46,20 @@
   },
   "gates": [
     {
+      "id": "db-authored-test-discovery",
+      "path": "packages/db/vitest.config.ts",
+      "description": "Select authored src and maintenance scripts tests while rejecting compiled, stale, and nested dist copies.",
+      "negativeFixture": "packages/db/src/test-discovery.test.ts",
+      "observedFailure": {
+        "date": "2026-10-01",
+        "command": "node scripts/run-vitest-stable.mjs --files packages/db/src/test-discovery.test.ts",
+        "breakApplied": "The isolated worktree restored the base config with unrestricted default discovery. Readback showed only environment: node; the same CLI-backed fixture and stable runner were retained.",
+        "reason": "Exit 1, two of three tests failed: discovery returned dist/basic.test.js, dist/stale-only.spec.js and other non-authored paths, and a CLI stale-dist filter returned a generated suite instead of an empty list. No syntax/import/launch error caused the failure.",
+        "restoredPass": "Restoring authored src/scripts inclusion and default-preserving dist exclusions gave exit 0, 3/3 tests. The separate real maintenance suite passed 15/15. The repaired config SHA-256 is 18c0d1d32d4d55f3017864881466c597fc7232ccb6ef82e9f85adf17288c1e2f.",
+        "artifactPath": "doc/evidence/db-test-discovery-2026-10-01.md"
+      }
+    },
+    {
       "id": "hermes-local-strict-isolation-launch",
       "path": "packages/adapters/hermes/src/server/strict-isolation.ts",
       "description": "Reject unsafe Hermes Local profile/home/env/limit/API-host inputs before child spawn.",
