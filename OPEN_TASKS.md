@@ -63,6 +63,10 @@ integration outcome; later rows remain queued and do not imply concurrent execut
   and [scheduled-wake gate](https://github.com/iMelki/paperclip/issues/126#issuecomment-5866289762).
 
 - [#140 — Harden Hermes Local launch boundaries](https://github.com/iMelki/paperclip/issues/140):
+  Follow-up: the child-process helper restored ambient provider keys after the
+  strict adapter scrubbed them. An opt-in no-inheritance fix and native inert-
+  child controls are prepared on a topic branch; review, hosted checks and
+  installed adoption remain separate from effective Hermes auth and live work.
   Strict named-profile isolation, approval-bypass rejection, and a fresh-session
   prompt guard have focused tests; the final staged gate and publication must
   be read back separately. No live worker, effective credential, or provider-

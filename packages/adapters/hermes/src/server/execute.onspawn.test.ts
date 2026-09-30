@@ -109,6 +109,7 @@ describe("hermes-local adapter onSpawn forwarding", () => {
     const lastCall = mocked.mock.calls[mocked.mock.calls.length - 1];
     const opts = lastCall[3] as Record<string, unknown>;
     expect(opts.onSpawn).toBe(onSpawn);
+    expect(opts.inheritEnv).toBe(true);
   });
 
   it("runChildProcess opts type includes onSpawn", () => {
@@ -166,6 +167,7 @@ describe("hermes-local adapter onSpawn forwarding", () => {
       expect(args.slice(0, 3)).toEqual(["--profile", "research", "chat"]);
       expect(args).not.toContain("--yolo");
       expect(opts.timeoutSec).toBe(900);
+      expect(opts.inheritEnv).toBe(false);
       expect(opts.env.HERMES_HOME).toBe(hermesHome);
       expect(opts.env.OPENAI_API_KEY).toBeUndefined();
     } finally {

@@ -551,6 +551,7 @@ export async function execute(
   const result = await runChildProcess(ctx.runId, hermesCmd, args, {
     cwd,
     env,
+    inheritEnv: !strictIsolation,
     timeoutSec,
     graceSec,
     onLog: wrappedOnLog,

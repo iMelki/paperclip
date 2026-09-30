@@ -6,6 +6,13 @@ All notable changes to this repository should be recorded here.
 
 ## Unreleased
 
+- **[#140]** Preserved the strict Hermes environment allowlist through the
+  actual child-process helper. Strict launches now disable ambient inheritance;
+  existing callers retain it by default. Native inert-child regression tests
+  cover omitted provider keys and explicit provision without a provider call.
+  Effective Hermes authentication, approval policy and live adoption remain
+  separate gates.
+
 - **[#140]** Registered the Hermes adapter's Vitest project in the root test
   workspace and grouped PR runner. Exact pre-push selection now runs its
   sibling tests locally; the registration and test-policy changes still
