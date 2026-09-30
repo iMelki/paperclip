@@ -14,8 +14,9 @@ This demonstrates duplicate discovery, not the cause of every Windows timeout.
 
 The repair restricts discovery to `src` and `scripts`, preserves Vitest's default
 file extensions and exclusions, and rejects nested `dist` paths. No test is
-deleted. No timeout on an existing test is changed. No installed dependency,
-live service, credential, database, or shared checkout is changed.
+deleted. No timeout on an existing test is changed. No installed dependency
+version, live service, credential, database, or shared source is changed.
+Dependency-link repair during validation is recorded separately below.
 
 ## Research and existing components
 
@@ -53,6 +54,47 @@ The fixture files throw if executed. `list --filesOnly` reads discovery only;
 it does not execute fixtures or start PostgreSQL. Child launches use argv,
 windowless pipe capture, a 30-second bound, and a 40-second outer test bound.
 Tiny synthetic fixtures are retained for inspection and governed recycle cleanup.
+
+## Canonical scratch reuse and validation isolation
+
+Independent review caught the initial non-conforming scratch prefix. The new
+producer now uses the canonical helper from user-owned agent-settings commit
+`5631d9208102c29e41828bd06afeb74d125a3354`, path
+`shared/tools/ephemeral-scratch.mjs`. Its first-party standalone copy lives at
+`scripts/lib/ephemeral-scratch.mjs`. The LF-normalized SHA-256 is
+`a296c167b1d77fcb4b665152917f38f02d9b7c8c9458601d96bb678eeb38a6be`.
+No independently asserted third-party license was inferred for this operator asset.
+
+The consumer checks that hash and the governed name. A retained fixture receipt
+identifies caller and path. All child TEMP, TMP and TMPDIR variables are confined
+to that root. The exact pre-push selector maps helper changes to the same DB
+contract, rather than relying on dynamic import-graph discovery.
+
+The current exact DB regression passed 4/4. Adding one inert comment to the
+helper made the same caller exit 1 at the digest assertion, with the other
+three discovery tests passing. Restoring the canonical text gave exit 0 and
+4/4 again. Logs: `scratch-drift-negative.log`, `scratch-restored.log`.
+Earlier 3/3 runs below are historical, before the fourth guard was added.
+
+Removing only the helper's declared test mapping made
+`node --test scripts/pre-push-test-selection.test.mjs` exit 1: the new contract
+expected the DB suite but received an empty selection. The other 20 tests passed.
+Restoring the mapping gave exit 0 and 21/21. Logs:
+`selection-map-negative.log`, `selection-map-restored.log`.
+
+The initial dependency reuse used package node_modules directory junctions.
+The normal commit hook relinked workspace entries through those shared parents.
+That temporarily redirected primary-checkout dependency links to the topic
+checkout. Package dependency containers and scoped parents are now private
+directories. Only individual external dependency entries are shared read-only.
+Primary preflight restored its links. Topic preflight then changed only its own
+entries; a subsequent primary preflight made no changes. Shared source and HEAD
+stayed clean at `ed92fe5`. No hook was bypassed. Retained junction pointers are
+in the private worktree log area; no permanent cleanup was performed.
+
+This demonstrates a setup hazard, not an npm dependency change or runtime
+repair. Other existing scratch producers remain separately tracked in
+[Paperclip #56](https://github.com/iMelki/paperclip/issues/56).
 
 Private logs: `.local-logs/db-discovery/` in the isolated topic worktree.
 Ledger: `db-authored-test-discovery` in `.gate-evidence.json`.

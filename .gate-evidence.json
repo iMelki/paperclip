@@ -46,6 +46,20 @@
   },
   "gates": [
     {
+      "id": "db-discovery-canonical-scratch-provenance",
+      "path": "scripts/lib/ephemeral-scratch.mjs",
+      "description": "Keep the standalone scratch helper byte-equivalent to its pinned canonical source after line-ending normalization.",
+      "negativeFixture": "packages/db/src/test-discovery.test.ts",
+      "observedFailure": {
+        "date": "2026-10-01",
+        "command": "node scripts/run-vitest-stable.mjs --files packages/db/src/test-discovery.test.ts",
+        "breakApplied": "Added one inert comment to the isolated vendored helper; the module remained valid and its consumer still launched.",
+        "reason": "Exit 1 at the canonical SHA-256 assertion; the three CLI-backed discovery tests passed. The failure was source drift, not syntax, import, launch, or timeout.",
+        "restoredPass": "Restored the canonical helper text. The identical caller exited 0, 4/4 tests passed; normalized SHA-256 a296c167b1d77fcb4b665152917f38f02d9b7c8c9458601d96bb678eeb38a6be.",
+        "artifactPath": "doc/evidence/db-test-discovery-2026-10-01.md"
+      }
+    },
+    {
       "id": "db-authored-test-discovery",
       "path": "packages/db/vitest.config.ts",
       "description": "Select authored src and maintenance scripts tests while rejecting compiled, stale, and nested dist copies.",

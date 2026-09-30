@@ -1,15 +1,20 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
-import os from "node:os";
+import { createHash } from "node:crypto";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "vitest";
 
 const repoRoot = fileURLToPath(new URL("../../../", import.meta.url));
+const scratchModule = new URL("../../../scripts/lib/ephemeral-scratch.mjs", import.meta.url);
+// A variable URL preserves the standalone module boundary without adding JS
+// emission to the DB TypeScript build.
+const { createEphemeralDir, ephemeralChildEnv, isEphemeralName } = await import(scratchModule.href);
 const dbConfig = path.join(repoRoot, "packages/db/vitest.config.ts");
 const vitestCli = path.join(repoRoot, "node_modules/vitest/vitest.mjs");
-const fixtureRoot = mkdtempSync(path.join(os.tmpdir(), "paperclip-db-discovery-"));
+const fixtureRoot = createEphemeralDir({ owner: "paperclip", purpose: "dbdiscovery" });
+console.info(JSON.stringify({ caller: "db-test-discovery", fixtureRoot, retained: true }));
 const authoredFiles = [
   "src/basic.test.ts",
   "src/nested/basic.spec.tsx",
@@ -52,6 +57,7 @@ function listFiles(filter?: string): string[] {
     shell: false,
     timeout: 30_000,
     maxBuffer: 1024 * 1024,
+    env: { ...process.env, ...ephemeralChildEnv(fixtureRoot) },
   });
   assert.equal(result.error, undefined, result.error?.message);
   assert.equal(result.status, 0, result.stderr || result.stdout);
@@ -69,4 +75,12 @@ test("a CLI filter cannot enroll stale generated DB tests", { timeout: 40_000 },
 
 test("an exact maintenance filter still selects the authored suite once", { timeout: 40_000 }, () => {
   assert.deepEqual(listFiles("scripts/maintenance.test.ts"), ["scripts/maintenance.test.ts"]);
+});
+
+test("discovery reuses the pinned canonical scratch primitive", () => {
+  // Ignore checkout line endings only; all other source drift must fail.
+  const source = readFileSync(scratchModule, "utf8").replaceAll("\r\n", "\n");
+  const digest = createHash("sha256").update(source).digest("hex");
+  assert.equal(digest, "a296c167b1d77fcb4b665152917f38f02d9b7c8c9458601d96bb678eeb38a6be");
+  assert.equal(isEphemeralName(path.basename(fixtureRoot)), true);
 });
