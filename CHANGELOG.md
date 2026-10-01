@@ -6,6 +6,12 @@ All notable changes to this repository should be recorded here.
 
 ## Unreleased
 
+- **[#140]** Strict Hermes launches now reject root `auth.json` state and fail
+  closed when that path cannot be inspected, before invoking the child helper.
+  Profile-local auth and legacy launches retain their existing behavior.
+  Real filesystem controls cover root stores, links, and inspection denial;
+  effective runtime isolation and installed adoption remain separate gates.
+
 - **[#140]** Preserved the strict Hermes environment allowlist through the
   actual child-process helper. Strict launches now disable ambient inheritance;
   existing callers retain it by default. Native inert-child regression tests

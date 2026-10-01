@@ -1,10 +1,15 @@
-import fs from "node:fs/promises";
+import * as fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { resolveStrictHermesIsolation } from "./strict-isolation.js";
 import { testEnvironment } from "./test.js";
+
+vi.mock("node:fs/promises", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs/promises")>();
+  return { ...actual, lstat: vi.fn(actual.lstat) };
+});
 
 async function fixture() {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-hermes-isolation-"));
@@ -31,6 +36,47 @@ function config(root: string): Record<string, unknown> {
 }
 
 describe("strict Hermes local launch boundary", () => {
+  it.each([
+    { providers: { openrouter: { api_key: "synthetic-root-provider-canary" } } },
+    { credential_pool: { openrouter: [{ access_token: "synthetic-root-pool-canary" }] } },
+  ])("rejects root auth stores before named-profile launch: %j", async (store) => {
+    const { root } = await fixture();
+    await fs.writeFile(path.join(root, "auth.json"), JSON.stringify(store));
+    await expect(resolveStrictHermesIsolation(config(root)))
+      .rejects.toThrow(/root auth.json/);
+  });
+
+  it("retains an explicit profile-local auth store without root inheritance", async () => {
+    const { root, profileDir } = await fixture();
+    await fs.writeFile(path.join(profileDir, "auth.json"), JSON.stringify({
+      providers: { openrouter: { api_key: "synthetic-profile-only-canary" } },
+    }));
+    await expect(resolveStrictHermesIsolation(config(root)))
+      .resolves.toMatchObject({ root, profile: "research" });
+  });
+
+  it("rejects a linked root auth path without reading its contents", async () => {
+    const { root } = await fixture();
+    const target = path.join(root, "synthetic-auth-target");
+    await fs.mkdir(target);
+    await fs.symlink(target, path.join(root, "auth.json"), process.platform === "win32" ? "junction" : "dir");
+    await expect(resolveStrictHermesIsolation(config(root)))
+      .rejects.toThrow(/root auth.json/);
+  });
+
+  it("fails closed when the root auth path cannot be inspected", async () => {
+    const { root } = await fixture();
+    const denied = Object.assign(new Error("synthetic-inspection-denial"), { code: "EACCES" });
+    const stat = vi.mocked(fs.lstat).mockRejectedValueOnce(denied);
+    try {
+      await expect(resolveStrictHermesIsolation(config(root)))
+        .rejects.toThrow(/could not inspect root auth.json/);
+      expect(stat).toHaveBeenCalledWith(path.join(root, "auth.json"));
+    } finally {
+      stat.mockClear();
+    }
+  });
+
   it("passes only portable environment fields and pins the named profile home", async () => {
     const { root } = await fixture();
     try {

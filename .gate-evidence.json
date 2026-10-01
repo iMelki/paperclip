@@ -50,6 +50,17 @@
       "path": "packages/adapters/hermes/src/server/strict-isolation.ts",
       "description": "Reject unsafe Hermes Local profile/home/env/limit/API-host inputs before child spawn.",
       "negativeFixture": "packages/adapters/hermes/scripts/strict-isolation-probe.mts",
+      "rootAuthFallbackProof": {
+        "date": "2026-10-01",
+        "command": "node node_modules/vitest/vitest.mjs run packages/adapters/hermes/src/server/strict-isolation.test.ts",
+        "breakApplied": "Omitted only the root-auth guard call while retaining the real filesystem fixtures and injected EACCES inspection error.",
+        "reason": "The exact caller exited 1: root provider state, root credential-pool state, a root auth link, and unknown inspection failure were accepted. Nine controls passed.",
+        "exitCode": 1,
+        "failedTests": 4,
+        "passedTests": 9,
+        "restoredPass": "Restored guard passed 13/13. Combined strict, execute/onSpawn and actual inert-child environment controls passed 27/27, exit 0. The execute caller denied root auth before runChildProcess; explicit profile-local auth and default legacy inheritance remained positive controls.",
+        "scope": "Opt-in source launch check only. Refuses any root auth path without reading credential values, including links and unknown inspection errors. Does not establish OS isolation, approval-policy enforcement, provider quota or live adoption."
+      },
       "spawnInheritanceProof": {
         "date": "2026-10-01",
         "command": "node node_modules/vitest/vitest.mjs run packages/adapter-utils/src/server-utils-env.test.ts packages/adapters/hermes/src/server/execute.onspawn.test.ts",

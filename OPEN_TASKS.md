@@ -63,6 +63,10 @@ integration outcome; later rows remain queued and do not imply concurrent execut
   and [scheduled-wake gate](https://github.com/iMelki/paperclip/issues/126#issuecomment-5866289762).
 
 - [#140 — Harden Hermes Local launch boundaries](https://github.com/iMelki/paperclip/issues/140):
+  A subsequent opt-in root-auth guard is prepared after offline effective-
+  resolver evidence. It denies root stores, links and unknown inspection errors
+  before spawn, retaining profile-local auth. Security-policy disclosure,
+  non-author review and installed adoption remain separate gates.
   Follow-up: the child-process helper restored ambient provider keys after the
   strict adapter scrubbed them. An opt-in no-inheritance fix and native inert-
   child controls are prepared on a topic branch; review, hosted checks and

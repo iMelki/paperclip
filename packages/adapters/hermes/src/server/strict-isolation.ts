@@ -16,6 +16,16 @@ export interface StrictHermesIsolation {
   env: Record<string, string>;
 }
 
+async function rejectRootAuthFallback(root: string): Promise<void> {
+  try {
+    await fs.lstat(path.join(root, "auth.json"));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+    throw new Error("Strict Hermes isolation could not inspect root auth.json");
+  }
+  throw new Error("Strict Hermes isolation rejects inherited root auth.json");
+}
+
 /** A source-level launch boundary, not proof of Hermes's effective credential resolution. */
 export async function resolveStrictHermesIsolation(
   config: Record<string, unknown>,
@@ -93,6 +103,7 @@ export async function resolveStrictHermesIsolation(
       throw new Error("Strict Hermes isolation cannot reuse a host Hermes home");
     }
   }
+  await rejectRootAuthFallback(root);
   const profileDir = path.join(root, "profiles", profile);
   const actualProfileDir = await fs.realpath(profileDir);
   if (normalized(actualProfileDir) !== normalized(profileDir)) {

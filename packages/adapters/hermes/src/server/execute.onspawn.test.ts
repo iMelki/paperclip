@@ -11,6 +11,7 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import os from "node:os";
 import path from "node:path";
+import * as fs from "node:fs/promises";
 
 // Mock the adapter-utils server-utils module that execute.ts imports from.
 // We intercept runChildProcess so we can inspect its opts without spawning
@@ -39,10 +40,13 @@ vi.mock("node:fs/promises", () => ({
   readdir: vi.fn(async () => []),
   stat: vi.fn(async () => ({ isFile: () => true, isDirectory: () => false })),
   realpath: vi.fn(async (input: string) => input),
-  lstat: vi.fn(async (input: string) => ({
-    isFile: () => input.endsWith("profile.yaml"),
-    isSymbolicLink: () => false,
-  })),
+  lstat: vi.fn(async (input: string) => {
+    if (input.endsWith("auth.json")) throw Object.assign(new Error("missing fixture auth"), { code: "ENOENT" });
+    return {
+      isFile: () => input.endsWith("profile.yaml"),
+      isSymbolicLink: () => false,
+    };
+  }),
 }));
 
 import { execute } from "./execute.js";
@@ -174,6 +178,28 @@ describe("hermes-local adapter onSpawn forwarding", () => {
       if (previous === undefined) delete process.env.OPENAI_API_KEY;
       else process.env.OPENAI_API_KEY = previous;
     }
+  });
+
+  it("rejects strict root auth before invoking the child-process helper", async () => {
+    const hermesHome = path.join(os.tmpdir(), "paperclip-hermes-strict-fixture");
+    const { ctx } = makeCtx({
+      strictIsolation: true,
+      hermesHome,
+      hermesProfile: "research",
+      hermesCommand: path.join(hermesHome, "bin", "hermes"),
+      paperclipApiUrl: "http://127.0.0.1:3100/api",
+      model: "gpt-5.5",
+      provider: "openai-codex",
+      timeoutSec: 900,
+      maxTurnsPerRun: 3,
+      persistSession: false,
+    });
+    vi.mocked(fs.lstat).mockResolvedValueOnce({
+      isFile: () => true, isSymbolicLink: () => false,
+    } as Awaited<ReturnType<typeof fs.lstat>>);
+    await expect(execute(ctx as any)).rejects.toThrow(/root auth.json/);
+    expect(fs.lstat).toHaveBeenCalledWith(path.join(hermesHome, "auth.json"));
+    expect(serverUtils.runChildProcess).not.toHaveBeenCalled();
   });
 
   it("starts a fresh strict session with the full brief when stale runtime state has a session ID", async () => {
