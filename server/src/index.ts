@@ -32,6 +32,7 @@ import {
 import detectPort from "detect-port";
 import { createApp } from "./app.js";
 import { loadConfig } from "./config.js";
+import { resolveListenPort } from "./listen-port.js";
 import { logger } from "./middleware/logger.js";
 import {
   getManagedInstanceConfig,
@@ -549,9 +550,9 @@ export async function startServer(): Promise<StartedServer> {
   }
 
   const requestedListenPort = config.port;
-  const listenPort = await detectPort({
+  const listenPort = await resolveListenPort({
     port: requestedListenPort,
-    hostname: config.host,
+    host: config.host,
   });
   if (config.authBaseUrlMode === "explicit" && config.authPublicBaseUrl) {
     config.authPublicBaseUrl = rewriteLocalUrlPort(config.authPublicBaseUrl, listenPort);
