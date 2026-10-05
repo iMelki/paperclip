@@ -157,6 +157,7 @@ function buildTestConfig(overrides: Record<string, unknown> = {}) {
     customBindHost: undefined,
     host: "127.0.0.1",
     port: 3210,
+    strictPort: false,
     allowedHostnames: [],
     authBaseUrlMode: "auto",
     authPublicBaseUrl: undefined,
@@ -604,6 +605,17 @@ describe("startServer authenticated auth origin setup", () => {
       port: 3210,
       hostname: "127.0.0.1",
     });
+  });
+
+  it("refuses to move to another port when strict port mode is on", async () => {
+    loadConfigMock.mockReturnValue(buildTestConfig({
+      host: "127.0.0.1",
+      port: 3210,
+      strictPort: true,
+    }));
+    detectPortMock.mockResolvedValueOnce(3211);
+
+    await expect(startServer()).rejects.toThrow("Port 3210 is busy on 127.0.0.1");
   });
 
   it("derives trusted origins from the detected listen port before auth initializes", async () => {

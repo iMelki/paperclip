@@ -6,9 +6,9 @@ import { resolveListenPort } from "../listen-port.js";
 
 // These tests use real sockets and the real detect-port package. Do not mock
 // detect-port in this file: the tests observe what it does with a busy address.
-// detect-port without a hostname probes five addresses, one of them by name
-// ("localhost"), so on a loaded machine it can take longer than the default
-// five-second test timeout.
+// The first listen on a non-loopback address was measured at 5 to 18 seconds on
+// a heavily loaded Windows host (later listens took under 100 ms). That is
+// longer than the default five-second test timeout.
 vi.setConfig({ testTimeout: 30_000 });
 
 // detect-port 2.1.0 probes the first non-127 IPv4 address of the machine as its
@@ -80,6 +80,22 @@ describe.skipIf(!otherAddress)("listen port selection while another address of t
 
   it("moves off the requested port when the configured host itself is busy", async () => {
     expect(await resolveListenPort({ port, host: otherAddress! })).not.toBe(port);
+  });
+
+  it("keeps the requested port in strict mode when only another address is busy", async () => {
+    expect(await resolveListenPort({ port, host: "127.0.0.1", strictPort: true })).toBe(port);
+  });
+
+  it("throws in strict mode when the configured host itself is busy", async () => {
+    await expect(resolveListenPort({ port, host: otherAddress!, strictPort: true })).rejects.toThrow(
+      `Port ${port} is busy on ${otherAddress}`,
+    );
+  });
+});
+
+describe("listen port selection in strict mode", () => {
+  it("accepts port 0 and returns the port that the system chose", async () => {
+    expect(await resolveListenPort({ port: 0, host: "127.0.0.1", strictPort: true })).toBeGreaterThan(0);
   });
 });
 

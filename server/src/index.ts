@@ -553,6 +553,7 @@ export async function startServer(): Promise<StartedServer> {
   const listenPort = await resolveListenPort({
     port: requestedListenPort,
     host: config.host,
+    strictPort: config.strictPort,
   });
   if (config.authBaseUrlMode === "explicit" && config.authPublicBaseUrl) {
     config.authPublicBaseUrl = rewriteLocalUrlPort(config.authPublicBaseUrl, listenPort);
