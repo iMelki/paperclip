@@ -16681,7 +16681,11 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
 
         const deferredPayload = parseObject(deferred.payload);
         const deferredContextSeed = parseObject(deferredPayload[DEFERRED_WAKE_CONTEXT_KEY]);
-        const activePauseHold = await treeControlSvc.getActivePauseHoldGate(issue.companyId, issue.id);
+        const activePauseHold = await treeControlSvc.getActivePauseHoldGate(
+          issue.companyId,
+          issue.id,
+          tx as unknown as Db,
+        );
         const treeHoldInteractionWake = activePauseHold && await isVerifiedIssueTreeControlInteractionWake(tx, {
           companyId: issue.companyId,
           issueId: issue.id,
@@ -16812,15 +16816,16 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
 
         const sessionBefore =
           readNonEmptyString(promotedContextSnapshot.resumeSessionDisplayId) ??
-          await resolveSessionBeforeForWakeup(deferredAgent, promotedTaskKey);
+          await resolveSessionBeforeForWakeup(deferredAgent, promotedTaskKey, tx as unknown as Db);
         const promotedContinuationAttempt = readContinuationAttempt(
           promotedContextSnapshot.livenessContinuationAttempt,
         );
         const promotedResponsibleUserId = await resolveResponsibleUserIdForRunSeed({
+          executor: tx as unknown as Db,
           companyId: deferredAgent.companyId,
           contextSnapshot: promotedContextSnapshot,
           issueContext: issue,
-          routineEnvContext: await getRoutineEnvForExecutionIssue(deferredAgent.companyId, issue),
+          routineEnvContext: await getRoutineEnvForExecutionIssue(deferredAgent.companyId, issue, tx as unknown as Db),
           requestedByActorType: deferred.requestedByActorType as "user" | "agent" | "system" | null,
           requestedByActorId: deferred.requestedByActorId,
           source: promotedSource,
@@ -17117,10 +17122,11 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         retryOfRunId: run.id,
       }, "normal_model");
       const responsibleUserId = await resolveResponsibleUserIdForRunSeed({
+        executor: tx as unknown as Db,
         companyId: issue.companyId,
         contextSnapshot: recoveryContextSnapshot,
         issueContext: issue,
-        routineEnvContext: await getRoutineEnvForExecutionIssue(issue.companyId, issue),
+        routineEnvContext: await getRoutineEnvForExecutionIssue(issue.companyId, issue, tx as unknown as Db),
         requestedByActorType: "system",
         requestedByActorId: null,
         source: "automation",

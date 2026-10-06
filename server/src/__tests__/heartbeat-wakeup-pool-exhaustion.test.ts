@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { eq, inArray, sql } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
-import { agents, companies, createDb, heartbeatRuns, issues } from "@paperclipai/db";
+import { agents, agentWakeupRequests, companies, createDb, heartbeatRuns, issues } from "@paperclipai/db";
 import {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
@@ -269,4 +269,87 @@ describeEmbeddedPostgres("heartbeat wakeup under a bounded connection pool", () 
 
     await expectPoolStillServesQueries();
   }, 60_000);
+
+  // Same exhaustion in the deferred-wake promotion transaction: releasing a
+  // finished run's issue lock promotes the wake that was deferred behind it.
+  // That transaction holds one pooled connection and resolves the session and
+  // responsible user for the promoted run, which must also read through `tx`.
+  it("promotes deferred wakes for concurrent run releases without exhausting the pool", async () => {
+    const { companyId, agentId: holderAgentId, issuePrefix } = await seedCompanyAndAgent();
+    const waiterAgentId = randomUUID();
+    await db.insert(agents).values({
+      id: waiterAgentId,
+      companyId,
+      name: "Deferred Waiter",
+      role: "engineer",
+      status: "idle",
+      adapterType: "process",
+      adapterConfig: {},
+      runtimeConfig: { heartbeat: { wakeOnDemand: true, maxConcurrentRuns: 1 } },
+      permissions: {},
+    });
+
+    const issueIds = Array.from({ length: POOL_SIZE * 3 }, () => randomUUID());
+    const holderRunIds = issueIds.map(() => randomUUID());
+    for (const [index, issueId] of issueIds.entries()) {
+      const wakeupRequestId = randomUUID();
+      await db.insert(agentWakeupRequests).values({
+        id: wakeupRequestId,
+        companyId,
+        agentId: holderAgentId,
+        source: "assignment",
+        status: "queued",
+      });
+      await db.insert(heartbeatRuns).values({
+        id: holderRunIds[index]!,
+        companyId,
+        agentId: holderAgentId,
+        invocationSource: "assignment",
+        triggerDetail: "system",
+        status: "running",
+        wakeupRequestId,
+        contextSnapshot: { issueId, taskId: issueId, wakeReason: "issue_assigned" },
+        startedAt: new Date(),
+      });
+      await db.insert(issues).values({
+        id: issueId,
+        companyId,
+        title: `Deferred promotion task ${index + 1}`,
+        status: "in_review",
+        priority: "medium",
+        assigneeAgentId: waiterAgentId,
+        executionRunId: holderRunIds[index]!,
+        executionAgentNameKey: "pool worker",
+        executionLockedAt: new Date(),
+        issueNumber: 100 + index,
+        identifier: `${issuePrefix}-${100 + index}`,
+      });
+      // The holder still owns the issue lock, so this wake is deferred behind it.
+      const deferred = await heartbeat.wakeup(waiterAgentId, {
+        source: "automation",
+        triggerDetail: "system",
+        reason: "issue_assigned",
+        payload: { issueId },
+        contextSnapshot: { issueId, taskId: issueId, wakeReason: "issue_assigned" },
+        requestedByActorType: "user",
+        requestedByActorId: "local-board",
+      });
+      expect(deferred).toBeNull();
+    }
+
+    const releases = holderRunIds.map((runId) => heartbeat.cancelRun(runId, "pool exhaustion regression"));
+    inFlight = releases;
+
+    await withinDeadline("concurrent deferred-wake promotions", Promise.all(releases), WAKEUP_DEADLINE_MS);
+
+    const promoted = await db
+      .select({ responsibleUserId: heartbeatRuns.responsibleUserId, contextSnapshot: heartbeatRuns.contextSnapshot })
+      .from(heartbeatRuns)
+      .where(eq(heartbeatRuns.agentId, waiterAgentId));
+    expect(promoted).toHaveLength(issueIds.length);
+    // Resolved through the company default, read on the promotion transaction.
+    expect(promoted.every((run) => run.responsibleUserId === "company-default-user")).toBe(true);
+
+    await expectPoolStillServesQueries();
+  }, 90_000);
 });
