@@ -13,6 +13,12 @@ All notable changes to this repository should be recorded here.
   `@babel/runtime` line that pnpm re-resolved. A frozen reinstall and a
   restart are needed to take effect.
 
+- **[#148]** Added the GPT-6 model ids (`gpt-6.1-sol`, `gpt-6-astra`,
+  `gpt-6-sol`, `gpt-6-luna`) to the Codex adapter's fixed model list and its
+  fast-mode list, with matching help text, docs and tests. The default model
+  stays `gpt-5.6-sol`. The ids need the Codex client 0.160.0 that #150
+  pins; this change touches no dependency or version pin.
+
 - **[#144]** Pass the configured bind host to detect-port when choosing the
   listen port, so a port held on another address of the machine no longer
   moves the server. Add opt-in `PAPERCLIP_STRICT_PORT=true` to fail startup

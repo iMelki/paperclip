@@ -50,6 +50,13 @@ describe("adapter model listing", () => {
     expect(models).toEqual(codexFallbackModels);
     // The bare gpt-5.6 alias is intentionally not advertised (Codex has no metadata for it).
     expect(models.some((model) => model.id === "gpt-5.6")).toBe(false);
+    // The GPT-6 ids lead the fixed list (newest version first); gpt-5.6-sol stays the default.
+    expect(models.slice(0, 4).map((model) => model.id)).toEqual([
+      "gpt-6.1-sol",
+      "gpt-6-astra",
+      "gpt-6-sol",
+      "gpt-6-luna",
+    ]);
     expect(models.some((model) => model.id === "gpt-5.6-sol")).toBe(true);
     expect(models.some((model) => model.id === "gpt-5.6-terra")).toBe(true);
     expect(models.some((model) => model.id === "gpt-5.6-luna")).toBe(true);
@@ -149,6 +156,9 @@ describe("adapter model listing", () => {
     expect(first).toEqual(second);
     expect(first.some((model) => model.id === "gpt-5-pro")).toBe(true);
     expect(first.some((model) => model.id === "codex-mini-latest")).toBe(true);
+    for (const id of ["gpt-6.1-sol", "gpt-6-astra", "gpt-6-sol", "gpt-6-luna"]) {
+      expect(first.some((model) => model.id === id)).toBe(true);
+    }
   });
 
   it("refreshes cached codex models on demand", async () => {
@@ -163,7 +173,7 @@ describe("adapter model listing", () => {
       .mockResolvedValueOnce({
         ok: true,
         json: async () => ({
-          data: [{ id: "gpt-5.6-terra" }],
+          data: [{ id: "gpt-5.6-terra" }, { id: "gpt-6.2-preview" }],
         }),
       } as Response);
 
@@ -174,6 +184,10 @@ describe("adapter model listing", () => {
     expect(initial.some((model) => model.id === "gpt-5")).toBe(true);
     expect(refreshed.some((model) => model.id === "gpt-5.6-terra")).toBe(true);
     expect(refreshed.some((model) => model.id === "gpt-5.6-luna")).toBe(true);
+    expect(refreshed.some((model) => model.id === "gpt-6.1-sol")).toBe(true);
+    expect(refreshed.some((model) => model.id === "gpt-6-luna")).toBe(true);
+    // An unknown id returned by discovery is kept as written.
+    expect(refreshed.some((model) => model.id === "gpt-6.2-preview")).toBe(true);
   });
 
   it("falls back to static codex models when OpenAI model discovery fails", async () => {
