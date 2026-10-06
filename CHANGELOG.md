@@ -6,6 +6,13 @@ All notable changes to this repository should be recorded here.
 
 ## Unreleased
 
+- **[#150]** Pin the Codex client under `codex-acp` 1.1.14 to `@openai/codex`
+  0.160.0 with a scoped pnpm override, so Codex agents can run the GPT-6
+  models (the server refuses them from 0.147.0 with HTTP 400). The lockfile
+  changes only `@openai/codex` and its platform packages, plus one
+  `@babel/runtime` line that pnpm re-resolved. A frozen reinstall and a
+  restart are needed to take effect.
+
 - **[#144]** Pass the configured bind host to detect-port when choosing the
   listen port, so a port held on another address of the machine no longer
   moves the server. Add opt-in `PAPERCLIP_STRICT_PORT=true` to fail startup
