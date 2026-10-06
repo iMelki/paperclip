@@ -1,5 +1,7 @@
 # Paperclip Open Tasks
 
+> GitHub issues are the authoritative tracker. This file is a convenience index and can lag behind GitHub.
+
 ## Next 15 Focus Queue
 
 Refreshed 2026-09-28 against GitHub. The first four rows support the current GitHub
@@ -8,7 +10,7 @@ integration outcome; later rows remain queued and do not imply concurrent execut
 1. [paperclip#129 - Modernize Factory host for GitHub integration](https://github.com/iMelki/paperclip/issues/129): Resolve the isolated upstream merge, preserve deployed migrations, and qualify recovery before replacing the live host.
 2. [paperclip#126 - Qualify the GitHub issue import pilot](https://github.com/iMelki/paperclip/issues/126): Prove one allowlisted repository imports without GitHub writes or agent dispatch and repeats without duplicate issues.
 3. [paperclip#130 - Finish Windows plugin harness qualification](https://github.com/iMelki/paperclip/issues/130): Use the merged shell-free launcher and portable policy test to validate the secured plugin on the target host.
-4. [paperclip#131 - Reconcile the operator task index](https://github.com/iMelki/paperclip/issues/131): Keep the current focus queue linked to open GitHub records and retain completed work in dated history.
+4. [paperclip#56 - Normalize Vitest scratch roots and prove abnormal-exit cleanup](https://github.com/iMelki/paperclip/issues/56): Give each stable test run one owned scratch root for TEMP, TMP, and TMPDIR, and remove only that root after normal and abnormal exits without a broad sweeper.
 5. [paperclip#118 - Assess embedded PostgreSQL version exposure](https://github.com/iMelki/paperclip/issues/118): Select and qualify a patched database supplier while preserving compatibility and an independently verified restore path.
 6. [paperclip#35 - Prove Windows embedded database lifecycle](https://github.com/iMelki/paperclip/issues/35): Exercise native startup and shutdown ownership on disposable data without treating mocked tests as runtime proof.
 7. [paperclip#33 - Stop fixture process and disk leaks](https://github.com/iMelki/paperclip/issues/33): Prove shutdown before reclaiming fixture data so failed test runs leave recoverable evidence instead of orphan processes.
@@ -19,7 +21,7 @@ integration outcome; later rows remain queued and do not imply concurrent execut
 12. [paperclip#30 - Bind quality verdicts to source identity](https://github.com/iMelki/paperclip/issues/30): Attach quality evidence to exact work units and revisions so stale or unrelated checks cannot authorize delivery.
 13. [paperclip#94 - Repair browser-verified accessibility defects](https://github.com/iMelki/paperclip/issues/94): Address the remaining motion, typography, contrast, target-size, landmark, and route findings with fresh browser evidence.
 14. [paperclip#89 - Fix narrow-screen layout overflow](https://github.com/iMelki/paperclip/issues/89): Verify dashboard, member tables, and profile flows fit the 390px viewport without horizontal content escape.
-15. [paperclip#48 - Turn the UI audit into verified improvements](https://github.com/iMelki/paperclip/issues/48): Prioritize remaining component and usability work using existing shared UI assets and browser acceptance evidence.
+15. [paperclip#20 - Reap Windows test process trees and remove load-order timeout flakes](https://github.com/iMelki/paperclip/issues/20): Stop leaked test servers and embedded-database child processes so later suites stay within their time limits, then prove a full stable run leaves no new orphans.
 
 ## Current work
 
@@ -163,6 +165,38 @@ test. Do not bypass provenance or fall back to the canonical checkout.
 This file is the durable local index for active `paperclip` issues.
 
 ## Recently Closed Issues
+
+- [#6 - Design and build a landing page](https://github.com/iMelki/paperclip/issues/6) — **closed 2026-09-26 as not planned**
+  - Former goal: define and implement a landing page with clear audience, value proposition, proof, and CTA.
+
+- [#5 - Use relevant skills for market research, competitor analysis, and monetization planning](https://github.com/iMelki/paperclip/issues/5) — **closed 2026-09-26 as not planned**
+  - Former goal: map competitors, ICPs, monetization options, and positioning for paperclip.
+
+- [#48 - Expand UI/UX Awwwards report (2026-08-09) into practical tasks](https://github.com/iMelki/paperclip/issues/48) — **closed 2026-09-26 as completed**
+  - Moved from the Next 15 queue and the active list when GitHub closed it. The dated notes below are
+    history from before the closure; the 2026-08-28 line saying no close predates it.
+  - Fleet-wide code-only audit scored this app 7.8/10 against the shared
+    Awwwards rubric. Full report: `docs/uiux-awwwards-report-2026-08-09.md`.
+    Scores are code-inspection estimates pending a Frontend Proof Bundle.
+    Fleet rollup: iMelki/agent-settings#586.
+  - Gauntlet **21/21** (run 10, `f7a0160fc`, 2026-08-27): first-pass
+    `/ASS/design-guide` rendered 16 capsules, `mainTextLen` 17664, empty
+    `consoleErrors`. Receipt:
+    `docs/uiux/browser-evidence-2026-08-27/gauntlet-run10-f7a0160fc.json`.
+    #94 (six browser defects) and #89 (390 fine-pointer reflow) remain
+    open and are not closed by this receipt.
+  - 2026-08-28 carry: factory still `f7a0160fc` **21/21**. Awwwards **7.4**.
+    Design-guide SVG fixed. Local UI commits `a384c4dc2` + `145720089` are
+    **not** on origin. No issue close.
+
+- [#77 - check-no-git-push extension allowlist is fail-open by omission](https://github.com/iMelki/paperclip/issues/77) — **closed 2026-09-26 as completed**
+  - Index notes before closure (status then: local repair and proof complete):
+  - The scanner now rejects every undeclared file type under its required roots.
+    Only explicit declaration/document exclusions remain outside content scanning,
+    so a newly introduced extension becomes a named integrity failure rather than
+    disappearing from the denominator. A real scratch caller rejected the hostile
+    unknown extension at exit 2, then passed after a hash-verified restore; hosted
+    exact-head proof remains pending.
 
 - [#115 — Honest provider and biller budgets](https://github.com/iMelki/paperclip/issues/115) — **closed 2026-09-17 after fresh focused UI validation**
   - `ProviderQuotaCard.test.tsx` passed 3/3 on current `dev`: recorded spend
@@ -403,14 +437,6 @@ This file is the durable local index for active `paperclip` issues.
     entry; reducing or replacing the oversized ambient-env payload (and its
     unrelated-secret exposure) remains this issue's scope.
 
-- [#77 - check-no-git-push extension allowlist is fail-open by omission](https://github.com/iMelki/paperclip/issues/77) — **local repair and proof complete**
-  - The scanner now rejects every undeclared file type under its required roots.
-    Only explicit declaration/document exclusions remain outside content scanning,
-    so a newly introduced extension becomes a named integrity failure rather than
-    disappearing from the denominator. A real scratch caller rejected the hostile
-    unknown extension at exit 2, then passed after a hash-verified restore; hosted
-    exact-head proof remains pending.
-
 - [#46 - Make React Doctor hook execution reproducible and fail closed](https://github.com/iMelki/paperclip/issues/46)
   - Commit `124a48cc` removed the floating `npx react-doctor@latest` path and
     added bounded local resolution, minimized child environment, normalized
@@ -593,12 +619,6 @@ This file is the durable local index for active `paperclip` issues.
   - Current upstream added a native Gemini ACP lane, so `gemini_local` is no
     longer legacy-only. Reassess the remaining Antigravity-specific value
     instead of removing the current adapter.
-
-- [#5 - Use relevant skills for market research, competitor analysis, and monetization planning](https://github.com/iMelki/paperclip/issues/5)
-  - Goal: map competitors, ICPs, monetization options, and positioning for paperclip.
-
-- [#6 - Design and build a landing page](https://github.com/iMelki/paperclip/issues/6)
-  - Goal: define and implement a landing page with clear audience, value proposition, proof, and CTA.
 
 ## Recently Completed
 
@@ -800,18 +820,3 @@ This file is the durable local index for active `paperclip` issues.
   - Fixed in `paperclip-github-plugin` PR #3 (`2cff6ee`): Windows harnesses now
     invoke npm's bundled npx CLI through Node without a shell. The full local
     aggregate suite still has a separate CRLF assertion on an unchanged file.
-
-- [#48 Expand UI/UX Awwwards report (2026-08-09) into practical tasks](https://github.com/iMelki/paperclip/issues/48)
-  - Fleet-wide code-only audit scored this app 7.8/10 against the shared
-    Awwwards rubric. Full report: `docs/uiux-awwwards-report-2026-08-09.md`.
-    Scores are code-inspection estimates pending a Frontend Proof Bundle.
-    Fleet rollup: iMelki/agent-settings#586.
-  - Gauntlet **21/21** (run 10, `f7a0160fc`, 2026-08-27): first-pass
-    `/ASS/design-guide` rendered 16 capsules, `mainTextLen` 17664, empty
-    `consoleErrors`. Receipt:
-    `docs/uiux/browser-evidence-2026-08-27/gauntlet-run10-f7a0160fc.json`.
-    #94 (six browser defects) and #89 (390 fine-pointer reflow) remain
-    open and are not closed by this receipt.
-  - 2026-08-28 carry: factory still `f7a0160fc` **21/21**. Awwwards **7.4**.
-    Design-guide SVG fixed. Local UI commits `a384c4dc2` + `145720089` are
-    **not** on origin. No issue close.
