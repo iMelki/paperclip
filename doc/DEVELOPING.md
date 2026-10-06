@@ -862,6 +862,20 @@ Default behavior:
 - `local_trusted`: enabled
 - `authenticated`: disabled
 
+## Listen Port Selection
+
+The server listens on `PORT` (default `3100`) on the configured bind host. It checks that port on the bind host only. If the port is busy there, the server uses the next free port and logs a warning.
+
+To stop startup instead, set:
+
+```sh
+PAPERCLIP_STRICT_PORT=true
+```
+
+With this set, a busy port stops startup with an error that names the host and the port. Use it when something outside Paperclip points at a fixed port, such as a reverse proxy or a published route. The default is off.
+
+The embedded PostgreSQL port is chosen separately and is not affected.
+
 ## CLI Client Operations
 
 Paperclip CLI now includes client-side control-plane commands in addition to setup commands.

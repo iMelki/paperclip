@@ -6,6 +6,12 @@ All notable changes to this repository should be recorded here.
 
 ## Unreleased
 
+- **[#144]** Pass the configured bind host to detect-port when choosing the
+  listen port, so a port held on another address of the machine no longer
+  moves the server. Add opt-in `PAPERCLIP_STRICT_PORT=true` to fail startup
+  instead of moving to another port. Real-socket tests and docs included. A
+  wildcard listener on Windows is still not detected.
+
 - **[#140]** Registered the Hermes adapter's Vitest project in the root test
   workspace and grouped PR runner. Exact pre-push selection now runs its
   sibling tests locally; the registration and test-policy changes still

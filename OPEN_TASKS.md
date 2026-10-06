@@ -23,6 +23,12 @@ integration outcome; later rows remain queued and do not imply concurrent execut
 
 ## Current work
 
+- [#144 — Keep the listen port when only another address holds it](https://github.com/iMelki/paperclip/issues/144):
+  The server now probes only its bind host, with an opt-in strict port. Seven
+  real-socket tests and the startup suite pass locally; hosted CI and a
+  non-author review are open. The Windows wildcard-listener limit is a
+  follow-up. No live pin move is part of this change.
+
 - [#33 — Preserve fixture data when stop is unresolved](https://github.com/iMelki/paperclip/issues/33):
   Bounded PR117 follow-up rejects failed-stop reclamation and prevents further
   startup retries. Six mocked tests pass; four deliberate-bypass failures prove

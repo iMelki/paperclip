@@ -40,7 +40,7 @@ const {
       from: vi.fn(() => ({ where: vi.fn(async () => []) })),
     })),
   }) as never);
-  const detectPortMock = vi.fn(async (port: number) => port);
+  const detectPortMock = vi.fn(async ({ port }: { port: number; hostname: string }) => port);
   const deriveAuthTrustedOriginsMock = vi.fn(() => []);
   const resolveHeartbeatSchedulingSuppressionMock = vi.fn(() => ({
     suppressed: false,
@@ -157,6 +157,7 @@ function buildTestConfig(overrides: Record<string, unknown> = {}) {
     customBindHost: undefined,
     host: "127.0.0.1",
     port: 3210,
+    strictPort: false,
     allowedHostnames: [],
     authBaseUrlMode: "auto",
     authPublicBaseUrl: undefined,
@@ -590,6 +591,31 @@ describe("startServer authenticated auth origin setup", () => {
     createBetterAuthInstanceMock.mockReturnValue({});
     deriveAuthTrustedOriginsMock.mockReturnValue([]);
     process.env.BETTER_AUTH_SECRET = "test-secret";
+  });
+
+  it("checks port availability on the configured bind host", async () => {
+    loadConfigMock.mockReturnValue(buildTestConfig({
+      host: "127.0.0.1",
+      port: 3210,
+    }));
+
+    await startServer();
+
+    expect(detectPortMock).toHaveBeenCalledWith({
+      port: 3210,
+      hostname: "127.0.0.1",
+    });
+  });
+
+  it("refuses to move to another port when strict port mode is on", async () => {
+    loadConfigMock.mockReturnValue(buildTestConfig({
+      host: "127.0.0.1",
+      port: 3210,
+      strictPort: true,
+    }));
+    detectPortMock.mockResolvedValueOnce(3211);
+
+    await expect(startServer()).rejects.toThrow("Port 3210 is busy on 127.0.0.1");
   });
 
   it("derives trusted origins from the detected listen port before auth initializes", async () => {
