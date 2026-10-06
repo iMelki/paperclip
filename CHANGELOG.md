@@ -6,6 +6,13 @@ All notable changes to this repository should be recorded here.
 
 ## Unreleased
 
+- **[#148]** Added the GPT-6 model ids (`gpt-6.1-sol`, `gpt-6-astra`,
+  `gpt-6-sol`, `gpt-6-luna`) to the Codex adapter's fixed model list and its
+  fast-mode list, with matching help text, docs and tests. The default model
+  stays `gpt-5.6-sol`. The ids are selectable but need a newer Codex client
+  than this fork resolves today to run; the client upgrade is a separate
+  change, and this one touches no dependency or version pin.
+
 - **[#144]** Pass the configured bind host to detect-port when choosing the
   listen port, so a port held on another address of the machine no longer
   moves the server. Add opt-in `PAPERCLIP_STRICT_PORT=true` to fail startup
