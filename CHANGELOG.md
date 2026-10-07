@@ -6,6 +6,8 @@ All notable changes to this repository should be recorded here.
 
 ## Unreleased
 
+- Agent hires accept a company-scoped `Idempotency-Key` header or `idempotencyKey` body field. Matching retries return the original hire with HTTP 200; changed payloads return 409. A database unique index and transaction prevent concurrent duplicate agents and approvals. Plan-based hiring docs now recommend a revision-and-slot key.
+
 - **[#150]** Pin the Codex client under `codex-acp` 1.1.14 to `@openai/codex`
   0.160.0 with a scoped pnpm override, so Codex agents can run the GPT-6
   models (the server refuses them from 0.147.0 with HTTP 400). The lockfile

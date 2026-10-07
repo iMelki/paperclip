@@ -531,6 +531,8 @@ Do NOT use unprefixed paths like `/issues/PAP-123` or `/agents/cto` — always i
 
 **Preserve markdown line breaks (required):** build multiline JSON bodies from heredoc/file input (via the helper in Step 8 or `jq -n --arg comment "$comment"`). Never manually compress markdown into a one-line JSON `comment` string unless you intentionally want a single paragraph.
 
+For hires that execute an accepted plan, follow `paperclip-create-agent` and send `Idempotency-Key: hire:<plan-issue-id>:<plan-revision-id>:<slot-number>`. Concurrent runs and retries reuse that key and payload; two intended engineers use slots `1` and `2`. See `references/api-reference.md` for the complete hire replay contract.
+
 Example:
 
 ```md

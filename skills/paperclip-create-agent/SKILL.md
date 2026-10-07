@@ -95,10 +95,13 @@ Before submitting, walk the draft-review checklist end-to-end and fix any item t
 
 ### 8. Submit hire request
 
+Before submitting, choose `hire:<plan-issue-id>:<plan-revision-id>:<slot-number>` and keep it stable across concurrent runs and retries. Slots `1` and `2` represent two intended engineers in the same revision. Use a new revision id for a changed plan. See `references/api-reference.md` for replay, conflict, fingerprint, and retention rules.
+
 ```sh
 curl -sS -X POST "$PAPERCLIP_API_URL/api/companies/$PAPERCLIP_COMPANY_ID/agent-hires" \
   -H "Authorization: Bearer $PAPERCLIP_API_KEY" \
   -H "Content-Type: application/json" \
+  -H "Idempotency-Key: hire:<plan-issue-id>:<plan-revision-id>:1" \
   -d '{
     "name": "CTO",
     "role": "cto",
