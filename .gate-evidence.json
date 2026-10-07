@@ -684,6 +684,20 @@
         "restoredPass": "Exact original source bytes restored and independently read back. The identical focused command exited 0 with 11/11 passing. The full worker-manager suite also exited 0 with 56/56 passing. Source-only evidence; compiler, independent review, and live adoption are separate gates.",
         "restoredSourceSha256": "59866795649e6b9d3b17db05bf95eac4648e0c42f02e775f7b5460d0009e619e"
       }
+    },
+    {
+      "id": "agent-hire-company-key-payload-identity",
+      "path": "server/src/services/agent-hire-idempotency.ts",
+      "description": "A company-scoped unique claim returns the original hire on matching replay and rejects changed payloads before another hire is created.",
+      "negativeFixture": "server/src/__tests__/agent-hire-idempotency.test.ts",
+      "observedFailure": {
+        "date": "2026-10-07",
+        "command": "pnpm exec vitest run --config vitest.config.ts src/__tests__/agent-hire-idempotency.test.ts -t 'two concurrent identical|a repeated request|rejects a different payload|keeps requests without' (from server)",
+        "breakApplied": "Restored the original route and shared hire validator from the base commit while retaining the regression fixture and new schema, then restored exact candidate bytes in finally.",
+        "reason": "Three attributable failures: concurrent requests returned two 201 responses, repeated request returned 201 rather than 200, and a changed payload reused the key with 201 rather than 409. The no-key compatibility case passed as required by unchanged behavior.",
+        "exitCode": 1,
+        "restoredPass": "Same real temporary PostgreSQL fixture after restoration and final review fixes: 15 passed, zero failures or skips, exit 0, 38.52 seconds. Concurrent readback found one agent, one approval, one matching receipt, two activities and zero runs. Shared schema tests separately failed 9/10 against the original validator and passed 10/10 after restoration."
+      }
     }
   ]
 }

@@ -221,6 +221,7 @@ Use the same company skill keys or references in `desiredSkills` when hiring or 
 curl -sS -X POST "$PAPERCLIP_API_URL/api/companies/$PAPERCLIP_COMPANY_ID/agent-hires" \
   -H "Authorization: Bearer $PAPERCLIP_API_KEY" \
   -H "Content-Type: application/json" \
+  -H "Idempotency-Key: hire:<plan-issue-id>:<plan-revision-id>:1" \
   -d '{
     "name": "QA Browser Agent",
     "role": "qa",
@@ -233,6 +234,8 @@ curl -sS -X POST "$PAPERCLIP_API_URL/api/companies/$PAPERCLIP_COMPANY_ID/agent-h
     ]
   }'
 ```
+
+For plan-based hires, keep this key and payload stable on retries. Use slots `1` and `2` for two intended hires in one revision. A matching replay returns HTTP `200` with the original hire; conflicting payload reuse returns `409`. The hire idempotency contract is documented in `api-reference.md`.
 
 For direct create without approval:
 

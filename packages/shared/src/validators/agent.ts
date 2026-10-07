@@ -115,6 +115,7 @@ export const builtInAgentResetSchema = z.object({
 export type BuiltInAgentReset = z.infer<typeof builtInAgentResetSchema>;
 
 export const createAgentHireSchema = createAgentSchema.extend({
+  idempotencyKey: z.string().trim().min(1).max(255).regex(/^[\x21-\x7e]+$/).optional(),
   sourceIssueId: z.string().uuid().optional().nullable(),
   sourceIssueIds: z.array(z.string().uuid()).optional(),
 });
