@@ -14,6 +14,17 @@ All notable changes to this repository should be recorded here.
   contract. The summary stays under the GitHub size limit and counts the
   flags it leaves out. Refs #137.
 
+- **[#159]** A Codex ACP run whose whole reply is a provider error object now
+  fails. codex-acp 1.1.14 sends a rejected request (for example an unsupported
+  model id) as reply text and ends the turn normally, so the run was recorded
+  as succeeded and started corrective runs on the same dead model. The Codex
+  ACP executor now returns exit code 1, error code
+  `codex_provider_error_reply`, and the provider error type and message as the
+  failure reason. Only a reply that, without blank lines and the model-metadata
+  warning, parses as one JSON error object (`type: "error"`, or an `error`
+  object with HTTP status 400-599) matches. Prose that quotes an error stays a
+  success.
+
 - **[#148]** Corrected comments in the Codex adapter and its test that said
   `gpt-5.6-sol` "stays the default model". `DEFAULT_CODEX_LOCAL_MODEL` only
   sets an entry of the model dropdown list. A Codex agent with an empty model

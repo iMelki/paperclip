@@ -7,6 +7,7 @@ import { runChildProcess } from "@paperclipai/adapter-utils/server-utils";
 import {
   buildCodexAcpConfig,
   createCodexAcpExecutor,
+  detectCodexAcpProviderErrorReply,
   nodeVersionMeetsCodexAcpMinimum,
   resolveCodexAcpBillingIdentity,
   resolveCodexExecutionEngine,
@@ -1122,6 +1123,98 @@ describe("codex_local ACP lane", () => {
     expect(result.errorFamily).toBe("refresh_token_invalidated");
     expect(result.resultJson?.errorFamily).toBe("refresh_token_invalidated");
     expect(result.resultJson).not.toHaveProperty("codexCredentialTelemetry");
+  });
+
+  describe("error-only provider replies", () => {
+    // Captured reply text from codex-acp 1.1.14 (codex 0.160.0) when the
+    // configured model id is rejected by the ChatGPT-account backend.
+    const METADATA_WARNING =
+      "Warning: Model metadata for gpt-nonexistent-test not found. Defaulting to fallback metadata; this can degrade performance and cause issues.";
+    const PROVIDER_ERROR_JSON =
+      "{\"type\":\"error\",\"status\":400,\"error\":{\"type\":\"invalid_request_error\",\"message\":\"The 'gpt-nonexistent-test' model is not supported when using Codex with a ChatGPT account.\"}}";
+
+    async function runWithReply(prefix: string, chunks: string[]) {
+      const root = await makeTempRoot(prefix);
+      const execute = createCodexAcpExecutor({
+        createRuntime: (options: FakeRuntimeOptions) => new FakeRuntime(
+          options,
+          chunks.map((text) => ({ type: "text_delta", text, stream: "output", tag: "agent_message_chunk" })),
+        ) as never,
+      });
+      return execute(buildContext(root));
+    }
+
+    it("fails the run when the whole reply is a provider error object", async () => {
+      const result = await runWithReply("paperclip-codex-acp-provider-error-", [
+        `${METADATA_WARNING}\n\n`,
+        `${PROVIDER_ERROR_JSON}\n\n`,
+      ]);
+
+      expect(result.exitCode).toBe(1);
+      expect(result.errorCode).toBe("codex_provider_error_reply");
+      expect(result.errorMessage).toBe(
+        "Codex provider error (400 invalid_request_error): The 'gpt-nonexistent-test' model is not supported when using Codex with a ChatGPT account.",
+      );
+      expect(result.summary).toBe(result.errorMessage);
+      expect(result.resultJson).toMatchObject({
+        status: "failed",
+        stopReason: "end_turn",
+        providerError: {
+          status: 400,
+          type: "invalid_request_error",
+          message: "The 'gpt-nonexistent-test' model is not supported when using Codex with a ChatGPT account.",
+        },
+      });
+    });
+
+    it("fails the run when the warning and the error object share one line", async () => {
+      const result = await runWithReply("paperclip-codex-acp-provider-error-inline-", [
+        `${METADATA_WARNING} ${PROVIDER_ERROR_JSON}`,
+      ]);
+
+      expect(result.exitCode).toBe(1);
+      expect(result.errorCode).toBe("codex_provider_error_reply");
+    });
+
+    it("keeps a normal reply successful", async () => {
+      const result = await runWithReply("paperclip-codex-acp-plain-reply-", ["OK"]);
+
+      expect(result.exitCode).toBe(0);
+      expect(result.errorCode).toBeNull();
+      expect(result.errorMessage).toBeNull();
+      expect(result.summary).toBe("OK");
+    });
+
+    it("keeps prose that quotes a provider error successful", async () => {
+      const reply = `The last run failed with this provider error:\n${PROVIDER_ERROR_JSON}\nI switched the agent to a supported model.`;
+      const result = await runWithReply("paperclip-codex-acp-quoted-error-", [reply]);
+
+      expect(result.exitCode).toBe(0);
+      expect(result.errorCode).toBeNull();
+      expect(result.summary).toBe(reply);
+    });
+
+    it("keeps the existing behaviour for a warning-only or empty reply", async () => {
+      const warningOnly = await runWithReply("paperclip-codex-acp-warning-only-", [METADATA_WARNING]);
+      expect(warningOnly.exitCode).toBe(0);
+      expect(warningOnly.errorCode).toBeNull();
+      expect(warningOnly.summary).toBe(METADATA_WARNING);
+
+      const empty = await runWithReply("paperclip-codex-acp-empty-reply-", []);
+      expect(empty.exitCode).toBe(0);
+      expect(empty.errorCode).toBeNull();
+      expect(empty.summary).toBe("end_turn");
+    });
+
+    it("does not flag a JSON object that is not an error", () => {
+      expect(detectCodexAcpProviderErrorReply("{\"status\":\"ok\",\"result\":42}")).toBeNull();
+      expect(detectCodexAcpProviderErrorReply("{\"error\":{\"message\":\"x\"},\"status\":200}")).toBeNull();
+      expect(detectCodexAcpProviderErrorReply("[{\"type\":\"error\"}]")).toBeNull();
+      expect(detectCodexAcpProviderErrorReply("")).toBeNull();
+      expect(
+        detectCodexAcpProviderErrorReply("{\"error\":{\"type\":\"server_error\",\"message\":\"boom\"},\"status\":503}"),
+      ).toEqual({ status: 503, type: "server_error", message: "boom" });
+    });
   });
 
   it("resumes compatible ACP sessions on later Codex ACP runs", async () => {
