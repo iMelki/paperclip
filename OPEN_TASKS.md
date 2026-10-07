@@ -25,6 +25,13 @@ integration outcome; later rows remain queued and do not imply concurrent execut
 
 ## Current work
 
+- [#154 — Stabilize workspace containment test completion](https://github.com/iMelki/paperclip/issues/154):
+  Await tracked heartbeat executions before reading final state. The isolated
+  database fixture delays agent finalization to expose the old one-second wait.
+  Verification is recorded in `.gate-evidence.json` and
+  `doc/evidence/issue-154/verification.md`. Co-CTO review, merge, and hosted CI
+  remain open; this change does not update a live instance.
+
 - [#144 — Keep the listen port when only another address holds it](https://github.com/iMelki/paperclip/issues/144):
   The server now probes only its bind host, with an opt-in strict port. Seven
   real-socket tests and the startup suite pass locally; hosted CI and a
