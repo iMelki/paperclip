@@ -19,6 +19,14 @@ That's it. On first start the server:
 
 Data persists across restarts in `~/.paperclip/instances/default/db/`. To reset local dev data, delete that directory.
 
+On server startup, a live PID in `postmaster.pid` is not enough to reuse the
+embedded server. Paperclip queries PostgreSQL on the recorded port and checks
+that its `data_directory` matches the configured directory. A failed identity
+check logs a warning and uses the normal startup path, which removes the stale
+lock before starting PostgreSQL. A reachable server that reports another data
+directory is refused without removing the lock. This check applies to server
+startup; the CLI lifecycle checks remain separate.
+
 If you need to apply pending migrations manually, run:
 
 ```sh

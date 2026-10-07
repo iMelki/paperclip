@@ -25,6 +25,15 @@ integration outcome; later rows remain queued and do not imply concurrent execut
 
 ## Current work
 
+- [Embedded PostgreSQL reuse identity - upstream #6597](https://github.com/paperclipai/paperclip/issues/6597):
+  Server startup now verifies PostgreSQL's data directory on the PID file's
+  recorded port before reuse. The regression fails against the original server
+  entry point and passes after restoration. Unit, native Windows, and startup
+  checks cover recycled, live, and dead PIDs. Independent co-CTO review and
+  deployment readback remain open. Migration, CLI worktree, and routine consumers
+  retain their separate lifecycle checks; the broader shared approach is tracked
+  in [upstream PR #9769](https://github.com/paperclipai/paperclip/pull/9769).
+
 - [#144 — Keep the listen port when only another address holds it](https://github.com/iMelki/paperclip/issues/144):
   The server now probes only its bind host, with an opt-in strict port. Seven
   real-socket tests and the startup suite pass locally; hosted CI and a

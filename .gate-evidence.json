@@ -45,6 +45,32 @@
   },
   "gates": [
     {
+      "id": "embedded-postgres-reuse-identity",
+      "path": "server/src/embedded-postgres-reuse.ts",
+      "description": "Server startup reuses PostgreSQL only after a query on the recorded port confirms the configured data directory; recycled and dead PIDs enter normal startup.",
+      "negativeFixture": "server/src/__tests__/embedded-postgres-reuse-native.test.ts",
+      "observedFailure": {
+        "date": "2026-10-07",
+        "baseHead": "3f3f583d8bb1c2152fc7832d5e3c00f380e17349",
+        "command": "pnpm --filter @paperclipai/server exec vitest run src/__tests__/embedded-postgres-reuse-native.test.ts",
+        "breakApplied": "Extracted the exact isPidRunning/getRunningPid block from base server/src/index.ts into the helper's interface. The native fixture wrote its actual live Node PID into a temporary initialized cluster's PID file while the recorded port was closed. Readback proved different broken/fixed source hashes.",
+        "reason": "One test failed, zero skipped, exit 1: expected { pid: <live-node-pid>, port: <closed-test-port> } to be null. PID occupancy incorrectly accepted Node as PostgreSQL; there was no import, syntax, or startup-harness failure.",
+        "exitCode": 1,
+        "restoredPass": "The helper was restored byte-for-byte. The identical native command passed 1/1 with zero skips, exit 0, in 11.41 seconds. It rejected the live Node PID, retained the stale file for the normal start path, started actual PostgreSQL after stale-lock removal, reused the actual PostgreSQL PID and recorded port even with a different configured port, and confirmed no reuse after clean stop. The 16-case unit suite passed separately, exit 0.",
+        "restoredSourceSha256": "1bec93d49040c6195c30832bbf0e6cef5aa919474ec83543f8f3655264344d36"
+      },
+      "consumerProof": {
+        "negativeFixture": "server/src/__tests__/server-startup-feedback-export.test.ts",
+        "command": "pnpm --filter @paperclipai/server exec vitest run src/__tests__/server-startup-feedback-export.test.ts -t 'starts PostgreSQL and removes the recycled-PID lock'",
+        "breakApplied": "Restored the whole original server/src/index.ts from the base commit while keeping the new caller regression. No production process or data directory was used.",
+        "reason": "One failed, 21 deliberately unselected, exit 1: expected vi.fn() to be called once, but got 0 times. The real startServer entry point skipped embedded PostgreSQL startup for a live Node PID.",
+        "exitCode": 1,
+        "restoredPass": "Restored exact candidate index bytes and ran the complete focused startup file: 22/22 passed, zero skips, exit 0, 6.68 seconds. Four new cases verify stale-lock removal/start for recycled and dead PIDs, reuse of a verified server's recorded port, and refusal of another instance with its lock intact.",
+        "restoredIndexSha256": "b652a4044f249950b7f5828dcb11d424ba8e5d1b9a0f078adb5d8faa1ad30ead"
+      },
+      "limits": "Windows native fixture and mocked startup proof only. Production deployment, macOS/Linux native proof, longer crash-recovery readiness waits, and CLI lifecycle consumers remain separate."
+    },
+    {
       "id": "hermes-local-strict-isolation-launch",
       "path": "packages/adapters/hermes/src/server/strict-isolation.ts",
       "description": "Reject unsafe Hermes Local profile/home/env/limit/API-host inputs before child spawn.",
