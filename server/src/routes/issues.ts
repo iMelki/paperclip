@@ -8790,7 +8790,16 @@ export function issueRoutes(
         )).limit(1).then((rows) => rows[0] ?? null),
       ]);
       if (!hasUnresolvedBlocker && !pendingInteraction && !pendingApproval && !descriptor) {
-        res.status(422).json({ error: "Entering blocked requires unresolved blockers, a pending interaction/approval, or unblockDescriptor" });
+        res.status(422).json({
+          error: "Entering blocked requires unresolved blockers, a pending interaction/approval, or unblockDescriptor",
+          details: {
+            unblockDescriptor: {
+              owner: req.actor.type === "agent" ? { agentId: req.actor.agentId } : "board",
+              action: "Describe the concrete action needed to unblock this issue",
+            },
+            constraints: "action must be non-empty and at most 2000 characters. Agents may only name themselves as owner; board callers may also use owner: 'board', { userId: '<active-company-member-id>' }, or { agentId: '<company-agent-uuid>' }.",
+          },
+        });
         return;
       }
     }

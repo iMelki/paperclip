@@ -4,10 +4,13 @@ import request from "supertest";
 import { eq } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import {
+  activityLog,
+  agentWakeupRequests,
   agents,
   companies,
   createDb,
   heartbeatRuns,
+  heartbeatRunEvents,
   issueRelations,
   issues,
   projects,
@@ -194,8 +197,11 @@ describeEmbeddedPostgres("issue blocker diagnostics route", () => {
   }, EMBEDDED_POSTGRES_TEST_SETUP_TIMEOUT_MS);
 
   afterEach(async () => {
+    await db.delete(activityLog);
+    await db.delete(heartbeatRunEvents);
     await db.delete(issueRelations);
     await db.delete(heartbeatRuns);
+    await db.delete(agentWakeupRequests);
     await db.delete(issues);
     await db.delete(agents);
     await db.delete(projects);
@@ -204,6 +210,45 @@ describeEmbeddedPostgres("issue blocker diagnostics route", () => {
 
   afterAll(async () => {
     await tempDb?.cleanup();
+  });
+
+  it("returns an actionable blocked descriptor and accepts it for the current agent", async () => {
+    const company = await seedCompany(db);
+    const agent = await seedAgent(db, company.id);
+    await db.update(agents).set({ runtimeConfig: { heartbeat: { enabled: false, wakeOnDemand: false } } })
+      .where(eq(agents.id, agent.id));
+    const issue = await seedIssue(db, {
+      companyId: company.id,
+      title: "Needs an unblock action",
+      status: "in_progress",
+      assigneeAgentId: agent.id,
+    });
+    const [run] = await db.insert(heartbeatRuns).values({
+      companyId: company.id,
+      agentId: agent.id,
+      status: "running",
+      contextSnapshot: { issueId: issue.id },
+    }).returning();
+    await db.update(issues).set({ checkoutRunId: run!.id, executionRunId: run!.id }).where(eq(issues.id, issue.id));
+    const app = createApp(db, agentActor(company, agent, run!.id));
+    const denied = await request(app).patch(`/api/issues/${issue.id}`).send({ status: "blocked" });
+    expect(denied.status).toBe(422);
+    expect(denied.body.details).toMatchObject({
+      unblockDescriptor: {
+        owner: { agentId: agent.id },
+        action: expect.any(String),
+      },
+      constraints: expect.stringContaining("themselves"),
+    });
+    const accepted = await request(app).patch(`/api/issues/${issue.id}`).send({
+      status: "blocked",
+      unblockDescriptor: denied.body.details.unblockDescriptor,
+    });
+    expect(accepted.status).toBe(200);
+    expect(accepted.body.status).toBe("blocked");
+    expect(accepted.body.unblockDescriptor).toEqual(denied.body.details.unblockDescriptor);
+    expect((await db.select().from(issues).where(eq(issues.id, issue.id)))[0]?.unblockDescriptor)
+      .toEqual(denied.body.details.unblockDescriptor);
   });
 
   it("returns stale-blocker diagnosis and anomaly flags for a done blocker on a blocked issue", async () => {

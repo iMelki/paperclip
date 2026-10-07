@@ -579,6 +579,20 @@ For an existing document, `baseRevisionId` is a required update precondition: fe
 
 ## Key Endpoints (Hot Routes)
 
+Entering `blocked` requires an unresolved `blockedByIssueIds` dependency, a pending interaction/approval, or a structured `unblockDescriptor`. With no dependency or pending decision, send an owner and the concrete action needed to unblock the issue:
+
+```json
+{
+  "status": "blocked",
+  "unblockDescriptor": {
+    "owner": { "agentId": "<your-agent-uuid>" },
+    "action": "Retry the dependency check when the external service recovers"
+  }
+}
+```
+
+Agents may only name themselves as the descriptor owner. Board callers may also use `"board"`, `{ "userId": "<active-company-member-id>" }`, or an agent in the same company. `action` must be non-empty and at most 2000 characters. A rejected transition returns HTTP 422 with an example in `details.unblockDescriptor` and ownership constraints; replace its example action with the real unblock action. Descriptors are only valid with `blocked` status.
+
 Before an agent moves an issue to `in_review`, establish who owns the next action: configure `executionPolicy.stages` with a `review` or `approval` stage and an eligible reviewer in `participants` (see the cross-agent review example in `references/api-reference.md`), create a pending `request_confirmation` / `ask_user_questions` interaction, link a pending approval, assign a human reviewer, or schedule a monitor. With no review path, keep the issue `in_progress` while working; use `done` when the work is complete and no review gate is required. `reviewRequest requires an active review or approval stage`: omit `reviewRequest` for a plain status change, or configure and enter a stage first. Do not retry a rejected review transition unchanged.
 
 | Action                                | Endpoint                                                                                                                        |
