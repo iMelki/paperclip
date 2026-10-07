@@ -45,6 +45,20 @@
   },
   "gates": [
     {
+      "id": "server-startup-pre-push-contract-selection",
+      "path": "scripts/pre-push-test-selection.mjs",
+      "description": "Declares the existing real startServer contract suite for server/src/index.ts while retaining failure when that suite is missing.",
+      "negativeFixture": "scripts/pre-push-test-selection.test.mjs",
+      "observedFailure": {
+        "date": "2026-10-07",
+        "command": "node --test --test-name-pattern='selects the server startup contract for the server entry point' scripts/pre-push-test-selection.test.mjs",
+        "breakApplied": "Ran the new exact entry-point selection fixture before adding its declaration. The fixture contained the production source path, its real startup contract path, and an unrelated suite.",
+        "reason": "Exit 1, one failing selected test: actual selected files [] instead of [server/src/__tests__/server-startup-feedback-export.test.ts]. The real pre-push gate independently rejected the same source path as lacking a deterministic sibling or declared test after the full typecheck passed.",
+        "exitCode": 1,
+        "restoredPass": "Added only the exact source-to-contract declaration. node --test scripts/pre-push-test-selection.test.mjs passed 22/22, zero skipped, exit 0. The missing-contract case still rejects coverage and identifies the exact missing startup suite; unrelated tests stay unselected."
+      }
+    },
+    {
       "id": "embedded-postgres-reuse-identity",
       "path": "server/src/embedded-postgres-reuse.ts",
       "description": "Server startup reuses PostgreSQL only after a query on the recorded port confirms the configured data directory; recycled and dead PIDs enter normal startup.",
