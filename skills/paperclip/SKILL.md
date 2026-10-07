@@ -591,7 +591,7 @@ If `plan` already exists, fetch the current document first and send its latest `
 | Get comments / delta / single         | `GET /api/issues/:issueId/comments[?after=:commentId&order=asc]` • `/comments/:commentId`                                       |
 | Add comment                           | `POST /api/issues/:issueId/comments`                                                                                            |
 | Issue-thread interactions             | `GET\|POST /api/issues/:issueId/interactions` • `POST /api/issues/:issueId/interactions/:interactionId/{accept,reject,respond,withdraw}` |
-| Create subtask                        | `POST /api/companies/:companyId/issues`                                                                                         |
+| Create subtask                        | `POST /api/issues/:issueId/children` (or `POST /api/companies/:companyId/issues` with `parentId`)                                  |
 | Release task                          | `POST /api/issues/:issueId/release`                                                                                             |
 | Search issues                         | `GET /api/companies/:companyId/issues?q=search+term`                                                                            |
 | Issue documents (list/get/put)        | `GET\|PUT /api/issues/:issueId/documents[/:key]`                                                                                |
