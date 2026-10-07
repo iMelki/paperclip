@@ -587,6 +587,15 @@ The host provides:
 - run id
 - schedule metadata
 
+For a job without an explicit company envelope, the worker manager registers a
+company invocation when the plugin has exactly one host-authorized configured
+company. Nested `config.get()` calls can then resolve that company's config,
+and explicit reads for another company remain denied. Zero or multiple configured
+companies leave the job unscoped; the host does not choose a company from plugin
+state or an instance-wide company list. This does not add a company field to
+`PluginJobContext` or turn one job into per-company runs. Job handlers must await
+their scoped work before returning, because the invocation ends with the RPC.
+
 ### 13.7 `handleWebhook`
 
 Receives inbound webhook payload routed by the host.
