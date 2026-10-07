@@ -575,7 +575,7 @@ PUT /api/issues/{issueId}/documents/plan
 }
 ```
 
-If `plan` already exists, fetch the current document first and send its latest `baseRevisionId` when you update it.
+For an existing document, `baseRevisionId` is a required update precondition: fetch `GET /api/issues/:issueId/documents/:key` and copy `document.latestRevisionId` into the PUT payload's `baseRevisionId`. Use `null` only when creating a new document. Missing or stale revisions return HTTP 409 with `details.currentRevisionId`. Re-read the document, reconcile your changes with its current body, and retry using the latest revision; do not blindly overwrite a concurrent edit.
 
 ## Key Endpoints (Hot Routes)
 
