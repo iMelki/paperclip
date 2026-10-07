@@ -1,6 +1,9 @@
 #!/usr/bin/env node
 import { randomUUID } from "node:crypto";
+import { appendFileSync } from "node:fs";
 import { createInterface } from "node:readline";
+
+let typedSessionFailureSupported = false;
 
 function writeMessage(message) {
   process.stdout.write(`${JSON.stringify(message)}\n`);
@@ -8,6 +11,12 @@ function writeMessage(message) {
 
 async function handleRequest(request) {
   if (request.method === "initialize") {
+    const meta = request.params?.clientCapabilities?._meta;
+    const air = meta?.jetbrains?.air;
+    typedSessionFailureSupported = air?.version === 1 && air.capabilities?.includes("sessionFailure");
+    if (process.env.PAPERCLIP_ACPX_INITIALIZE_CANARY) {
+      appendFileSync(process.env.PAPERCLIP_ACPX_INITIALIZE_CANARY, `${JSON.stringify(meta ?? null)}\n`);
+    }
     process.stderr.write("Error handling request { method: 'nes/close' } { code: -32601 }\n");
     process.stderr.write("paperclip-acp-echo-agent started\n");
     return {
@@ -18,6 +27,20 @@ async function handleRequest(request) {
   }
   if (request.method === "session/new") return { sessionId: randomUUID() };
   if (request.method === "session/prompt") {
+    if (process.env.PAPERCLIP_ACPX_TYPED_FAILURE_CANARY && typedSessionFailureSupported) {
+      return {
+        stopReason: "end_turn",
+        _meta: { jetbrains: { air: {
+          version: 1,
+          sessionFailure: {
+            version: 1,
+            severity: process.env.PAPERCLIP_ACPX_TYPED_FAILURE_SEVERITY ?? "error",
+            category: process.env.PAPERCLIP_ACPX_TYPED_FAILURE_CATEGORY ?? "request",
+            title: process.env.PAPERCLIP_ACPX_TYPED_FAILURE_CANARY,
+          },
+        } } },
+      };
+    }
     writeMessage({
       jsonrpc: "2.0",
       method: "session/update",
