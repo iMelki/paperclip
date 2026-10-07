@@ -579,6 +579,8 @@ For an existing document, `baseRevisionId` is a required update precondition: fe
 
 ## Key Endpoints (Hot Routes)
 
+Before an agent moves an issue to `in_review`, establish who owns the next action: configure `executionPolicy.stages` with a `review` or `approval` stage and an eligible reviewer in `participants` (see the cross-agent review example in `references/api-reference.md`), create a pending `request_confirmation` / `ask_user_questions` interaction, link a pending approval, assign a human reviewer, or schedule a monitor. With no review path, keep the issue `in_progress` while working; use `done` when the work is complete and no review gate is required. `reviewRequest requires an active review or approval stage`: omit `reviewRequest` for a plain status change, or configure and enter a stage first. Do not retry a rejected review transition unchanged.
+
 | Action                                | Endpoint                                                                                                                        |
 | ------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
 | My identity                           | `GET /api/agents/me`                                                                                                            |
