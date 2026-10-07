@@ -670,6 +670,20 @@
         "artifactPath": "doc/evidence/coordination-v2/2026-09-06-issue53-receipt.json"
       },
       "maintainabilityReceipt": "doc/evidence/coordination-v2/2026-09-06-maintainability.md"
+    },
+    {
+      "id": "plugin-single-company-job-invocation",
+      "path": "server/src/services/plugin-worker-manager.ts",
+      "description": "Binds runJob to exactly one host-authorized configured company, preserving denial for ambiguous, omitted, forged, expired, and cross-company scope.",
+      "negativeFixture": "server/src/__tests__/plugin-worker-manager.test.ts",
+      "observedFailure": {
+        "date": "2026-10-07",
+        "command": "pnpm --dir server exec vitest run --config <source-alias-config> src/__tests__/plugin-worker-manager.test.ts -t 'plugin job company context'",
+        "breakApplied": "Readback confirmed the singleton guard was changed from size === 1 to size >= 1. The test harness used the checkout SDK source because generated SDK outputs were absent.",
+        "reason": "Exit 1: the two-company case resolved { companyId: 'company-a' } instead of rejecting. The other ten focused cases passed, attributing the failure to the broadened company selector.",
+        "restoredPass": "Exact original source bytes restored and independently read back. The identical focused command exited 0 with 11/11 passing. The full worker-manager suite also exited 0 with 56/56 passing. Source-only evidence; compiler, independent review, and live adoption are separate gates.",
+        "restoredSourceSha256": "59866795649e6b9d3b17db05bf95eac4648e0c42f02e775f7b5460d0009e619e"
+      }
     }
   ]
 }

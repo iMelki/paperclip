@@ -113,13 +113,13 @@ rl.on("line", (line) => {
       id: message.id,
       result: {
         ok: true,
-        supportedMethods: ["getData", "performAction"],
+        supportedMethods: ["getData", "performAction", "runJob"],
       },
     });
     return;
   }
 
-  if (method === "getData" || method === "performAction") {
+  if (method === "getData" || method === "performAction" || method === "runJob") {
     const mode = message.params?.params?.mode;
     if (mode === "late" || mode === "late-forged" || mode === "late-failed" || mode === "late-omit") {
       // Model a non-blocking action which returns immediately while an async
