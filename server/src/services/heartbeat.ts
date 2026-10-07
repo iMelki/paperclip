@@ -1904,7 +1904,7 @@ export async function assertGitWorktreeBaseWorkspaceReady(input: {
   if (strategyType !== "git_worktree") return;
 
   const issueLabel = input.issue.identifier ?? input.issue.id;
-  const remediation = "This task needs a project / project workspace or a reusable execution workspace before it can run.";
+  const remediation = "Attach a repository or execution workspace to the project, then retry this task.";
   const fail = (reason: string, message: string, extra: Record<string, unknown> = {}) => {
     throw new WorkspaceValidationFailure(message, {
       workspaceValidation: {
@@ -2162,7 +2162,7 @@ export async function assertGitSensitiveAdapterWorkspaceValid(input: {
   if (workspaceExpectation && effectiveCwd && !await hasGitMetadata(effectiveCwd)) {
     fail(
       "missing_git_metadata",
-      `Issue ${issue.identifier ?? issue.id} expected a git workspace for ${input.adapterType}, but "${effectiveCwd}" has no .git metadata.`,
+      `Issue ${issue.identifier ?? issue.id} expected a git workspace for ${input.adapterType}, but "${effectiveCwd}" has no .git metadata. Attach a repository or execution workspace to the project, then retry this task.`,
     );
   }
 
@@ -16134,6 +16134,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           keepIdleOnFailure:
             outcome === "failed" &&
             ((finalizedRun ? readHeartbeatRunErrorFamily(finalizedRun) === "provider_quota" : runErrorCode === "provider_quota") ||
+              runErrorCode === WORKSPACE_VALIDATION_FAILURE_CODE ||
               isWorkspaceSyncConflictFailure(adapterResult.errorMessage)),
           wasFirstHeartbeat: timerClaimWasFirstHeartbeat(run),
         },
@@ -16262,7 +16263,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
 
       await finalizeAgentStatus(agent.id, "failed", message, {
         wasFirstHeartbeat: timerClaimWasFirstHeartbeat(run),
-        keepIdleOnFailure: isWorkspaceSyncConflictFailure(message),
+        keepIdleOnFailure: workspaceValidationFailure !== null || isWorkspaceSyncConflictFailure(message),
       });
     }
     } catch (outerErr) {
@@ -16383,6 +16384,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           if (setupFailureWrite.updated) {
             await finalizeAgentStatus(run.agentId, "failed", message, {
               wasFirstHeartbeat: timerClaimWasFirstHeartbeat(run),
+              keepIdleOnFailure: workspaceValidationSetupFailure !== null,
             }).catch(() => undefined);
           }
           }
