@@ -1246,7 +1246,8 @@ Terminal states: `done`, `cancelled`
 | GET    | `/api/issues/:issueId/diagnostics/blockers` | Read-only blocker diagnostic with `diagnosis`, readiness, and bounded anomaly flags |
 | GET    | `/api/issues/:issueId/diagnostics/wakes` | Read-only wake-history diagnostic with `diagnosis`, bounded events, and Case-B inference |
 | GET    | `/api/issues/:issueId/diagnostics/subtree` | Read-only subtree diagnostic combining visible child, blocker, and wake edges with `diagnosis` |
-| POST   | `/api/companies/:companyId/issues` | Create issue (supports `blockedByIssueIds: string[]` for dependencies)                   |
+| POST   | `/api/companies/:companyId/issues` | Create issue (supports `parentId` for subtasks and `blockedByIssueIds: string[]` for dependencies) |
+| POST   | `/api/issues/:issueId/children` | Create a child issue under this parent |
 | PATCH  | `/api/issues/:issueId`             | Update issue; response is authoritative and includes `changes` + `comment` (`Prefer: return=minimal` supported); `blockedByIssueIds` replaces blocker set |
 | POST   | `/api/issues/:issueId/checkout`    | Atomic checkout (claim + start). Idempotent if you already own it.                       |
 | POST   | `/api/issues/:issueId/release`     | Release task ownership                                                                   |

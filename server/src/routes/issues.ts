@@ -1608,8 +1608,8 @@ const ACTIVE_REVIEW_APPROVAL_STATUSES = new Set(["pending", "revision_requested"
 const INVALID_AGENT_IN_REVIEW_DISPOSITION_MESSAGE =
   "invalid_issue_disposition: Agent-authored updates that move an issue to in_review must include a real review path. " +
   "This request would leave the issue in_review without anyone or anything owning the next action. " +
-  "Keep working instead of moving to review, create a request_confirmation or ask_user_questions interaction, " +
-  "link or request a pending approval, assign a human reviewer with assigneeUserId, set a typed executionState.currentParticipant through an execution policy, " +
+  "Keep the issue in_progress while working, create a request_confirmation or ask_user_questions interaction, " +
+  "link or request a pending approval, assign a human reviewer with assigneeUserId, configure executionPolicy.stages with a review or approval stage and an eligible participant, " +
   "or schedule an issue monitor for an external review/check. After creating one of those review paths, retry the status update.";
 
 function executionPrincipalsEqual(
@@ -8790,7 +8790,16 @@ export function issueRoutes(
         )).limit(1).then((rows) => rows[0] ?? null),
       ]);
       if (!hasUnresolvedBlocker && !pendingInteraction && !pendingApproval && !descriptor) {
-        res.status(422).json({ error: "Entering blocked requires unresolved blockers, a pending interaction/approval, or unblockDescriptor" });
+        res.status(422).json({
+          error: "Entering blocked requires unresolved blockers, a pending interaction/approval, or unblockDescriptor",
+          details: {
+            unblockDescriptor: {
+              owner: req.actor.type === "agent" ? { agentId: req.actor.agentId } : "board",
+              action: "Describe the concrete action needed to unblock this issue",
+            },
+            constraints: "action must be non-empty and at most 2000 characters. Agents may only name themselves as owner; board callers may also use owner: 'board', { userId: '<active-company-member-id>' }, or { agentId: '<company-agent-uuid>' }.",
+          },
+        });
         return;
       }
     }
@@ -8798,7 +8807,7 @@ export function issueRoutes(
       const existingExecutionState = parseIssueExecutionState(existing.executionState);
       if (!existingExecutionState || existingExecutionState.status !== "pending") {
         if (reviewRequest !== null) {
-          res.status(422).json({ error: "reviewRequest requires an active review or approval stage" });
+          res.status(422).json({ error: "reviewRequest requires an active review or approval stage. Configure executionPolicy.stages with an eligible review or approval participant and enter in_review, or omit reviewRequest and keep the issue in_progress while working." });
           return;
         }
       } else {

@@ -857,6 +857,8 @@ describeEmbeddedPostgres("heartbeat workspace branch containment", () => {
   const tempRoots: string[] = [];
 
   beforeAll(async () => {
+    // A temporary folder inside a checkout must not inherit its parent's Git repository.
+    vi.stubEnv("GIT_CEILING_DIRECTORIES", os.tmpdir());
     tempDb = await startEmbeddedPostgresTestDatabase("paperclip-branch-containment-");
     db = createDb(tempDb.connectionString);
   }, EMBEDDED_POSTGRES_TEST_SETUP_TIMEOUT_MS);
@@ -912,7 +914,68 @@ describeEmbeddedPostgres("heartbeat workspace branch containment", () => {
   afterAll(async () => {
     await db.$client.end();
     await tempDb?.cleanup();
+    vi.unstubAllEnvs();
   }, 60_000);
+
+  it.each(["project_primary", "git_worktree"] as const)("keeps the agent idle after a %s workspace configuration failure", async (strategy) => {
+    const cwd = await mkdtemp(path.join(os.tmpdir(), "paperclip-missing-git-"));
+    tempRoots.push(cwd);
+    expect(await readGit(cwd, ["rev-parse", "--show-toplevel"]).catch(() => null)).toBeNull();
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    const projectId = randomUUID();
+    const projectWorkspaceId = randomUUID();
+    const issueId = randomUUID();
+    const issuePrefix = `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`;
+    await instanceSettingsService(db).updateExperimental({ enableIsolatedWorkspaces: true });
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Workspace validation",
+      issuePrefix,
+      defaultResponsibleUserId: "board",
+    });
+    await db.insert(projects).values({ id: projectId, companyId, name: "Workspace validation" });
+    await db.insert(projectWorkspaces).values({
+      id: projectWorkspaceId, companyId, projectId, name: "Primary", cwd, isPrimary: true,
+    });
+    await db.insert(agents).values({
+      id: agentId,
+      companyId,
+      name: "Executor",
+      role: "engineer",
+      status: "idle",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: { heartbeat: { wakeOnDemand: true, maxConcurrentRuns: 1 } },
+    });
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      projectId,
+      projectWorkspaceId,
+      title: "Missing repository",
+      status: "todo",
+      assigneeAgentId: agentId,
+      responsibleUserId: "board",
+      issueNumber: 1,
+      identifier: `${issuePrefix}-1`,
+      executionWorkspaceSettings: strategy === "git_worktree"
+        ? { mode: "isolated_workspace", workspaceStrategy: { type: "git_worktree" } }
+        : { mode: "project_primary" },
+    });
+    const heartbeat = heartbeatService(db);
+    const run = await heartbeat.invoke(agentId, "assignment", { issueId, wakeReason: "issue_assigned" }, "system");
+    expect(run).not.toBeNull();
+    const finished = await waitForRunToFinish(heartbeat, run!.id);
+    expect(finished).toMatchObject({ status: "failed", errorCode: "workspace_validation_failed" });
+    expect(adapterExecute).not.toHaveBeenCalled();
+    await vi.waitFor(async () => {
+      const [agent] = await db.select({ status: agents.status, errorReason: agents.errorReason })
+        .from(agents).where(eq(agents.id, agentId));
+      expect(agent).toEqual({ status: "idle", errorReason: null });
+    });
+    expect(finished?.error).toContain("Attach a repository or execution workspace to the project");
+  }, 15_000);
 
   it("blocks projectless isolated git-worktree issues before dispatch", async () => {
     const companyId = randomUUID();

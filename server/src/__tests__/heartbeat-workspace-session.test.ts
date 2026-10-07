@@ -438,7 +438,7 @@ describe("assertGitSensitiveAdapterWorkspaceValid", () => {
         },
       }),
       "missing_git_metadata",
-      "has no .git metadata",
+      "Attach a repository or execution workspace to the project",
     );
   });
 
@@ -484,7 +484,7 @@ describe("assertGitWorktreeBaseWorkspaceReady", () => {
       },
     })).rejects.toMatchObject({
       code: "workspace_validation_failed",
-      message: expect.stringContaining("needs a project / project workspace or a reusable execution workspace"),
+      message: expect.stringContaining("Attach a repository or execution workspace to the project"),
       resultJson: {
         workspaceValidation: expect.objectContaining({
           reason: "git_worktree_base_agent_home",

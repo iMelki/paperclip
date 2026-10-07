@@ -56,11 +56,19 @@ export const createAgentInstructionsBundleSchema = z.object({
   }),
 });
 
-const agentModelProfileConfigSchema = z.object({
+const agentModelProfileConfigSchema = z.preprocess((value) => {
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    const profile = value as Record<string, unknown>;
+    if (profile.enabled === false && profile.adapterConfig === undefined) {
+      return { ...profile, adapterConfig: {} };
+    }
+  }
+  return value;
+}, z.object({
   enabled: z.boolean().optional(),
   label: z.string().trim().min(1).optional(),
   adapterConfig: adapterConfigSchema,
-}).strict();
+}).strict());
 
 export const agentRuntimeConfigSchema = z.object({
   modelProfiles: z.object({

@@ -277,10 +277,31 @@ describe("issue execution policy routes", () => {
     expect(res.status).toBe(422);
     expect(res.body.error).toContain("invalid_issue_disposition");
     expect(res.body.error).toContain("request_confirmation");
+    expect(res.body.error).toContain("executionPolicy.stages");
+    expect(res.body.error).toContain("in_progress");
     expect(res.body.details).toMatchObject({
       code: "invalid_issue_disposition",
       missing: "review_path",
     });
+    expect(mockIssueService.update).not.toHaveBeenCalled();
+  }, 15_000);
+
+  it("explains how to recover a review request without an active stage", async () => {
+    mockIssueService.getById.mockResolvedValue({
+      id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      companyId: "company-1",
+      status: "in_progress",
+      assigneeAgentId: "33333333-3333-4333-8333-333333333333",
+      assigneeUserId: null,
+      executionPolicy: null,
+      executionState: null,
+    });
+    const res = await request(await createApp())
+      .patch("/api/issues/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+      .send({ reviewRequest: { instructions: "Review the deliverable" } });
+    expect(res.status).toBe(422);
+    expect(res.body.error).toContain("executionPolicy.stages");
+    expect(res.body.error).toContain("omit reviewRequest");
     expect(mockIssueService.update).not.toHaveBeenCalled();
   });
 
