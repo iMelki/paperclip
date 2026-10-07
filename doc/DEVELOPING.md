@@ -258,6 +258,16 @@ These browser suites are intended for targeted local verification and CI, not th
 
 For normal issue work, start with the smallest targeted check that proves the change. Reserve repo-wide typecheck/build/test runs for PR-ready handoff or changes broad enough that narrow checks do not cover the risk.
 
+Serialized heartbeat integration tests must await `heartbeat.drainActiveRunExecutions()`
+before asserting final agent status or containment effects. A terminal
+`heartbeat_runs` row can precede agent status, recovery notices, and cleanup.
+The drain awaits the tracked execution and follow-up wakeup promises; the
+enclosing test timeout bounds hung work. Keep the existing
+`drainHeartbeatRunsToQuiescence` helper in teardown before deleting fixture rows.
+The workspace branch-containment suite delays the two marked fixtures' final
+idle write by 1.5 seconds in its disposable database. This makes the former
+one-second status wait fail even without host load.
+
 ## One-Command Local Run
 
 For a first-time local install, you can bootstrap and run in one command:

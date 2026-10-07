@@ -1,0 +1,16 @@
+ FAIL  src/__tests__/heartbeat-workspace-branch-containment.test.ts > heartbeat workspace branch containment > keeps the agent idle after a project_primary workspace configuration failure
+AssertionError: expected { Object (status, errorReason) } to deeply equal { status: 'idle', errorReason: null }
+
+- Expected
++ Received
+
+  {
+    "errorReason": null,
+-   "status": "idle",
++   "status": "running",
+  }
+
+
+Test Files: 1 failed
+Tests: 1 failed, 7 passed, 0 skipped (8 total)
+Exit code: 1

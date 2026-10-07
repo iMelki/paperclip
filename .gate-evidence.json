@@ -698,6 +698,26 @@
         "exitCode": 1,
         "restoredPass": "Same real temporary PostgreSQL fixture after restoration and final review fixes: 15 passed, zero failures or skips, exit 0, 38.52 seconds. Concurrent readback found one agent, one approval, one matching receipt, two activities and zero runs. Shared schema tests separately failed 9/10 against the original validator and passed 10/10 after restoration."
       }
+    },
+    {
+      "id": "heartbeat-workspace-containment-execution-completion",
+      "path": "server/src/__tests__/heartbeat-workspace-branch-containment.test.ts",
+      "description": "Await tracked heartbeat completion before final agent and containment assertions; reproduce delayed idle finalization in a disposable database.",
+      "negativeFixture": "server/src/__tests__/heartbeat-workspace-branch-containment.test.ts",
+      "observedFailure": {
+        "date": "2026-10-07",
+        "command": "(from server) node ../node_modules/vitest/vitest.mjs run src/__tests__/heartbeat-workspace-branch-containment.test.ts --reporter=default --reporter=json --outputFile.json=<run-report>",
+        "breakApplied": "Restored both original polling helpers and the default vi.waitFor status wait. Kept the 1.5-second final-idle-write trigger and marked agents. Verified the original waits were present and the replacement helper was absent before execution.",
+        "reason": "The project_primary configuration-failure case expected idle with null errorReason and read running with null errorReason. Exactly 1 failed, 7 passed, 0 skipped; exit 1.",
+        "exitCode": 1,
+        "artifactPath": "doc/evidence/issue-154/negative.txt",
+        "restoredPass": "Restored the saved fixed bytes, verified their SHA-256, then observed 10 consecutive runs: each 8 passed, 0 failed, 0 skipped, exit 0. Five unmodified baseline runs were green, so the negative proof uses a controlled slow final status write rather than claiming a natural flake reproduced.",
+        "restoredExitCode": 0,
+        "restoredArtifactPath": "doc/evidence/issue-154/runs.json",
+        "restoredTestSha256": "95d37d85c1d1ed93774e7383e6b8f6cbe0f17b94d80f0495cecbde040352c1e8",
+        "scope": "Serialized native Windows integration tests against disposable databases and Git fixtures. No live instance or hosted CI proof."
+      },
+      "maintainabilityReceipt": "doc/evidence/issue-154/verification.md"
     }
   ]
 }

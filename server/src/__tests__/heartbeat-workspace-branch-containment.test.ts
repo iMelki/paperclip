@@ -4,7 +4,7 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
-import { and, eq, inArray } from "drizzle-orm";
+import { and, eq, inArray, sql } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   activityLog,
@@ -124,11 +124,11 @@ type Heartbeat = ReturnType<typeof heartbeatService>;
 type BranchContainmentCallSite = "fresh_realize" | "persisted_restore" | "finalize";
 
 async function runGit(cwd: string, args: string[]) {
-  await execFileAsync("git", args, { cwd });
+  await execFileAsync("git", args, { cwd, windowsHide: true });
 }
 
 async function readGit(cwd: string, args: string[]) {
-  return (await execFileAsync("git", args, { cwd })).stdout.trim();
+  return (await execFileAsync("git", args, { cwd, windowsHide: true })).stdout.trim();
 }
 
 async function createGitRepo() {
@@ -163,13 +163,12 @@ async function createForwardBranchMismatch(input: {
   await runGit(input.worktreePath, ["commit", "-m", "Add actual branch work"]);
 }
 
-async function waitForRunToFinish(heartbeat: Heartbeat, runId: string, timeoutMs = 10_000) {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    const run = await heartbeat.getRun(runId);
-    if (run && run.status !== "queued" && run.status !== "running") return run;
-    await new Promise((resolve) => setTimeout(resolve, 50));
-  }
+// A terminal run row is written before agent status, recovery notices, and
+// the finally block settle. Await the tracked executions, including follow-up
+// wakeups, before reading their durable result. The enclosing test timeout
+// remains the bound for genuinely hung work; no separate polling budget races it.
+async function waitForRunToSettle(heartbeat: Heartbeat, runId: string) {
+  await heartbeat.drainActiveRunExecutions();
   return heartbeat.getRun(runId);
 }
 
@@ -187,66 +186,6 @@ async function deleteHeartbeatRunsForCleanup(db: Db) {
     }
   }
   throw lastError;
-}
-
-async function waitForContainmentSideEffects(input: {
-  db: Db;
-  companyId: string;
-  sourceIssueId: string;
-  sameWorkspaceSiblingId: string;
-  otherWorkspaceSiblingId: string;
-  timeoutMs?: number;
-}) {
-  const issueIds = [
-    input.sourceIssueId,
-    input.sameWorkspaceSiblingId,
-    input.otherWorkspaceSiblingId,
-  ];
-  const deadline = Date.now() + (input.timeoutMs ?? 10_000);
-  let latest: {
-    issueRows: Awaited<ReturnType<typeof readContainmentIssueRows>>;
-    actionRows: Awaited<ReturnType<typeof readContainmentActionRows>>;
-    comments: Awaited<ReturnType<typeof readContainmentComments>>;
-  } | null = null;
-  while (Date.now() < deadline) {
-    const [issueRows, actionRows, comments] = await Promise.all([
-      readContainmentIssueRows(input.db, issueIds),
-      readContainmentActionRows(input.db, input.companyId, issueIds),
-      readContainmentComments(input.db, issueIds),
-    ]);
-    latest = { issueRows, actionRows, comments };
-    const issueById = new Map(issueRows.map((issue) => [issue.id, issue]));
-    const source = issueById.get(input.sourceIssueId);
-    const sameWorkspaceSibling = issueById.get(input.sameWorkspaceSiblingId);
-    const otherWorkspaceSibling = issueById.get(input.otherWorkspaceSiblingId);
-    const recoveryActionId = actionRows.length === 1 ? actionRows[0]?.id : null;
-    const hasRecoveryActionComment = recoveryActionId
-      ? comments.some((comment) =>
-          comment.issueId === input.sourceIssueId &&
-          noticeMetadataReferencesRecoveryAction(comment.metadata, recoveryActionId))
-      : false;
-    if (
-      source?.status === "blocked" &&
-      source.executionRunId === null &&
-      source.checkoutRunId === null &&
-      sameWorkspaceSibling?.status === "in_progress" &&
-      sameWorkspaceSibling.executionRunId === null &&
-      sameWorkspaceSibling.checkoutRunId === null &&
-      otherWorkspaceSibling?.status === "in_progress" &&
-      otherWorkspaceSibling.executionRunId === null &&
-      otherWorkspaceSibling.checkoutRunId === null &&
-      actionRows.length === 1 &&
-      hasRecoveryActionComment
-    ) {
-      return latest;
-    }
-    await new Promise((resolve) => setTimeout(resolve, 50));
-  }
-  return latest ?? {
-    issueRows: await readContainmentIssueRows(input.db, issueIds),
-    actionRows: await readContainmentActionRows(input.db, input.companyId, issueIds),
-    comments: await readContainmentComments(input.db, issueIds),
-  };
 }
 
 function readContainmentIssueRows(db: Db, issueIds: string[]) {
@@ -590,7 +529,7 @@ async function expectContainedWorkspaceBranchFailure(input: {
   expectedBranch: string;
   actualBranch: string;
 }) {
-  const finishedRun = await waitForRunToFinish(input.heartbeat, input.runId, 10_000);
+  const finishedRun = await waitForRunToSettle(input.heartbeat, input.runId);
   expect(finishedRun).toMatchObject({
     status: "failed",
     errorCode: "workspace_validation_failed",
@@ -628,13 +567,12 @@ async function expectContainedWorkspaceBranchFailure(input: {
   expect(provenance.expectedHeadSha).not.toBe(provenance.actualHeadSha);
   expect(provenance.plainLanguageReason).toEqual(expect.stringContaining("cannot prove a forward-only reconciliation"));
 
-  const { issueRows, actionRows, comments } = await waitForContainmentSideEffects({
-    db: input.db,
-    companyId: input.companyId,
-    sourceIssueId: input.sourceIssueId,
-    sameWorkspaceSiblingId: input.sameWorkspaceSiblingId,
-    otherWorkspaceSiblingId: input.otherWorkspaceSiblingId,
-  });
+  const issueIds = [input.sourceIssueId, input.sameWorkspaceSiblingId, input.otherWorkspaceSiblingId];
+  const [issueRows, actionRows, comments] = await Promise.all([
+    readContainmentIssueRows(input.db, issueIds),
+    readContainmentActionRows(input.db, input.companyId, issueIds),
+    readContainmentComments(input.db, issueIds),
+  ]);
   const issueById = new Map(issueRows.map((issue) => [issue.id, issue]));
   expect(issueById.get(input.sourceIssueId)).toMatchObject({
     status: "blocked",
@@ -711,7 +649,7 @@ async function expectForwardBranchReconciled(input: {
   expectsExistingRecordUpdate: boolean;
   expectedResolvedRecoveryActionFingerprint?: string | null;
 }) {
-  const finishedRun = await waitForRunToFinish(input.heartbeat, input.runId, 10_000);
+  const finishedRun = await waitForRunToSettle(input.heartbeat, input.runId);
   expect(finishedRun).toMatchObject({
     status: "succeeded",
     errorCode: null,
@@ -861,6 +799,16 @@ describeEmbeddedPostgres("heartbeat workspace branch containment", () => {
     vi.stubEnv("GIT_CEILING_DIRECTORIES", os.tmpdir());
     tempDb = await startEmbeddedPostgresTestDatabase("paperclip-branch-containment-");
     db = createDb(tempDb.connectionString);
+    // Reproduce a slow final status write without adding host CPU pressure.
+    // Only the marked invalid-workspace fixtures take this 1.5 s delay; this
+    // exceeds vi.waitFor's old 1 s default even on an otherwise idle host.
+    await db.execute(sql`create function containment_test_delay_idle() returns trigger as $$
+      begin perform pg_sleep(1.5); return new; end;
+    $$ language plpgsql`);
+    await db.execute(sql`create trigger containment_test_delay_idle before update on agents
+      for each row when (old.status = 'running' and new.status = 'idle'
+        and new.metadata->>'containmentFinalizationDelay' = 'true')
+      execute function containment_test_delay_idle()`);
   }, EMBEDDED_POSTGRES_TEST_SETUP_TIMEOUT_MS);
 
   afterEach(async () => {
@@ -943,6 +891,7 @@ describeEmbeddedPostgres("heartbeat workspace branch containment", () => {
       companyId,
       name: "Executor",
       role: "engineer",
+      metadata: { containmentFinalizationDelay: true },
       status: "idle",
       adapterType: "codex_local",
       adapterConfig: {},
@@ -966,14 +915,12 @@ describeEmbeddedPostgres("heartbeat workspace branch containment", () => {
     const heartbeat = heartbeatService(db);
     const run = await heartbeat.invoke(agentId, "assignment", { issueId, wakeReason: "issue_assigned" }, "system");
     expect(run).not.toBeNull();
-    const finished = await waitForRunToFinish(heartbeat, run!.id);
+    const finished = await waitForRunToSettle(heartbeat, run!.id);
     expect(finished).toMatchObject({ status: "failed", errorCode: "workspace_validation_failed" });
     expect(adapterExecute).not.toHaveBeenCalled();
-    await vi.waitFor(async () => {
-      const [agent] = await db.select({ status: agents.status, errorReason: agents.errorReason })
-        .from(agents).where(eq(agents.id, agentId));
-      expect(agent).toEqual({ status: "idle", errorReason: null });
-    });
+    const [agent] = await db.select({ status: agents.status, errorReason: agents.errorReason })
+      .from(agents).where(eq(agents.id, agentId));
+    expect(agent).toEqual({ status: "idle", errorReason: null });
     expect(finished?.error).toContain("Attach a repository or execution workspace to the project");
   }, 15_000);
 
