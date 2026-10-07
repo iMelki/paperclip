@@ -6,6 +6,12 @@ All notable changes to this repository should be recorded here.
 
 ## Unreleased
 
+- **[#148]** Corrected comments in the Codex adapter and its test that said
+  `gpt-5.6-sol` "stays the default model". `DEFAULT_CODEX_LOCAL_MODEL` only
+  sets an entry of the model dropdown list. A Codex agent with an empty model
+  field runs without `--model`, so it uses the `model` key of its company's
+  Codex home `config.toml`. Comments only; no code or assertion changed.
+
 - Agent hires accept a company-scoped `Idempotency-Key` header or `idempotencyKey` body field. Matching retries return the original hire with HTTP 200; changed payloads return 409. A database unique index and transaction prevent concurrent duplicate agents and approvals. Plan-based hiring docs now recommend a revision-and-slot key.
 
 - **[#150]** Pin the Codex client under `codex-acp` 1.1.14 to `@openai/codex`
