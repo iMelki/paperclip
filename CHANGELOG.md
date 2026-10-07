@@ -6,6 +6,14 @@ All notable changes to this repository should be recorded here.
 
 ## Unreleased
 
+- **[#160]** The PR security step now lists each flag (check name and file,
+  or package names) in the job log and in the `security-review` check-run
+  summary. For `secret-scan` flags it names only the pattern, never the
+  matched text. A failed draft-advisory call (403 for the workflow token on
+  this fork) is logged and no longer stops the check run or the exit-0
+  contract. The summary stays under the GitHub size limit and counts the
+  flags it leaves out. Refs #137.
+
 - **[#148]** Corrected comments in the Codex adapter and its test that said
   `gpt-5.6-sol` "stays the default model". `DEFAULT_CODEX_LOCAL_MODEL` only
   sets an entry of the model dropdown list. A Codex agent with an empty model
