@@ -6,6 +6,31 @@ All notable changes to this repository should be recorded here.
 
 ## Unreleased
 
+- **[#160]** The PR security step now lists each flag (check name and file,
+  or package names) in the job log and in the `security-review` check-run
+  summary. For `secret-scan` flags it names only the pattern, never the
+  matched text. A failed draft-advisory call (403 for the workflow token on
+  this fork) is logged and no longer stops the check run or the exit-0
+  contract. The summary stays under the GitHub size limit and counts the
+  flags it leaves out. Refs #137.
+
+- **[#159]** A Codex ACP run whose whole reply is a provider error object now
+  fails. codex-acp 1.1.14 sends a rejected request (for example an unsupported
+  model id) as reply text and ends the turn normally, so the run was recorded
+  as succeeded and started corrective runs on the same dead model. The Codex
+  ACP executor now returns exit code 1, error code
+  `codex_provider_error_reply`, and the provider error type and message as the
+  failure reason. Only a reply that, without blank lines and the model-metadata
+  warning, parses as one JSON error object (`type: "error"`, or an `error`
+  object with HTTP status 400-599) matches. Prose that quotes an error stays a
+  success.
+
+- **[#148]** Corrected comments in the Codex adapter and its test that said
+  `gpt-5.6-sol` "stays the default model". `DEFAULT_CODEX_LOCAL_MODEL` only
+  sets an entry of the model dropdown list. A Codex agent with an empty model
+  field runs without `--model`, so it uses the `model` key of its company's
+  Codex home `config.toml`. Comments only; no code or assertion changed.
+
 - Agent hires accept a company-scoped `Idempotency-Key` header or `idempotencyKey` body field. Matching retries return the original hire with HTTP 200; changed payloads return 409. A database unique index and transaction prevent concurrent duplicate agents and approvals. Plan-based hiring docs now recommend a revision-and-slot key.
 
 - **[#150]** Pin the Codex client under `codex-acp` 1.1.14 to `@openai/codex`

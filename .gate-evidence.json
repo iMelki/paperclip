@@ -7,7 +7,6 @@
     ".github/scripts/check-pr-dependencies.mjs",
     ".github/scripts/check-pr-linked-issue.mjs",
     ".github/scripts/check-pr-lockfile.mjs",
-    ".github/scripts/check-pr-security.mjs",
     ".github/scripts/check-pr-template.mjs",
     ".github/scripts/check-pr-test-coverage.mjs",
     ".github/workflows/agent-runtime-images.yml",
@@ -697,6 +696,20 @@
         "reason": "Three attributable failures: concurrent requests returned two 201 responses, repeated request returned 201 rather than 200, and a changed payload reused the key with 201 rather than 409. The no-key compatibility case passed as required by unchanged behavior.",
         "exitCode": 1,
         "restoredPass": "Same real temporary PostgreSQL fixture after restoration and final review fixes: 15 passed, zero failures or skips, exit 0, 38.52 seconds. Concurrent readback found one agent, one approval, one matching receipt, two activities and zero runs. Shared schema tests separately failed 9/10 against the original validator and passed 10/10 after restoration."
+      }
+    },
+    {
+      "id": "pr-security-flags-visible-after-advisory-403",
+      "path": ".github/scripts/check-pr-security.mjs",
+      "description": "When the draft-advisory POST fails (403 for the workflow GITHUB_TOKEN on a fork), every flag is still listed by check name and file in the job log and the security-review check-run summary, the matched secret text is never printed, and the script exits 0.",
+      "negativeFixture": ".github/scripts/tests/check-pr-security-advisory-403.test.mjs",
+      "observedFailure": {
+        "date": "2026-10-07",
+        "command": "node --test .github/scripts/tests/check-pr-security-advisory-403.test.mjs",
+        "breakApplied": "git restore --source=origin/dev --worktree restored the unfixed script (SHA-256 7f847be419a9b10a498a6dbe602a4d646cb080faddf70738e19d359503e63f8b); git diff against origin/dev was empty.",
+        "reason": "Exit 1 with 1 pass and 1 fail. The 403 case failed on its first assertion: the job log did not list 'ci-tampering .github/workflows/pr.yml'. Its stderr held only the flag count and the advisory 403, as in the fork CI logs. The no-flag control passed.",
+        "exitCode": 1,
+        "restoredPass": "The fixed script was copied back (SHA-256 648fd3561a9747935da5b1cb118b81adad300e46653e41948a11cf4867244c7d). The identical command exited 0 with 2/2 passing. All .github/scripts/tests files passed 149/149."
       }
     },
     {
