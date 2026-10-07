@@ -5,9 +5,12 @@ export const label = "Codex";
 
 export const SANDBOX_INSTALL_COMMAND = "npm install -g @openai/codex";
 
-// Use the concrete `gpt-5.6-sol` slug (Codex's own default for the 5.6 family) rather than the
-// bare `gpt-5.6` alias: OpenAI ships no model metadata for the bare slug, so passing it makes the
-// Codex CLI warn ("Model metadata for `gpt-5.6` not found") and fall back to generic context limits.
+// The concrete `gpt-5.6-sol` slug (Codex's own default for the 5.6 family) rather than the bare
+// `gpt-5.6` alias: OpenAI ships no model metadata for the bare slug, so passing it makes the Codex
+// CLI warn ("Model metadata for `gpt-5.6` not found") and fall back to generic context limits.
+// This constant only supplies an entry of the model dropdown list below; it is not applied when an
+// agent is created or run. An agent whose model field is empty runs without --model, so the Codex
+// CLI uses the `model` key of its company's Codex home config.toml.
 export const DEFAULT_CODEX_LOCAL_MODEL = "gpt-5.6-sol";
 export const DEFAULT_CODEX_LOCAL_BYPASS_APPROVALS_AND_SANDBOX = false;
 export const CODEX_LOCAL_FAST_MODE_SUPPORTED_MODELS = [
@@ -63,13 +66,15 @@ export function isCodexLocalFastModeSupported(model: string | null | undefined):
 }
 
 // Newest model version first, then by decreasing capability inside each version, older models at
-// the end. The GPT-6 ids lead the list, but gpt-5.6-sol stays the default model.
+// the end. The GPT-6 ids lead the list. This order only drives the model dropdown; the model a
+// new agent actually uses when its model field is empty is the `model` key of its company's Codex
+// home config.toml.
 export const models = [
   { id: "gpt-6.1-sol", label: "gpt-6.1-sol" },
   { id: "gpt-6-astra", label: "gpt-6-astra" },
   { id: "gpt-6-sol", label: "gpt-6-sol" },
   { id: "gpt-6-luna", label: "gpt-6-luna" },
-  // DEFAULT_CODEX_LOCAL_MODEL is gpt-5.6-sol, so it doubles as the first (default) 5.6 entry.
+  // DEFAULT_CODEX_LOCAL_MODEL is gpt-5.6-sol, so it doubles as the first 5.6 entry in the list.
   { id: DEFAULT_CODEX_LOCAL_MODEL, label: DEFAULT_CODEX_LOCAL_MODEL },
   { id: "gpt-5.6-terra", label: "gpt-5.6-terra" },
   { id: "gpt-5.6-luna", label: "gpt-5.6-luna" },

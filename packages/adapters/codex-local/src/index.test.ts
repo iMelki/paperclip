@@ -21,11 +21,12 @@ describe("codex local adapter metadata", () => {
   it("advertises current GPT-5.6 Codex-capable OpenAI models by default", () => {
     const modelIds = models.map((model) => model.id);
 
-    // Default to the concrete gpt-5.6-sol slug — Codex ships no metadata for the bare gpt-5.6
-    // alias, so it must not be advertised or used as the default (it triggers a fallback warning).
+    // The list constant is the concrete gpt-5.6-sol slug — Codex ships no metadata for the bare
+    // gpt-5.6 alias, so it must not be advertised (it triggers a fallback warning).
     expect(DEFAULT_CODEX_LOCAL_MODEL).toBe("gpt-5.6-sol");
     // Newest model version first, then by capability within a version. The GPT-6 ids lead the
-    // list, and gpt-5.6-sol stays the default.
+    // list. This order only drives the model dropdown; an agent with an empty model field uses
+    // the `model` key of its company's Codex home config.toml.
     expect(modelIds.slice(0, 7)).toEqual([
       "gpt-6.1-sol",
       "gpt-6-astra",
