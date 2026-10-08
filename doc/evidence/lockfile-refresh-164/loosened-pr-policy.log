@@ -62,9 +62,9 @@ not ok 10 - PR policy accepts the exact bot branch and rejects mismatched base o
   failureType: 'testCodeFailure'
   error: |-
     example chore/refresh-lockfile-dev -> dev
-    
+
     false !== true
-    
+
   code: 'ERR_ASSERTION'
   name: 'AssertionError'
   expected: true

@@ -74,7 +74,7 @@ not ok 12 - manual inputs default to dev; the push trigger remains master only
   failureType: 'testCodeFailure'
   error: |-
     The input did not match the regular expression /      ref:\n(?:.*\n)*?        default: dev\n        type: string/. Input:
-    
+
     'name: Refresh Lockfile\n' +
       '\n' +
       'on:\n' +
@@ -171,23 +171,23 @@ not ok 12 - manual inputs default to dev; the push trigger remains master only
       '          GH_TOKEN: ${{ github.token }}\n' +
       '        run: |\n' +
       '          gh pr merge --auto --squash --delete-branch "${{ steps.upsert-pr.outputs.pr_url }}"\n'
-    
+
   code: 'ERR_ASSERTION'
   name: 'AssertionError'
   expected:
   actual: |-
     name: Refresh Lockfile
-    
+
     on:
       push:
         branches:
           - master
       workflow_dispatch:
-    
+
     concurrency:
       group: refresh-lockfile-master
       cancel-in-progress: false
-    
+
     jobs:
       refresh:
         runs-on: ubuntu-latest
@@ -195,26 +195,26 @@ not ok 12 - manual inputs default to dev; the push trigger remains master only
         permissions:
           contents: write
           pull-requests: write
-    
+
         steps:
           - name: Checkout repository
             uses: actions/checkout@v7
-    
+
           - name: Setup pnpm
             uses: pnpm/action-setup@v6
             with:
               version: 9.15.4
               run_install: false
-    
+
           - name: Setup Node.js
             uses: actions/setup-node@v7
             with:
               node-version: 20
               cache: pnpm
-    
+
           - name: Refresh pnpm lockfile
             run: pnpm install --lockfile-only --ignore-scripts --no-frozen-lockfile
-    
+
           - name: Fail on unexpected file changes
             run: |
               changed="$(git status --porcelain)"
@@ -227,7 +227,7 @@ not ok 12 - manual inputs default to dev; the push trigger remains master only
                 echo "$changed"
                 exit 1
               fi
-    
+
           - name: Create or update pull request
             id: upsert-pr
             env:
@@ -239,16 +239,16 @@ not ok 12 - manual inputs default to dev; the push trigger remains master only
                 echo "pr_url=" >> "$GITHUB_OUTPUT"
                 exit 0
               fi
-    
+
               BRANCH="chore/refresh-lockfile"
               git config user.name "lockfile-bot"
               git config user.email "lockfile-bot@users.noreply.github.com"
-    
+
               git checkout -B "$BRANCH"
               git add pnpm-lock.yaml
               git commit -m "chore(lockfile): refresh pnpm-lock.yaml"
               git push --force origin "$BRANCH"
-    
+
               # Only reuse an open PR from this repository owner, not a fork with the same branch name.
               pr_url="$(
                 gh pr list --state open --head "$BRANCH" --json url,headRepositoryOwner \
@@ -265,14 +265,14 @@ not ok 12 - manual inputs default to dev; the push trigger remains master only
                 echo "PR already exists: $pr_url"
               fi
               echo "pr_url=$pr_url" >> "$GITHUB_OUTPUT"
-    
+
           - name: Enable auto-merge for lockfile PR
             if: steps.upsert-pr.outputs.pr_url != ''
             env:
               GH_TOKEN: ${{ github.token }}
             run: |
               gh pr merge --auto --squash --delete-branch "${{ steps.upsert-pr.outputs.pr_url }}"
-    
+
   operator: 'match'
   stack: |-
     TestContext.<anonymous> (file:///<repo>/scripts/refresh-lockfile.test.mjs:101:12)
@@ -312,7 +312,7 @@ not ok 14 - dev refresh reuses only the matching head, base and repository owner
   failureType: 'testCodeFailure'
   error: |-
     The input did not match the regular expression /git\tpush\t--force\torigin\tchore\/refresh-lockfile-dev/. Input:
-    
+
     'git\tdiff\t--quiet\t--\tpnpm-lock.yaml\n' +
       'git\tconfig\tuser.name\tlockfile-bot\n' +
       'git\tconfig\tuser.email\tlockfile-bot@users.noreply.github.com\n' +
@@ -322,7 +322,7 @@ not ok 14 - dev refresh reuses only the matching head, base and repository owner
       'git\tpush\t--force\torigin\tchore/refresh-lockfile\n' +
       'gh\tpr\tlist\t--state\topen\t--head\tchore/refresh-lockfile\t--json\turl,headRepositoryOwner\t--jq\t.[] | select(.headRepositoryOwner.login == "example") | .url\n' +
       'gh\tpr\tcreate\t--head\tchore/refresh-lockfile\t--title\tchore(lockfile): refresh pnpm-lock.yaml\t--body\tAuto-generated lockfile refresh after dependencies changed on master. This PR only updates pnpm-lock.yaml.\n'
-    
+
   code: 'ERR_ASSERTION'
   name: 'AssertionError'
   expected:
@@ -336,7 +336,7 @@ not ok 14 - dev refresh reuses only the matching head, base and repository owner
     git	push	--force	origin	chore/refresh-lockfile
     gh	pr	list	--state	open	--head	chore/refresh-lockfile	--json	url,headRepositoryOwner	--jq	.[] | select(.headRepositoryOwner.login == "example") | .url
     gh	pr	create	--head	chore/refresh-lockfile	--title	chore(lockfile): refresh pnpm-lock.yaml	--body	Auto-generated lockfile refresh after dependencies changed on master. This PR only updates pnpm-lock.yaml.
-    
+
   operator: 'match'
   stack: |-
     TestContext.<anonymous> (file:///<repo>/scripts/refresh-lockfile.test.mjs:121:10)
@@ -356,7 +356,7 @@ not ok 15 - wrong-base, wrong-head and fork PRs cannot prevent creating a dev PR
   failureType: 'testCodeFailure'
   error: |-
     The input did not match the regular expression /gh\tpr\tcreate\t--head\tchore\/refresh-lockfile-dev\t--base\tdev/. Input:
-    
+
     'git\tdiff\t--quiet\t--\tpnpm-lock.yaml\n' +
       'git\tconfig\tuser.name\tlockfile-bot\n' +
       'git\tconfig\tuser.email\tlockfile-bot@users.noreply.github.com\n' +
@@ -366,7 +366,7 @@ not ok 15 - wrong-base, wrong-head and fork PRs cannot prevent creating a dev PR
       'git\tpush\t--force\torigin\tchore/refresh-lockfile\n' +
       'gh\tpr\tlist\t--state\topen\t--head\tchore/refresh-lockfile\t--json\turl,headRepositoryOwner\t--jq\t.[] | select(.headRepositoryOwner.login == "example") | .url\n' +
       'gh\tpr\tcreate\t--head\tchore/refresh-lockfile\t--title\tchore(lockfile): refresh pnpm-lock.yaml\t--body\tAuto-generated lockfile refresh after dependencies changed on master. This PR only updates pnpm-lock.yaml.\n'
-    
+
   code: 'ERR_ASSERTION'
   name: 'AssertionError'
   expected:
@@ -380,7 +380,7 @@ not ok 15 - wrong-base, wrong-head and fork PRs cannot prevent creating a dev PR
     git	push	--force	origin	chore/refresh-lockfile
     gh	pr	list	--state	open	--head	chore/refresh-lockfile	--json	url,headRepositoryOwner	--jq	.[] | select(.headRepositoryOwner.login == "example") | .url
     gh	pr	create	--head	chore/refresh-lockfile	--title	chore(lockfile): refresh pnpm-lock.yaml	--body	Auto-generated lockfile refresh after dependencies changed on master. This PR only updates pnpm-lock.yaml.
-    
+
   operator: 'match'
   stack: |-
     TestContext.<anonymous> (file:///<repo>/scripts/refresh-lockfile.test.mjs:130:10)
@@ -400,7 +400,7 @@ not ok 16 - master refresh still pushes and creates a PR targeting master
   failureType: 'testCodeFailure'
   error: |-
     The input did not match the regular expression /git\tpush\t--force\torigin\tchore\/refresh-lockfile-master/. Input:
-    
+
     'git\tdiff\t--quiet\t--\tpnpm-lock.yaml\n' +
       'git\tconfig\tuser.name\tlockfile-bot\n' +
       'git\tconfig\tuser.email\tlockfile-bot@users.noreply.github.com\n' +
@@ -410,7 +410,7 @@ not ok 16 - master refresh still pushes and creates a PR targeting master
       'git\tpush\t--force\torigin\tchore/refresh-lockfile\n' +
       'gh\tpr\tlist\t--state\topen\t--head\tchore/refresh-lockfile\t--json\turl,headRepositoryOwner\t--jq\t.[] | select(.headRepositoryOwner.login == "example") | .url\n' +
       'gh\tpr\tcreate\t--head\tchore/refresh-lockfile\t--title\tchore(lockfile): refresh pnpm-lock.yaml\t--body\tAuto-generated lockfile refresh after dependencies changed on master. This PR only updates pnpm-lock.yaml.\n'
-    
+
   code: 'ERR_ASSERTION'
   name: 'AssertionError'
   expected:
@@ -424,7 +424,7 @@ not ok 16 - master refresh still pushes and creates a PR targeting master
     git	push	--force	origin	chore/refresh-lockfile
     gh	pr	list	--state	open	--head	chore/refresh-lockfile	--json	url,headRepositoryOwner	--jq	.[] | select(.headRepositoryOwner.login == "example") | .url
     gh	pr	create	--head	chore/refresh-lockfile	--title	chore(lockfile): refresh pnpm-lock.yaml	--body	Auto-generated lockfile refresh after dependencies changed on master. This PR only updates pnpm-lock.yaml.
-    
+
   operator: 'match'
   stack: |-
     TestContext.<anonymous> (file:///<repo>/scripts/refresh-lockfile.test.mjs:138:10)

@@ -32,9 +32,9 @@ not ok 5 - passes for the refresh bot with a branch matching base dev
   failureType: 'testCodeFailure'
   error: |-
     Expected values to be strictly equal:
-    
+
     false !== true
-    
+
   code: 'ERR_ASSERTION'
   name: 'AssertionError'
   expected: true
@@ -58,9 +58,9 @@ not ok 6 - passes for the refresh bot with a branch matching base master
   failureType: 'testCodeFailure'
   error: |-
     Expected values to be strictly equal:
-    
+
     false !== true
-    
+
   code: 'ERR_ASSERTION'
   name: 'AssertionError'
   expected: true
@@ -84,9 +84,9 @@ not ok 7 - passes for the refresh bot with a branch matching base release/stable
   failureType: 'testCodeFailure'
   error: |-
     Expected values to be strictly equal:
-    
+
     false !== true
-    
+
   code: 'ERR_ASSERTION'
   name: 'AssertionError'
   expected: true
