@@ -1,5 +1,12 @@
 # Changelog
 
+- **[#162]** The patched acpx 0.12.0 client now advertises AIR `sessionFailure`
+  support and fails error-severity typed terminal turns even when the agent
+  returns `end_turn`. Warnings stay successful. Per-turn callbacks receive the
+  complete title and details for later diagnostic handling. The current
+  codex-acp 1.1.14 ignores this capability; its existing behavior is unchanged.
+  Refresh the lockfile patch hash in a separate dependency pull request.
+
 - Preserve historical browser proof variants in a verified private archive and dated index without replacing current gauntlet images or receipts.
 
 All notable changes to this repository should be recorded here.
