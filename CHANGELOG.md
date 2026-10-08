@@ -1,5 +1,9 @@
 # Changelog
 
+- **[#165, #167]** Record fresh Windows packaging baseline comparison and focused
+  typed-failure passes; document the scratch-only three-reference lockfile refresh
+  and CTO dispatch route. No runtime or tracked lockfile changes are included.
+
 - Preserve historical browser proof variants in a verified private archive and dated index without replacing current gauntlet images or receipts.
 
 All notable changes to this repository should be recorded here.

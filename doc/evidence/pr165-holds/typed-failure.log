@@ -1,0 +1,38 @@
+
+ RUN  v4.1.10 <host-path>
+
+ ✓ |@paperclipai/adapter-utils| src/acpx-engine/typed-failure.test.ts > startTurn: binds complete diagnostics to the current turn 2322ms
+ ✓ |@paperclipai/adapter-utils| src/acpx-engine/typed-failure.test.ts > runTurn: binds complete diagnostics to the current turn 2135ms
+paperclip-acp-echo-agent started
+paperclip-acp-echo-agent started
+stdout | src/acpx-engine/typed-failure.test.ts > oneshot: fails a negotiated typed terminal error despite end_turn
+{"mode":"oneshot","exitCode":1,"errorCode":"acpx_turn_failed","stopReason":"ACP agent reported a terminal request failure."}
+
+ ✓ |@paperclipai/adapter-utils| src/acpx-engine/typed-failure.test.ts > oneshot: fails a negotiated typed terminal error despite end_turn 1213ms
+paperclip-acp-echo-agent started
+paperclip-acp-echo-agent started
+stdout | src/acpx-engine/typed-failure.test.ts > oneshot: advertises sessionFailure in initialize clientCapabilities._meta
+{"mode":"oneshot","initializeMeta":[{"jetbrains":{"air":{"version":1,"capabilities":["sessionFailure"]}}},{"jetbrains":{"air":{"version":1,"capabilities":["sessionFailure"]}}}]}
+
+ ✓ |@paperclipai/adapter-utils| src/acpx-engine/typed-failure.test.ts > oneshot: advertises sessionFailure in initialize clientCapabilities._meta 1304ms
+paperclip-acp-echo-agent started
+paperclip-acp-echo-agent started
+ ✓ |@paperclipai/adapter-utils| src/acpx-engine/typed-failure.test.ts > oneshot: keeps an error-shaped warning successful 1218ms
+paperclip-acp-echo-agent started
+stdout | src/acpx-engine/typed-failure.test.ts > persistent: fails a negotiated typed terminal error despite end_turn
+{"mode":"persistent","exitCode":1,"errorCode":"acpx_turn_failed","stopReason":"ACP agent reported a terminal request failure."}
+
+ ✓ |@paperclipai/adapter-utils| src/acpx-engine/typed-failure.test.ts > persistent: fails a negotiated typed terminal error despite end_turn 1116ms
+paperclip-acp-echo-agent started
+stdout | src/acpx-engine/typed-failure.test.ts > persistent: advertises sessionFailure in initialize clientCapabilities._meta
+{"mode":"persistent","initializeMeta":[{"jetbrains":{"air":{"version":1,"capabilities":["sessionFailure"]}}}]}
+
+ ✓ |@paperclipai/adapter-utils| src/acpx-engine/typed-failure.test.ts > persistent: advertises sessionFailure in initialize clientCapabilities._meta 1137ms
+paperclip-acp-echo-agent started
+ ✓ |@paperclipai/adapter-utils| src/acpx-engine/typed-failure.test.ts > persistent: keeps an error-shaped warning successful 1183ms
+
+ Test Files  1 passed (1)
+      Tests  8 passed (8)
+   Start at  12:45:41
+   Duration  12.44s (transform 367ms, setup 0ms, import 592ms, tests 11.63s, environment 0ms)
+

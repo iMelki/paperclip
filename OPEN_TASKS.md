@@ -25,6 +25,12 @@ integration outcome; later rows remain queued and do not imply concurrent execut
 
 ## Current work
 
+- [#167 — Repair the Windows ACPX packaging fixture](https://github.com/iMelki/paperclip/issues/167):
+  Plain dev and PR #165 both reproduce the same 7-pass/1-fail pre-helper path error.
+  The portability owner repairs native URL conversion and qualifies the shell fixture.
+  PR #165's separate lockfile dispatch remains with the acting CTO; see
+  [fresh hold evidence](doc/evidence/pr165-holds/validation.md).
+
 - [#164 — Let Refresh Lockfile target dev](https://github.com/iMelki/paperclip/issues/164):
   Manual branch/base selection and isolated refresh branches are under CTO review.
   After the restart merge freeze lifts, merge the workflow fix and observe a dev
