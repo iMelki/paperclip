@@ -25,6 +25,11 @@ integration outcome; later rows remain queued and do not imply concurrent execut
 
 ## Current work
 
+- [#164 — Let Refresh Lockfile target dev](https://github.com/iMelki/paperclip/issues/164):
+  Manual branch/base selection and isolated refresh branches are under CTO review.
+  After the restart merge freeze lifts, merge the workflow fix and observe a dev
+  dispatch before landing the lockfile update needed by PR #165.
+
 - [#144 — Keep the listen port when only another address holds it](https://github.com/iMelki/paperclip/issues/144):
   The server now probes only its bind host, with an opt-in strict port. Seven
   real-socket tests and the startup suite pass locally; hosted CI and a

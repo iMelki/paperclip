@@ -6,13 +6,11 @@
     ".github/scripts/check-pr-dedup-search.mjs",
     ".github/scripts/check-pr-dependencies.mjs",
     ".github/scripts/check-pr-linked-issue.mjs",
-    ".github/scripts/check-pr-lockfile.mjs",
     ".github/scripts/check-pr-template.mjs",
     ".github/scripts/check-pr-test-coverage.mjs",
     ".github/workflows/agent-runtime-images.yml",
     ".github/workflows/docker.yml",
     ".github/workflows/e2e.yml",
-    ".github/workflows/refresh-lockfile.yml",
     ".github/workflows/release-smoke.yml",
     ".github/workflows/release-verify.yml",
     ".github/workflows/release.yml",
@@ -710,6 +708,63 @@
         "reason": "Exit 1 with 1 pass and 1 fail. The 403 case failed on its first assertion: the job log did not list 'ci-tampering .github/workflows/pr.yml'. Its stderr held only the flag count and the advisory 403, as in the fork CI logs. The no-flag control passed.",
         "exitCode": 1,
         "restoredPass": "The fixed script was copied back (SHA-256 648fd3561a9747935da5b1cb118b81adad300e46653e41948a11cf4867244c7d). The identical command exited 0 with 2/2 passing. All .github/scripts/tests files passed 149/149."
+      }
+    },
+    {
+      "id": "lockfile-refresh-164-original-workflow",
+      "path": ".github/workflows/refresh-lockfile.yml",
+      "description": "Select the exact refresh head/base and retain maintainer review outside master.",
+      "negativeFixture": "scripts/refresh-lockfile.test.mjs",
+      "observedFailure": {
+        "date": "2026-10-08",
+        "command": "node --test --test-reporter=tap scripts/refresh-lockfile.test.mjs .github/scripts/tests/check-pr-lockfile.test.mjs",
+        "breakApplied": "Replaced only refresh-lockfile.yml with exact origin/dev bytes via git show; readback verified the break. Restored the candidate in finally.",
+        "reason": "Original workflow: 7 failures for absent input defaults/checkout/concurrency expressions, shared work branch, missing head/base PR routing, invalid-branch acceptance and dev auto-merge. 14 controls passed.",
+        "exitCode": 1,
+        "artifactPath": "doc/evidence/lockfile-refresh-164/original-workflow.log",
+        "restoredPass": "21 pass, 0 fail; byte-identical restoration verified.",
+        "restoredExitCode": 0,
+        "restoredArtifactPath": "doc/evidence/lockfile-refresh-164/original-workflow-restored.log",
+        "restoredSha256": "ab56c84ec3688fddd3f7695883fb55d19ab522f5b427dab2ae5ab8f17b9002dc",
+        "scope": "Local shell/CLI stubs and actual predicates; no live dispatch, push, PR creation or merge."
+      }
+    },
+    {
+      "id": "lockfile-refresh-164-loosened-lockfile-gate",
+      "path": ".github/scripts/check-pr-lockfile.mjs",
+      "description": "Select the exact refresh head/base and retain maintainer review outside master.",
+      "negativeFixture": ".github/scripts/tests/check-pr-lockfile.test.mjs",
+      "observedFailure": {
+        "date": "2026-10-08",
+        "command": "node --test --test-reporter=tap .github/scripts/tests/check-pr-lockfile.test.mjs",
+        "breakApplied": "Replaced the bot-author test with true and exact base equality with prBranch.startsWith('chore/refresh-lockfile-'); verified non-no-op edit and restored in finally.",
+        "reason": "Four rejection assertions failed: non-bot author, wrong base, extra branch suffix and missing base were accepted. Seven controls passed. Original gate separately failed all 3 new per-base acceptance cases.",
+        "exitCode": 1,
+        "artifactPath": "doc/evidence/lockfile-refresh-164/loosened-lockfile-gate.log",
+        "restoredPass": "11 pass, 0 fail; byte-identical restoration verified.",
+        "restoredExitCode": 0,
+        "restoredArtifactPath": "doc/evidence/lockfile-refresh-164/loosened-lockfile-gate-restored.log",
+        "restoredSha256": "b3aa32f56c0a0265a457a4974f36da6a73514a69f89abed715f7d6040ae3e888",
+        "scope": "Local shell/CLI stubs and actual predicates; no live dispatch, push, PR creation or merge."
+      }
+    },
+    {
+      "id": "lockfile-refresh-164-loosened-pr-policy",
+      "path": ".github/workflows/pr.yml",
+      "description": "Select the exact refresh head/base and retain maintainer review outside master.",
+      "negativeFixture": "scripts/refresh-lockfile.test.mjs",
+      "observedFailure": {
+        "date": "2026-10-08",
+        "command": "node --test --test-reporter=tap scripts/refresh-lockfile.test.mjs",
+        "breakApplied": "Replaced only the new github-actions[bot] author condition with true; readback verified the break. Restored exact candidate bytes in finally.",
+        "reason": "The PR policy accepted example chore/refresh-lockfile-dev -> dev; the test expected the manual-lockfile block to run. Exactly 1 failed, 9 controls passed.",
+        "exitCode": 1,
+        "artifactPath": "doc/evidence/lockfile-refresh-164/loosened-pr-policy.log",
+        "restoredPass": "10 pass, 0 fail; byte-identical restoration verified.",
+        "restoredExitCode": 0,
+        "restoredArtifactPath": "doc/evidence/lockfile-refresh-164/loosened-pr-policy-restored.log",
+        "restoredSha256": "befa0a2708e6b875aff8cee3addc62b06cf9a02a57ed6896efbc759e2413db26",
+        "scope": "Local shell/CLI stubs and actual predicates; no live dispatch, push, PR creation or merge."
       }
     }
   ]
