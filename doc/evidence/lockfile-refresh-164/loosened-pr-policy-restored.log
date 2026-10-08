@@ -1,0 +1,70 @@
+TAP version 13
+# Subtest: manual inputs default to dev; the push trigger remains master only
+ok 1 - manual inputs default to dev; the push trigger remains master only
+  ---
+  duration_ms: 7.8336
+  type: 'test'
+  ...
+# Subtest: checkout ref can differ from the base; concurrency is separated by base
+ok 2 - checkout ref can differ from the base; concurrency is separated by base
+  ---
+  duration_ms: 4.5575
+  type: 'test'
+  ...
+# Subtest: dev refresh reuses only the matching head, base and repository owner
+ok 3 - dev refresh reuses only the matching head, base and repository owner
+  ---
+  duration_ms: 383.144
+  type: 'test'
+  ...
+# Subtest: wrong-base, wrong-head and fork PRs cannot prevent creating a dev PR
+ok 4 - wrong-base, wrong-head and fork PRs cannot prevent creating a dev PR
+  ---
+  duration_ms: 569.9061
+  type: 'test'
+  ...
+# Subtest: master refresh still pushes and creates a PR targeting master
+ok 5 - master refresh still pushes and creates a PR targeting master
+  ---
+  duration_ms: 566.7642
+  type: 'test'
+  ...
+# Subtest: unchanged lockfile performs no push or PR operation
+ok 6 - unchanged lockfile performs no push or PR operation
+  ---
+  duration_ms: 67.9068
+  type: 'test'
+  ...
+# Subtest: invalid per-base branch is rejected before commit or push
+ok 7 - invalid per-base branch is rejected before commit or push
+  ---
+  duration_ms: 144.7411
+  type: 'test'
+  ...
+# Subtest: the existing file-change gate permits only a lockfile refresh
+ok 8 - the existing file-change gate permits only a lockfile refresh
+  ---
+  duration_ms: 350.5823
+  type: 'test'
+  ...
+# Subtest: auto-merge remains master-only and requires a PR URL
+ok 9 - auto-merge remains master-only and requires a PR URL
+  ---
+  duration_ms: 2.4365
+  type: 'test'
+  ...
+# Subtest: PR policy accepts the exact bot branch and rejects mismatched base or author
+ok 10 - PR policy accepts the exact bot branch and rejects mismatched base or author
+  ---
+  duration_ms: 3.8859
+  type: 'test'
+  ...
+1..10
+# tests 10
+# suites 0
+# pass 10
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 2254.2446

@@ -1,0 +1,136 @@
+TAP version 13
+# Subtest: passes when lockfile is not changed
+ok 1 - passes when lockfile is not changed
+  ---
+  duration_ms: 1.1265
+  type: 'test'
+  ...
+# Subtest: passes when lockfile changed by refresh bot on correct branch
+ok 2 - passes when lockfile changed by refresh bot on correct branch
+  ---
+  duration_ms: 0.3074
+  type: 'test'
+  ...
+# Subtest: fails when lockfile changed by regular user
+ok 3 - fails when lockfile changed by regular user
+  ---
+  duration_ms: 0.3371
+  type: 'test'
+  ...
+# Subtest: fails when lockfile changed by bot on wrong branch
+ok 4 - fails when lockfile changed by bot on wrong branch
+  ---
+  duration_ms: 0.2743
+  type: 'test'
+  ...
+# Subtest: passes for the refresh bot with a branch matching base dev
+not ok 5 - passes for the refresh bot with a branch matching base dev
+  ---
+  duration_ms: 1.4241
+  type: 'test'
+  location: 'C:\\Dev\\cto-lanes-20261007\\wt\\L14\\.github\\scripts\\tests\\check-pr-lockfile.test.mjs:36:3'
+  failureType: 'testCodeFailure'
+  error: |-
+    Expected values to be strictly equal:
+    
+    false !== true
+    
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected: true
+  actual: false
+  operator: 'strictEqual'
+  stack: |-
+    TestContext.<anonymous> (file:///<repo>/.github/scripts/tests/check-pr-lockfile.test.mjs:37:12)
+    Test.runInAsyncScope (node:async_hooks:227:14)
+    Test.run (node:internal/test_runner/test:1325:25)
+    Test.processPendingSubtests (node:internal/test_runner/test:911:18)
+    Test.postRun (node:internal/test_runner/test:1465:19)
+    Test.run (node:internal/test_runner/test:1390:12)
+    async Test.processPendingSubtests (node:internal/test_runner/test:911:7)
+  ...
+# Subtest: passes for the refresh bot with a branch matching base master
+not ok 6 - passes for the refresh bot with a branch matching base master
+  ---
+  duration_ms: 0.2971
+  type: 'test'
+  location: 'C:\\Dev\\cto-lanes-20261007\\wt\\L14\\.github\\scripts\\tests\\check-pr-lockfile.test.mjs:36:3'
+  failureType: 'testCodeFailure'
+  error: |-
+    Expected values to be strictly equal:
+    
+    false !== true
+    
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected: true
+  actual: false
+  operator: 'strictEqual'
+  stack: |-
+    TestContext.<anonymous> (file:///<repo>/.github/scripts/tests/check-pr-lockfile.test.mjs:37:12)
+    Test.runInAsyncScope (node:async_hooks:227:14)
+    Test.run (node:internal/test_runner/test:1325:25)
+    Test.processPendingSubtests (node:internal/test_runner/test:911:18)
+    Test.postRun (node:internal/test_runner/test:1465:19)
+    Test.run (node:internal/test_runner/test:1390:12)
+    async Test.processPendingSubtests (node:internal/test_runner/test:911:7)
+  ...
+# Subtest: passes for the refresh bot with a branch matching base release/stable
+not ok 7 - passes for the refresh bot with a branch matching base release/stable
+  ---
+  duration_ms: 0.2116
+  type: 'test'
+  location: 'C:\\Dev\\cto-lanes-20261007\\wt\\L14\\.github\\scripts\\tests\\check-pr-lockfile.test.mjs:36:3'
+  failureType: 'testCodeFailure'
+  error: |-
+    Expected values to be strictly equal:
+    
+    false !== true
+    
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected: true
+  actual: false
+  operator: 'strictEqual'
+  stack: |-
+    TestContext.<anonymous> (file:///<repo>/.github/scripts/tests/check-pr-lockfile.test.mjs:37:12)
+    Test.runInAsyncScope (node:async_hooks:227:14)
+    Test.run (node:internal/test_runner/test:1325:25)
+    Test.processPendingSubtests (node:internal/test_runner/test:911:18)
+    Test.postRun (node:internal/test_runner/test:1465:19)
+    Test.run (node:internal/test_runner/test:1390:12)
+    async Test.processPendingSubtests (node:internal/test_runner/test:911:7)
+  ...
+# Subtest: rejects refresh branch chore/refresh-lockfile-dev for someuser on base dev
+ok 8 - rejects refresh branch chore/refresh-lockfile-dev for someuser on base dev
+  ---
+  duration_ms: 0.1659
+  type: 'test'
+  ...
+# Subtest: rejects refresh branch chore/refresh-lockfile-master for github-actions[bot] on base dev
+ok 9 - rejects refresh branch chore/refresh-lockfile-master for github-actions[bot] on base dev
+  ---
+  duration_ms: 0.157
+  type: 'test'
+  ...
+# Subtest: rejects refresh branch chore/refresh-lockfile-dev-extra for github-actions[bot] on base dev
+ok 10 - rejects refresh branch chore/refresh-lockfile-dev-extra for github-actions[bot] on base dev
+  ---
+  duration_ms: 0.3494
+  type: 'test'
+  ...
+# Subtest: rejects refresh branch chore/refresh-lockfile-dev for github-actions[bot] on base (missing)
+ok 11 - rejects refresh branch chore/refresh-lockfile-dev for github-actions[bot] on base (missing)
+  ---
+  duration_ms: 0.3643
+  type: 'test'
+  ...
+1..11
+# tests 11
+# suites 0
+# pass 8
+# fail 3
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 199.3072

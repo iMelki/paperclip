@@ -1,0 +1,90 @@
+TAP version 13
+# Subtest: manual inputs default to dev; the push trigger remains master only
+ok 1 - manual inputs default to dev; the push trigger remains master only
+  ---
+  duration_ms: 6.1476
+  type: 'test'
+  ...
+# Subtest: checkout ref can differ from the base; concurrency is separated by base
+ok 2 - checkout ref can differ from the base; concurrency is separated by base
+  ---
+  duration_ms: 4.6335
+  type: 'test'
+  ...
+# Subtest: dev refresh reuses only the matching head, base and repository owner
+ok 3 - dev refresh reuses only the matching head, base and repository owner
+  ---
+  duration_ms: 432.2853
+  type: 'test'
+  ...
+# Subtest: wrong-base, wrong-head and fork PRs cannot prevent creating a dev PR
+ok 4 - wrong-base, wrong-head and fork PRs cannot prevent creating a dev PR
+  ---
+  duration_ms: 601.98
+  type: 'test'
+  ...
+# Subtest: master refresh still pushes and creates a PR targeting master
+ok 5 - master refresh still pushes and creates a PR targeting master
+  ---
+  duration_ms: 440.6576
+  type: 'test'
+  ...
+# Subtest: unchanged lockfile performs no push or PR operation
+ok 6 - unchanged lockfile performs no push or PR operation
+  ---
+  duration_ms: 45.6956
+  type: 'test'
+  ...
+# Subtest: invalid per-base branch is rejected before commit or push
+ok 7 - invalid per-base branch is rejected before commit or push
+  ---
+  duration_ms: 118.0225
+  type: 'test'
+  ...
+# Subtest: the existing file-change gate permits only a lockfile refresh
+ok 8 - the existing file-change gate permits only a lockfile refresh
+  ---
+  duration_ms: 344.7257
+  type: 'test'
+  ...
+# Subtest: auto-merge remains master-only and requires a PR URL
+ok 9 - auto-merge remains master-only and requires a PR URL
+  ---
+  duration_ms: 2.6366
+  type: 'test'
+  ...
+# Subtest: PR policy accepts the exact bot branch and rejects mismatched base or author
+not ok 10 - PR policy accepts the exact bot branch and rejects mismatched base or author
+  ---
+  duration_ms: 3.4721
+  type: 'test'
+  location: 'C:\\Dev\\cto-lanes-20261007\\wt\\L14\\scripts\\refresh-lockfile.test.mjs:177:1'
+  failureType: 'testCodeFailure'
+  error: |-
+    example chore/refresh-lockfile-dev -> dev
+    
+    false !== true
+    
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected: true
+  actual: false
+  operator: 'strictEqual'
+  stack: |-
+    TestContext.<anonymous> (file:///<repo>/scripts/refresh-lockfile.test.mjs:193:12)
+    Test.runInAsyncScope (node:async_hooks:227:14)
+    Test.run (node:internal/test_runner/test:1325:25)
+    Test.processPendingSubtests (node:internal/test_runner/test:911:18)
+    Test.postRun (node:internal/test_runner/test:1465:19)
+    Test.run (node:internal/test_runner/test:1390:12)
+    async Test.processPendingSubtests (node:internal/test_runner/test:911:7)
+  ...
+1..10
+# tests 10
+# suites 0
+# pass 9
+# fail 1
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 2181.4325

@@ -1,0 +1,136 @@
+TAP version 13
+# Subtest: passes when lockfile is not changed
+ok 1 - passes when lockfile is not changed
+  ---
+  duration_ms: 1.1508
+  type: 'test'
+  ...
+# Subtest: passes when lockfile changed by refresh bot on correct branch
+ok 2 - passes when lockfile changed by refresh bot on correct branch
+  ---
+  duration_ms: 0.2228
+  type: 'test'
+  ...
+# Subtest: fails when lockfile changed by regular user
+ok 3 - fails when lockfile changed by regular user
+  ---
+  duration_ms: 0.1922
+  type: 'test'
+  ...
+# Subtest: fails when lockfile changed by bot on wrong branch
+ok 4 - fails when lockfile changed by bot on wrong branch
+  ---
+  duration_ms: 0.1435
+  type: 'test'
+  ...
+# Subtest: passes for the refresh bot with a branch matching base dev
+ok 5 - passes for the refresh bot with a branch matching base dev
+  ---
+  duration_ms: 0.1536
+  type: 'test'
+  ...
+# Subtest: passes for the refresh bot with a branch matching base master
+ok 6 - passes for the refresh bot with a branch matching base master
+  ---
+  duration_ms: 0.0779
+  type: 'test'
+  ...
+# Subtest: passes for the refresh bot with a branch matching base release/stable
+ok 7 - passes for the refresh bot with a branch matching base release/stable
+  ---
+  duration_ms: 0.0878
+  type: 'test'
+  ...
+# Subtest: rejects refresh branch chore/refresh-lockfile-dev for someuser on base dev
+ok 8 - rejects refresh branch chore/refresh-lockfile-dev for someuser on base dev
+  ---
+  duration_ms: 0.1304
+  type: 'test'
+  ...
+# Subtest: rejects refresh branch chore/refresh-lockfile-master for github-actions[bot] on base dev
+ok 9 - rejects refresh branch chore/refresh-lockfile-master for github-actions[bot] on base dev
+  ---
+  duration_ms: 0.1741
+  type: 'test'
+  ...
+# Subtest: rejects refresh branch chore/refresh-lockfile-dev-extra for github-actions[bot] on base dev
+ok 10 - rejects refresh branch chore/refresh-lockfile-dev-extra for github-actions[bot] on base dev
+  ---
+  duration_ms: 0.2078
+  type: 'test'
+  ...
+# Subtest: rejects refresh branch chore/refresh-lockfile-dev for github-actions[bot] on base (missing)
+ok 11 - rejects refresh branch chore/refresh-lockfile-dev for github-actions[bot] on base (missing)
+  ---
+  duration_ms: 0.1054
+  type: 'test'
+  ...
+# Subtest: manual inputs default to dev; the push trigger remains master only
+ok 12 - manual inputs default to dev; the push trigger remains master only
+  ---
+  duration_ms: 8.4983
+  type: 'test'
+  ...
+# Subtest: checkout ref can differ from the base; concurrency is separated by base
+ok 13 - checkout ref can differ from the base; concurrency is separated by base
+  ---
+  duration_ms: 7.4449
+  type: 'test'
+  ...
+# Subtest: dev refresh reuses only the matching head, base and repository owner
+ok 14 - dev refresh reuses only the matching head, base and repository owner
+  ---
+  duration_ms: 485.0461
+  type: 'test'
+  ...
+# Subtest: wrong-base, wrong-head and fork PRs cannot prevent creating a dev PR
+ok 15 - wrong-base, wrong-head and fork PRs cannot prevent creating a dev PR
+  ---
+  duration_ms: 621.7574
+  type: 'test'
+  ...
+# Subtest: master refresh still pushes and creates a PR targeting master
+ok 16 - master refresh still pushes and creates a PR targeting master
+  ---
+  duration_ms: 513.6071
+  type: 'test'
+  ...
+# Subtest: unchanged lockfile performs no push or PR operation
+ok 17 - unchanged lockfile performs no push or PR operation
+  ---
+  duration_ms: 54.2614
+  type: 'test'
+  ...
+# Subtest: invalid per-base branch is rejected before commit or push
+ok 18 - invalid per-base branch is rejected before commit or push
+  ---
+  duration_ms: 127.4652
+  type: 'test'
+  ...
+# Subtest: the existing file-change gate permits only a lockfile refresh
+ok 19 - the existing file-change gate permits only a lockfile refresh
+  ---
+  duration_ms: 319.8988
+  type: 'test'
+  ...
+# Subtest: auto-merge remains master-only and requires a PR URL
+ok 20 - auto-merge remains master-only and requires a PR URL
+  ---
+  duration_ms: 2.9188
+  type: 'test'
+  ...
+# Subtest: PR policy accepts the exact bot branch and rejects mismatched base or author
+ok 21 - PR policy accepts the exact bot branch and rejects mismatched base or author
+  ---
+  duration_ms: 5.4887
+  type: 'test'
+  ...
+1..21
+# tests 21
+# suites 0
+# pass 21
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 2396.6389

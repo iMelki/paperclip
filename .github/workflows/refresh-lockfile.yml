@@ -5,9 +5,20 @@ on:
     branches:
       - master
   workflow_dispatch:
+    inputs:
+      ref:
+        description: Branch to refresh
+        required: true
+        default: dev
+        type: string
+      base:
+        description: Pull request base branch
+        required: true
+        default: dev
+        type: string
 
 concurrency:
-  group: refresh-lockfile-master
+  group: refresh-lockfile-${{ inputs.base || 'master' }}
   cancel-in-progress: false
 
 jobs:
@@ -17,10 +28,14 @@ jobs:
     permissions:
       contents: write
       pull-requests: write
+    env:
+      BASE: ${{ inputs.base || 'master' }}
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref || github.sha }}
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v6
@@ -62,7 +77,8 @@ jobs:
             exit 0
           fi
 
-          BRANCH="chore/refresh-lockfile"
+          BRANCH="chore/refresh-lockfile-$BASE"
+          git check-ref-format --branch "$BRANCH"
           git config user.name "lockfile-bot"
           git config user.email "lockfile-bot@users.noreply.github.com"
 
@@ -71,17 +87,19 @@ jobs:
           git commit -m "chore(lockfile): refresh pnpm-lock.yaml"
           git push --force origin "$BRANCH"
 
-          # Only reuse an open PR from this repository owner, not a fork with the same branch name.
+          # Match both branches and this repository owner, not a fork with the same branch name.
           pr_url="$(
-            gh pr list --state open --head "$BRANCH" --json url,headRepositoryOwner \
+            gh pr list --state open --head "$BRANCH" --base "$BASE" --json url,headRepositoryOwner \
               --jq ".[] | select(.headRepositoryOwner.login == \"$REPO_OWNER\") | .url" |
             head -n 1
           )"
           if [ -z "$pr_url" ]; then
-            pr_url="$(gh pr create \
+            pr_url="$(printf '%s\n' \
+              "Auto-generated lockfile refresh for $BASE. This PR only updates pnpm-lock.yaml." | gh pr create \
               --head "$BRANCH" \
+              --base "$BASE" \
               --title "chore(lockfile): refresh pnpm-lock.yaml" \
-              --body "Auto-generated lockfile refresh after dependencies changed on master. This PR only updates pnpm-lock.yaml.")"
+              --body-file -)"
             echo "Created new PR: $pr_url"
           else
             echo "PR already exists: $pr_url"
@@ -89,7 +107,7 @@ jobs:
           echo "pr_url=$pr_url" >> "$GITHUB_OUTPUT"
 
       - name: Enable auto-merge for lockfile PR
-        if: steps.upsert-pr.outputs.pr_url != ''
+        if: env.BASE == 'master' && steps.upsert-pr.outputs.pr_url != ''
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
