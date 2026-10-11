@@ -5,7 +5,7 @@ import { flushSync } from "react-dom";
 import { createRoot, type Root } from "react-dom/client";
 import type { HeartbeatRun } from "@paperclipai/shared";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { RunActivityChart, SuccessRateChart } from "./ActivityCharts";
+import { RunActivityChart, SpendBreakdownChart, SpendChart, SuccessRateChart } from "./ActivityCharts";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
@@ -131,5 +131,43 @@ describe("ActivityCharts", () => {
     expect(container.textContent).toContain("Recovered");
     const dayCell = container.querySelector("[title*='recovered: 4']");
     expect(dayCell).not.toBeNull();
+  });
+
+  it("stacks billed and estimated spend per day and labels the estimate", () => {
+    render(
+      <SpendChart
+        days={[
+          { date: "2026-04-19", billedCents: 0, estimatedCents: 0, tokens: 0 },
+          { date: "2026-04-20", billedCents: 250, estimatedCents: 1_200, tokens: 3_000_000 },
+        ]}
+      />,
+    );
+
+    expect(container.textContent).toContain("Billed");
+    expect(container.textContent).toContain("Estimated (API prices)");
+    const dayCell = container.querySelector("[title^='2026-04-20']");
+    expect(dayCell?.getAttribute("title")).toContain("estimated: ~$12.00 at API prices");
+  });
+
+  it("says when tokens exist but no model price is known", () => {
+    render(<SpendChart days={[{ date: "2026-04-20", billedCents: 0, estimatedCents: 0, tokens: 1_500_000 }]} />);
+    expect(container.textContent).toContain("1.5M tokens on models without a known price");
+  });
+
+  it("ranks the spend breakdown and marks estimated totals", () => {
+    render(
+      <SpendBreakdownChart
+        rows={[
+          { key: "a", label: "CEO", billedCents: 0, estimatedCents: 900, tokens: 10 },
+          { key: "b", label: "Engineer", billedCents: 500, estimatedCents: 0, tokens: 10 },
+        ]}
+      />,
+    );
+    expect(container.textContent).toContain("~$9.00");
+    expect(container.textContent).toContain("$5.00");
+    expect(container.textContent).not.toContain("~$5.00");
+
+    render(<SpendBreakdownChart rows={[]} />);
+    expect(container.textContent).toContain("No spend this month");
   });
 });
