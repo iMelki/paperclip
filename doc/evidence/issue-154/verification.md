@@ -1,7 +1,12 @@
 # Workspace containment completion proof — issue #154
 
 The base is `cf181ecd2852dadedbe3d3747175e380cd75ae27` from a fresh `origin/dev` fetch.
-The fixed test file SHA-256 is `95d37d85c1d1ed93774e7383e6b8f6cbe0f17b94d80f0495cecbde040352c1e8`.
+The fixed test file SHA-256 is `9b492deaf7e54a061d2c6262d99003db6aeef2a2759dd6bcf9af116a280c57c7`.
+That is the LF blob as committed at `8234176dd645ee572114832c8bc768981c918b49`
+(`server/src/__tests__/heartbeat-workspace-branch-containment.test.ts`, `eol=lf`).
+A CRLF rendering of the same blob hashes to
+`2cf0d200cae8a59c8591c2b545c2b5ee9876d74eb1d6b057b0af7ce2fc935427`.
+See "Evidence binding correction" below for the hash the original runs recorded.
 Native Windows runs used the real disposable embedded PostgreSQL and Git worktrees.
 The process runner retained individual raw logs and JSON reports privately.
 The public [run receipts](runs.json) omit host paths and personal identifiers.
@@ -74,6 +79,34 @@ per-process RAM samples and UTC start times are in `runs.json`. The negative
 process averaged 67.7% CPU.
 Load was measured from Windows `GetSystemTimes` deltas, not inferred from
 test duration. Baseline CPU deltas were not collected.
+
+## Evidence binding correction
+
+The runs above and [runs.json](runs.json) recorded the test file SHA-256
+`95d37d85c1d1ed93774e7383e6b8f6cbe0f17b94d80f0495cecbde040352c1e8`. That hash
+matches no committed version of the test file. The committed LF blob and its
+CRLF rendering hash as stated at the top of this file, and the merge-base
+version hashes differently again. The 80/80 fixed executions and the negative
+run above are therefore historical and are not bound to the reviewed bytes.
+They are kept unchanged as the original record.
+
+Independent reruns at `8234176dd645ee572114832c8bc768981c918b49`, against the
+committed bytes (`9b492dea…`), in a separate clone with frozen-lockfile
+dependencies, one worker, per-run temporary directories and no Docker:
+
+| Run | Passed | Failed | Skipped | Exit | Seconds |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| fixed-01 | 8 | 0 | 0 | 0 | 122.688 |
+| fixed-02 | 8 | 0 | 0 | 0 | 112.078 |
+| negative-old-waits | 5 | 3 | 0 | 1 | 137.859 |
+| fixed-03 | 8 | 0 | 0 | 0 | 133.281 |
+
+Fixed runs passed 24/24. The negative run restored the merge-base polling
+helpers and status wait in an untracked scratch copy, keeping the committed
+1.5-second database fixture. It failed 3/8: the project-primary case read
+`running` instead of `idle` (the intended failure), and two old ten-second row
+polls read `running` instead of `succeeded` under load. The tracked test was
+not edited, and the run after the negative passed 8/8.
 
 ## Scope and remaining proof
 
