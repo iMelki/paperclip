@@ -266,7 +266,10 @@ enclosing test timeout bounds hung work. Keep the existing
 `drainHeartbeatRunsToQuiescence` helper in teardown before deleting fixture rows.
 The workspace branch-containment suite delays the two marked fixtures' final
 idle write by 1.5 seconds in its disposable database. This makes the former
-one-second status wait fail even without host load.
+one-second status wait likely to fail, but not on every run or host: in the
+recorded negatives the project_primary case failed (read `running` instead of
+`idle`), while the git_worktree case passed once. The suite does not assert
+that the trigger fired.
 
 ## One-Command Local Run
 

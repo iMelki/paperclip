@@ -92,7 +92,9 @@ They are kept unchanged as the original record.
 
 Independent reruns at `8234176dd645ee572114832c8bc768981c918b49`, against the
 committed bytes (`9b492dea…`), in a separate clone with frozen-lockfile
-dependencies, one worker, per-run temporary directories and no Docker:
+dependencies, one worker, per-run temporary directories and no Docker. The
+saved report is [rerun-8234176d.json](rerun-8234176d.json), and the gate ledger
+entry `heartbeat-workspace-containment-execution-completion-rebound` binds it:
 
 | Run | Passed | Failed | Skipped | Exit | Seconds |
 | --- | ---: | ---: | ---: | ---: | ---: |

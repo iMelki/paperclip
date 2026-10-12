@@ -785,6 +785,28 @@
         "restoredTestSha256": "95d37d85c1d1ed93774e7383e6b8f6cbe0f17b94d80f0495cecbde040352c1e8",
         "scope": "Serialized native Windows integration tests against disposable databases and Git fixtures. No live instance or hosted CI proof."
       },
+      "maintainabilityReceipt": "doc/evidence/issue-154/verification.md",
+      "historicalNote": "restoredTestSha256 matches no committed version of the test file; this entry is kept unchanged as the original record and is superseded by heartbeat-workspace-containment-execution-completion-rebound."
+    },
+    {
+      "id": "heartbeat-workspace-containment-execution-completion-rebound",
+      "path": "server/src/__tests__/heartbeat-workspace-branch-containment.test.ts",
+      "description": "Rebinds the execution-completion gate to the committed test bytes (LF blob 9b492dea..., as committed at 8234176d) with independent reruns.",
+      "negativeFixture": "server/src/__tests__/heartbeat-workspace-branch-containment.test.ts",
+      "observedFailure": {
+        "date": "2026-10-12",
+        "command": "(from server) node ../node_modules/vitest/vitest.mjs run src/__tests__/heartbeat-workspace-branch-containment.test.ts --maxWorkers=1 --reporter=default --reporter=json --outputFile.json=<run-report>",
+        "breakApplied": "In an untracked scratch copy of the committed test, restored the merge-base polling helpers and default status wait; kept the 1.5-second final-idle-write trigger. The tracked test file was not edited.",
+        "reason": "3 failed, 5 passed, 0 skipped; exit 1. The project_primary configuration-failure case read running instead of idle (the intended failure); two old ten-second row polls read running instead of succeeded under host load.",
+        "exitCode": 1,
+        "artifactPath": "doc/evidence/issue-154/rerun-8234176d.json",
+        "restoredPass": "Three runs of the committed test at 8234176d: each 8 passed, 0 failed, 0 skipped, exit 0 (24/24); the run after the negative passed 8/8.",
+        "restoredExitCode": 0,
+        "restoredArtifactPath": "doc/evidence/issue-154/rerun-8234176d.json",
+        "restoredArtifactSha256": "07845da775713469eb06808e911da9e6eea4c07a0fddae1e91c67065e494a264",
+        "restoredTestSha256": "9b492deaf7e54a061d2c6262d99003db6aeef2a2759dd6bcf9af116a280c57c7",
+        "scope": "Serialized native Windows integration tests in an independent clone against disposable databases and Git fixtures. No live instance or hosted CI proof."
+      },
       "maintainabilityReceipt": "doc/evidence/issue-154/verification.md"
     }
   ]
