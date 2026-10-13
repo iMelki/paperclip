@@ -8,6 +8,7 @@ import {
   shouldStartAfterOnboard,
 } from "../commands/onboard.js";
 import type { PaperclipConfig } from "../config/schema.js";
+import { defaultSecretsConfig } from "../prompts/secrets.js";
 
 const ORIGINAL_ENV = { ...process.env };
 const ORIGINAL_CWD = process.cwd();
@@ -87,7 +88,10 @@ function createFreshConfigPath() {
 }
 
 describe("onboard", () => {
+  let isolatedDefaultHome: string;
+
   beforeEach(() => {
+    isolatedDefaultHome = fs.mkdtempSync(path.join(os.tmpdir(), "paperclip-onboard-default-home-"));
     process.env = { ...ORIGINAL_ENV };
     delete process.env.PAPERCLIP_AGENT_JWT_SECRET;
     delete process.env.PAPERCLIP_SECRETS_MASTER_KEY;
@@ -100,7 +104,7 @@ describe("onboard", () => {
     delete process.env.PAPERCLIP_STORAGE_LOCAL_DIR;
     delete process.env.PAPERCLIP_SECRETS_PROVIDER;
     delete process.env.PAPERCLIP_SECRETS_STRICT_MODE;
-    delete process.env.PAPERCLIP_HOME;
+    process.env.PAPERCLIP_HOME = isolatedDefaultHome;
     delete process.env.PAPERCLIP_CONFIG;
     delete process.env.PAPERCLIP_INSTANCE_ID;
     delete process.env.PAPERCLIP_BIND;
@@ -113,6 +117,18 @@ describe("onboard", () => {
     process.env = { ...ORIGINAL_ENV };
     process.chdir(ORIGINAL_CWD);
     process.exitCode = ORIGINAL_EXIT_CODE;
+  });
+
+  it("contains implicit secrets defaults inside the retained test home", () => {
+    const keyPath = defaultSecretsConfig().localEncrypted.keyFilePath;
+    const relative = path.relative(isolatedDefaultHome, keyPath);
+    // Assert containment first so a failing control reports only a boolean,
+    // without inspecting or printing the operator's real home or key.
+    expect(
+      relative.length > 0 && relative !== ".." &&
+      !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative),
+    ).toBe(true);
+    expect(keyPath).toBe(path.join(isolatedDefaultHome, "instances", "default", "secrets", "master.key"));
   });
 
   it("preserves an existing config when rerun without flags", async () => {

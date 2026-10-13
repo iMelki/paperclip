@@ -6,6 +6,13 @@ All notable changes to this repository should be recorded here.
 
 ## Unreleased
 
+- **[#35 / PR #169]** Preserve the embedded PostgreSQL PID file when identity
+  cannot be verified for a live or inaccessible process. Refuse a second start.
+  Keep explicit dead-PID and current-Node-PID recovery, and verified PostgreSQL
+  reuse. Other live recycled PIDs remain conservative until verified.
+  Keep the mandatory onboarding test's default secrets path inside its retained
+  temporary home when the related commit suites run.
+
 - **[#160]** The PR security step now lists each flag (check name and file,
   or package names) in the job log and in the `security-review` check-run
   summary. For `secret-scan` flags it names only the pattern, never the

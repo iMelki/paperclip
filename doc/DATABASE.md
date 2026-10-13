@@ -22,10 +22,14 @@ Data persists across restarts in `~/.paperclip/instances/default/db/`. To reset 
 On server startup, a live PID in `postmaster.pid` is not enough to reuse the
 embedded server. Paperclip queries PostgreSQL on the recorded port and checks
 that its `data_directory` matches the configured directory. A failed identity
-check logs a warning and uses the normal startup path, which removes the stale
-lock before starting PostgreSQL. A reachable server that reports another data
-directory is refused without removing the lock. This check applies to server
-startup; the CLI lifecycle checks remain separate.
+query does not prove that a live or inaccessible process is stale. Startup logs
+a warning, preserves its PID file, and refuses to start a second server. This
+also covers process-lookup errors other than an explicit missing-process result.
+A dead PID or the current Node server's own recycled PID can use the normal
+startup path. Other recycled live processes remain conservative until identity
+can be verified. A reachable server that reports another data directory is also
+refused without removing the lock. This check applies to server startup; the
+CLI lifecycle checks remain separate.
 
 If you need to apply pending migrations manually, run:
 

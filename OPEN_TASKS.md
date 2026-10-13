@@ -25,6 +25,15 @@ integration outcome; later rows remain queued and do not imply concurrent execut
 
 ## Current work
 
+- [#35 - Embedded PostgreSQL lifecycle](https://github.com/iMelki/paperclip/issues/35),
+  [PR #169](https://github.com/iMelki/paperclip/pull/169): the local query-failure
+  repair refuses ambiguous live ownership before lock removal or a second start.
+  Mocked caller and helper controls cover unavailable/recovery/access results
+  with live, inaccessible and failed process lookups. The mandatory onboarding
+  fixture now contains its implicit secrets defaults in a retained temporary home.
+  Publication, independent
+  exact-head review, normal full gates and installed/native acceptance remain open.
+
 - [Embedded PostgreSQL reuse identity - upstream #6597](https://github.com/paperclipai/paperclip/issues/6597):
   Server startup now verifies PostgreSQL's data directory on the PID file's
   recorded port before reuse. The regression fails against the original server

@@ -369,6 +369,7 @@ describe("startServer embedded PostgreSQL identity", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.spyOn(process, "kill").mockReturnValue(true);
     dataDir = mkdtempSync(path.join(tmpdir(), "server-pg-identity-"));
     pidFile = path.join(dataDir, "postmaster.pid");
     writeFileSync(path.join(dataDir, "PG_VERSION"), "18\n");
@@ -390,6 +391,7 @@ describe("startServer embedded PostgreSQL identity", () => {
     detectPortMock.mockReset().mockImplementation(async ({ port }: { port: number; hostname: string }) => port);
     vi.mocked(getPostgresDataDirectory).mockReset();
     vi.mocked(ensurePostgresDatabase).mockReset();
+    vi.restoreAllMocks();
   });
 
   it("starts PostgreSQL and removes the recycled-PID lock instead of reusing node", async () => {
@@ -401,7 +403,7 @@ describe("startServer embedded PostgreSQL identity", () => {
   });
 
   it("keeps reusing verified live PostgreSQL on the recorded port", async () => {
-    writeFileSync(pidFile, `${process.pid}\n${dataDir}\n1700000000\n55433\n`);
+    writeFileSync(pidFile, `4242\n${dataDir}\n1700000000\n55433\n`);
     vi.mocked(getPostgresDataDirectory).mockResolvedValue(dataDir);
     await expect(startServer()).rejects.toThrow("database phase reached");
     expect(pgCtorMock).not.toHaveBeenCalled();
@@ -426,11 +428,36 @@ describe("startServer embedded PostgreSQL identity", () => {
   });
 
   it("refuses another PostgreSQL instance without removing the lock or starting", async () => {
+    writeFileSync(pidFile, `4242\n${dataDir}\n1700000000\n55432\n`);
     vi.mocked(getPostgresDataDirectory).mockResolvedValue(path.resolve(dataDir, "another-instance"));
     await expect(startServer()).rejects.toThrow("data directory belongs to another instance");
     expect(pgStartMock).not.toHaveBeenCalled();
     expect(existsSync(pidFile)).toBe(true);
   });
+
+  it.each(["present", "EPERM", "EIO"].flatMap((liveness) =>
+    [null, "database system is starting up", "permission denied"].map((failure) => ({ liveness, failure })),
+  ))(
+    "preserves a live PostgreSQL lock and refuses a second start on failed identity query: $liveness / $failure",
+    async ({ liveness, failure }) => {
+      writeFileSync(pidFile, `4242\n${dataDir}\n1700000000\n55432\n`);
+      const original = readFileSync(pidFile, "utf8");
+      if (liveness !== "present") vi.mocked(process.kill).mockImplementation(() => {
+        throw Object.assign(new Error("process lookup unavailable"), { code: liveness });
+      });
+      if (failure === null) vi.mocked(getPostgresDataDirectory).mockResolvedValue(null);
+      else vi.mocked(getPostgresDataDirectory).mockRejectedValue(new Error(failure));
+      const error = await startServer().catch((reason: unknown) => reason);
+      expect({ lockPreserved: existsSync(pidFile), secondStarts: pgStartMock.mock.calls.length }).toEqual({
+        lockPreserved: true, secondStarts: 0,
+      });
+      expect(readFileSync(pidFile, "utf8")).toBe(original);
+      expect(error).toBeInstanceOf(Error);
+      expect((error as Error).message).toContain("identity could not be verified");
+      expect(pgCtorMock).not.toHaveBeenCalled();
+      expect(ensurePostgresDatabase).not.toHaveBeenCalled();
+    },
+  );
 });
 
 describe("startServer feedback export wiring", () => {

@@ -20,8 +20,8 @@ export async function readRunningEmbeddedPostgres(
   try {
     process.kill(pid, 0);
   } catch (error) {
-    // Permission denied is not evidence that the process is dead.
-    if ((error as NodeJS.ErrnoException).code !== "EPERM") return null;
+    // Only an explicit missing-process result proves that the PID is stale.
+    if ((error as NodeJS.ErrnoException).code === "ESRCH") return null;
   }
 
   const port = Number(lines[3]?.trim() || configuredPort);
@@ -34,10 +34,18 @@ export async function readRunningEmbeddedPostgres(
     `postgres://paperclip:paperclip@127.0.0.1:${port}/postgres`,
   ).catch(() => null);
   if (actualDataDir === null) {
+    // This process is the Node server, so its own PID is affirmative stale-PID evidence.
+    // A foreign live/inaccessible PID can still be PostgreSQL during recovery.
+    const recycledSelfPid = pid === process.pid;
     logger.warn(
       { pid, port },
-      "Embedded PostgreSQL identity could not be verified; treating postmaster.pid as stale and trying normal startup",
+      recycledSelfPid
+        ? "The current Node process owns this PID; treating postmaster.pid as stale and trying normal startup"
+        : "Embedded PostgreSQL identity could not be verified; preserving postmaster.pid and refusing startup",
     );
+    if (!recycledSelfPid) {
+      throw new Error("Refusing embedded PostgreSQL startup: identity could not be verified for a live process.");
+    }
     return null;
   }
   if (resolve(actualDataDir) !== resolve(dataDir)) {

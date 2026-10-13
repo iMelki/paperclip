@@ -45,6 +45,29 @@
   },
   "gates": [
     {
+      "id": "embedded-postgres-reuse-query-failure-refusal",
+      "path": "server/src/embedded-postgres-reuse.ts",
+      "description": "Preserve a foreign live or inaccessible process's lock and refuse a second embedded PostgreSQL start when the identity query is unavailable.",
+      "negativeFixture": "server/src/__tests__/embedded-postgres-reuse.test.ts",
+      "consumerFixture": "server/src/__tests__/server-startup-feedback-export.test.ts",
+      "observedFailure": {
+        "date": "2026-10-13",
+        "baseHead": "d8c26573c5dd2227f9b0e5e7133d8c4f26c223f4",
+        "command": "vitest run src/__tests__/embedded-postgres-reuse.test.ts src/__tests__/server-startup-feedback-export.test.ts --testNamePattern 'identity query is unavailable|failed identity query' (isolated node config, one worker)",
+        "breakApplied": "Ran the new mocked regressions against the original helper bytes from baseHead before applying the repair. No database, provider, or service was started.",
+        "reason": "18 selected cases failed, zero passed, exit 1: the helper returned null; the real startServer consumer removed the lock and called the mocked second start. The matrix covers live, EPERM and EIO process checks with null, recovery and permission query failures. No setup failure occurred.",
+        "exitCode": 1,
+        "restoredPass": "The repaired helper and identical negative fixtures passed all 18 cases. Both complete identity describes passed 37 selected tests, zero failed, exit 0; 18 unrelated startup tests were deliberately unselected. Consumer checks prove byte-identical lock contents, no constructor/start callback and no database-open callback. Dead PID, current Node PID, verified PostgreSQL, recorded port and mismatch controls remain covered.",
+        "admission": "Original negative run: physical RAM 87.462%, sample-to-process-birth 462.062 ms. Repaired run: RAM 83.224%, birth 517.900 ms. Both finite Windows Job receipts show complete captures and zero active children. An earlier 6228.982 ms negative run is retained privately but excluded from qualification."
+      },
+      "normalHookPrerequisite": {
+        "path": "cli/src/__tests__/onboard.test.ts",
+        "observedFailure": "The new pure default-secrets containment check failed before the fixture correction: one selected failure, zero passed, eleven deliberately unselected, exit 1. It computed the default path only and failed a boolean containment assertion before any onboarding or key existence/read/write operation. RAM 80.130%, birth 245.258 ms; exact failure/source receipts retained privately.",
+        "restoredPass": "Use a fresh retained mkdtemp under the owned TEMP as the fixture's intended PAPERCLIP_HOME, preserving every existing assertion and env restoration. All twelve CLI onboarding tests passed, zero failed/unselected, exit 0. Independent saved-config readback confirmed all eight key-path references inside owned scratch and retained the intentional invalid-config fixture; no secret bytes were read/printed. RAM 82.970%, birth 828.424 ms."
+      },
+      "limits": "Mocked PostgreSQL source and startServer consumer proof, plus real CLI test-owned configuration containment proof. Normal commit hooks and their declared suites must also pass; full repository typecheck/test/build, independent review, publication and installed/live proof remain separate. Foreign recycled processes are intentionally conservative unless identity succeeds; only ESRCH or the current Node PID establishes stale-PID fallback. Malformed/unreadable PID fallback retains previous behavior. CLI database lifecycle is unchanged."
+    },
+    {
       "id": "server-startup-pre-push-contract-selection",
       "path": "scripts/pre-push-test-selection.mjs",
       "description": "Declares the existing real startServer contract suite for server/src/index.ts while retaining failure when that suite is missing.",

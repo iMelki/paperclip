@@ -22,12 +22,12 @@ describe("embedded PostgreSQL reuse identity", () => {
 
   afterEach(() => vi.restoreAllMocks());
 
-  function writePid(pid: string = String(process.pid), port = "55432") {
+  function writePid(pid: string = "4242", port = "55432") {
     writeFileSync(pidFile, `${pid}\n${dataDir}\n1700000000\n${port}\n\nlocalhost\n\nready\n`);
   }
 
-  it("does not reuse a recycled PID owned by node when PostgreSQL is unreachable", async () => {
-    writePid();
+  it("does not reuse a recycled PID owned by this Node process", async () => {
+    writePid(String(process.pid));
     probe.mockResolvedValue(null); // The PostgreSQL port is closed, but the PID is alive.
     const original = readFileSync(pidFile, "utf8");
 
@@ -43,7 +43,7 @@ describe("embedded PostgreSQL reuse identity", () => {
 
   it("reuses a live PostgreSQL server with the matching data directory", async () => {
     writePid();
-    expect(await readRunningEmbeddedPostgres(dataDir, 55432)).toEqual({ pid: process.pid, port: 55432 });
+    expect(await readRunningEmbeddedPostgres(dataDir, 55432)).toEqual({ pid: 4242, port: 55432 });
     expect(probe).toHaveBeenCalledOnce();
     expect(warn).not.toHaveBeenCalled();
   });
@@ -64,7 +64,7 @@ describe("embedded PostgreSQL reuse identity", () => {
   it("checks PostgreSQL identity when PID liveness is inaccessible", async () => {
     writePid();
     vi.mocked(process.kill).mockImplementation(() => { throw Object.assign(new Error("permission denied"), { code: "EPERM" }); });
-    expect(await readRunningEmbeddedPostgres(dataDir, 55432)).toEqual({ pid: process.pid, port: 55432 });
+    expect(await readRunningEmbeddedPostgres(dataDir, 55432)).toEqual({ pid: 4242, port: 55432 });
   });
 
   it("does not reuse a missing PID file", async () => {
@@ -93,10 +93,19 @@ describe("embedded PostgreSQL reuse identity", () => {
     expect(probe).not.toHaveBeenCalled();
   });
 
-  it("treats a failed PostgreSQL query as unverified identity", async () => {
-    writePid();
-    probe.mockRejectedValue(new Error("connection refused"));
-    expect(await readRunningEmbeddedPostgres(dataDir, 55432)).toBeNull();
-    expect(warn).toHaveBeenCalledOnce();
-  });
+  it.each(["present", "EPERM", "EIO"].flatMap((liveness) =>
+    [null, "database system is starting up", "permission denied"].map((failure) => ({ liveness, failure })),
+  ))(
+    "refuses a live foreign PID when the identity query is unavailable: $liveness / $failure", async ({ liveness, failure }) => {
+      writePid();
+      const original = readFileSync(pidFile, "utf8");
+      if (liveness !== "present") vi.mocked(process.kill).mockImplementation(() => {
+        throw Object.assign(new Error("process lookup unavailable"), { code: liveness });
+      });
+      if (failure === null) probe.mockResolvedValue(null);
+      else probe.mockRejectedValue(new Error(failure));
+      await expect(readRunningEmbeddedPostgres(dataDir, 55432)).rejects.toThrow("identity could not be verified");
+      expect(readFileSync(pidFile, "utf8")).toBe(original);
+    },
+  );
 });
