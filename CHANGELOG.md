@@ -6,6 +6,11 @@ All notable changes to this repository should be recorded here.
 
 ## Unreleased
 
+- **[Refs #162]** Recovery recognizes Claude ACP session-limit failures and
+  `resets` clock messages. These failures use the existing provider-quota wait
+  and monitor path instead of immediate continuation retries. Ordinary ACP
+  errors and deliberately paused issues retain their existing behavior.
+
 - **[#164]** Refresh Lockfile accepts manual `ref` and `base` inputs that default
   to `dev`. Each base has its own refresh branch and matching PR lookup. Master
   pushes still refresh their triggering commit and retain auto-merge; other bases

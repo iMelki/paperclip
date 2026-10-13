@@ -5,6 +5,63 @@ import {
 } from "./service.js";
 
 describe("classifyAdapterFailureForRecovery", () => {
+  it.each(["adapter_failed", "acpx_turn_failed"])(
+    "waits for the explicit Claude session reset on %s instead of retrying immediately",
+    (errorCode) => {
+      const now = new Date("2026-10-13T18:00:38.000Z");
+      expect(classifyAdapterFailureForRecovery({
+        errorCode,
+        error: "Internal error: You've hit your session limit · resets 10:40pm (Asia/Jerusalem)",
+        resultJson: { mode: "persistent", status: "failed", stopReason: "adapter_failed" },
+      }, now)).toEqual({
+        kind: "provider_quota",
+        retryAt: new Date("2026-10-13T19:40:00.000Z"),
+        parsedResetTime: true,
+      });
+    },
+  );
+
+  it("uses the explicit reset clock from the ACP result summary", () => {
+    expect(classifyAdapterFailureForRecovery({
+      errorCode: "acpx_turn_failed",
+      error: "Provider turn failed",
+      resultJson: { summary: "You've hit your session limit - resets at 21:30 (UTC)" },
+    }, new Date("2026-10-13T18:00:00.000Z"))).toEqual({
+      kind: "provider_quota",
+      retryAt: new Date("2026-10-13T21:30:00.000Z"),
+      parsedResetTime: true,
+    });
+  });
+
+  it("does not classify an ordinary ACP turn error as a quota wait", () => {
+    expect(classifyAdapterFailureForRecovery({
+      errorCode: "acpx_turn_failed",
+      error: "The agent failed while reading a workspace file",
+      resultJson: { status: "failed" },
+    })).toBeNull();
+  });
+
+  it("does not turn a non-adapter session-limit message into an automatic retry", () => {
+    expect(classifyAdapterFailureForRecovery({
+      errorCode: "issue_paused",
+      error: "You've hit your session limit - resets 10:40pm (Asia/Jerusalem)",
+      resultJson: null,
+    })).toBeNull();
+  });
+
+  it("keeps quota recovery bounded when the provider supplies no reset clock", () => {
+    const now = new Date("2026-10-13T18:00:00.000Z");
+    expect(classifyAdapterFailureForRecovery({
+      errorCode: "acpx_turn_failed",
+      error: "You've hit your session limit",
+      resultJson: null,
+    }, now)).toEqual({
+      kind: "provider_quota",
+      retryAt: new Date(now.getTime() + PROVIDER_QUOTA_RECOVERY_DEFAULT_BACKOFF_MS),
+      parsedResetTime: false,
+    });
+  });
+
   it("classifies usage-limit messages and parses the provider reset time", () => {
     const now = new Date("2026-07-15T20:00:00.000Z");
     const classification = classifyAdapterFailureForRecovery({
