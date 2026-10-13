@@ -25,6 +25,13 @@ integration outcome; later rows remain queued and do not imply concurrent execut
 
 ## Current work
 
+- [#154 — Stabilize workspace containment test completion](https://github.com/iMelki/paperclip/issues/154):
+  Await tracked heartbeat executions before reading final state. The isolated
+  database fixture delays agent finalization to expose the old one-second wait.
+  Verification is recorded in `.gate-evidence.json` and
+  `doc/evidence/issue-154/verification.md`. Co-CTO review, merge, and hosted CI
+  remain open; this change does not update a live instance.
+
 - [#164 — Let Refresh Lockfile target dev](https://github.com/iMelki/paperclip/issues/164):
   Manual branch/base selection and isolated refresh branches are under CTO review.
   After the restart merge freeze lifts, merge the workflow fix and observe a dev
@@ -183,7 +190,7 @@ This file is the durable local index for active `paperclip` issues.
   - Fleet-wide code-only audit scored this app 7.8/10 against the shared
     Awwwards rubric. Full report: `docs/uiux-awwwards-report-2026-08-09.md`.
     Scores are code-inspection estimates pending a Frontend Proof Bundle.
-    Fleet rollup: iMelki/agent-settings#586.
+    Portfolio tracking is maintained privately.
   - Gauntlet **21/21** (run 10, `f7a0160fc`, 2026-08-27): first-pass
     `/ASS/design-guide` rendered 16 capsules, `mainTextLen` 17664, empty
     `consoleErrors`. Receipt:
