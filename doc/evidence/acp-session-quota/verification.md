@@ -21,13 +21,22 @@ scheduler, provider route, credential behavior, or paid fallback.
 Base source: `e226c8045f923f42e5191da2727d3ef1fbbb157f`.
 Evidence date: 2026-10-13. Caller: Codex. Mutation intent: isolated source only.
 
-Command: `node node_modules/vitest/vitest.mjs run server/src/services/recovery/provider-failure-classification.test.ts --maxWorkers=1`.
+Focused command, from `server`:
+`node ../node_modules/vitest/vitest.mjs run src/services/recovery/provider-failure-classification.test.ts --maxWorkers=1`.
 
 | Check | Result | Exit | Duration |
 | --- | --- | --- | --- |
 | New fixtures against the unchanged classifier | 4 failed, 11 passed | 1 | 25.84 s |
 | Fixtures after the classifier change | 15 passed | 0 | 66.08 s |
 | Server TypeScript check | Passed | 0 | See local receipt |
+
+Implementation commit: `4e3bdfd0`. The unmodified repository pre-commit hook
+passed server and dependent CLI typechecks, 12 selected regression suites
+(142 tests), forbidden-token checks, and the pinned Gitleaks staged scan.
+The repository's normal related-suite cap selected 12 of 165 importing suites;
+this is bounded local qualification, not an exhaustive hosted-CI result.
+The backend change does not require React validation. The hook separately
+reported React Doctor incomplete because its exact dependency is not pinned.
 
 The negative run occurred before editing the classifier. Its four failures
 were missed quota classifications, not unrelated setup failures. The positive
