@@ -1165,6 +1165,39 @@
         "scope": "Isolated local source tests; no installed runtime or native recovery proof.",
         "restoredArtifactPath": "doc/evidence/acp-session-quota/verification.md"
       }
+    },
+    {
+      "id": "plugin-dormant-upgrade-separate-approval",
+      "path": "server/src/services/plugin-lifecycle.ts",
+      "description": "Stage a disabled plugin without starting work; pending upgrade retries never imply capability approval.",
+      "negativeFixture": "server/src/__tests__/plugin-deferred-activation.test.ts",
+      "observedFailure": {
+        "date": "2026-10-16",
+        "command": "Original Chief C62 request PP-HOST-UPGRADE-ORIGINAL-NEGATIVE-DATA-20261016.private.json, SHA256 6e35a90148d7f66e2690abdad2d52d4a877cb4749252409a41e33b0b41cf3211; exact saved Node24/Vitest4.1.10 argv selects four lifecycle/real-loader cases, one worker, no file parallelism.",
+        "breakApplied": "Run the four new assertions against the unchanged ca698 production services before repair; retained exact original preimages and nine post-pins.",
+        "reason": "Exactly four attributable failures: two disabled-upgrade rejections, added-capability staging rejection, and a repeated pending upgrade incorrectly becoming ready. The other 24 of 28 discovered cases were unselected, not accepted passes.",
+        "exitCode": 1,
+        "artifactPath": "doc/evidence/plugin-upgrade-approval-20261016.md",
+        "restoredPass": "Supported-path repair: exact four original assertions plus regressions passed within 44/44, zero skipped, exit0, 8621ms; eleven post-pins stable, owned root/tree zero, full healthy streams with zero drops. Original negative lasted5954ms/exit1. Exact private positive request SHA256376436966c695d685b52bc7a95d0a4ab6a9eea2e0f82b897dc2a519f8fda077f.",
+        "restoredExitCode": 0,
+        "scope": "Mock-only services and compiled SQL predicates. No installed activation, real database race, disk-artifact tamper guard, OAuth approval or live import proof. Existing activation refresh gap remains separately tracked."
+      }
+    },
+    {
+      "id": "github-oauth-json-response-contract",
+      "path": "server/src/services/tool-access.ts",
+      "description": "Request GitHub's documented JSON token response and reject missing/error token results using the production helper.",
+      "negativeFixture": "server/src/__tests__/tool-oauth-github-compatibility.test.ts",
+      "observedFailure": {
+        "date": "2026-10-12",
+        "command": "Invoke-Project12SdkCheck.ps1 -Mode OAuth (private bounded NativeJob qualification runner)",
+        "breakApplied": "Removed only Accept application/json from the private production exchange helper. No live OAuth transport or credential was used.",
+        "reason": "Exactly the GitHub-shaped JSON-request case failed with oauth_access_token_missing; 42 passed, 1 failed, exit 1. No syntax/import/dependency/deadline failure in this accepted negative run.",
+        "exitCode": 1,
+        "artifactPath": "doc/evidence/github-project-board-import-20261012.md",
+        "restoredPass": "The exact source SHA3873F32AF399231BE5FB5374B5624757AB97D7DEFEC0ACD20266083E0C46656A was restored. Same caller and 1.5GiB Job/512MiB process limits: 43 passed, zero skipped, exit0, 9110ms, zero active members. The earlier allocation-failed negative attempt was inconclusive and is not this proof.",
+        "restoredExitCode": 0
+      }
     }
   ]
 }
