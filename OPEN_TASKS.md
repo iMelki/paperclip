@@ -25,6 +25,15 @@ integration outcome; later rows remain queued and do not imply concurrent execut
 
 ## Current work
 
+- [Embedded PostgreSQL reuse identity - upstream #6597](https://github.com/paperclipai/paperclip/issues/6597):
+  Server startup now verifies PostgreSQL's data directory on the PID file's
+  recorded port before reuse. The regression fails against the original server
+  entry point and passes after restoration. Unit, native Windows, and startup
+  checks cover recycled, live, and dead PIDs. Independent co-CTO review and
+  deployment readback remain open. Migration, CLI worktree, and routine consumers
+  retain their separate lifecycle checks; the broader shared approach is tracked
+  in [upstream PR #9769](https://github.com/paperclipai/paperclip/pull/9769).
+
 - [#154 — Stabilize workspace containment test completion](https://github.com/iMelki/paperclip/issues/154):
   Await tracked heartbeat executions before reading final state. The isolated
   database fixture delays agent finalization to expose the old one-second wait.

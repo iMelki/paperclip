@@ -93,6 +93,28 @@ test("selects exact declared contract tests without widening to an import graph"
   });
 });
 
+test("selects the server startup contract for the server entry point", () => {
+  withFixture(({ repoRoot, trackedFiles, write }) => {
+    write("server/src/index.ts", "export async function startServer() {}\n");
+    write("server/src/__tests__/server-startup-feedback-export.test.ts", "test('startup', () => {});\n");
+    write("server/src/__tests__/unrelated.test.ts", "test('other', () => {});\n");
+    const result = selectPrePushTests({ repoRoot, changedFiles: ["server/src/index.ts"], trackedFiles });
+    assert.deepEqual(result.vitestFiles, ["server/src/__tests__/server-startup-feedback-export.test.ts"]);
+    assert.deepEqual(result.coverage[0].declaredTests, ["server/src/__tests__/server-startup-feedback-export.test.ts"]);
+    assert.deepEqual(result.selectionErrors, []);
+  });
+});
+
+test("rejects server startup coverage when its declared contract is missing", () => {
+  withFixture(({ repoRoot, trackedFiles, write }) => {
+    write("server/src/index.ts", "export async function startServer() {}\n");
+    write("server/src/__tests__/unrelated.test.ts", "test('other', () => {});\n");
+    const result = selectPrePushTests({ repoRoot, changedFiles: ["server/src/index.ts"], trackedFiles });
+    assert.deepEqual(result.vitestFiles, []);
+    assert.match(result.selectionErrors.join("\n"), /server-startup-feedback-export\.test\.ts/);
+  });
+});
+
 test("selects the DB coordination contract for the shared issues schema", () => {
   withFixture(({ repoRoot, trackedFiles, write }) => {
     write("packages/db/src/schema/issues.ts", "export const issues = true;\n");
