@@ -100,10 +100,12 @@ index 243c9d13bcba520923b63adfddad75cf2d94362d..b65e04a64d220ff213af8f4fcff5a7cb
  async function runPromptTurn(params) {
  	try {
  		const promptPromise = params.client.prompt(params.sessionId, params.prompt);
-@@ -6079,6 +6120,20 @@ async function runPromptTurn(params) {
+@@ -6079,6 +6120,21 @@ async function runPromptTurn(params) {
  			idleMs: SESSION_REPLY_IDLE_MS,
  			timeoutMs: SESSION_REPLY_DRAIN_TIMEOUT_MS
  		}).catch(() => {});
++		// Record response-only usage first: a failed turn can still consume tokens.
++		recordPromptResponseUsage(params.conversation, response.usage, params.promptMessageId);
 +		const terminalFailureCategory = typedTerminalSessionFailureCategory(response);
 +		if (terminalFailureCategory !== null) {
 +			// Pass complete provider text to the diagnostic callback. Consumers redact
@@ -118,7 +120,7 @@ index 243c9d13bcba520923b63adfddad75cf2d94362d..b65e04a64d220ff213af8f4fcff5a7cb
 +			} catch {}
 +			throw new Error(`ACP agent reported a terminal ${terminalFailureCategory} failure.`);
 +		}
- 		recordPromptResponseUsage(params.conversation, response.usage, params.promptMessageId);
+-		recordPromptResponseUsage(params.conversation, response.usage, params.promptMessageId);
  		return {
  			stopReason: response.stopReason,
 diff --git a/dist/runtime.d.ts b/dist/runtime.d.ts
