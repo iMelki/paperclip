@@ -129,9 +129,16 @@ install, activation, or live database change.
   instance. `service.json` still said `healthy`, but its last health timestamp
   was stale. The bounded read-only factory-status collector exceeded its 30 s
   owner deadline; its exact owned job was terminated and zero active members
-  were verified. No restart was performed. This indicates an unresponsive
-  existing process; cause is not established. RAM later sampled at 88.6%, after
-  a brief 90.5% reading.
+  were verified. No restart was performed. This was a transient unresponsive
+  period; its cause is not established. RAM later sampled at 88.6%, after a
+  brief 90.5% reading.
+- Follow-up at 2026-10-17 23:45:22 UTC: both health endpoints returned HTTP 200
+  for the unchanged live `e226c8045f923f42e5191da2727d3ef1fbbb157f` app (0.908 s
+  local; 0.253 s tailnet). At 23:46:52 UTC, `/ASI/projects` returned HTTP 200
+  locally (6.072 s) and via tailnet (0.450 s). The loopback listener ancestry
+  terminates at the recorded `WindowlessProcessHost`; there is no evidence of a
+  second independent Paperclip instance. Exact process chain, receipts, route
+  timing, and authoritative log hashes are in the owner-only runtime readback.
 
 ## Diagnostic attempts and fixes
 
@@ -163,10 +170,9 @@ install, activation, or live database change.
   junction into Factory; safe rollout therefore needs an isolated installed
   package/runtime and a separately controlled owner handover, not a pnpm run
   against the shared junction.
-- The existing live process is currently unresponsive despite retaining its
-  5113 listeners. Treat the stale service `healthy` field as invalid until an
-  owner-bound live health check passes again. Restart/repair was not attempted
-  in this evidence pass.
+- The stored service health timestamp is stale, but the later direct health
+  checks passed. Treat endpoint probes, not the stale stored flag, as live truth;
+  monitor for recurrence. Restart/repair was not attempted in this evidence pass.
 - The successful backup restore was isolated; this does not prove a live Factory
   restore or replace a verified production rollback rehearsal.
 - GitHub OAuth final Authorize is still operator-only. Project #12 is not bound
