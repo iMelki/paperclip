@@ -1,4 +1,10 @@
-import type { DashboardRunActivityDay, HeartbeatRun } from "@paperclipai/shared";
+import type {
+  DashboardRunActivityDay,
+  DashboardSpendBreakdownRow,
+  DashboardSpendDay,
+  HeartbeatRun,
+} from "@paperclipai/shared";
+import { formatCents, formatTokens } from "../lib/utils";
 
 /* ---- Utilities ---- */
 
@@ -322,6 +328,104 @@ export function SuccessRateChart(props: RunChartProps) {
         })}
       </div>
       <DateLabels days={days} />
+    </div>
+  );
+}
+
+/* ---- Spend ---- */
+
+// Billed = cents in the cost ledger. Estimated = API-list-price value of token
+// usage that was booked at $0 (subscription billing); never a real charge.
+const spendSegmentColors = {
+  billed: "var(--hex-10b981)",
+  estimated: "var(--hex-6366f1)",
+} as const;
+
+function spendTooltip(label: string, entry: { billedCents: number; estimatedCents: number; tokens: number }): string {
+  const lines = [label];
+  if (entry.billedCents > 0) lines.push(`  billed: ${formatCents(entry.billedCents)}`);
+  if (entry.estimatedCents > 0) lines.push(`  estimated: ~${formatCents(entry.estimatedCents)} at API prices`);
+  lines.push(`  tokens: ${formatTokens(entry.tokens)}`);
+  return lines.join("\n");
+}
+
+function spendLegend(rows: readonly { billedCents: number; estimatedCents: number }[]) {
+  const hasBilled = rows.some((row) => row.billedCents > 0);
+  const hasEstimated = rows.some((row) => row.estimatedCents > 0);
+  return [
+    ...(hasBilled ? [{ color: spendSegmentColors.billed, label: "Billed" }] : []),
+    ...(hasEstimated ? [{ color: spendSegmentColors.estimated, label: "Estimated (API prices)" }] : []),
+  ];
+}
+
+export function SpendChart({ days: spendDays }: { days?: DashboardSpendDay[] | null }) {
+  const activity = spendDays ?? [];
+  const hasData = activity.some((day) => day.billedCents > 0 || day.estimatedCents > 0);
+  if (!hasData) {
+    const tokens = activity.reduce((sum, day) => sum + day.tokens, 0);
+    return (
+      <p className="text-xs text-muted-foreground">
+        {tokens > 0 ? `${formatTokens(tokens)} tokens on models without a known price` : "No spend recorded"}
+      </p>
+    );
+  }
+  const days = activity.map((day) => day.date);
+  const maxValue = Math.max(...activity.map((day) => day.billedCents + day.estimatedCents), 1);
+
+  return (
+    <div>
+      <div className="flex items-end gap-(--sz-3px) h-20">
+        {activity.map((entry) => {
+          const total = entry.billedCents + entry.estimatedCents;
+          const heightPct = (total / maxValue) * 100;
+          return (
+            <div key={entry.date} className="flex-1 h-full flex flex-col justify-end" title={spendTooltip(entry.date, entry)}>
+              {total > 0 ? (
+                <div className="flex flex-col-reverse gap-px overflow-hidden" style={{ height: `${heightPct}%`, minHeight: 2 }}>
+                  {entry.billedCents > 0 && <div style={{ flex: entry.billedCents, backgroundColor: spendSegmentColors.billed }} />}
+                  {entry.estimatedCents > 0 && <div style={{ flex: entry.estimatedCents, backgroundColor: spendSegmentColors.estimated }} />}
+                </div>
+              ) : (
+                <div className="bg-muted/30 rounded-sm" style={{ height: 2 }} />
+              )}
+            </div>
+          );
+        })}
+      </div>
+      <DateLabels days={days} />
+      <ChartLegend items={spendLegend(activity)} />
+    </div>
+  );
+}
+
+export function SpendBreakdownChart({ rows, emptyLabel = "No spend this month" }: { rows?: DashboardSpendBreakdownRow[] | null; emptyLabel?: string }) {
+  const entries = (rows ?? []).filter((row) => row.billedCents > 0 || row.estimatedCents > 0);
+  if (entries.length === 0) return <p className="text-xs text-muted-foreground">{emptyLabel}</p>;
+  const maxValue = Math.max(...entries.map((row) => row.billedCents + row.estimatedCents), 1);
+
+  return (
+    <div>
+      <div className="space-y-1.5">
+        {entries.map((row) => {
+          const total = row.billedCents + row.estimatedCents;
+          const amount = row.billedCents > 0 && row.estimatedCents === 0 ? formatCents(total) : `~${formatCents(total)}`;
+          return (
+            <div key={row.key} className="min-w-0" title={spendTooltip(row.label, row)}>
+              <div className="flex items-baseline justify-between gap-2 text-(length:--text-nano)">
+                <span className="truncate text-muted-foreground">{row.label}</span>
+                <span className="shrink-0 tabular-nums text-muted-foreground">{amount}</span>
+              </div>
+              <div className="mt-0.5 flex h-1.5 overflow-hidden rounded-sm bg-muted/30">
+                <div className="flex gap-px" style={{ width: `${(total / maxValue) * 100}%` }}>
+                  {row.billedCents > 0 && <div style={{ flex: row.billedCents, backgroundColor: spendSegmentColors.billed }} />}
+                  {row.estimatedCents > 0 && <div style={{ flex: row.estimatedCents, backgroundColor: spendSegmentColors.estimated }} />}
+                </div>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+      <ChartLegend items={spendLegend(entries)} />
     </div>
   );
 }

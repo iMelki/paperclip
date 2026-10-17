@@ -1284,6 +1284,23 @@ export const storybookDashboardSummary: DashboardSummary = {
     monthSpendCents: 67_500,
     monthBudgetCents: 250_000,
     monthUtilizationPercent: 27,
+    monthInputTokens: 1_200_000,
+    monthCachedInputTokens: 18_000_000,
+    monthOutputTokens: 240_000,
+    monthEstimatedCents: 2140,
+    monthUnpricedTokens: 0,
+    spendDays: [
+      { date: "2026-04-10", billedCents: 67_500, estimatedCents: 640, tokens: 5_100_000 },
+      { date: "2026-04-11", billedCents: 0, estimatedCents: 910, tokens: 7_400_000 },
+    ],
+    byAgent: [
+      { key: "agent-1", label: "CEO", billedCents: 0, estimatedCents: 1230, tokens: 9_800_000 },
+      { key: "agent-2", label: "Engineer", billedCents: 67_500, estimatedCents: 910, tokens: 9_640_000 },
+    ],
+    byModel: [
+      { key: "claude-opus-5-5", label: "claude-opus-5-5", billedCents: 0, estimatedCents: 2140, tokens: 19_440_000 },
+      { key: "gpt-5", label: "gpt-5", billedCents: 67_500, estimatedCents: 0, tokens: 3_100_000 },
+    ],
   },
   pendingApprovals: 2,
   budgets: {

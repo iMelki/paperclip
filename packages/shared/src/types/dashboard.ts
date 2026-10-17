@@ -42,6 +42,28 @@ export interface DashboardSummary {
     monthSpendCents: number;
     monthBudgetCents: number;
     monthUtilizationPercent: number;
+    /**
+     * Token usage for the same UTC month. Subscription-billed runs book
+     * `costCents = 0` (see normalizeBilledCostCents), so tokens are the only
+     * signal of how much such a fleet consumed.
+     */
+    monthInputTokens: number;
+    monthCachedInputTokens: number;
+    monthOutputTokens: number;
+    /**
+     * API-equivalent cost of zero-cost events with token usage, priced from
+     * the shared MODEL_PRICING table at read time. An estimate: never stored,
+     * never counted against budgets.
+     */
+    monthEstimatedCents: number;
+    /** Tokens on zero-cost events whose model has no known rate. */
+    monthUnpricedTokens: number;
+    /** Billed and estimated spend per UTC day over the run-activity window. */
+    spendDays: DashboardSpendDay[];
+    /** This month's spend by agent, largest first (top entries only). */
+    byAgent: DashboardSpendBreakdownRow[];
+    /** This month's spend by model, largest first (top entries only). */
+    byModel: DashboardSpendBreakdownRow[];
   };
   pendingApprovals: number;
   budgets: {
@@ -51,4 +73,22 @@ export interface DashboardSummary {
     pausedProjects: number;
   };
   runActivity: DashboardRunActivityDay[];
+}
+
+export interface DashboardSpendDay {
+  date: string;
+  /** Cents booked in the cost ledger (metered API billing). */
+  billedCents: number;
+  /** API-equivalent estimate for zero-cost token usage (see monthEstimatedCents). */
+  estimatedCents: number;
+  tokens: number;
+}
+
+export interface DashboardSpendBreakdownRow {
+  /** Agent id or model id, depending on the breakdown. */
+  key: string;
+  label: string;
+  billedCents: number;
+  estimatedCents: number;
+  tokens: number;
 }

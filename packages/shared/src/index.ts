@@ -72,6 +72,15 @@ export {
   type PipelineHealthWarningCode,
 } from "./pipeline-health.js";
 export {
+  MODEL_PRICING,
+  estimateTokenCostCents,
+  normalizePricingModelId,
+  resolveModelTokenRate,
+  type ModelPricingTable,
+  type ModelTokenRate,
+  type TokenCounts,
+} from "./model-pricing.js";
+export {
   caseTypeMatchesPipeline,
   deriveCaseType,
   type CaseTypePipelineRef,
@@ -1084,6 +1093,8 @@ export type {
   InstanceSchedulerHeartbeatAgent,
   LiveEvent,
   DashboardRunActivityDay,
+  DashboardSpendBreakdownRow,
+  DashboardSpendDay,
   DashboardSummary,
   TimelineActorType,
   TimelineEventKind,
