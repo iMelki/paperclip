@@ -13,6 +13,57 @@ All notable changes to this repository should be recorded here.
   It reuses the pinned canonical scratch helper and confines child temp output.
   This does not repair embedded PostgreSQL startup or process cleanup.
 
+- **[#164]** Refresh Lockfile accepts manual `ref` and `base` inputs that default
+  to `dev`. Each base has its own refresh branch and matching PR lookup. Master
+  pushes still refresh their triggering commit and retain auto-merge; other bases
+  require maintainer review. Both lockfile gates accept the bot's exact per-base branch.
+
+- **[#160]** The PR security step now lists each flag (check name and file,
+  or package names) in the job log and in the `security-review` check-run
+  summary. For `secret-scan` flags it names only the pattern, never the
+  matched text. A failed draft-advisory call (403 for the workflow token on
+  this fork) is logged and no longer stops the check run or the exit-0
+  contract. The summary stays under the GitHub size limit and counts the
+  flags it leaves out. Refs #137.
+
+- **[#159]** A Codex ACP run whose whole reply is a provider error object now
+  fails. codex-acp 1.1.14 sends a rejected request (for example an unsupported
+  model id) as reply text and ends the turn normally, so the run was recorded
+  as succeeded and started corrective runs on the same dead model. The Codex
+  ACP executor now returns exit code 1, error code
+  `codex_provider_error_reply`, and the provider error type and message as the
+  failure reason. Only a reply that, without blank lines and the model-metadata
+  warning, parses as one JSON error object (`type: "error"`, or an `error`
+  object with HTTP status 400-599) matches. Prose that quotes an error stays a
+  success.
+
+- **[#148]** Corrected comments in the Codex adapter and its test that said
+  `gpt-5.6-sol` "stays the default model". `DEFAULT_CODEX_LOCAL_MODEL` only
+  sets an entry of the model dropdown list. A Codex agent with an empty model
+  field runs without `--model`, so it uses the `model` key of its company's
+  Codex home `config.toml`. Comments only; no code or assertion changed.
+
+- Agent hires accept a company-scoped `Idempotency-Key` header or `idempotencyKey` body field. Matching retries return the original hire with HTTP 200; changed payloads return 409. A database unique index and transaction prevent concurrent duplicate agents and approvals. Plan-based hiring docs now recommend a revision-and-slot key.
+
+- **[#150]** Pin the Codex client under `codex-acp` 1.1.14 to `@openai/codex`
+  0.160.0 with a scoped pnpm override, so Codex agents can run the GPT-6
+  models (the server refuses them from 0.147.0 with HTTP 400). The lockfile
+  changes only `@openai/codex` and its platform packages, plus one
+  `@babel/runtime` line that pnpm re-resolved. A frozen reinstall and a
+  restart are needed to take effect.
+
+- **[#148]** Added the GPT-6 model ids (`gpt-6.1-sol`, `gpt-6-astra`,
+  `gpt-6-sol`, `gpt-6-luna`) to the Codex adapter's fixed model list and its
+  fast-mode list, with matching help text, docs and tests. The default model
+  stays `gpt-5.6-sol`. The ids need the Codex client 0.160.0 that #150
+  pins; this change touches no dependency or version pin.
+
+- **[#144]** Pass the configured bind host to detect-port when choosing the
+  listen port, so a port held on another address of the machine no longer
+  moves the server. Add opt-in `PAPERCLIP_STRICT_PORT=true` to fail startup
+  instead of moving to another port. Real-socket tests and docs included. A
+  wildcard listener on Windows is still not detected.
+
 - **[#140]** Registered the Hermes adapter's Vitest project in the root test
   workspace and grouped PR runner. Exact pre-push selection now runs its
   sibling tests locally; the registration and test-policy changes still

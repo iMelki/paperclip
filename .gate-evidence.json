@@ -6,14 +6,11 @@
     ".github/scripts/check-pr-dedup-search.mjs",
     ".github/scripts/check-pr-dependencies.mjs",
     ".github/scripts/check-pr-linked-issue.mjs",
-    ".github/scripts/check-pr-lockfile.mjs",
-    ".github/scripts/check-pr-security.mjs",
     ".github/scripts/check-pr-template.mjs",
     ".github/scripts/check-pr-test-coverage.mjs",
     ".github/workflows/agent-runtime-images.yml",
     ".github/workflows/docker.yml",
     ".github/workflows/e2e.yml",
-    ".github/workflows/refresh-lockfile.yml",
     ".github/workflows/release-smoke.yml",
     ".github/workflows/release-verify.yml",
     ".github/workflows/release.yml",
@@ -698,6 +695,147 @@
         "artifactPath": "doc/evidence/coordination-v2/2026-09-06-issue53-receipt.json"
       },
       "maintainabilityReceipt": "doc/evidence/coordination-v2/2026-09-06-maintainability.md"
+    },
+    {
+      "id": "plugin-single-company-job-invocation",
+      "path": "server/src/services/plugin-worker-manager.ts",
+      "description": "Binds runJob to exactly one host-authorized configured company, preserving denial for ambiguous, omitted, forged, expired, and cross-company scope.",
+      "negativeFixture": "server/src/__tests__/plugin-worker-manager.test.ts",
+      "observedFailure": {
+        "date": "2026-10-07",
+        "command": "pnpm --dir server exec vitest run --config <source-alias-config> src/__tests__/plugin-worker-manager.test.ts -t 'plugin job company context'",
+        "breakApplied": "Readback confirmed the singleton guard was changed from size === 1 to size >= 1. The test harness used the checkout SDK source because generated SDK outputs were absent.",
+        "reason": "Exit 1: the two-company case resolved { companyId: 'company-a' } instead of rejecting. The other ten focused cases passed, attributing the failure to the broadened company selector.",
+        "restoredPass": "Exact original source bytes restored and independently read back. The identical focused command exited 0 with 11/11 passing. The full worker-manager suite also exited 0 with 56/56 passing. Source-only evidence; compiler, independent review, and live adoption are separate gates.",
+        "restoredSourceSha256": "59866795649e6b9d3b17db05bf95eac4648e0c42f02e775f7b5460d0009e619e"
+      }
+    },
+    {
+      "id": "agent-hire-company-key-payload-identity",
+      "path": "server/src/services/agent-hire-idempotency.ts",
+      "description": "A company-scoped unique claim returns the original hire on matching replay and rejects changed payloads before another hire is created.",
+      "negativeFixture": "server/src/__tests__/agent-hire-idempotency.test.ts",
+      "observedFailure": {
+        "date": "2026-10-07",
+        "command": "pnpm exec vitest run --config vitest.config.ts src/__tests__/agent-hire-idempotency.test.ts -t 'two concurrent identical|a repeated request|rejects a different payload|keeps requests without' (from server)",
+        "breakApplied": "Restored the original route and shared hire validator from the base commit while retaining the regression fixture and new schema, then restored exact candidate bytes in finally.",
+        "reason": "Three attributable failures: concurrent requests returned two 201 responses, repeated request returned 201 rather than 200, and a changed payload reused the key with 201 rather than 409. The no-key compatibility case passed as required by unchanged behavior.",
+        "exitCode": 1,
+        "restoredPass": "Same real temporary PostgreSQL fixture after restoration and final review fixes: 15 passed, zero failures or skips, exit 0, 38.52 seconds. Concurrent readback found one agent, one approval, one matching receipt, two activities and zero runs. Shared schema tests separately failed 9/10 against the original validator and passed 10/10 after restoration."
+      }
+    },
+    {
+      "id": "pr-security-flags-visible-after-advisory-403",
+      "path": ".github/scripts/check-pr-security.mjs",
+      "description": "When the draft-advisory POST fails (403 for the workflow GITHUB_TOKEN on a fork), every flag is still listed by check name and file in the job log and the security-review check-run summary, the matched secret text is never printed, and the script exits 0.",
+      "negativeFixture": ".github/scripts/tests/check-pr-security-advisory-403.test.mjs",
+      "observedFailure": {
+        "date": "2026-10-07",
+        "command": "node --test .github/scripts/tests/check-pr-security-advisory-403.test.mjs",
+        "breakApplied": "git restore --source=origin/dev --worktree restored the unfixed script (SHA-256 7f847be419a9b10a498a6dbe602a4d646cb080faddf70738e19d359503e63f8b); git diff against origin/dev was empty.",
+        "reason": "Exit 1 with 1 pass and 1 fail. The 403 case failed on its first assertion: the job log did not list 'ci-tampering .github/workflows/pr.yml'. Its stderr held only the flag count and the advisory 403, as in the fork CI logs. The no-flag control passed.",
+        "exitCode": 1,
+        "restoredPass": "The fixed script was copied back (SHA-256 648fd3561a9747935da5b1cb118b81adad300e46653e41948a11cf4867244c7d). The identical command exited 0 with 2/2 passing. All .github/scripts/tests files passed 149/149."
+      }
+    },
+    {
+      "id": "lockfile-refresh-164-original-workflow",
+      "path": ".github/workflows/refresh-lockfile.yml",
+      "description": "Select the exact refresh head/base and retain maintainer review outside master.",
+      "negativeFixture": "scripts/refresh-lockfile.test.mjs",
+      "observedFailure": {
+        "date": "2026-10-08",
+        "command": "node --test --test-reporter=tap scripts/refresh-lockfile.test.mjs .github/scripts/tests/check-pr-lockfile.test.mjs",
+        "breakApplied": "Replaced only refresh-lockfile.yml with exact origin/dev bytes via git show; readback verified the break. Restored the candidate in finally.",
+        "reason": "Original workflow: 7 failures for absent input defaults/checkout/concurrency expressions, shared work branch, missing head/base PR routing, invalid-branch acceptance and dev auto-merge. 14 controls passed.",
+        "exitCode": 1,
+        "artifactPath": "doc/evidence/lockfile-refresh-164/original-workflow.log",
+        "restoredPass": "21 pass, 0 fail; byte-identical restoration verified.",
+        "restoredExitCode": 0,
+        "restoredArtifactPath": "doc/evidence/lockfile-refresh-164/original-workflow-restored.log",
+        "restoredSha256": "ab56c84ec3688fddd3f7695883fb55d19ab522f5b427dab2ae5ab8f17b9002dc",
+        "scope": "Local shell/CLI stubs and actual predicates; no live dispatch, push, PR creation or merge."
+      }
+    },
+    {
+      "id": "lockfile-refresh-164-loosened-lockfile-gate",
+      "path": ".github/scripts/check-pr-lockfile.mjs",
+      "description": "Select the exact refresh head/base and retain maintainer review outside master.",
+      "negativeFixture": ".github/scripts/tests/check-pr-lockfile.test.mjs",
+      "observedFailure": {
+        "date": "2026-10-08",
+        "command": "node --test --test-reporter=tap .github/scripts/tests/check-pr-lockfile.test.mjs",
+        "breakApplied": "Replaced the bot-author test with true and exact base equality with prBranch.startsWith('chore/refresh-lockfile-'); verified non-no-op edit and restored in finally.",
+        "reason": "Four rejection assertions failed: non-bot author, wrong base, extra branch suffix and missing base were accepted. Seven controls passed. Original gate separately failed all 3 new per-base acceptance cases.",
+        "exitCode": 1,
+        "artifactPath": "doc/evidence/lockfile-refresh-164/loosened-lockfile-gate.log",
+        "restoredPass": "11 pass, 0 fail; byte-identical restoration verified.",
+        "restoredExitCode": 0,
+        "restoredArtifactPath": "doc/evidence/lockfile-refresh-164/loosened-lockfile-gate-restored.log",
+        "restoredSha256": "b3aa32f56c0a0265a457a4974f36da6a73514a69f89abed715f7d6040ae3e888",
+        "scope": "Local shell/CLI stubs and actual predicates; no live dispatch, push, PR creation or merge."
+      }
+    },
+    {
+      "id": "lockfile-refresh-164-loosened-pr-policy",
+      "path": ".github/workflows/pr.yml",
+      "description": "Select the exact refresh head/base and retain maintainer review outside master.",
+      "negativeFixture": "scripts/refresh-lockfile.test.mjs",
+      "observedFailure": {
+        "date": "2026-10-08",
+        "command": "node --test --test-reporter=tap scripts/refresh-lockfile.test.mjs",
+        "breakApplied": "Replaced only the new github-actions[bot] author condition with true; readback verified the break. Restored exact candidate bytes in finally.",
+        "reason": "The PR policy accepted example chore/refresh-lockfile-dev -> dev; the test expected the manual-lockfile block to run. Exactly 1 failed, 9 controls passed.",
+        "exitCode": 1,
+        "artifactPath": "doc/evidence/lockfile-refresh-164/loosened-pr-policy.log",
+        "restoredPass": "10 pass, 0 fail; byte-identical restoration verified.",
+        "restoredExitCode": 0,
+        "restoredArtifactPath": "doc/evidence/lockfile-refresh-164/loosened-pr-policy-restored.log",
+        "restoredSha256": "befa0a2708e6b875aff8cee3addc62b06cf9a02a57ed6896efbc759e2413db26",
+        "scope": "Local shell/CLI stubs and actual predicates; no live dispatch, push, PR creation or merge."
+      }
+    },
+    {
+      "id": "heartbeat-workspace-containment-execution-completion",
+      "path": "server/src/__tests__/heartbeat-workspace-branch-containment.test.ts",
+      "description": "Await tracked heartbeat completion before final agent and containment assertions; reproduce delayed idle finalization in a disposable database.",
+      "negativeFixture": "server/src/__tests__/heartbeat-workspace-branch-containment.test.ts",
+      "observedFailure": {
+        "date": "2026-10-07",
+        "command": "(from server) node ../node_modules/vitest/vitest.mjs run src/__tests__/heartbeat-workspace-branch-containment.test.ts --reporter=default --reporter=json --outputFile.json=<run-report>",
+        "breakApplied": "Restored both original polling helpers and the default vi.waitFor status wait. Kept the 1.5-second final-idle-write trigger and marked agents. Verified the original waits were present and the replacement helper was absent before execution.",
+        "reason": "The project_primary configuration-failure case expected idle with null errorReason and read running with null errorReason. Exactly 1 failed, 7 passed, 0 skipped; exit 1.",
+        "exitCode": 1,
+        "artifactPath": "doc/evidence/issue-154/negative.txt",
+        "restoredPass": "Restored the saved fixed bytes, verified their SHA-256, then observed 10 consecutive runs: each 8 passed, 0 failed, 0 skipped, exit 0. Five unmodified baseline runs were green, so the negative proof uses a controlled slow final status write rather than claiming a natural flake reproduced.",
+        "restoredExitCode": 0,
+        "restoredArtifactPath": "doc/evidence/issue-154/runs.json",
+        "restoredTestSha256": "95d37d85c1d1ed93774e7383e6b8f6cbe0f17b94d80f0495cecbde040352c1e8",
+        "scope": "Serialized native Windows integration tests against disposable databases and Git fixtures. No live instance or hosted CI proof."
+      },
+      "maintainabilityReceipt": "doc/evidence/issue-154/verification.md",
+      "historicalNote": "restoredTestSha256 matches no committed version of the test file; this entry is kept unchanged as the original record and is superseded by heartbeat-workspace-containment-execution-completion-rebound."
+    },
+    {
+      "id": "heartbeat-workspace-containment-execution-completion-rebound",
+      "path": "server/src/__tests__/heartbeat-workspace-branch-containment.test.ts",
+      "description": "Rebinds the execution-completion gate to the committed test bytes (LF blob 9b492dea..., as committed at 8234176d) with independent reruns.",
+      "negativeFixture": "server/src/__tests__/heartbeat-workspace-branch-containment.test.ts",
+      "observedFailure": {
+        "date": "2026-10-12",
+        "command": "(from server) node ../node_modules/vitest/vitest.mjs run src/__tests__/heartbeat-workspace-branch-containment.test.ts --maxWorkers=1 --reporter=default --reporter=json --outputFile.json=<run-report>",
+        "breakApplied": "In an untracked scratch copy of the committed test, restored the merge-base polling helpers and default status wait; kept the 1.5-second final-idle-write trigger. The tracked test file was not edited.",
+        "reason": "3 failed, 5 passed, 0 skipped; exit 1. The project_primary configuration-failure case read running instead of idle (the intended failure); two old ten-second row polls read running instead of succeeded under host load.",
+        "exitCode": 1,
+        "artifactPath": "doc/evidence/issue-154/rerun-8234176d.json",
+        "restoredPass": "Three runs of the committed test at 8234176d: each 8 passed, 0 failed, 0 skipped, exit 0 (24/24); the run after the negative passed 8/8.",
+        "restoredExitCode": 0,
+        "restoredArtifactPath": "doc/evidence/issue-154/rerun-8234176d.json",
+        "restoredArtifactSha256": "07845da775713469eb06808e911da9e6eea4c07a0fddae1e91c67065e494a264",
+        "restoredTestSha256": "9b492deaf7e54a061d2c6262d99003db6aeef2a2759dd6bcf9af116a280c57c7",
+        "scope": "Serialized native Windows integration tests in an independent clone against disposable databases and Git fixtures. No live instance or hosted CI proof."
+      },
+      "maintainabilityReceipt": "doc/evidence/issue-154/verification.md"
     }
   ]
 }

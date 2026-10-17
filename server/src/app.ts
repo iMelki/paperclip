@@ -8,6 +8,7 @@ import type { InspectDatabaseBackupHealthOptions } from "./services/database-bac
 import type { StorageService } from "./storage/types.js";
 import { httpLogger, errorHandler } from "./middleware/index.js";
 import { actorMiddleware } from "./middleware/auth.js";
+import { apiRouteNotFound } from "./middleware/api-route-not-found.js";
 import { boardMutationGuard } from "./middleware/board-mutation-guard.js";
 import { privateHostnameGuard, resolvePrivateHostnameAllowSet } from "./middleware/private-hostname-guard.js";
 import { applyTrustProxy, parseTrustProxyEnv } from "./middleware/trust-proxy.js";
@@ -534,9 +535,7 @@ export async function createApp(
     }),
   );
   app.use("/api", api);
-  app.use("/api", (_req, res) => {
-    res.status(404).json({ error: "API route not found" });
-  });
+  app.use("/api", apiRouteNotFound);
   app.use(pluginUiStaticRoutes(db, {
     localPluginDir: opts.localPluginDir ?? DEFAULT_LOCAL_PLUGIN_DIR,
   }));

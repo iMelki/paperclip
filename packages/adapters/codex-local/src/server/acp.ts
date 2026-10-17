@@ -307,6 +307,76 @@ function withCodexAuthRefreshFailureClassification(result: AdapterExecutionResul
   };
 }
 
+export const CODEX_ACP_PROVIDER_ERROR_REPLY_CODE = "codex_provider_error_reply";
+
+// Codex prints this when it has no metadata for the selected model; the bridge
+// forwards it as reply text ahead of the provider error.
+const CODEX_MODEL_METADATA_WARNING_RE =
+  /^Warning: Model metadata for \S+ not found\.(?: Defaulting to fallback metadata; this can degrade performance and cause issues\.)?/;
+
+export interface CodexAcpProviderErrorReply {
+  status: number | null;
+  type: string | null;
+  message: string;
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * codex-acp 1.1.x forwards a non-retryable Codex app-server error as ordinary
+ * assistant text and still ends the prompt with `end_turn`. Detect that reply
+ * shape only: after dropping blank lines and the model-metadata warning, the
+ * whole reply must parse as one JSON error object (`type: "error"`, or an
+ * `error` object with an HTTP 4xx/5xx status). Prose that merely quotes JSON
+ * error text never matches because it does not parse as a single object.
+ */
+export function detectCodexAcpProviderErrorReply(text: string): CodexAcpProviderErrorReply | null {
+  const body = text
+    .split(/\r?\n/)
+    .map((line) => line.trim().replace(CODEX_MODEL_METADATA_WARNING_RE, "").trim())
+    .filter((line) => line.length > 0)
+    .join("\n");
+  if (!body.startsWith("{")) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(body);
+  } catch {
+    return null;
+  }
+  if (!isPlainObject(parsed)) return null;
+  const nested = isPlainObject(parsed.error) ? parsed.error : null;
+  const rawStatus = typeof parsed.status === "number" ? parsed.status : nested?.status;
+  const status = typeof rawStatus === "number" && Number.isInteger(rawStatus) ? rawStatus : null;
+  const httpError = nested !== null && status !== null && status >= 400 && status <= 599;
+  if (parsed.type !== "error" && !httpError) return null;
+  const message =
+    firstNonEmptyString(nested?.message, parsed.message) ?? "Codex provider returned an error.";
+  const type = firstNonEmptyString(nested?.type, nested?.code, parsed.code) ?? null;
+  return { status, type, message };
+}
+
+function withCodexProviderErrorReplyClassification(result: AdapterExecutionResult): AdapterExecutionResult {
+  if ((result.exitCode ?? 0) !== 0 || result.timedOut || result.errorMessage) return result;
+  const providerError = detectCodexAcpProviderErrorReply(result.summary ?? "");
+  if (!providerError) return result;
+  const label = [providerError.status, providerError.type].filter((part) => part !== null).join(" ");
+  const errorMessage = `Codex provider error${label ? ` (${label})` : ""}: ${providerError.message}`;
+  return {
+    ...result,
+    exitCode: 1,
+    errorMessage,
+    errorCode: CODEX_ACP_PROVIDER_ERROR_REPLY_CODE,
+    summary: errorMessage,
+    resultJson: {
+      ...(result.resultJson ?? {}),
+      status: "failed",
+      providerError,
+    },
+  };
+}
+
 /**
  * Classify billing the same way the Codex CLI lane does so ACP runs land in
  * the cost ledger with a real provider/billingType instead of acpx/unknown.
@@ -354,7 +424,7 @@ export function createCodexAcpExecutor(options: CodexAcpExecutorOptions = {}): C
       ...ctx,
       config: buildCodexAcpConfig(ctx.config),
     });
-    return withCodexAuthRefreshFailureClassification(result);
+    return withCodexAuthRefreshFailureClassification(withCodexProviderErrorReplyClassification(result));
   };
 }
 

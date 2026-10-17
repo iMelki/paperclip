@@ -734,6 +734,16 @@ export function createPluginWorkerHandle(
     const directCompanyId = readNonEmptyString(params.companyId);
     if (directCompanyId) return { companyId: directCompanyId };
 
+    // Jobs are dispatched without a company envelope. Use the host-authorized
+    // configuration set only when it identifies exactly one company, matching
+    // webhook tenant resolution. A real invocation keeps nested config/secret
+    // calls bound to that company even while another invocation is active.
+    // Instance-only and multi-company jobs keep their existing unscoped path;
+    // never select a tenant from worker-controlled settings or company lists.
+    if (method === "runJob" && proactiveCompanyScopes.size === 1) {
+      return { companyId: proactiveCompanyScopes.values().next().value! };
+    }
+
     if (method === "performAction" && isRecord(params.actorContext)) {
       const companyId = readNonEmptyString(params.actorContext.companyId);
       return companyId ? { companyId } : null;

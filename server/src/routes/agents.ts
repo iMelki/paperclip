@@ -105,6 +105,8 @@ import {
   resolveDefaultAgentInstructionsBundleRole,
 } from "../services/default-agent-instructions.js";
 import { getTelemetryClient } from "../telemetry.js";
+import { executeAgentHire, fingerprintHireRequest, readHireIdempotencyKey } from "../services/agent-hire-idempotency.js";
+import { publishActivity, type ActivityPublication } from "../services/activity-log.js";
 import { assertEnvironmentSelectionForCompany } from "./environment-selection.js";
 import { recoveryService } from "../services/recovery/service.js";
 import { resolveCoreTrustPreset } from "../services/trust-preset-resolver.js";
@@ -772,9 +774,11 @@ export function agentRoutes(
     companyId: string,
     agentId: string,
     grantedByUserId: string | null,
+    source: Db = db,
   ) {
-    await access.ensureMembership(companyId, "agent", agentId, "member", "active");
-    await access.setPrincipalPermission(
+    const grants = source === db ? access : accessService(source);
+    await grants.ensureMembership(companyId, "agent", agentId, "member", "active");
+    await grants.setPrincipalPermission(
       companyId,
       "agent",
       agentId,
@@ -1232,8 +1236,9 @@ export function agentRoutes(
     adapterType: string | null | undefined;
     adapterConfig: Record<string, unknown>;
     constraintAdapterConfig?: Record<string, unknown>;
-  }): Promise<Record<string, unknown>> {
-    const normalizedAdapterConfig = await secretsSvc.normalizeAdapterConfigForPersistence(
+  }, source: Db = db): Promise<Record<string, unknown>> {
+    const persistenceSecrets = source === db ? secretsSvc : secretService(source);
+    const normalizedAdapterConfig = await persistenceSecrets.normalizeAdapterConfigForPersistence(
       input.companyId,
       input.adapterConfig,
       {
@@ -1255,6 +1260,7 @@ export function agentRoutes(
     adapterType: string,
     runtimeConfig: Record<string, unknown>,
     baseAdapterConfig: Record<string, unknown>,
+    source: Db = db,
   ): Promise<Record<string, unknown>> {
     const entries = listRuntimeModelProfileAdapterConfigs(runtimeConfig);
     if (entries.length === 0) return runtimeConfig;
@@ -1276,7 +1282,7 @@ export function agentRoutes(
           ...baseAdapterConfig,
           ...adapterDefaultConfig,
         },
-      });
+      }, source);
       normalizedModelProfiles[entry.profileKey] = {
         ...entry.profile,
         adapterConfig: normalizedAdapterConfig,
@@ -1407,7 +1413,9 @@ export function agentRoutes(
   }>(
     agent: T,
     input?: { files: Record<string, string>; entryFile?: string },
+    source: Db = db,
   ): Promise<T> {
+    const agentSvc = source === db ? svc : agentService(source);
     if (!adapterSupportsInstructionsBundle(agent.adapterType)) {
       return agent;
     }
@@ -1428,7 +1436,7 @@ export function agentRoutes(
       delete nextAdapterConfig.bootstrapPromptTemplate;
       if (!hadLegacyPrompt) return agent;
 
-      const updated = await svc.update(agent.id, { adapterConfig: nextAdapterConfig }, {
+      const updated = await agentSvc.update(agent.id, { adapterConfig: nextAdapterConfig }, {
         allowPendingApprovalConfigUpdate: true,
       });
       return (updated as T | null) ?? { ...agent, adapterConfig: nextAdapterConfig };
@@ -1445,7 +1453,7 @@ export function agentRoutes(
     delete nextAdapterConfig.promptTemplate;
     delete nextAdapterConfig.bootstrapPromptTemplate;
 
-    const updated = await svc.update(agent.id, { adapterConfig: nextAdapterConfig }, {
+    const updated = await agentSvc.update(agent.id, { adapterConfig: nextAdapterConfig }, {
       allowPendingApprovalConfigUpdate: true,
     });
     return (updated as T | null) ?? { ...agent, adapterConfig: nextAdapterConfig };
@@ -2527,7 +2535,10 @@ export function agentRoutes(
     const companyId = req.params.companyId as string;
     await assertCanCreateAgentsForCompany(req, companyId);
     const sourceIssueIds = parseSourceIssueIds(req.body);
+    const idempotencyKey = readHireIdempotencyKey(req.get("Idempotency-Key"), req.body.idempotencyKey);
+    const fingerprint = idempotencyKey ? fingerprintHireRequest(req.body, sourceIssueIds) : "";
     const {
+      idempotencyKey: _idempotencyKey,
       desiredSkills: requestedDesiredSkills,
       instructionsBundle,
       sourceIssueId: _sourceIssueId,
@@ -2542,169 +2553,198 @@ export function agentRoutes(
     );
     assertNoAgentAdapterConfigMutation(req, rawHireAdapterConfig);
     assertNoAgentRuntimeConfigAdapterConfigMutation(req, hireInput.runtimeConfig);
-    const hiredAgentId = randomUUID();
-    const requestedAdapterConfig = applyCodexLocalKeyIsolation(
-      companyId,
-      hiredAgentId,
-      hireInput.adapterType,
-      applyCreateDefaultsByAdapterType(
-        hireInput.adapterType,
-        rawHireAdapterConfig,
-      ),
-    );
-    const desiredSkillAssignment = await resolveDesiredSkillAssignment(
-      companyId,
-      hireInput.adapterType,
-      requestedAdapterConfig,
-      normalizeDesiredSkillSelections(Array.isArray(requestedDesiredSkills) ? requestedDesiredSkills : undefined),
-      "add",
-    );
-    const normalizedAdapterConfig = await normalizeMediatedAdapterConfigForPersistence({
-      companyId,
-      adapterType: hireInput.adapterType,
-      adapterConfig: desiredSkillAssignment.adapterConfig,
-    });
-    const normalizedRuntimeConfig = await normalizeRuntimeConfigAdapterConfigsForPersistence(
-      companyId,
-      hireInput.adapterType,
-      await normalizeNewAgentRuntimeConfig(hireInput.adapterType, hireInput.runtimeConfig),
-      normalizedAdapterConfig,
-    );
-    const normalizedHireInput = {
-      ...hireInput,
-      adapterConfig: normalizedAdapterConfig,
-      runtimeConfig: normalizedRuntimeConfig,
-    };
-
-    const company = await db
-      .select()
-      .from(companies)
-      .where(eq(companies.id, companyId))
+    const company = await db.select().from(companies).where(eq(companies.id, companyId))
       .then((rows) => rows[0] ?? null);
-    if (!company) {
-      res.status(404).json({ error: "Company not found" });
-      return;
-    }
+    if (!company) throw notFound("Company not found");
+    const publications: ActivityPublication[] | undefined = idempotencyKey ? [] : undefined;
+    const prepareHire = async () => {
+      const hiredAgentId = randomUUID();
+      const requestedAdapterConfig = applyCodexLocalKeyIsolation(
+        companyId,
+        hiredAgentId,
+        hireInput.adapterType,
+        applyCreateDefaultsByAdapterType(
+          hireInput.adapterType,
+          rawHireAdapterConfig,
+        ),
+      );
+      const desiredSkillAssignment = await resolveDesiredSkillAssignment(
+        companyId,
+        hireInput.adapterType,
+        requestedAdapterConfig,
+        normalizeDesiredSkillSelections(Array.isArray(requestedDesiredSkills) ? requestedDesiredSkills : undefined),
+        "add",
+      );
+      return { hiredAgentId, desiredSkillAssignment };
+    };
+    const { result, replayed } = await executeAgentHire(db, companyId, idempotencyKey, fingerprint, prepareHire,
+      async (source, { hiredAgentId, desiredSkillAssignment }) => {
+        const hireAgents = source === db ? svc : agentService(source);
+        const hireApprovals = source === db ? approvalsSvc : approvalService(source);
+        const hireIssueApprovals = source === db ? issueApprovalsSvc : issueApprovalService(source);
+        const normalizedAdapterConfig = await normalizeMediatedAdapterConfigForPersistence({
+          companyId,
+          adapterType: hireInput.adapterType,
+          adapterConfig: desiredSkillAssignment.adapterConfig,
+        }, source);
+        const normalizedRuntimeConfig = await normalizeRuntimeConfigAdapterConfigsForPersistence(
+          companyId,
+          hireInput.adapterType,
+          await normalizeNewAgentRuntimeConfig(hireInput.adapterType, hireInput.runtimeConfig),
+          normalizedAdapterConfig,
+          source,
+        );
+        const normalizedHireInput = {
+          ...hireInput,
+          adapterConfig: normalizedAdapterConfig,
+          runtimeConfig: normalizedRuntimeConfig,
+        };
 
-    const requiresApproval = company.requireBoardApprovalForNewAgents;
-    const status = requiresApproval ? "pending_approval" : "idle";
-    const createdAgent = await svc.create(companyId, {
-      id: hiredAgentId,
-      ...normalizedHireInput,
-      status,
-      spentMonthlyCents: 0,
-      lastHeartbeatAt: null,
-    });
-    const agent = await materializeDefaultInstructionsBundleForNewAgent(createdAgent, instructionsBundle);
+        const company = await source
+          .select()
+          .from(companies)
+          .where(eq(companies.id, companyId))
+          .then((rows) => rows[0] ?? null);
+        if (!company) {
+          throw notFound("Company not found");
+        }
 
-    let approval: Awaited<ReturnType<typeof approvalsSvc.getById>> | null = null;
-    const actor = getActorInfo(req);
+        const requiresApproval = company.requireBoardApprovalForNewAgents;
+        const status = requiresApproval ? "pending_approval" : "idle";
+        const createdAgent = await hireAgents.create(companyId, {
+          id: hiredAgentId,
+          ...normalizedHireInput,
+          status,
+          spentMonthlyCents: 0,
+          lastHeartbeatAt: null,
+        });
+        const agent = await materializeDefaultInstructionsBundleForNewAgent(createdAgent, instructionsBundle, source);
 
-    if (requiresApproval) {
-      const requestedAdapterType = normalizedHireInput.adapterType ?? agent.adapterType;
-      const requestedAdapterConfig = (
-        agent.adapterConfig ?? normalizedHireInput.adapterConfig
-      ) as Record<string, unknown>;
-      const requestedRuntimeConfig = (
-        normalizedHireInput.runtimeConfig ?? agent.runtimeConfig
-      ) as Record<string, unknown>;
-      const requestedMetadata = (
-        normalizedHireInput.metadata ?? agent.metadata ?? {}
-      ) as Record<string, unknown>;
-      const approvalPayload = prepareNormalizedHireApprovalPayloadForPersistence(
-        {
-          name: normalizedHireInput.name,
-          role: normalizedHireInput.role,
-          title: normalizedHireInput.title ?? null,
-          icon: normalizedHireInput.icon ?? null,
-          reportsTo: normalizedHireInput.reportsTo ?? null,
-          capabilities: normalizedHireInput.capabilities ?? null,
-          adapterType: requestedAdapterType,
-          adapterConfig: requestedAdapterConfig,
-          runtimeConfig: requestedRuntimeConfig,
-          budgetMonthlyCents:
-            typeof normalizedHireInput.budgetMonthlyCents === "number"
-              ? normalizedHireInput.budgetMonthlyCents
-              : agent.budgetMonthlyCents,
-          desiredSkills: desiredSkillAssignment.desiredSkills,
-          metadata: requestedMetadata,
-          agentId: agent.id,
-          requestedByAgentId: actor.actorType === "agent" ? actor.actorId : null,
-          requestedConfigurationSnapshot: {
-            adapterType: requestedAdapterType,
-            adapterConfig: requestedAdapterConfig,
-            runtimeConfig: requestedRuntimeConfig,
+        let approval: Awaited<ReturnType<typeof approvalsSvc.getById>> | null = null;
+        const actor = getActorInfo(req);
+
+        if (requiresApproval) {
+          const requestedAdapterType = normalizedHireInput.adapterType ?? agent.adapterType;
+          const requestedAdapterConfig = (
+            agent.adapterConfig ?? normalizedHireInput.adapterConfig
+          ) as Record<string, unknown>;
+          const requestedRuntimeConfig = (
+            normalizedHireInput.runtimeConfig ?? agent.runtimeConfig
+          ) as Record<string, unknown>;
+          const requestedMetadata = (
+            normalizedHireInput.metadata ?? agent.metadata ?? {}
+          ) as Record<string, unknown>;
+          const approvalPayload = prepareNormalizedHireApprovalPayloadForPersistence(
+            {
+              name: normalizedHireInput.name,
+              role: normalizedHireInput.role,
+              title: normalizedHireInput.title ?? null,
+              icon: normalizedHireInput.icon ?? null,
+              reportsTo: normalizedHireInput.reportsTo ?? null,
+              capabilities: normalizedHireInput.capabilities ?? null,
+              adapterType: requestedAdapterType,
+              adapterConfig: requestedAdapterConfig,
+              runtimeConfig: requestedRuntimeConfig,
+              budgetMonthlyCents:
+                typeof normalizedHireInput.budgetMonthlyCents === "number"
+                  ? normalizedHireInput.budgetMonthlyCents
+                  : agent.budgetMonthlyCents,
+              desiredSkills: desiredSkillAssignment.desiredSkills,
+              metadata: requestedMetadata,
+              agentId: agent.id,
+              requestedByAgentId: actor.actorType === "agent" ? actor.actorId : null,
+              requestedConfigurationSnapshot: {
+                adapterType: requestedAdapterType,
+                adapterConfig: requestedAdapterConfig,
+                runtimeConfig: requestedRuntimeConfig,
+                desiredSkills: desiredSkillAssignment.desiredSkills,
+              },
+            },
+            agent as unknown as Record<string, unknown>,
+          );
+          approval = await hireApprovals.create(companyId, {
+            type: "hire_agent",
+            requestedByAgentId: actor.actorType === "agent" ? actor.actorId : null,
+            requestedByUserId: actor.actorType === "user" ? actor.actorId : null,
+            status: "pending",
+            payload: approvalPayload,
+            decisionNote: null,
+            decidedByUserId: null,
+            decidedAt: null,
+            updatedAt: new Date(),
+          });
+
+          if (sourceIssueIds.length > 0) {
+            await hireIssueApprovals.linkManyForApproval(approval.id, sourceIssueIds, {
+              agentId: actor.actorType === "agent" ? actor.actorId : null,
+              userId: actor.actorType === "user" ? actor.actorId : null,
+            });
+          }
+        }
+
+        await logActivity(source, {
+          companyId,
+          actorType: actor.actorType,
+          actorId: actor.actorId,
+          agentId: actor.agentId,
+          runId: actor.runId,
+          agentApiKeyId: actor.agentApiKeyId,
+          action: "agent.hire_created",
+          entityType: "agent",
+          entityId: agent.id,
+          details: {
+            name: agent.name,
+            role: agent.role,
+            requiresApproval,
+            approvalId: approval?.id ?? null,
+            issueIds: sourceIssueIds,
             desiredSkills: desiredSkillAssignment.desiredSkills,
           },
-        },
-        agent as unknown as Record<string, unknown>,
-      );
-      approval = await approvalsSvc.create(companyId, {
-        type: "hire_agent",
-        requestedByAgentId: actor.actorType === "agent" ? actor.actorId : null,
-        requestedByUserId: actor.actorType === "user" ? actor.actorId : null,
-        status: "pending",
-        payload: approvalPayload,
-        decisionNote: null,
-        decidedByUserId: null,
-        decidedAt: null,
-        updatedAt: new Date(),
-      });
+        }, publications);
+        await applyDefaultAgentTaskAssignGrant(
+          companyId,
+          agent.id,
+          actor.actorType === "user" ? actor.actorId : null,
+          source,
+        );
 
-      if (sourceIssueIds.length > 0) {
-        await issueApprovalsSvc.linkManyForApproval(approval.id, sourceIssueIds, {
-          agentId: actor.actorType === "agent" ? actor.actorId : null,
-          userId: actor.actorType === "user" ? actor.actorId : null,
-        });
-      }
-    }
+        if (approval) {
+          await logActivity(source, {
+            companyId,
+            actorType: actor.actorType,
+            actorId: actor.actorId,
+            agentId: actor.agentId,
+            runId: actor.runId,
+            agentApiKeyId: actor.agentApiKeyId,
+            action: "approval.created",
+            entityType: "approval",
+            entityId: approval.id,
+            details: { type: approval.type, linkedAgentId: agent.id },
+          }, publications);
+        }
 
-    await logActivity(db, {
-      companyId,
-      actorType: actor.actorType,
-      actorId: actor.actorId,
-      agentId: actor.agentId,
-      runId: actor.runId,
-      agentApiKeyId: actor.agentApiKeyId,
-      action: "agent.hire_created",
-      entityType: "agent",
-      entityId: agent.id,
-      details: {
-        name: agent.name,
-        role: agent.role,
-        requiresApproval,
-        approvalId: approval?.id ?? null,
-        issueIds: sourceIssueIds,
-        desiredSkills: desiredSkillAssignment.desiredSkills,
-      },
+        return { agent, approval };
     });
-    const telemetryClient = getTelemetryClient();
-    if (telemetryClient) {
-      trackAgentCreated(telemetryClient, { agentRole: agent.role, agentId: agent.id });
+    for (const publication of publications ?? []) publishActivity(publication);
+    if (!replayed) {
+      const telemetryClient = getTelemetryClient();
+      if (telemetryClient) trackAgentCreated(telemetryClient, { agentRole: result.agent.role, agentId: result.agent.id });
     }
-
-    await applyDefaultAgentTaskAssignGrant(
-      companyId,
-      agent.id,
-      actor.actorType === "user" ? actor.actorId : null,
-    );
-
-    if (approval) {
-      await logActivity(db, {
-        companyId,
-        actorType: actor.actorType,
-        actorId: actor.actorId,
-        agentId: actor.agentId,
-        runId: actor.runId,
-        agentApiKeyId: actor.agentApiKeyId,
-        action: "approval.created",
-        entityType: "approval",
-        entityId: approval.id,
-        details: { type: approval.type, linkedAgentId: agent.id },
-      });
-    }
-
-    res.status(201).json({ agent, approval });
+    const response = replayed ? {
+      ...result,
+      approval: result.approval ? {
+        ...result.approval,
+        payload: redactEventPayload(result.approval.payload) ?? {},
+      } : null,
+      agent: await actorCanReadConfigurationsForCompany(req, companyId)
+        ? {
+          ...result.agent,
+          adapterConfig: redactEventPayload(result.agent.adapterConfig),
+          runtimeConfig: redactEventPayload(result.agent.runtimeConfig),
+        }
+        : redactForRestrictedAgentView(result.agent),
+    } : result;
+    res.status(replayed ? 200 : 201).json(response);
   });
 
   router.post("/companies/:companyId/agents", validate(createAgentSchema), async (req, res) => {

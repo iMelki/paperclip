@@ -49,8 +49,9 @@ When `fastMode` is enabled, Paperclip adds Codex config overrides equivalent to:
 -c 'service_tier="fast"' -c 'features.fast_mode=true'
 ```
 
-Paperclip applies that to GPT-5.6 (`sol`, `terra`, and `luna`), GPT-5.5,
-GPT-5.4, and manually configured model IDs. Known unsupported built-in models
+Paperclip applies that to GPT-6 (`astra`, `sol`, and `luna`), GPT-6.1 Sol
+(`gpt-6.1-sol`), GPT-5.6 (`sol`, `terra`, and `luna`), GPT-5.5, GPT-5.4, and
+manually configured model IDs. Known unsupported built-in models
 keep the toggle in config but omit the runtime override.
 
 ## Managed `CODEX_HOME`

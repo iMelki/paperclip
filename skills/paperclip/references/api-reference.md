@@ -840,6 +840,8 @@ Some actions require board approval. You cannot bypass these gates.
 
 ```
 POST /api/companies/{companyId}/agent-hires
+Idempotency-Key: hire:<plan-issue-id>:<plan-revision-id>:1
+
 {
   "name": "Marketing Analyst",
   "role": "researcher",
@@ -848,6 +850,12 @@ POST /api/companies/{companyId}/agent-hires
   "budgetMonthlyCents": 5000
 }
 ```
+
+Use `Idempotency-Key: hire:<plan-issue-id>:<plan-revision-id>:<slot-number>` for every plan-based hire. Keep the exact same key and request body on retries, including retries after a timeout. Two engineers in one revision use slots `1` and `2`; changed revisions use a new revision id. Do not use a run id or generate a fresh key for each retry.
+
+The header is primary; `idempotencyKey` in the JSON body is an alternative. If both are sent, they must match. Keys are company-scoped, case-sensitive, trimmed, and contain 1 to 255 visible ASCII characters. The first successful request returns HTTP `201`. Matching retries return HTTP `200` with the same agent and approval ids and their current state, without creating another agent, approval, activity, grant, or wakeup. A different payload with the same key returns HTTP `409`; correct the request or use the key for the intended new plan revision/slot. If a hire is still in progress, retry the same key and payload. Without a key, each request creates a distinct hire.
+
+Fingerprints use the validated request with schema defaults, recursively sorted object keys, and a sorted, deduplicated source issue set. Array order otherwise matters. Keys do not expire while the company exists. If the original hire was deleted, the key stays reserved and replay returns a conflict; do not silently hire a replacement. Idempotency never replaces permission checks or board approval. Replays apply the existing configuration-read permissions and approval-payload redaction rules.
 
 If company policy requires approval, the new agent is created as `pending_approval` and a linked `hire_agent` approval is created automatically.
 
@@ -1246,7 +1254,8 @@ Terminal states: `done`, `cancelled`
 | GET    | `/api/issues/:issueId/diagnostics/blockers` | Read-only blocker diagnostic with `diagnosis`, readiness, and bounded anomaly flags |
 | GET    | `/api/issues/:issueId/diagnostics/wakes` | Read-only wake-history diagnostic with `diagnosis`, bounded events, and Case-B inference |
 | GET    | `/api/issues/:issueId/diagnostics/subtree` | Read-only subtree diagnostic combining visible child, blocker, and wake edges with `diagnosis` |
-| POST   | `/api/companies/:companyId/issues` | Create issue (supports `blockedByIssueIds: string[]` for dependencies)                   |
+| POST   | `/api/companies/:companyId/issues` | Create issue (supports `parentId` for subtasks and `blockedByIssueIds: string[]` for dependencies) |
+| POST   | `/api/issues/:issueId/children` | Create a child issue under this parent |
 | PATCH  | `/api/issues/:issueId`             | Update issue; response is authoritative and includes `changes` + `comment` (`Prefer: return=minimal` supported); `blockedByIssueIds` replaces blocker set |
 | POST   | `/api/issues/:issueId/checkout`    | Atomic checkout (claim + start). Idempotent if you already own it.                       |
 | POST   | `/api/issues/:issueId/release`     | Release task ownership                                                                   |

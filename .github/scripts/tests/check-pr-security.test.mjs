@@ -2,7 +2,11 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   buildAdvisoryPayload,
+  buildFlagsSummary,
+  CHECK_RUN_SUMMARY_LIMIT,
+  describeFlag,
   findExistingDraftAdvisory,
+  reportSecurityFlags,
   postSecurityCheckRun,
   scanSecrets,
   scanCITampering,
@@ -221,6 +225,75 @@ test('postSecurityCheckRun: uses the injected fetch implementation', async () =>
       summary: 'Draft advisory filed for maintainer review. Not a merge block — review the advisory at your leisure.',
     },
   });
+});
+
+// ── Flag reporting ───────────────────────────────────────────────────────────
+
+test('describeFlag: names the check, file and pattern but never the matched line', () => {
+  const line = `+const apiToken = "${'SENTINEL'.repeat(3)}"`;
+  const [flag] = scanSecrets([{ filename: 'src/config.ts', patch: line }]);
+  assert.equal(describeFlag(flag), 'secret-scan src/config.ts (pattern: High-entropy secret)');
+  assert.ok(!describeFlag(flag).includes('SENTINEL'));
+});
+
+test('describeFlag: lists supply-chain packages and replaces control characters', () => {
+  assert.equal(
+    describeFlag({ check: 'supply-chain', packages: ['a', '@s/b'] }),
+    'supply-chain (packages: a, @s/b)',
+  );
+  assert.equal(
+    describeFlag({ check: 'ci-tampering', file: '.github/workflows/x\n::warning::y.yml' }),
+    'ci-tampering .github/workflows/x?::warning::y.yml',
+  );
+});
+
+test('buildFlagsSummary: stays within the limit and counts the flags it leaves out', () => {
+  const flags = Array.from({ length: 2000 }, (_, i) => ({
+    check: 'sensitive-path',
+    file: `server/src/routes/${'x'.repeat(80)}-${i}.ts`,
+  }));
+  const summary = buildFlagsSummary(flags, false);
+  assert.ok(summary.length <= CHECK_RUN_SUMMARY_LIMIT, `summary is ${summary.length} chars`);
+  const match = summary.match(/…and (\d+) more flag\(s\); see the job log\.$/);
+  assert.ok(match, 'summary must end with the count of flags left out');
+  const listed = summary.split('\n').filter(l => l.startsWith('- ')).length;
+  assert.equal(listed + Number(match[1]), flags.length);
+
+  const small = buildFlagsSummary(flags.slice(0, 3), true);
+  assert.ok(!small.includes('more flag(s)'));
+  assert.match(small, /Draft advisory filed/);
+});
+
+test('reportSecurityFlags: a 403 on the advisory POST still logs and summarizes every flag', async () => {
+  const logged = [];
+  const log = { error: (msg) => logged.push(msg) };
+  const calls = [];
+  const flags = [
+    { check: 'ci-tampering', file: '.github/workflows/pr.yml' },
+    { check: 'secret-scan', file: 'src/config.ts', pattern: 'OpenAI API key', line: '+SENTINEL-LINE' },
+  ];
+
+  const result = await reportSecurityFlags(async (path, _token, options = {}) => {
+    calls.push({ path, options });
+    if (path.includes('/security-advisories?state=draft')) return [];
+    if (path.endsWith('/security-advisories')) {
+      throw new Error(`GitHub API POST ${path} → 403: {"message":"Resource not accessible by integration"}`);
+    }
+    return { ok: true };
+  }, 'token', 'example/repo', { number: 7, title: 'PR', head: { sha: 'deadbeef' } }, flags, log);
+
+  assert.deepEqual(result, { advisoryFiled: false });
+  assert.ok(logged.includes('[security]   - ci-tampering .github/workflows/pr.yml'));
+  assert.ok(logged.includes('[security]   - secret-scan src/config.ts (pattern: OpenAI API key)'));
+  assert.ok(logged.some(l => l.includes('draft advisory not filed') && l.includes('403')));
+  assert.ok(!logged.join('\n').includes('SENTINEL'));
+
+  const checkRun = calls.find(c => c.path.endsWith('/check-runs'));
+  const body = JSON.parse(checkRun.options.body);
+  assert.equal(body.conclusion, 'neutral');
+  assert.match(body.output.summary, /could not be filed/);
+  assert.match(body.output.summary, /ci-tampering \.github\/workflows\/pr\.yml/);
+  assert.ok(!checkRun.options.body.includes('SENTINEL'));
 });
 
 test('validateSensitivePaths: checks paths against the resolved base ref instead of master', async () => {

@@ -54,6 +54,7 @@ Use it for every path: exact template, adjacent template, or generic fallback.
 ## G. Governance fields
 
 - [ ] `icon` is set to one of `/llms/agent-icons.txt` and fits the role
+- [ ] Plan-based hires use a stable `Idempotency-Key` in the form `hire:<plan-issue-id>:<plan-revision-id>:<slot-number>`; retries reuse the same key and payload, and distinct slots have distinct keys
 - [ ] `sourceIssueId` (or `sourceIssueIds`) is set when the hire was triggered by an issue
 - [ ] `desiredSkills` lists only skills that already exist in the company library, or will be installed first via the company-skills workflow
 - [ ] Adapter config matches this Paperclip instance (cwd, model, credentials) per `/llms/agent-configuration/<adapter>.txt`

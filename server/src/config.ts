@@ -56,6 +56,7 @@ export interface Config {
   customBindHost: string | undefined;
   host: string;
   port: number;
+  strictPort: boolean;
   allowedHostnames: string[];
   authBaseUrlMode: AuthBaseUrlMode;
   authPublicBaseUrl: string | undefined;
@@ -292,6 +293,7 @@ export function loadConfig(): Config {
     customBindHost: resolvedBind.customBindHost,
     host: resolvedBind.host,
     port: Number(process.env.PORT) || fileConfig?.server.port || 3100,
+    strictPort: process.env.PAPERCLIP_STRICT_PORT === "true",
     allowedHostnames,
     authBaseUrlMode,
     authPublicBaseUrl,

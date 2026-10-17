@@ -472,6 +472,151 @@ describe("plugin-worker-manager stderr failure context", () => {
 });
 
 
+describe("plugin job company context", () => {
+  function makeJobHandle(companyIds: string[]) {
+    const configGet = vi.fn(async (params: { companyId?: string }) => ({ companyId: params.companyId }));
+    const hostHandlers = createHostClientHandlers({
+      pluginId: "test.plugin",
+      capabilities: [],
+      services: { config: { get: configGet } } as unknown as HostServices,
+    });
+    const configCall = vi.fn(hostHandlers["config.get"]);
+    const handle = createPluginWorkerHandle("test.plugin", {
+      entrypointPath: INVOCATION_SCOPE_WORKER_ENTRYPOINT,
+      manifest: TEST_MANIFEST,
+      config: {},
+      instanceInfo: { instanceId: "instance-1", hostVersion: "1.0.0" },
+      apiVersion: 1,
+      hostHandlers: { ...hostHandlers, "config.get": configCall },
+      proactiveCompanyScopes: companyIds,
+    });
+    return { handle, configGet, configCall };
+  }
+
+  function jobProbe(trigger: "schedule" | "manual" | "retry", params: Record<string, unknown> = {}) {
+    return {
+      job: { jobKey: "sync.issues", runId: "run-1", trigger, scheduledAt: new Date().toISOString() },
+      // Fixture-only probe controls; the job envelope matches the scheduler.
+      params: { mode: "echo", hostMethod: "config.get", omitCompanyId: true, ...params },
+    } as HostToWorkerMethods["runJob"][0];
+  }
+
+  it.each(["schedule", "manual", "retry"] as const)(
+    "scopes a %s job's argumentless config read to its sole configured company",
+    async (trigger) => {
+      const { handle, configGet } = makeJobHandle(["company-a"]);
+      try {
+        await handle.start();
+        await expect(handle.call("runJob", jobProbe(trigger))).resolves.toEqual({ companyId: "company-a" });
+        expect(configGet).toHaveBeenCalledWith(
+          { companyId: "company-a" },
+          { invocationScope: { companyId: "company-a" } },
+        );
+      } finally {
+        await handle.stop().catch(() => undefined);
+      }
+    },
+  );
+
+  it.each([{ companyIds: [] }, { companyIds: ["company-a", "company-b"] }])(
+    "does not select a company from $companyIds", async ({ companyIds }) => {
+      const { handle, configGet } = makeJobHandle(companyIds);
+      try {
+        await handle.start();
+        await expect(handle.call("runJob", jobProbe("schedule"))).rejects.toMatchObject({
+          code: PLUGIN_RPC_ERROR_CODES.INVOCATION_SCOPE_DENIED,
+          message: expect.stringContaining("company context is required"),
+        });
+        expect(configGet).not.toHaveBeenCalled();
+      } finally {
+        await handle.stop().catch(() => undefined);
+      }
+    },
+  );
+
+  it.each(["omit", "unknown"])("denies a job config read with an %s invocation id", async (mode) => {
+    const { handle, configGet } = makeJobHandle(["company-a"]);
+    try {
+      await handle.start();
+      await expect(handle.call("runJob", jobProbe("schedule", { mode }))).rejects.toMatchObject({
+        code: PLUGIN_RPC_ERROR_CODES.INVOCATION_SCOPE_DENIED,
+        message: expect.stringContaining("unknown invocation scope"),
+      });
+      expect(configGet).not.toHaveBeenCalled();
+    } finally {
+      await handle.stop().catch(() => undefined);
+    }
+  });
+
+  it("denies a job config read for another company", async () => {
+    const { handle, configGet } = makeJobHandle(["company-a"]);
+    try {
+      await handle.start();
+      await expect(handle.call("runJob", jobProbe("schedule", {
+        omitCompanyId: false, requestedCompanyId: "company-b",
+      }))).rejects.toMatchObject({
+        code: PLUGIN_RPC_ERROR_CODES.INVOCATION_SCOPE_DENIED,
+        message: expect.stringContaining('requested company "company-b"'),
+      });
+      expect(configGet).not.toHaveBeenCalled();
+    } finally {
+      await handle.stop().catch(() => undefined);
+    }
+  });
+
+  it("uses the current configured company for the next job after config changes", async () => {
+    const { handle, configGet } = makeJobHandle(["company-a"]);
+    try {
+      await handle.start();
+      await expect(handle.call("runJob", jobProbe("schedule"))).resolves.toEqual({ companyId: "company-a" });
+      handle.setProactiveCompanyScopes(["company-b"]);
+      await expect(handle.call("runJob", jobProbe("schedule"))).resolves.toEqual({ companyId: "company-b" });
+      handle.setProactiveCompanyScopes([]);
+      await expect(handle.call("runJob", jobProbe("schedule"))).rejects.toMatchObject({
+        code: PLUGIN_RPC_ERROR_CODES.INVOCATION_SCOPE_DENIED,
+        message: expect.stringContaining("company context is required"),
+      });
+      expect(configGet).toHaveBeenCalledTimes(2);
+    } finally {
+      await handle.stop().catch(() => undefined);
+    }
+  });
+
+  it("keeps a job config read scoped while another action scope is retained", async () => {
+    const { handle, configGet, configCall } = makeJobHandle(["company-a"]);
+    try {
+      await handle.start();
+      await expect(handle.call("performAction", {
+        key: "queue-work",
+        params: { mode: "late", hostMethod: "config.get", omitCompanyId: true },
+        actorContext: { type: "agent", userId: null, agentId: "agent-1", runId: "action-1", companyId: "company-a" },
+        renderEnvironment: null,
+      })).resolves.toEqual({ queued: true });
+      await expect(handle.call("runJob", jobProbe("schedule"))).resolves.toEqual({ companyId: "company-a" });
+      await vi.waitFor(() => expect(configCall).toHaveBeenCalledTimes(2));
+      expect(configGet).toHaveBeenCalledTimes(2);
+    } finally {
+      await handle.stop().catch(() => undefined);
+    }
+  });
+
+  it("denies a detached job config read after the job invocation completes", async () => {
+    const { handle, configGet, configCall } = makeJobHandle(["company-a"]);
+    try {
+      await handle.start();
+      await expect(handle.call("runJob", jobProbe("schedule", { mode: "late" }))).resolves.toEqual({ queued: true });
+      await vi.waitFor(() => expect(configCall).toHaveBeenCalledTimes(1));
+      await expect(configCall.mock.results[0].value).rejects.toMatchObject({
+        code: PLUGIN_RPC_ERROR_CODES.INVOCATION_SCOPE_DENIED,
+        message: expect.stringContaining("unknown invocation scope"),
+      });
+      expect(configGet).not.toHaveBeenCalled();
+    } finally {
+      await handle.stop().catch(() => undefined);
+    }
+  });
+});
+
 describe("plugin host company context guards", () => {
   it("rejects config and secret calls without host-issued company context before host services run", async () => {
     const configGet = vi.fn(async () => ({ apiKey: "unreachable" }));

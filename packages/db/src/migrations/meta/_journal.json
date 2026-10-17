@@ -1492,6 +1492,13 @@
       "when": 1788808021263,
       "tag": "0214_sticky_argent",
       "breakpoints": true
+    },
+    {
+      "idx": 215,
+      "version": "7",
+      "when": 1791388334034,
+      "tag": "0215_complete_dragon_lord",
+      "breakpoints": true
     }
   ]
 }

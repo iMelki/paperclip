@@ -11,7 +11,7 @@ import {
   updateIssueSchema,
   upsertIssueDocumentSchema,
 } from "./issue.js";
-import { createAgentSchema } from "./agent.js";
+import { createAgentSchema, updateAgentSchema } from "./agent.js";
 
 describe("issue validators", () => {
   it("requires attributed feedback for request-changes decisions without treating its content as trusted", () => {
@@ -501,6 +501,19 @@ describe("issue validators", () => {
       model: "gpt-5.3-codex-spark",
     });
     expect(parsed.runtimeConfig.heartbeat).toEqual({ enabled: true });
+  });
+
+  it("round-trips disabled agent model profiles without adapter config", () => {
+    const runtimeConfig = { modelProfiles: { cheap: { enabled: false } } };
+    expect(updateAgentSchema.parse({ runtimeConfig }).runtimeConfig).toEqual({
+      modelProfiles: { cheap: { enabled: false, adapterConfig: {} } },
+    });
+    expect(updateAgentSchema.safeParse({
+      runtimeConfig: { modelProfiles: { cheap: { enabled: true } } },
+    }).success).toBe(false);
+    expect(updateAgentSchema.safeParse({
+      runtimeConfig: { modelProfiles: { cheap: {} } },
+    }).success).toBe(false);
   });
 
   it("validates cheap model profile env bindings like top-level adapter config", () => {
