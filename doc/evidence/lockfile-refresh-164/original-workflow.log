@@ -1,0 +1,508 @@
+TAP version 13
+# Subtest: passes when lockfile is not changed
+ok 1 - passes when lockfile is not changed
+  ---
+  duration_ms: 1.6482
+  type: 'test'
+  ...
+# Subtest: passes when lockfile changed by refresh bot on correct branch
+ok 2 - passes when lockfile changed by refresh bot on correct branch
+  ---
+  duration_ms: 0.2766
+  type: 'test'
+  ...
+# Subtest: fails when lockfile changed by regular user
+ok 3 - fails when lockfile changed by regular user
+  ---
+  duration_ms: 0.3225
+  type: 'test'
+  ...
+# Subtest: fails when lockfile changed by bot on wrong branch
+ok 4 - fails when lockfile changed by bot on wrong branch
+  ---
+  duration_ms: 0.2651
+  type: 'test'
+  ...
+# Subtest: passes for the refresh bot with a branch matching base dev
+ok 5 - passes for the refresh bot with a branch matching base dev
+  ---
+  duration_ms: 0.2211
+  type: 'test'
+  ...
+# Subtest: passes for the refresh bot with a branch matching base master
+ok 6 - passes for the refresh bot with a branch matching base master
+  ---
+  duration_ms: 0.175
+  type: 'test'
+  ...
+# Subtest: passes for the refresh bot with a branch matching base release/stable
+ok 7 - passes for the refresh bot with a branch matching base release/stable
+  ---
+  duration_ms: 0.1404
+  type: 'test'
+  ...
+# Subtest: rejects refresh branch chore/refresh-lockfile-dev for someuser on base dev
+ok 8 - rejects refresh branch chore/refresh-lockfile-dev for someuser on base dev
+  ---
+  duration_ms: 0.2274
+  type: 'test'
+  ...
+# Subtest: rejects refresh branch chore/refresh-lockfile-master for github-actions[bot] on base dev
+ok 9 - rejects refresh branch chore/refresh-lockfile-master for github-actions[bot] on base dev
+  ---
+  duration_ms: 0.1938
+  type: 'test'
+  ...
+# Subtest: rejects refresh branch chore/refresh-lockfile-dev-extra for github-actions[bot] on base dev
+ok 10 - rejects refresh branch chore/refresh-lockfile-dev-extra for github-actions[bot] on base dev
+  ---
+  duration_ms: 0.3273
+  type: 'test'
+  ...
+# Subtest: rejects refresh branch chore/refresh-lockfile-dev for github-actions[bot] on base (missing)
+ok 11 - rejects refresh branch chore/refresh-lockfile-dev for github-actions[bot] on base (missing)
+  ---
+  duration_ms: 0.3776
+  type: 'test'
+  ...
+# Subtest: manual inputs default to dev; the push trigger remains master only
+not ok 12 - manual inputs default to dev; the push trigger remains master only
+  ---
+  duration_ms: 3.4759
+  type: 'test'
+  location: 'C:\\Dev\\cto-lanes-20261007\\wt\\L14\\scripts\\refresh-lockfile.test.mjs:99:1'
+  failureType: 'testCodeFailure'
+  error: |-
+    The input did not match the regular expression /      ref:\n(?:.*\n)*?        default: dev\n        type: string/. Input:
+
+    'name: Refresh Lockfile\n' +
+      '\n' +
+      'on:\n' +
+      '  push:\n' +
+      '    branches:\n' +
+      '      - master\n' +
+      '  workflow_dispatch:\n' +
+      '\n' +
+      'concurrency:\n' +
+      '  group: refresh-lockfile-master\n' +
+      '  cancel-in-progress: false\n' +
+      '\n' +
+      'jobs:\n' +
+      '  refresh:\n' +
+      '    runs-on: ubuntu-latest\n' +
+      '    timeout-minutes: 10\n' +
+      '    permissions:\n' +
+      '      contents: write\n' +
+      '      pull-requests: write\n' +
+      '\n' +
+      '    steps:\n' +
+      '      - name: Checkout repository\n' +
+      '        uses: actions/checkout@v7\n' +
+      '\n' +
+      '      - name: Setup pnpm\n' +
+      '        uses: pnpm/action-setup@v6\n' +
+      '        with:\n' +
+      '          version: 9.15.4\n' +
+      '          run_install: false\n' +
+      '\n' +
+      '      - name: Setup Node.js\n' +
+      '        uses: actions/setup-node@v7\n' +
+      '        with:\n' +
+      '          node-version: 20\n' +
+      '          cache: pnpm\n' +
+      '\n' +
+      '      - name: Refresh pnpm lockfile\n' +
+      '        run: pnpm install --lockfile-only --ignore-scripts --no-frozen-lockfile\n' +
+      '\n' +
+      '      - name: Fail on unexpected file changes\n' +
+      '        run: |\n' +
+      '          changed="$(git status --porcelain)"\n' +
+      '          if [ -z "$changed" ]; then\n' +
+      '            echo "Lockfile is already up to date."\n' +
+      '            exit 0\n' +
+      '          fi\n' +
+      `          if printf '%s\\n' "$changed" | grep -Fvq ' pnpm-lock.yaml'; then\n` +
+      '            echo "Unexpected files changed during lockfile refresh:"\n' +
+      '            echo "$changed"\n' +
+      '            exit 1\n' +
+      '          fi\n' +
+      '\n' +
+      '      - name: Create or update pull request\n' +
+      '        id: upsert-pr\n' +
+      '        env:\n' +
+      '          GH_TOKEN: ${{ github.token }}\n' +
+      '          REPO_OWNER: ${{ github.repository_owner }}\n' +
+      '        run: |\n' +
+      '          if git diff --quiet -- pnpm-lock.yaml; then\n' +
+      '            echo "Lockfile unchanged, nothing to do."\n' +
+      '            echo "pr_url=" >> "$GITHUB_OUTPUT"\n' +
+      '            exit 0\n' +
+      '          fi\n' +
+      '\n' +
+      '          BRANCH="chore/refresh-lockfile"\n' +
+      '          git config user.name "lockfile-bot"\n' +
+      '          git config user.email "lockfile-bot@users.noreply.github.com"\n' +
+      '\n' +
+      '          git checkout -B "$BRANCH"\n' +
+      '          git add pnpm-lock.yaml\n' +
+      '          git commit -m "chore(lockfile): refresh pnpm-lock.yaml"\n' +
+      '          git push --force origin "$BRANCH"\n' +
+      '\n' +
+      '          # Only reuse an open PR from this repository owner, not a fork with the same branch name.\n' +
+      '          pr_url="$(\n' +
+      '            gh pr list --state open --head "$BRANCH" --json url,headRepositoryOwner \\\n' +
+      '              --jq ".[] | select(.headRepositoryOwner.login == \\"$REPO_OWNER\\") | .url" |\n' +
+      '            head -n 1\n' +
+      '          )"\n' +
+      '          if [ -z "$pr_url" ]; then\n' +
+      '            pr_url="$(gh pr create \\\n' +
+      '              --head "$BRANCH" \\\n' +
+      '              --title "chore(lockfile): refresh pnpm-lock.yaml" \\\n' +
+      '              --body "Auto-generated lockfile refresh after dependencies changed on master. This PR only updates pnpm-lock.yaml.")"\n' +
+      '            echo "Created new PR: $pr_url"\n' +
+      '          else\n' +
+      '            echo "PR already exists: $pr_url"\n' +
+      '          fi\n' +
+      '          echo "pr_url=$pr_url" >> "$GITHUB_OUTPUT"\n' +
+      '\n' +
+      '      - name: Enable auto-merge for lockfile PR\n' +
+      "        if: steps.upsert-pr.outputs.pr_url != ''\n" +
+      '        env:\n' +
+      '          GH_TOKEN: ${{ github.token }}\n' +
+      '        run: |\n' +
+      '          gh pr merge --auto --squash --delete-branch "${{ steps.upsert-pr.outputs.pr_url }}"\n'
+
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected:
+  actual: |-
+    name: Refresh Lockfile
+
+    on:
+      push:
+        branches:
+          - master
+      workflow_dispatch:
+
+    concurrency:
+      group: refresh-lockfile-master
+      cancel-in-progress: false
+
+    jobs:
+      refresh:
+        runs-on: ubuntu-latest
+        timeout-minutes: 10
+        permissions:
+          contents: write
+          pull-requests: write
+
+        steps:
+          - name: Checkout repository
+            uses: actions/checkout@v7
+
+          - name: Setup pnpm
+            uses: pnpm/action-setup@v6
+            with:
+              version: 9.15.4
+              run_install: false
+
+          - name: Setup Node.js
+            uses: actions/setup-node@v7
+            with:
+              node-version: 20
+              cache: pnpm
+
+          - name: Refresh pnpm lockfile
+            run: pnpm install --lockfile-only --ignore-scripts --no-frozen-lockfile
+
+          - name: Fail on unexpected file changes
+            run: |
+              changed="$(git status --porcelain)"
+              if [ -z "$changed" ]; then
+                echo "Lockfile is already up to date."
+                exit 0
+              fi
+              if printf '%s\n' "$changed" | grep -Fvq ' pnpm-lock.yaml'; then
+                echo "Unexpected files changed during lockfile refresh:"
+                echo "$changed"
+                exit 1
+              fi
+
+          - name: Create or update pull request
+            id: upsert-pr
+            env:
+              GH_TOKEN: ${{ github.token }}
+              REPO_OWNER: ${{ github.repository_owner }}
+            run: |
+              if git diff --quiet -- pnpm-lock.yaml; then
+                echo "Lockfile unchanged, nothing to do."
+                echo "pr_url=" >> "$GITHUB_OUTPUT"
+                exit 0
+              fi
+
+              BRANCH="chore/refresh-lockfile"
+              git config user.name "lockfile-bot"
+              git config user.email "lockfile-bot@users.noreply.github.com"
+
+              git checkout -B "$BRANCH"
+              git add pnpm-lock.yaml
+              git commit -m "chore(lockfile): refresh pnpm-lock.yaml"
+              git push --force origin "$BRANCH"
+
+              # Only reuse an open PR from this repository owner, not a fork with the same branch name.
+              pr_url="$(
+                gh pr list --state open --head "$BRANCH" --json url,headRepositoryOwner \
+                  --jq ".[] | select(.headRepositoryOwner.login == \"$REPO_OWNER\") | .url" |
+                head -n 1
+              )"
+              if [ -z "$pr_url" ]; then
+                pr_url="$(gh pr create \
+                  --head "$BRANCH" \
+                  --title "chore(lockfile): refresh pnpm-lock.yaml" \
+                  --body "Auto-generated lockfile refresh after dependencies changed on master. This PR only updates pnpm-lock.yaml.")"
+                echo "Created new PR: $pr_url"
+              else
+                echo "PR already exists: $pr_url"
+              fi
+              echo "pr_url=$pr_url" >> "$GITHUB_OUTPUT"
+
+          - name: Enable auto-merge for lockfile PR
+            if: steps.upsert-pr.outputs.pr_url != ''
+            env:
+              GH_TOKEN: ${{ github.token }}
+            run: |
+              gh pr merge --auto --squash --delete-branch "${{ steps.upsert-pr.outputs.pr_url }}"
+
+  operator: 'match'
+  stack: |-
+    TestContext.<anonymous> (file:///<repo>/scripts/refresh-lockfile.test.mjs:101:12)
+    Test.runInAsyncScope (node:async_hooks:227:14)
+    Test.run (node:internal/test_runner/test:1325:25)
+    Test.start (node:internal/test_runner/test:1191:17)
+    startSubtestAfterBootstrap (node:internal/test_runner/harness:385:17)
+  ...
+# Subtest: checkout ref can differ from the base; concurrency is separated by base
+not ok 13 - checkout ref can differ from the base; concurrency is separated by base
+  ---
+  duration_ms: 0.4939
+  type: 'test'
+  location: 'C:\\Dev\\cto-lanes-20261007\\wt\\L14\\scripts\\refresh-lockfile.test.mjs:110:1'
+  failureType: 'testCodeFailure'
+  error: 'missing workflow expression'
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected: true
+  operator: '=='
+  stack: |-
+    resolve (file:///<repo>/scripts/refresh-lockfile.test.mjs:36:10)
+    TestContext.<anonymous> (file:///<repo>/scripts/refresh-lockfile.test.mjs:111:16)
+    Test.runInAsyncScope (node:async_hooks:227:14)
+    Test.run (node:internal/test_runner/test:1325:25)
+    Test.processPendingSubtests (node:internal/test_runner/test:911:18)
+    Test.postRun (node:internal/test_runner/test:1465:19)
+    Test.run (node:internal/test_runner/test:1390:12)
+    async startSubtestAfterBootstrap (node:internal/test_runner/harness:385:3)
+  ...
+# Subtest: dev refresh reuses only the matching head, base and repository owner
+not ok 14 - dev refresh reuses only the matching head, base and repository owner
+  ---
+  duration_ms: 479.091
+  type: 'test'
+  location: 'C:\\Dev\\cto-lanes-20261007\\wt\\L14\\scripts\\refresh-lockfile.test.mjs:118:1'
+  failureType: 'testCodeFailure'
+  error: |-
+    The input did not match the regular expression /git\tpush\t--force\torigin\tchore\/refresh-lockfile-dev/. Input:
+
+    'git\tdiff\t--quiet\t--\tpnpm-lock.yaml\n' +
+      'git\tconfig\tuser.name\tlockfile-bot\n' +
+      'git\tconfig\tuser.email\tlockfile-bot@users.noreply.github.com\n' +
+      'git\tcheckout\t-B\tchore/refresh-lockfile\n' +
+      'git\tadd\tpnpm-lock.yaml\n' +
+      'git\tcommit\t-m\tchore(lockfile): refresh pnpm-lock.yaml\n' +
+      'git\tpush\t--force\torigin\tchore/refresh-lockfile\n' +
+      'gh\tpr\tlist\t--state\topen\t--head\tchore/refresh-lockfile\t--json\turl,headRepositoryOwner\t--jq\t.[] | select(.headRepositoryOwner.login == "example") | .url\n' +
+      'gh\tpr\tcreate\t--head\tchore/refresh-lockfile\t--title\tchore(lockfile): refresh pnpm-lock.yaml\t--body\tAuto-generated lockfile refresh after dependencies changed on master. This PR only updates pnpm-lock.yaml.\n'
+
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected:
+  actual: |-
+    git	diff	--quiet	--	pnpm-lock.yaml
+    git	config	user.name	lockfile-bot
+    git	config	user.email	lockfile-bot@users.noreply.github.com
+    git	checkout	-B	chore/refresh-lockfile
+    git	add	pnpm-lock.yaml
+    git	commit	-m	chore(lockfile): refresh pnpm-lock.yaml
+    git	push	--force	origin	chore/refresh-lockfile
+    gh	pr	list	--state	open	--head	chore/refresh-lockfile	--json	url,headRepositoryOwner	--jq	.[] | select(.headRepositoryOwner.login == "example") | .url
+    gh	pr	create	--head	chore/refresh-lockfile	--title	chore(lockfile): refresh pnpm-lock.yaml	--body	Auto-generated lockfile refresh after dependencies changed on master. This PR only updates pnpm-lock.yaml.
+
+  operator: 'match'
+  stack: |-
+    TestContext.<anonymous> (file:///<repo>/scripts/refresh-lockfile.test.mjs:121:10)
+    Test.runInAsyncScope (node:async_hooks:227:14)
+    Test.run (node:internal/test_runner/test:1325:25)
+    Test.processPendingSubtests (node:internal/test_runner/test:911:18)
+    Test.postRun (node:internal/test_runner/test:1465:19)
+    Test.run (node:internal/test_runner/test:1390:12)
+    async Test.processPendingSubtests (node:internal/test_runner/test:911:7)
+  ...
+# Subtest: wrong-base, wrong-head and fork PRs cannot prevent creating a dev PR
+not ok 15 - wrong-base, wrong-head and fork PRs cannot prevent creating a dev PR
+  ---
+  duration_ms: 379.5612
+  type: 'test'
+  location: 'C:\\Dev\\cto-lanes-20261007\\wt\\L14\\scripts\\refresh-lockfile.test.mjs:127:1'
+  failureType: 'testCodeFailure'
+  error: |-
+    The input did not match the regular expression /gh\tpr\tcreate\t--head\tchore\/refresh-lockfile-dev\t--base\tdev/. Input:
+
+    'git\tdiff\t--quiet\t--\tpnpm-lock.yaml\n' +
+      'git\tconfig\tuser.name\tlockfile-bot\n' +
+      'git\tconfig\tuser.email\tlockfile-bot@users.noreply.github.com\n' +
+      'git\tcheckout\t-B\tchore/refresh-lockfile\n' +
+      'git\tadd\tpnpm-lock.yaml\n' +
+      'git\tcommit\t-m\tchore(lockfile): refresh pnpm-lock.yaml\n' +
+      'git\tpush\t--force\torigin\tchore/refresh-lockfile\n' +
+      'gh\tpr\tlist\t--state\topen\t--head\tchore/refresh-lockfile\t--json\turl,headRepositoryOwner\t--jq\t.[] | select(.headRepositoryOwner.login == "example") | .url\n' +
+      'gh\tpr\tcreate\t--head\tchore/refresh-lockfile\t--title\tchore(lockfile): refresh pnpm-lock.yaml\t--body\tAuto-generated lockfile refresh after dependencies changed on master. This PR only updates pnpm-lock.yaml.\n'
+
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected:
+  actual: |-
+    git	diff	--quiet	--	pnpm-lock.yaml
+    git	config	user.name	lockfile-bot
+    git	config	user.email	lockfile-bot@users.noreply.github.com
+    git	checkout	-B	chore/refresh-lockfile
+    git	add	pnpm-lock.yaml
+    git	commit	-m	chore(lockfile): refresh pnpm-lock.yaml
+    git	push	--force	origin	chore/refresh-lockfile
+    gh	pr	list	--state	open	--head	chore/refresh-lockfile	--json	url,headRepositoryOwner	--jq	.[] | select(.headRepositoryOwner.login == "example") | .url
+    gh	pr	create	--head	chore/refresh-lockfile	--title	chore(lockfile): refresh pnpm-lock.yaml	--body	Auto-generated lockfile refresh after dependencies changed on master. This PR only updates pnpm-lock.yaml.
+
+  operator: 'match'
+  stack: |-
+    TestContext.<anonymous> (file:///<repo>/scripts/refresh-lockfile.test.mjs:130:10)
+    Test.runInAsyncScope (node:async_hooks:227:14)
+    Test.run (node:internal/test_runner/test:1325:25)
+    Test.processPendingSubtests (node:internal/test_runner/test:911:18)
+    Test.postRun (node:internal/test_runner/test:1465:19)
+    Test.run (node:internal/test_runner/test:1390:12)
+    async Test.processPendingSubtests (node:internal/test_runner/test:911:7)
+  ...
+# Subtest: master refresh still pushes and creates a PR targeting master
+not ok 16 - master refresh still pushes and creates a PR targeting master
+  ---
+  duration_ms: 396.3663
+  type: 'test'
+  location: 'C:\\Dev\\cto-lanes-20261007\\wt\\L14\\scripts\\refresh-lockfile.test.mjs:135:1'
+  failureType: 'testCodeFailure'
+  error: |-
+    The input did not match the regular expression /git\tpush\t--force\torigin\tchore\/refresh-lockfile-master/. Input:
+
+    'git\tdiff\t--quiet\t--\tpnpm-lock.yaml\n' +
+      'git\tconfig\tuser.name\tlockfile-bot\n' +
+      'git\tconfig\tuser.email\tlockfile-bot@users.noreply.github.com\n' +
+      'git\tcheckout\t-B\tchore/refresh-lockfile\n' +
+      'git\tadd\tpnpm-lock.yaml\n' +
+      'git\tcommit\t-m\tchore(lockfile): refresh pnpm-lock.yaml\n' +
+      'git\tpush\t--force\torigin\tchore/refresh-lockfile\n' +
+      'gh\tpr\tlist\t--state\topen\t--head\tchore/refresh-lockfile\t--json\turl,headRepositoryOwner\t--jq\t.[] | select(.headRepositoryOwner.login == "example") | .url\n' +
+      'gh\tpr\tcreate\t--head\tchore/refresh-lockfile\t--title\tchore(lockfile): refresh pnpm-lock.yaml\t--body\tAuto-generated lockfile refresh after dependencies changed on master. This PR only updates pnpm-lock.yaml.\n'
+
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected:
+  actual: |-
+    git	diff	--quiet	--	pnpm-lock.yaml
+    git	config	user.name	lockfile-bot
+    git	config	user.email	lockfile-bot@users.noreply.github.com
+    git	checkout	-B	chore/refresh-lockfile
+    git	add	pnpm-lock.yaml
+    git	commit	-m	chore(lockfile): refresh pnpm-lock.yaml
+    git	push	--force	origin	chore/refresh-lockfile
+    gh	pr	list	--state	open	--head	chore/refresh-lockfile	--json	url,headRepositoryOwner	--jq	.[] | select(.headRepositoryOwner.login == "example") | .url
+    gh	pr	create	--head	chore/refresh-lockfile	--title	chore(lockfile): refresh pnpm-lock.yaml	--body	Auto-generated lockfile refresh after dependencies changed on master. This PR only updates pnpm-lock.yaml.
+
+  operator: 'match'
+  stack: |-
+    TestContext.<anonymous> (file:///<repo>/scripts/refresh-lockfile.test.mjs:138:10)
+    Test.runInAsyncScope (node:async_hooks:227:14)
+    Test.run (node:internal/test_runner/test:1325:25)
+    Test.processPendingSubtests (node:internal/test_runner/test:911:18)
+    Test.postRun (node:internal/test_runner/test:1465:19)
+    Test.run (node:internal/test_runner/test:1390:12)
+    async Test.processPendingSubtests (node:internal/test_runner/test:911:7)
+  ...
+# Subtest: unchanged lockfile performs no push or PR operation
+ok 17 - unchanged lockfile performs no push or PR operation
+  ---
+  duration_ms: 57.112
+  type: 'test'
+  ...
+# Subtest: invalid per-base branch is rejected before commit or push
+not ok 18 - invalid per-base branch is rejected before commit or push
+  ---
+  duration_ms: 403.4489
+  type: 'test'
+  location: 'C:\\Dev\\cto-lanes-20261007\\wt\\L14\\scripts\\refresh-lockfile.test.mjs:149:1'
+  failureType: 'testCodeFailure'
+  error: 'Expected "actual" to be strictly unequal to: 0'
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected: 0
+  actual: 0
+  operator: 'notStrictEqual'
+  stack: |-
+    TestContext.<anonymous> (file:///<repo>/scripts/refresh-lockfile.test.mjs:151:10)
+    Test.runInAsyncScope (node:async_hooks:227:14)
+    Test.run (node:internal/test_runner/test:1325:25)
+    Test.processPendingSubtests (node:internal/test_runner/test:911:18)
+    Test.postRun (node:internal/test_runner/test:1465:19)
+    Test.run (node:internal/test_runner/test:1390:12)
+    async Test.processPendingSubtests (node:internal/test_runner/test:911:7)
+  ...
+# Subtest: the existing file-change gate permits only a lockfile refresh
+ok 19 - the existing file-change gate permits only a lockfile refresh
+  ---
+  duration_ms: 353.7147
+  type: 'test'
+  ...
+# Subtest: auto-merge remains master-only and requires a PR URL
+not ok 20 - auto-merge remains master-only and requires a PR URL
+  ---
+  duration_ms: 0.4056
+  type: 'test'
+  location: 'C:\\Dev\\cto-lanes-20261007\\wt\\L14\\scripts\\refresh-lockfile.test.mjs:166:1'
+  failureType: 'testCodeFailure'
+  error: 'dev refresh must not enable auto-merge'
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected: true
+  actual: false
+  operator: '=='
+  stack: |-
+    TestContext.<anonymous> (file:///<repo>/scripts/refresh-lockfile.test.mjs:168:10)
+    Test.runInAsyncScope (node:async_hooks:227:14)
+    Test.run (node:internal/test_runner/test:1325:25)
+    Test.processPendingSubtests (node:internal/test_runner/test:911:18)
+    Test.postRun (node:internal/test_runner/test:1465:19)
+    Test.run (node:internal/test_runner/test:1390:12)
+    async Test.processPendingSubtests (node:internal/test_runner/test:911:7)
+  ...
+# Subtest: PR policy accepts the exact bot branch and rejects mismatched base or author
+ok 21 - PR policy accepts the exact bot branch and rejects mismatched base or author
+  ---
+  duration_ms: 4.2071
+  type: 'test'
+  ...
+1..21
+# tests 21
+# suites 0
+# pass 14
+# fail 7
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 2284.6098

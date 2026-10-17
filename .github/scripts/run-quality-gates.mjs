@@ -119,7 +119,7 @@ async function main() {
       Promise.resolve(checkLinkedIssue(prBody, prTitle)),
       Promise.resolve(checkDedupSearch(prBody, prTitle)),
       Promise.resolve(checkTestCoverage(files, prTitle)),
-      Promise.resolve(checkLockfile(files, author, branch)),
+      Promise.resolve(checkLockfile(files, author, branch, pr.base?.ref)),
       checkDependencies(files, GH_TOKEN, GH_REPO, prNumber, pr.base?.ref),
     ]);
 
