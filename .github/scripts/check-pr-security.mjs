@@ -2,10 +2,13 @@
 /**
  * check-pr-security.mjs
  * Runs 6 security checks against a PR diff. Never posts public comments.
- * Creates a draft security advisory in the repo if any check fires.
+ * If any check fires, it lists each flag (check name and file; never the
+ * matched text) in the job log and in the `security-review` check run, and
+ * tries to create a draft security advisory. A failed advisory call is logged
+ * and does not stop the check run.
  *
  * Env: GH_TOKEN, GH_REPO, PR_NUMBER, PR_AUTHOR
- * Exit: always 0 — security flags are silent, never block the PR visibly.
+ * Exit: always 0 for flags — security flags never block the PR visibly.
  */
 import { fileURLToPath } from 'node:url';
 import { ghFetch } from './get-bot-token.mjs';
@@ -273,7 +276,92 @@ export async function findExistingDraftAdvisory(fetchImpl, token, repo, prNumber
   return null;
 }
 
-export async function postSecurityCheckRun(fetchImpl, token, repo, headSha, hasFlags) {
+// ── Flag reporting (job log and check-run summary) ────────────────────────────
+//
+// The draft advisory is not always created. On a fork the workflow runs with
+// the workflow GITHUB_TOKEN, and the workflow `permissions:` key has no scope
+// for repository security advisories (`security-events` covers code scanning
+// only). POST /repos/{owner}/{repo}/security-advisories needs the "Repository
+// security advisories: write" permission of a GitHub App or a token from a
+// security manager or admin, so it returns 403 "Resource not accessible by
+// integration" there. The flags must therefore also be reported in places the
+// token can always write: the job log and the `security-review` check run.
+//
+// Job logs and check runs of a public repository are public. Report only the
+// check name, the file path, the pattern NAME and package names. Never report
+// `flag.line`: for `secret-scan` it holds the matched text.
+
+// GitHub rejects a check-run `output.summary` longer than 65535 characters.
+export const CHECK_RUN_SUMMARY_LIMIT = 65_535;
+const MAX_FLAG_LINE_CHARS = 500;
+
+function sanitizeFlagText(value) {
+  // Control characters (a newline in a file name, for example) could start a
+  // new log line, which the runner might read as a workflow command.
+  // eslint-disable-next-line no-control-regex
+  return String(value).replace(/[\u0000-\u001f\u007f]/g, '?');
+}
+
+export function describeFlag(flag) {
+  const parts = [flag.check ?? 'unknown-check'];
+  if (flag.file) parts.push(flag.file);
+  if (flag.pattern) parts.push(`(pattern: ${flag.pattern})`);
+  if (Array.isArray(flag.packages) && flag.packages.length) {
+    parts.push(`(packages: ${flag.packages.join(', ')})`);
+  }
+  const text = sanitizeFlagText(parts.join(' '));
+  return text.length > MAX_FLAG_LINE_CHARS ? `${text.slice(0, MAX_FLAG_LINE_CHARS - 1)}…` : text;
+}
+
+export function formatFlagLogLines(flags) {
+  return flags.map(flag => `[security]   - ${describeFlag(flag)}`);
+}
+
+export function buildFlagsSummary(flags, advisoryFiled, limit = CHECK_RUN_SUMMARY_LIMIT) {
+  const header = [
+    advisoryFiled
+      ? 'Draft advisory filed for maintainer review. Not a merge block — review the advisory at your leisure.'
+      : 'The draft advisory could not be filed (see the job log). Not a merge block — review the flags below.',
+    '',
+    `**Flags (${flags.length}):**`,
+  ].join('\n');
+  const lines = flags.map(flag => `- \`${describeFlag(flag).replace(/`/g, "'")}\``);
+
+  let summary = header;
+  for (let i = 0; i < lines.length; i += 1) {
+    const remainingAfter = lines.length - i - 1;
+    const tail = remainingAfter > 0 ? `\n…and ${remainingAfter} more flag(s); see the job log.` : '';
+    if (summary.length + 1 + lines[i].length + tail.length > limit) {
+      return `${summary}\n…and ${lines.length - i} more flag(s); see the job log.`;
+    }
+    summary += `\n${lines[i]}`;
+  }
+  return summary;
+}
+
+// Creates or updates the draft advisory, but never lets a failure of that call
+// hide the flags or break the "always exit 0" contract.
+export async function trySyncDraftAdvisory(fetchImpl, token, repo, prNumber, prTitle, flags, log = console) {
+  try {
+    await syncDraftAdvisory(fetchImpl, token, repo, prNumber, prTitle, flags);
+    return true;
+  } catch (err) {
+    log.error(`[security] draft advisory not filed: ${sanitizeFlagText(err?.message ?? err)}`);
+    log.error('[security] the flags are listed above and in the security-review check run.');
+    return false;
+  }
+}
+
+export async function reportSecurityFlags(fetchImpl, token, repo, pr, flags, log = console) {
+  log.error(`[security] ${flags.length} flag(s) detected:`);
+  for (const line of formatFlagLogLines(flags)) log.error(line);
+  const advisoryFiled = await trySyncDraftAdvisory(fetchImpl, token, repo, pr.number, pr.title, flags, log);
+  await postSecurityCheckRun(fetchImpl, token, repo, pr.head.sha, true, { flags, advisoryFiled });
+  return { advisoryFiled };
+}
+
+export async function postSecurityCheckRun(fetchImpl, token, repo, headSha, hasFlags, details = {}) {
+  const { flags, advisoryFiled = true } = details;
   await fetchImpl(`/repos/${repo}/check-runs`, token, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -289,7 +377,9 @@ export async function postSecurityCheckRun(fetchImpl, token, repo, headSha, hasF
       conclusion: 'neutral',
       output: {
         title: 'Security Review Recommended',
-        summary: 'Draft advisory filed for maintainer review. Not a merge block — review the advisory at your leisure.',
+        summary: Array.isArray(flags) && flags.length
+          ? buildFlagsSummary(flags, advisoryFiled)
+          : 'Draft advisory filed for maintainer review. Not a merge block — review the advisory at your leisure.',
       },
     } : {
       name: 'security-review',
@@ -373,11 +463,7 @@ async function main() {
   ];
 
   if (allFlags.length > 0) {
-    console.error(`[security] ${allFlags.length} flag(s) detected — creating draft advisory and pending check run`);
-    await Promise.all([
-      syncDraftAdvisory(ghFetch, GH_TOKEN, GH_REPO, prNumber, pr.title, allFlags),
-      postSecurityCheckRun(ghFetch, GH_TOKEN, GH_REPO, pr.head.sha, true),
-    ]);
+    await reportSecurityFlags(ghFetch, GH_TOKEN, GH_REPO, { number: prNumber, title: pr.title, head: pr.head }, allFlags);
   } else {
     console.log('[security] all clear');
     await postSecurityCheckRun(ghFetch, GH_TOKEN, GH_REPO, pr.head.sha, false);

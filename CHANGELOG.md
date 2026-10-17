@@ -13,6 +13,19 @@ All notable changes to this repository should be recorded here.
 
 ## Unreleased
 
+- **[#164]** Refresh Lockfile accepts manual `ref` and `base` inputs that default
+  to `dev`. Each base has its own refresh branch and matching PR lookup. Master
+  pushes still refresh their triggering commit and retain auto-merge; other bases
+  require maintainer review. Both lockfile gates accept the bot's exact per-base branch.
+
+- **[#160]** The PR security step now lists each flag (check name and file,
+  or package names) in the job log and in the `security-review` check-run
+  summary. For `secret-scan` flags it names only the pattern, never the
+  matched text. A failed draft-advisory call (403 for the workflow token on
+  this fork) is logged and no longer stops the check run or the exit-0
+  contract. The summary stays under the GitHub size limit and counts the
+  flags it leaves out. Refs #137.
+
 - **[#159]** A Codex ACP run whose whole reply is a provider error object now
   fails. codex-acp 1.1.14 sends a rejected request (for example an unsupported
   model id) as reply text and ends the turn normally, so the run was recorded
