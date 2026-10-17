@@ -11,7 +11,7 @@ concurrency:
 
 jobs:
   secret-scan:
-    runs-on: ubuntu-latest
+    runs-on: [box-paperclip]
     timeout-minutes: 10
     permissions:
       contents: read
@@ -44,7 +44,7 @@ jobs:
 
   policy:
     needs: [secret-scan]
-    runs-on: ubuntu-latest
+    runs-on: [box-paperclip]
     timeout-minutes: 5
     outputs:
       lockfile_regenerated: ${{ steps.regen_lockfile.outputs.regenerated }}
@@ -140,7 +140,7 @@ jobs:
   typecheck_release_registry:
     name: Typecheck + Release Registry
     needs: [policy]
-    runs-on: ubuntu-latest
+    runs-on: [box-paperclip]
     timeout-minutes: 20
 
     steps:
@@ -177,7 +177,7 @@ jobs:
   general_tests:
     name: General tests (${{ matrix.group_label }})
     needs: [policy]
-    runs-on: ubuntu-latest
+    runs-on: [box-paperclip]
     timeout-minutes: 20
     strategy:
       fail-fast: false
@@ -254,7 +254,7 @@ jobs:
     name: verify
     if: ${{ always() }}
     needs: [typecheck_release_registry, general_tests, build]
-    runs-on: ubuntu-latest
+    runs-on: [box-paperclip]
     timeout-minutes: 5
 
     steps:
@@ -271,7 +271,7 @@ jobs:
   build:
     name: Build
     needs: [policy]
-    runs-on: ubuntu-latest
+    runs-on: [box-paperclip]
     timeout-minutes: 20
 
     steps:
@@ -305,7 +305,7 @@ jobs:
   verify_serialized_server:
     name: Verify serialized server suites (${{ matrix.shard_label }})
     needs: [policy]
-    runs-on: ubuntu-latest
+    runs-on: [box-paperclip]
     timeout-minutes: 20
     strategy:
       fail-fast: false
@@ -362,7 +362,7 @@ jobs:
   canary_dry_run:
     name: Canary Dry Run
     needs: [policy]
-    runs-on: ubuntu-latest
+    runs-on: [box-paperclip]
     timeout-minutes: 20
 
     steps:
@@ -417,7 +417,7 @@ jobs:
   e2e_shards:
     name: e2e shard (${{ matrix.shard_label }})
     needs: [policy]
-    runs-on: ubuntu-latest
+    runs-on: [box-paperclip]
     timeout-minutes: 30
     strategy:
       fail-fast: false
@@ -515,7 +515,7 @@ jobs:
     name: e2e
     if: ${{ always() }}
     needs: [e2e_shards]
-    runs-on: ubuntu-latest
+    runs-on: [box-paperclip]
     timeout-minutes: 5
 
     steps:

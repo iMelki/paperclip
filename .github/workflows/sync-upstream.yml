@@ -9,7 +9,7 @@ on:
 jobs:
   sync:
     name: Sync fork master with paperclipai/paperclip
-    runs-on: ubuntu-latest
+    runs-on: [box-paperclip]
     permissions:
       contents: write
 

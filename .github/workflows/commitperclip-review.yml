@@ -15,6 +15,7 @@ permissions:
 
 jobs:
   review:
+    # Stays hosted: pull_request_target with write permissions fires on fork PRs, so it must not run on the box runner; on a public repo the hosted run is free.
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
