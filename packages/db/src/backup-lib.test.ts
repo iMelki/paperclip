@@ -594,4 +594,158 @@ describeEmbeddedPostgres("runDatabaseBackup", () => {
     },
     20_000,
   );
+
+  it(
+    "restores fallback COPY data and continues with SQL after the COPY terminator",
+    async () => {
+      const restoreConnectionString = await createTempDatabase();
+      const restoreSql = postgres(restoreConnectionString, { max: 1, onnotice: () => {} });
+      const backupDir = createTempDir("paperclip-db-restore-copy-");
+      const backupFile = path.join(backupDir, "copy.sql");
+      const marker = "-- paperclip statement breakpoint 69f6f3f1-42fd-46a6-bf17-d1d85f8f3900";
+      const originalPsqlPath = process.env.PAPERCLIP_PSQL_PATH;
+      process.env.PAPERCLIP_PSQL_PATH = path.join(backupDir, "missing-psql.exe");
+
+      try {
+        await fs.promises.writeFile(
+          backupFile,
+          [
+            "-- Paperclip database backup",
+            "BEGIN;",
+            "-- paperclip statement breakpoint 69f6f3f1-42fd-46a6-bf17-d1d85f8f3900",
+            "CREATE TABLE public.restore_copy_test (id integer primary key, payload text not null);",
+            "-- paperclip statement breakpoint 69f6f3f1-42fd-46a6-bf17-d1d85f8f3900",
+            "COPY public.restore_copy_test (id, payload) FROM stdin;",
+            "1\talpha",
+            "2\tline\\ncontinued",
+            "\\.",
+            marker,
+            "CREATE TABLE public.restore_copy_marker_test (payload text not null);",
+            marker,
+            "COPY public.restore_copy_marker_test (payload) FROM stdin;",
+            marker,
+            "\\.",
+            marker,
+            "INSERT INTO public.restore_copy_test (id, payload) VALUES (3, 'after copy');",
+            marker,
+            "COMMIT;",
+            marker,
+          ].join("\n"),
+          "utf8",
+        );
+
+        await runDatabaseRestore({
+          connectionString: restoreConnectionString,
+          backupFile,
+        });
+
+        const rows = await restoreSql.unsafe<{ id: number; payload: string }[]>(`
+          SELECT id, payload
+          FROM public.restore_copy_test
+          ORDER BY id
+        `);
+        expect(rows).toEqual([
+          { id: 1, payload: "alpha" },
+          { id: 2, payload: "line\ncontinued" },
+          { id: 3, payload: "after copy" },
+        ]);
+
+        const markerRows = await restoreSql.unsafe<{ payload: string }[]>(`
+          SELECT payload
+          FROM public.restore_copy_marker_test
+        `);
+        expect(markerRows).toEqual([{ payload: marker }]);
+      } finally {
+        if (originalPsqlPath === undefined) {
+          delete process.env.PAPERCLIP_PSQL_PATH;
+        } else {
+          process.env.PAPERCLIP_PSQL_PATH = originalPsqlPath;
+        }
+        await restoreSql.end();
+      }
+    },
+    60_000,
+  );
+
+  it(
+    "rejects malformed and unsupported fallback COPY blocks without running trailing SQL",
+    async () => {
+      const restoreConnectionString = await createTempDatabase();
+      const restoreSql = postgres(restoreConnectionString, { max: 1, onnotice: () => {} });
+      const backupDir = createTempDir("paperclip-db-restore-invalid-copy-");
+      const missingTerminatorFile = path.join(backupDir, "missing-terminator.sql");
+      const unsupportedFormatFile = path.join(backupDir, "unsupported-format.sql");
+      const marker = "-- paperclip statement breakpoint 69f6f3f1-42fd-46a6-bf17-d1d85f8f3900";
+      const originalPsqlPath = process.env.PAPERCLIP_PSQL_PATH;
+      process.env.PAPERCLIP_PSQL_PATH = path.join(backupDir, "missing-psql.exe");
+
+      try {
+        await fs.promises.writeFile(
+          missingTerminatorFile,
+          [
+            "BEGIN;",
+            marker,
+            "CREATE TABLE public.restore_copy_missing_test (payload text not null);",
+            marker,
+            "COPY public.restore_copy_missing_test (payload) FROM stdin;",
+            "copy row",
+            marker,
+            "INSERT INTO public.restore_copy_missing_test (payload) VALUES ('must not execute');",
+            marker,
+            "COMMIT;",
+            marker,
+          ].join("\n"),
+          "utf8",
+        );
+        await expect(
+          runDatabaseRestore({
+            connectionString: restoreConnectionString,
+            backupFile: missingTerminatorFile,
+          }),
+        ).rejects.toThrow("COPY data block is missing its terminator");
+
+        const missingTableRows = await restoreSql.unsafe<{ table_name: string | null }[]>(`
+          SELECT to_regclass('public.restore_copy_missing_test')::text AS table_name
+        `);
+        expect(missingTableRows).toEqual([{ table_name: null }]);
+
+        await fs.promises.writeFile(
+          unsupportedFormatFile,
+          [
+            "BEGIN;",
+            marker,
+            "CREATE TABLE public.restore_copy_unsupported_test (payload text not null);",
+            marker,
+            "COPY public.restore_copy_unsupported_test (payload) FROM stdin WITH (FORMAT binary);",
+            "binary rows cannot be decoded as text",
+            "\\.",
+            marker,
+            "INSERT INTO public.restore_copy_unsupported_test (payload) VALUES ('must not execute');",
+            marker,
+            "COMMIT;",
+            marker,
+          ].join("\n"),
+          "utf8",
+        );
+        await expect(
+          runDatabaseRestore({
+            connectionString: restoreConnectionString,
+            backupFile: unsupportedFormatFile,
+          }),
+        ).rejects.toThrow("Unsupported COPY format in fallback restore");
+        const unsupportedTableRows = await restoreSql.unsafe<{ table_name: string | null }[]>(`
+          SELECT to_regclass('public.restore_copy_unsupported_test')::text AS table_name
+        `);
+        expect(unsupportedTableRows).toEqual([{ table_name: null }]);
+      } finally {
+        if (originalPsqlPath === undefined) {
+          delete process.env.PAPERCLIP_PSQL_PATH;
+        } else {
+          process.env.PAPERCLIP_PSQL_PATH = originalPsqlPath;
+        }
+        await restoreSql.end();
+      }
+    },
+    90_000,
+  );
 });
