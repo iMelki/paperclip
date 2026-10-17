@@ -122,6 +122,16 @@ install, activation, or live database change.
 - The current live app still reports ready on local and Tailscale port `5113`
   at commit `e226c8045f923f42e5191da2727d3ef1fbbb157f`. That is a health check
   for the existing app, not evidence that this candidate is running.
+- Later readback on 2026-10-17 23:40–23:42 UTC supersedes that earlier healthy
+  observation: both 5113 listeners remained present, but local API health timed
+  out after 8 s and tailnet API health after 12 s. The local Node listener was
+  still a descendant of the recorded WindowlessProcessHost, not an independent
+  instance. `service.json` still said `healthy`, but its last health timestamp
+  was stale. The bounded read-only factory-status collector exceeded its 30 s
+  owner deadline; its exact owned job was terminated and zero active members
+  were verified. No restart was performed. This indicates an unresponsive
+  existing process; cause is not established. RAM later sampled at 88.6%, after
+  a brief 90.5% reading.
 
 ## Diagnostic attempts and fixes
 
@@ -153,6 +163,10 @@ install, activation, or live database change.
   junction into Factory; safe rollout therefore needs an isolated installed
   package/runtime and a separately controlled owner handover, not a pnpm run
   against the shared junction.
+- The existing live process is currently unresponsive despite retaining its
+  5113 listeners. Treat the stale service `healthy` field as invalid until an
+  owner-bound live health check passes again. Restart/repair was not attempted
+  in this evidence pass.
 - The successful backup restore was isolated; this does not prove a live Factory
   restore or replace a verified production rollback rehearsal.
 - GitHub OAuth final Authorize is still operator-only. Project #12 is not bound
