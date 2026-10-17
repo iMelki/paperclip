@@ -122,6 +122,22 @@ install, activation, or live database change.
 - The current live app still reports ready on local and Tailscale port `5113`
   at commit `e226c8045f923f42e5191da2727d3ef1fbbb157f`. That is a health check
   for the existing app, not evidence that this candidate is running.
+
+The project documents `pnpm install` followed by `pnpm dev` for a source
+checkout. Its `paperclipai update --rollback` workflow is for managed/global
+npm payloads, not this source-checkout dev service. The candidate's postgres
+junction resolves into Factory's shared `node_modules`; the live target remains
+postgres 3.4.9 with pre-repair `src/connection.js` SHA-256
+`ba6c9a963a00562dfc573a64d30f1162fceb2bd7ee60f02715275a3cf1301cb9`. The
+patched candidate was installed only in the private archive copy with the
+documented install plus offline/frozen/script-disabled safeguards. Its patched
+connection file SHA-256 is
+`11de436cbb51e0be213af9e69f7841fed9873bc5d4ddbf31b0b734210e2dcf`; the lockfile
+selects patch hash `sogjkqi5atqemwbhpven6z3bki`. No live `node_modules` rollback
+image exists, so installing from the qualified checkout is still held. Current
+live rollback is simply the unchanged `e226c804` runtime; a future handover
+requires an isolated dependency destination and complete, hash-verified
+pre-change dependency backup.
 - Later readback on 2026-10-17 23:40–23:42 UTC supersedes that earlier healthy
   observation: both 5113 listeners remained present, but local API health timed
   out after 8 s and tailnet API health after 12 s. The local Node listener was

@@ -90,6 +90,14 @@ stale. The exact owner ancestry, endpoint timings, status-probe timeout, and
 authoritative log hashes are retained in the private runtime readback. Do not
 claim the COPY candidate is installed.
 
+**Dependency rollout gate:** the source-checkout install instructions are
+`pnpm install` then `pnpm dev`; the managed npm `update --rollback` does not
+apply to this Factory dev service. The candidate's postgres junction points
+into Factory's shared `node_modules`, and no complete Factory dependency
+rollback image exists. The project-supported install was qualified only in
+the private archive copy; do not run it from the candidate checkout until an
+isolated install destination and full hash-verified rollback package are ready.
+
 - **Private Agent Settings #1620 / Paperclip #129 — activation disk-manifest
   refresh guard:** pre-existing refresh can replace the registry manifest from
   disk without added-capability approval. The current CAS repair does not close
