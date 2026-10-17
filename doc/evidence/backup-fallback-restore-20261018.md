@@ -132,7 +132,7 @@ postgres 3.4.9 with pre-repair `src/connection.js` SHA-256
 patched candidate was installed only in the private archive copy with the
 documented install plus offline/frozen/script-disabled safeguards. Its patched
 connection file SHA-256 is
-`11de436cbb51e0be213af9e69f7841fed9873bc5d4ddbf31b0b734210e2dcf`; the lockfile
+`11de436cbb51e0be213af9e69f7841fed9873bc5d4ddbf31b0b73421033e2dcf`; the lockfile
 selects patch hash `sogjkqi5atqemwbhpven6z3bki`. No live `node_modules` rollback
 image exists, so installing from the qualified checkout is still held. Current
 live rollback is simply the unchanged `e226c804` runtime; a future handover
