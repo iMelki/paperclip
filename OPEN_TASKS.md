@@ -81,6 +81,15 @@ was verified closed. No restart or install was attempted. RAM sampled at
 88.6% after one transient 90.5% reading. Investigate the responsive-owner/log
 stall before any controlled repair; do not trust the stale healthy flag.
 
+**Read-only recovery follow-up (2026-10-17 23:45–23:46 UTC):** without a
+restart, local and tailnet `/api/health` both returned 200 for the unchanged
+`e226c804` app; `/ASI/projects` also returned 200 on both routes. Local route
+latency was about 6 s while tailnet varied from 0.45–5 s. The transient stall
+recovered, but its cause is unknown and the stored manager health stamp remains
+stale. The exact owner ancestry, endpoint timings, status-probe timeout, and
+authoritative log hashes are retained in the private runtime readback. Do not
+claim the COPY candidate is installed.
+
 - **Private Agent Settings #1620 / Paperclip #129 — activation disk-manifest
   refresh guard:** pre-existing refresh can replace the registry manifest from
   disk without added-capability approval. The current CAS repair does not close
