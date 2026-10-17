@@ -14,6 +14,7 @@ import { getAdapterLabel } from "../adapters/adapter-display-registry";
 import { clearPendingInviteToken, rememberPendingInviteToken } from "../lib/invite-memory";
 import { queryKeys } from "../lib/queryKeys";
 import { formatDate } from "../lib/utils";
+import { PasswordInput } from "@/components/PasswordInput";
 
 type AuthMode = "sign_in" | "sign_up";
 type AuthFeedback = { tone: "error" | "info"; message: string };
@@ -744,11 +745,11 @@ export function InviteLandingPage() {
                   </label>
                   <label className="block text-sm" htmlFor="invite-password">
                     <span className="mb-1 block text-zinc-400">Password</span>
-                    <input
+                    <PasswordInput
                       id="invite-password"
                       name="password"
-                      type="password"
                       className={fieldClassName}
+                      toggleClassName="rounded-none text-zinc-400 hover:text-zinc-100"
                       value={password}
                       onChange={(event) => {
                         setPassword(event.target.value);
