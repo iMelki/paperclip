@@ -25,6 +25,14 @@ integration outcome; later rows remain queued and do not imply concurrent execut
 
 ## Current work
 
+- [#162 — Recognize Claude ACP session quota waits](https://github.com/iMelki/paperclip/issues/162):
+  The local candidate recognizes session-limit messages with `acpx_turn_failed`
+  and parses their reset clock through the existing quota recovery path. The
+  focused suite passes 15 cases; the old classifier fails four new cases.
+  Independent review, publication, installed adoption, and a native recovery
+  observation remain open. See
+  [verification and rollout conditions](doc/evidence/acp-session-quota/verification.md).
+
 - [#154 — Stabilize workspace containment test completion](https://github.com/iMelki/paperclip/issues/154):
   Await tracked heartbeat executions before reading final state. The isolated
   database fixture delays agent finalization to expose the old one-second wait.
