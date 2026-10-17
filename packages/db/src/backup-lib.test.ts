@@ -668,6 +668,60 @@ describeEmbeddedPostgres("runDatabaseBackup", () => {
   );
 
   it(
+    "rejects a server-failed fallback COPY after CopyDone and rolls back the restore",
+    async () => {
+      const restoreConnectionString = await createTempDatabase();
+      const restoreSql = postgres(restoreConnectionString, { max: 1, onnotice: () => {} });
+      const backupDir = createTempDir("paperclip-db-restore-copy-server-error-");
+      const backupFile = path.join(backupDir, "server-error.sql");
+      const marker = "-- paperclip statement breakpoint 69f6f3f1-42fd-46a6-bf17-d1d85f8f3900";
+      const originalPsqlPath = process.env.PAPERCLIP_PSQL_PATH;
+      process.env.PAPERCLIP_PSQL_PATH = path.join(backupDir, "missing-psql.exe");
+
+      try {
+        await fs.promises.writeFile(
+          backupFile,
+          [
+            "BEGIN;",
+            marker,
+            "CREATE TABLE public.restore_copy_server_error_test (id integer CHECK (id > 0));",
+            marker,
+            "COPY public.restore_copy_server_error_test (id) FROM stdin;",
+            "-1",
+            "\\.",
+            marker,
+            "INSERT INTO public.restore_copy_server_error_test (id) VALUES (2);",
+            marker,
+            "COMMIT;",
+            marker,
+          ].join("\n"),
+          "utf8",
+        );
+
+        await expect(
+          runDatabaseRestore({
+            connectionString: restoreConnectionString,
+            backupFile,
+          }),
+        ).rejects.toThrow(/check constraint/i);
+
+        const rows = await restoreSql.unsafe<{ table_name: string | null }[]>(`
+          SELECT to_regclass('public.restore_copy_server_error_test')::text AS table_name
+        `);
+        expect(rows).toEqual([{ table_name: null }]);
+      } finally {
+        if (originalPsqlPath === undefined) {
+          delete process.env.PAPERCLIP_PSQL_PATH;
+        } else {
+          process.env.PAPERCLIP_PSQL_PATH = originalPsqlPath;
+        }
+        await restoreSql.end();
+      }
+    },
+    30_000,
+  );
+
+  it(
     "rejects malformed and unsupported fallback COPY blocks without running trailing SQL",
     async () => {
       const restoreConnectionString = await createTempDatabase();
