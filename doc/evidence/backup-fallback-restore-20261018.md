@@ -155,6 +155,13 @@ pre-change dependency backup.
   terminates at the recorded `WindowlessProcessHost`; there is no evidence of a
   second independent Paperclip instance. Exact process chain, receipts, route
   timing, and authoritative log hashes are in the owner-only runtime readback.
+- Read-only continuation check at 2026-10-17 23:58 UTC found the project page
+  still served HTTP 200 locally in 6.06 s, while both local and tailnet
+  `/api/health` requests timed out at 10 s. This is a degraded API-health result,
+  not proof the app is fully usable; no restart was performed. The fresh physical
+  RAM sample was 90.9%, so the private staged SDK build was not admitted under
+  the workspace's 90% heavy-work threshold. The dependency install remains
+  staged only; the candidate is not installed in the live app.
 
 ## Diagnostic attempts and fixes
 
