@@ -71,6 +71,16 @@ rollback image exists. The project-supported install was qualified only in
 the private archive copy; do not run it from the candidate checkout until an
 isolated install destination and full hash-verified rollback package are ready.
 
+**2026-10-18 runtime regression observed:** ports 5113 still have listeners,
+but local health timed out at 8 s and tailnet health at 12 s without response.
+The app's Node listener is still descended from its recorded windowless service
+host, so this is not yet evidence of a second independent Paperclip instance.
+`service.json` still says healthy, but its last health timestamp is stale; the
+bounded read-only status collector itself hit its 30 s limit and its owned job
+was verified closed. No restart or install was attempted. RAM sampled at
+88.6% after one transient 90.5% reading. Investigate the responsive-owner/log
+stall before any controlled repair; do not trust the stale healthy flag.
+
 - **Private Agent Settings #1620 / Paperclip #129 — activation disk-manifest
   refresh guard:** pre-existing refresh can replace the registry manifest from
   disk without added-capability approval. The current CAS repair does not close
