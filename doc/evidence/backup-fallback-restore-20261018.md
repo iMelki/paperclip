@@ -1,5 +1,11 @@
 # Private backup fallback restore qualification — 2026-10-18
 
+> Status boundary: the COPY stream repair is committed and source-qualified.
+> Its dependency tree has also been installed and checked in an isolated
+> private source copy. It is **not installed in the live Paperclip app**.
+> The live app continues to serve its prior commit; this report does not claim
+> a rollout, OAuth approval, or GitHub Project #12 import.
+
 ## Outcome
 
 The isolated JavaScript restore fallback now understands the default text
@@ -54,7 +60,8 @@ install, activation, or live database change.
 
 ## Validation
 
-- Full `packages/db/src/backup-lib.test.ts`: **9 passed, 0 failed, 0 skipped**.
+- Earlier pre-driver-patch `packages/db/src/backup-lib.test.ts` run:
+  **9 passed, 0 failed, 0 skipped**.
   Task-owned run: `run-20261018T003000Z-backup-lib-suite-final`; terminal status
   `success`; duration 218,240 ms; peak Job memory 540.9 MiB; zero active
   processes proven; stdout/stderr captures complete, healthy, and dropped 0
@@ -78,10 +85,43 @@ install, activation, or live database change.
   upstream preimage SHA-256: `ee3a218d9aa6a6f2887c1a19da50009335fe84c11a5431d5cab72d6bc528632f`.
 - DB package TypeScript check (`tsc --noEmit -p packages/db/tsconfig.json`):
   terminal task-owned run `run-20261018T234000Z-3fd934`; success, exit 0,
-  duration 27.6 s; complete capture and zero active Job processes proven.
-- Test receipts and complete logs are in the current user's private
-  TaskOwnedJob namespace under task `paperclip-1620-copy-restore`; no raw DB
-  payload or credentials are included in this report.
+  native duration 25,604 ms; complete capture and zero active Job processes
+  proven. This is distinct from the earlier historical DB typecheck run.
+- Correct task-owned receipt groups are `paperclip-129-copy-patch-protocol`,
+  `paperclip-129-copy-patch-rollback-test`,
+  `paperclip-129-copy-patch-backup-suite`, and
+  `paperclip-129-copy-patch-typecheck`; the prior label
+  `paperclip-1620-copy-restore` was incorrect for these four runs. Exact
+  receipt/stdout/stderr paths and hashes are in the owner-only proof packet;
+  no raw DB payload or credentials are included.
+
+## Private dependency staging
+
+- The candidate was exported from commit
+  `549ee8dff38685604a1b63264fa1e0887d5e0f7d` into a private local copy. The
+  candidate's `packages/db/node_modules/postgres` in the working checkout is a
+  junction into the running Factory app's dependency tree, so pnpm was never
+  run against that checkout.
+- pnpm **9.15.4** completed an offline, frozen-lockfile installation in the
+  isolated copy with lifecycle scripts disabled (`1,166` packages; `54.5 s`).
+  A first staging attempt safely failed because pnpm 9 interpreted an external
+  absolute `--modules-dir` as a workspace-relative path; it wrote only under
+  its private scratch directory. The normal per-copy `node_modules` layout
+  avoided that ambiguity.
+- The install command completed, but its wrapper initially returned a failure
+  because a post-install verifier incorrectly looked for `postgres` at the
+  workspace root. A separate read-only, task-owned verifier passed after
+  checking the actual `packages/db/node_modules/postgres` junction: version
+  `3.4.9`, target inside the private stage, patched `src/connection.js` contains
+  the final-callback repair, and the staged lockfile selects the exact recorded
+  patch hash. The Factory dependency junction was not followed or changed.
+- Expected warnings remain: lifecycle scripts were deliberately disabled, so
+  optional SDK development-server bin shims referencing an unbuilt SDK `dist`
+  were not created. This qualifies dependency staging only; it does not qualify
+  a full build, install into the app, or live activation.
+- The current live app still reports ready on local and Tailscale port `5113`
+  at commit `e226c8045f923f42e5191da2727d3ef1fbbb157f`. That is a health check
+  for the existing app, not evidence that this candidate is running.
 
 ## Diagnostic attempts and fixes
 
@@ -107,8 +147,12 @@ install, activation, or live database change.
 
 ## Remaining gates
 
-- Source is locally qualified but is not installed, activated, pushed, or
-  published. Public GitHub writes remain explicitly out of scope.
+- Source and isolated dependency staging are locally qualified, but the repair
+  is not installed or activated in the live app. Public GitHub writes remain
+  explicitly out of scope. The candidate's live dependency points through a
+  junction into Factory; safe rollout therefore needs an isolated installed
+  package/runtime and a separately controlled owner handover, not a pnpm run
+  against the shared junction.
 - The successful backup restore was isolated; this does not prove a live Factory
   restore or replace a verified production rollback rehearsal.
 - GitHub OAuth final Authorize is still operator-only. Project #12 is not bound
