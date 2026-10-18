@@ -865,6 +865,7 @@ export async function startServer(): Promise<StartedServer> {
     pluginWorkerManager,
     decisionServiceOptions,
     managedPluginAutoInstall,
+    nativeGitHubProjectSchedulingEnabled: config.nativeGitHubProjectSchedulingEnabled,
   });
   const server = createServer(app as unknown as Parameters<typeof createServer>[0]);
 

@@ -43,6 +43,11 @@ export {
   formatEmbeddedPostgresError,
 } from "./embedded-postgres-error.js";
 export {
+  resolveEmbeddedPostgresLock,
+  type EmbeddedPostgresLockOperations,
+  type EmbeddedPostgresLockResult,
+} from "./embedded-postgres-lock.js";
+export {
   ensureLinuxSharedLibraryAliases,
   prepareEmbeddedPostgresNativeRuntime,
 } from "./embedded-postgres-native.js";
