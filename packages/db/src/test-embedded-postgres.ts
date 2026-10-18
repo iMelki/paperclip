@@ -157,6 +157,13 @@ function readPostmasterPid(dataDir: string): number | null {
 
 export type EmbeddedPostgresStopOptions = {
   /**
+   * Override the graceful-stop observation bound for a specific test fixture.
+   * The default remains short for ordinary test hooks; callers must still
+   * preserve the data directory if this bounded wait expires.
+   */
+  stopTimeoutMs?: number;
+
+  /**
    * Explicit opt-in, OFF by default: when a graceful stop fails on Windows,
    * terminate this cluster's own processes. Only processes proven to be this
    * cluster's are touched -- the data directory is in the postmaster's command
@@ -238,7 +245,12 @@ async function stopEmbeddedPostgresBounded(
     cleanupFn?.();
     return true;
   }
+  const stopTimeoutMs = options.stopTimeoutMs ?? EMBEDDED_POSTGRES_STOP_TIMEOUT_MS;
+  if (!Number.isSafeInteger(stopTimeoutMs) || stopTimeoutMs < 1 || stopTimeoutMs > 120_000) {
+    throw new Error("Embedded PostgreSQL stop timeout must be an integer between 1 and 120000 milliseconds");
+  }
   let cleaned = false;
+  let stopFailure: unknown;
   const cleanupOnce = () => {
     if (cleaned) return;
     cleaned = true;
@@ -250,7 +262,10 @@ async function stopEmbeddedPostgresBounded(
   };
   const stopped = Promise.resolve().then(() => instance.stop()).then(
     () => "stopped" as const,
-    () => "failed" as const,
+    (error: unknown) => {
+      stopFailure = error;
+      return "failed" as const;
+    },
   );
   let timer: ReturnType<typeof setTimeout> | undefined;
   let outcome: "stopped" | "failed" | "timeout" = "timeout";
@@ -258,7 +273,7 @@ async function stopEmbeddedPostgresBounded(
     outcome = await Promise.race([
       stopped,
       new Promise<"timeout">((resolve) => {
-        timer = setTimeout(() => resolve("timeout"), EMBEDDED_POSTGRES_STOP_TIMEOUT_MS);
+        timer = setTimeout(() => resolve("timeout"), stopTimeoutMs);
         timer.unref?.();
       }),
     ]);
@@ -284,6 +299,11 @@ async function stopEmbeddedPostgresBounded(
 
   // Never remove the data directory under a process that may still be alive.
   // A rejected stop is not termination proof. Only late success may reclaim.
+  console.warn(
+    `Embedded PostgreSQL graceful stop did not complete for ${dataDir ?? "unknown data directory"}; `
+    + `outcome=${outcome}; timeoutMs=${stopTimeoutMs}; `
+    + `error=${stopFailure instanceof Error ? stopFailure.message : String(stopFailure ?? "none")}.`,
+  );
   void stopped.then((result) => {
     if (result === "stopped") cleanupOnce();
   });
