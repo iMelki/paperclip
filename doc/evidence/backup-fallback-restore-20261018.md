@@ -117,11 +117,34 @@ install, activation, or live database change.
   patch hash. The Factory dependency junction was not followed or changed.
 - Expected warnings remain: lifecycle scripts were deliberately disabled, so
   optional SDK development-server bin shims referencing an unbuilt SDK `dist`
-  were not created. This qualifies dependency staging only; it does not qualify
-  a full build, install into the app, or live activation.
-- The current live app still reports ready on local and Tailscale port `5113`
-  at commit `e226c8045f923f42e5191da2727d3ef1fbbb157f`. That is a health check
-  for the existing app, not evidence that this candidate is running.
+  were not created at that stage. This qualified dependency staging only; it
+  did not then qualify a full build, install into the app, or live activation.
+- **Private paired-SDK build qualification (2026-10-18):** after a fresh RAM
+  sample of 83.78%, the private stage was built using the candidate's paired
+  `@paperclipai/shared` 0.3.1 and `@paperclipai/plugin-sdk` 1.0.0 sources, not the
+  live Factory dependency junction. Physical Node v24.18.0 was hash-bound by the
+  task-owned runner (`9a4eb5f1c29c6a2e93852ead46b999e284a6a5ca8bab4d4e241d587d025a52de`).
+  Shared TypeScript compilation exited 0 in 16.204 s (receipt
+  `3c831a0a8744489d8ffb5ce2a0531372`; 748.0 MiB peak job memory); SDK
+  compilation exited 0 in 10.850 s (receipt
+  `8d3eb05f07aa40c8ad2bbaa6d7ec047c`; 694.6 MiB peak job memory). Both runs
+  proved zero active owned processes and healthy complete stdout/stderr
+  captures. The resulting SDK `dist` contains 68 files with deterministic
+  manifest SHA-256
+  `08b4dd0aed6813e09e8434998be9d8c073930433ee93890c9ca1d3a58e454c08`; all 19
+  declared export/type/bin targets exist. A bounded runtime smoke using the
+  staged `tsx` loader imported the main, protocol and UI entries and checked
+  required exports (61/20/25 exports respectively), exit 0 in 2.473 s (receipt
+  `fbcf966c739d4bb0af354057722c397e`; 238.5 MiB peak job memory). Its receipt
+  hash is `b576bb0ac5f871ea2dc478bdd52615860303e58f2acdcae55484b7605dba390c`.
+  An initial plain-Node import was not a product failure: the local shared
+  package intentionally exports TypeScript source; the corrected `tsx` smoke
+  passed. These results qualify the private SDK build/runtime surface only,
+  not a whole-app build, live install, or rollback.
+- An earlier live readback showed the unchanged app returning ready on local
+  and Tailscale port `5113` at commit `e226c8045f923f42e5191da2727d3ef1fbbb157f`.
+  That was a health check for the existing app, not evidence that this
+  candidate was running.
 
 The project documents `pnpm install` followed by `pnpm dev` for a source
 checkout. Its `paperclipai update --rollback` workflow is for managed/global
