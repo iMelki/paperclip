@@ -137,8 +137,8 @@ describe("ActivityCharts", () => {
     render(
       <SpendChart
         days={[
-          { date: "2026-04-19", billedCents: 0, estimatedCents: 0, tokens: 0 },
-          { date: "2026-04-20", billedCents: 250, estimatedCents: 1_200, tokens: 3_000_000 },
+          { date: "2026-04-19", billedCents: 0, estimatedCents: 0, tokens: 0, unpricedTokens: 0 },
+          { date: "2026-04-20", billedCents: 250, estimatedCents: 1_200, tokens: 3_000_000, unpricedTokens: 0 },
         ]}
       />,
     );
@@ -149,23 +149,48 @@ describe("ActivityCharts", () => {
     expect(dayCell?.getAttribute("title")).toContain("estimated: ~$12.00 at API prices");
   });
 
-  it("says when tokens exist but no model price is known", () => {
-    render(<SpendChart days={[{ date: "2026-04-20", billedCents: 0, estimatedCents: 0, tokens: 1_500_000 }]} />);
-    expect(container.textContent).toContain("1.5M tokens on models without a known price");
+  it("keeps token-only unpriced days visible as their own category", () => {
+    render(
+      <SpendChart
+        days={[
+          { date: "2026-04-19", billedCents: 0, estimatedCents: 0, tokens: 0, unpricedTokens: 0 },
+          { date: "2026-04-20", billedCents: 0, estimatedCents: 0, tokens: 1_500_000, unpricedTokens: 1_500_000 },
+        ]}
+      />,
+    );
+    expect(container.textContent).not.toContain("No spend recorded");
+    expect(container.textContent).toContain("Unpriced usage");
+    expect(container.querySelector("[data-testid='spend-unpriced-strip'] [title='2026-04-20: 1.5M tokens unpriced']")).not.toBeNull();
+    expect(container.querySelector("[title^='2026-04-20']")?.getAttribute("title")).toContain("unpriced: 1.5M tokens");
+  });
+
+  it("shows sub-cent estimates instead of $0.00", () => {
+    render(<SpendChart days={[{ date: "2026-04-20", billedCents: 0, estimatedCents: 0.1, tokens: 1_000, unpricedTokens: 0 }]} />);
+    expect(container.querySelector("[title^='2026-04-20']")?.getAttribute("title")).toContain("estimated: ~<$0.01");
+    expect(container.querySelector("[data-testid='spend-unpriced-strip']")).toBeNull();
+  });
+
+  it("says when nothing was spent or used", () => {
+    render(<SpendChart days={[{ date: "2026-04-20", billedCents: 0, estimatedCents: 0, tokens: 0, unpricedTokens: 0 }]} />);
+    expect(container.textContent).toContain("No spend recorded");
   });
 
   it("ranks the spend breakdown and marks estimated totals", () => {
     render(
       <SpendBreakdownChart
         rows={[
-          { key: "a", label: "CEO", billedCents: 0, estimatedCents: 900, tokens: 10 },
-          { key: "b", label: "Engineer", billedCents: 500, estimatedCents: 0, tokens: 10 },
+          { key: "a", label: "CEO", billedCents: 0, estimatedCents: 900, tokens: 10, unpricedTokens: 0 },
+          { key: "b", label: "Engineer", billedCents: 500, estimatedCents: 0, tokens: 10, unpricedTokens: 0 },
+          { key: "c", label: "Researcher", billedCents: 0, estimatedCents: 0, tokens: 2_000, unpricedTokens: 2_000 },
         ]}
       />,
     );
     expect(container.textContent).toContain("~$9.00");
     expect(container.textContent).toContain("$5.00");
     expect(container.textContent).not.toContain("~$5.00");
+    expect(container.textContent).toContain("Researcher");
+    expect(container.textContent).toContain("2.0k tok unpriced");
+    expect(container.textContent).toContain("Unpriced usage");
 
     render(<SpendBreakdownChart rows={[]} />);
     expect(container.textContent).toContain("No spend this month");

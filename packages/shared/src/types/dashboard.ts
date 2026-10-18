@@ -45,18 +45,24 @@ export interface DashboardSummary {
     /**
      * Token usage for the same UTC month. Subscription-billed runs book
      * `costCents = 0` (see normalizeBilledCostCents), so tokens are the only
-     * signal of how much such a fleet consumed.
+     * signal of how much such a fleet consumed. Input is exclusive of cache
+     * reads for every producer (see toExclusiveTokenCounts).
      */
     monthInputTokens: number;
     monthCachedInputTokens: number;
     monthOutputTokens: number;
     /**
-     * API-equivalent cost of zero-cost events with token usage, priced from
-     * the shared MODEL_PRICING table at read time. An estimate: never stored,
-     * never counted against budgets.
+     * API-equivalent cost of `subscription_included` events, priced from the
+     * shared MODEL_PRICING table at read time. Fractional cents (round only
+     * for display). An estimate: never stored, never counted against budgets.
      */
     monthEstimatedCents: number;
-    /** Tokens on zero-cost events whose model has no known rate. */
+    /** Tokens covered by monthEstimatedCents. */
+    monthEstimatedTokens: number;
+    /**
+     * Tokens with neither a billed amount nor an estimate: subscription usage
+     * on a model with no known rate, or events the ledger marks `unpriced`.
+     */
     monthUnpricedTokens: number;
     /** Billed and estimated spend per UTC day over the run-activity window. */
     spendDays: DashboardSpendDay[];
@@ -79,9 +85,11 @@ export interface DashboardSpendDay {
   date: string;
   /** Cents booked in the cost ledger (metered API billing). */
   billedCents: number;
-  /** API-equivalent estimate for zero-cost token usage (see monthEstimatedCents). */
+  /** API-equivalent estimate for subscription usage (see monthEstimatedCents). */
   estimatedCents: number;
   tokens: number;
+  /** Tokens with neither a billed amount nor an estimate (see monthUnpricedTokens). */
+  unpricedTokens: number;
 }
 
 export interface DashboardSpendBreakdownRow {
@@ -91,4 +99,5 @@ export interface DashboardSpendBreakdownRow {
   billedCents: number;
   estimatedCents: number;
   tokens: number;
+  unpricedTokens: number;
 }

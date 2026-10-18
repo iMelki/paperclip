@@ -76,6 +76,8 @@ export {
   estimateTokenCostCents,
   normalizePricingModelId,
   resolveModelTokenRate,
+  INPUT_INCLUDES_CACHED_ADAPTER_TYPES,
+  toExclusiveTokenCounts,
   type ModelPricingTable,
   type ModelTokenRate,
   type TokenCounts,

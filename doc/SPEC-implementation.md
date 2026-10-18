@@ -1214,12 +1214,17 @@ Validation:
 
 Subscription-billed runs (`billingType = "subscription_included"`, e.g. Claude Code
 or Codex signed in to a plan) record their token counts with `costCents = 0`, since
-no per-run charge exists. The dashboard prices those zero-cost tokens at API list
-rates (`MODEL_PRICING` in `packages/shared/src/model-pricing.ts`) and reports the
-result separately as `monthEstimatedCents`, per-day `spendDays.estimatedCents` and
-per-agent/per-model breakdowns. The estimate is computed at read time, never written
-to `cost_events`, and never counts toward budgets; models without a known rate stay
-unpriced (`monthUnpricedTokens`) rather than guessed.
+no per-run charge exists. The dashboard prices only those rows at API list rates
+(`MODEL_PRICING` in `packages/shared/src/model-pricing.ts`) and reports the result
+separately as `monthEstimatedCents` (fractional cents, covering `monthEstimatedTokens`),
+per-day `spendDays.estimatedCents` and per-agent/per-model breakdowns. The estimate is
+computed at read time, never written to `cost_events`, and never counts toward budgets.
+Fixed, credits, unknown and metered rows keep their ledger amount; when the ledger marks
+one `unpriced`, or a subscription row's model has no exact rate (dated snapshots aside),
+its tokens are reported as unpriced usage (`monthUnpricedTokens`, `unpricedTokens`)
+rather than guessed. Token counts are normalized per producer before pricing or
+summing: Codex (`codex_local`) reports `inputTokens` inclusive of `cachedInputTokens`,
+every other adapter exclusive (`toExclusiveTokenCounts`).
 
 ## 13.4 Rollups
 

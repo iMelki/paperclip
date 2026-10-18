@@ -302,6 +302,7 @@ const dashboard: DashboardSummary = {
     monthCachedInputTokens: 0,
     monthOutputTokens: 0,
     monthEstimatedCents: 0,
+    monthEstimatedTokens: 0,
     monthUnpricedTokens: 0,
     spendDays: [],
     byAgent: [],
