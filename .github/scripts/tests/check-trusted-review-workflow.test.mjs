@@ -32,20 +32,21 @@ test('accepts the trusted checkout and unmasked contract-check ordering', () => 
 
 test('accepts an identical base-ref policy contract', () => {
   const contract = createPolicyContract(trustedPolicySources);
+  assert.deepEqual(Object.keys(contract.files).sort(), [...policyPaths].sort());
   assert.deepEqual(verifyPolicyContract(contract, trustedPolicySources), { passed: true, errors: [] });
 });
 
-test('rejects a base-ref dependency policy drift from the trusted contract', () => {
+test('rejects drift in every file in the base-ref policy closure', () => {
   const contract = createPolicyContract(trustedPolicySources);
-  const drifted = {
-    ...trustedPolicySources,
-    '.github/scripts/check-fork-dependency-policy.mjs': Buffer.from(
-      `${trustedPolicySources['.github/scripts/check-fork-dependency-policy.mjs']}\n// drift fixture\n`,
-    ),
-  };
-  const result = verifyPolicyContract(contract, drifted);
-  assert.equal(result.passed, false);
-  assert.match(result.errors[0], /check-fork-dependency-policy\.mjs/);
+  for (const path of policyPaths) {
+    const drifted = {
+      ...trustedPolicySources,
+      [path]: Buffer.from(`${trustedPolicySources[path]}\n// drift fixture\n`),
+    };
+    const result = verifyPolicyContract(contract, drifted);
+    assert.equal(result.passed, false, `${path} drift must be rejected`);
+    assert.ok(result.errors[0].includes(path), result.errors[0]);
+  }
 });
 
 test('rejects an incomplete or malformed trusted policy contract', () => {
@@ -148,11 +149,26 @@ test('rejects a job-level fork condition that skips the trusted gate', () => {
 });
 
 test('rejects a contract check configured to continue after failure', () => {
-  const ignoredFailure = workflow.replace(
+  for (const value of ['true', '${{ github.event.repository.fork }}']) {
+    const ignoredFailure = workflow.replace(
+      '        run: node .github/scripts/check-trusted-review-workflow.mjs --record-policy-contract "$RUNNER_TEMP"\n',
+      `        run: node .github/scripts/check-trusted-review-workflow.mjs --record-policy-contract "$RUNNER_TEMP"\n        continue-on-error: ${value}\n`,
+    );
+    mustReject(ignoredFailure, /must not allow errors to continue/);
+  }
+  const quotedKey = workflow.replace(
     '        run: node .github/scripts/check-trusted-review-workflow.mjs --record-policy-contract "$RUNNER_TEMP"\n',
-    '        run: node .github/scripts/check-trusted-review-workflow.mjs --record-policy-contract "$RUNNER_TEMP"\n        continue-on-error: true\n',
+    '        run: node .github/scripts/check-trusted-review-workflow.mjs --record-policy-contract "$RUNNER_TEMP"\n        "continue-on-error": false\n',
   );
-  mustReject(ignoredFailure, /must not allow errors to continue/);
+  mustReject(quotedKey, /must not allow errors to continue/);
+});
+
+test('rejects a base policy verification configured to continue after failure', () => {
+  const ignoredFailure = workflow.replace(
+    '        run: node "${{ steps.policy-contract.outputs.contract_dir }}/check-trusted-review-workflow.mjs" --verify-policy-contract "${{ steps.policy-contract.outputs.contract_dir }}/policy-contract.json"\n',
+    '        run: node "${{ steps.policy-contract.outputs.contract_dir }}/check-trusted-review-workflow.mjs" --verify-policy-contract "${{ steps.policy-contract.outputs.contract_dir }}/policy-contract.json"\n        continue-on-error: ${{ github.event.repository.fork }}\n',
+  );
+  mustReject(ignoredFailure, /base policy contract verification must not allow errors to continue/);
 });
 
 test('rejects a broader GitHub token permission set', () => {

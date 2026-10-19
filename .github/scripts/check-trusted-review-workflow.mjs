@@ -157,6 +157,10 @@ function stepName(step) {
   return match?.[1] ?? null;
 }
 
+function hasContinueOnError(step) {
+  return step.lines.some((line) => /^ {8}["']?continue-on-error["']?\s*:/i.test(line));
+}
+
 function checkoutRef(step) {
   const withIndex = step.lines.findIndex((line) => /^ {8}with:\s*$/.test(line));
   if (withIndex < 0) return null;
@@ -301,7 +305,7 @@ export function checkTrustedReviewWorkflow(source) {
     if (scalar(checker, 'if') !== null) {
       add('contract checker must not be conditionally skipped, including for fork pull requests');
     }
-    if (/^ {8}continue-on-error:\s*true\s*$/mi.test(checker.lines.join('\n'))) {
+    if (hasContinueOnError(checker)) {
       add('contract checker must not allow errors to continue');
     }
   }
@@ -322,7 +326,7 @@ export function checkTrustedReviewWorkflow(source) {
     if (scalar(verifyStep, 'if') !== null) {
       add('base policy contract verification must not be conditionally skipped');
     }
-    if (/^ {8}continue-on-error:\s*true\s*$/mi.test(verifyStep.lines.join('\n'))) {
+    if (hasContinueOnError(verifyStep)) {
       add('base policy contract verification must not allow errors to continue');
     }
   }

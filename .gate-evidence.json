@@ -81,10 +81,10 @@
       "description": "The privileged workflow runs only from the trusted workflow SHA, preserves the exact base SHA checkout, and rejects drift in the fork dependency policy script and its direct helper closure before executing base-ref policy code.",
       "negativeFixture": ".github/scripts/tests/check-trusted-review-workflow.test.mjs",
       "observedFailure": {
-        "date": "2026-10-19",
-        "command": "node --test .github/scripts/tests/check-trusted-review-workflow.test.mjs",
-        "reason": "The deliberately changed check-fork-dependency-policy.mjs fixture was rejected with a drift report naming that file.",
-        "restoredPass": "The identical trusted/base policy fixture passed; focused suite completed with 18 tests passed, 0 failed, 0 skipped. Local contract tests do not establish hosted Actions runtime or branch protection."
+        "date": "2026-10-20",
+        "command": "timeout --signal=TERM --kill-after=5s 30s node --test .github/scripts/tests/check-trusted-review-workflow.test.mjs",
+        "reason": "Drift fixtures for every file in the three-file base-ref policy closure were rejected; expression-valued and quoted continue-on-error settings on trusted checks were rejected.",
+        "restoredPass": "The focused suite completed with 19 tests passed, 0 failed, 0 skipped. Log: /tmp/paperclip-121-review-contract-20261020.log (SHA-256 acb66be909d56376583c873fe267b0e3dac72d2da3b7aae4fc126da871b12dbd). Local contract tests do not establish hosted Actions runtime or branch protection."
       }
     },
     {
