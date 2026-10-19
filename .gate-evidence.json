@@ -59,7 +59,7 @@
     {
       "id": "embedded-postgres-reuse-identity",
       "path": "server/src/embedded-postgres-reuse.ts",
-      "description": "Server startup reuses PostgreSQL only after a query on the recorded port confirms the configured data directory; recycled and dead PIDs enter normal startup.",
+      "description": "Server startup reuses PostgreSQL only after a query on the recorded port confirms the configured data directory (physical path, case-insensitive on Windows). Only a dead PID (ESRCH) or the current process PID enters normal startup; a possibly-live PID with a failed identity query keeps its lock and refuses startup.",
       "negativeFixture": "server/src/__tests__/embedded-postgres-reuse-native.test.ts",
       "observedFailure": {
         "date": "2026-10-07",

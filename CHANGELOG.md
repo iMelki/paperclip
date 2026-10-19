@@ -6,6 +6,13 @@ All notable changes to this repository should be recorded here.
 
 ## Unreleased
 
+- **[#169]** Server startup reuses an embedded PostgreSQL only when a query on
+  the `postmaster.pid` port reports the configured data directory, compared by
+  physical path (case-insensitive on Windows) with the embedded login. If the
+  PID may still be alive but identity cannot be verified, startup stops and
+  leaves the lock file unchanged; only a dead PID or the server's own PID is
+  treated as a stale lock.
+
 - **[#164]** Refresh Lockfile accepts manual `ref` and `base` inputs that default
   to `dev`. Each base has its own refresh branch and matching PR lookup. Master
   pushes still refresh their triggering commit and retain auto-merge; other bases
