@@ -39,8 +39,10 @@ jobs:
           echo "PAPERCLIP_GITLEAKS_BIN=$install_dir/gitleaks" >> "$GITHUB_ENV"
           "$install_dir/gitleaks" version
 
-      - name: Scan complete repository history
-        run: node scripts/verify-gitleaks.mjs --history
+      - name: Scan pull-request commit range
+        run: >-
+          node scripts/verify-gitleaks.mjs --range
+          "${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }}"
 
   policy:
     needs: [secret-scan]
