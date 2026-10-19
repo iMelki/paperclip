@@ -4,8 +4,46 @@
 
 ## Next 15 Focus Queue
 
-Refreshed 2026-09-28 against GitHub. The first four rows support the current GitHub
-integration outcome; later rows remain queued and do not imply concurrent execution.
+Refreshed 2026-10-20 against the available `dev` source snapshot
+`95956f99516afaf23bccff2b34005c30c97a2c1a`. GitHub issues remain authoritative;
+this index records the latest qualification evidence and does not imply issue closure.
+
+### Qualification snapshot
+
+- **#129:** Open. PR #133 is stale/diverged from the source snapshot; the host SDK/plugin
+  API and migration journals need reconciliation before integration or runtime rollout.
+- **#126:** Open. The host authorization change is present, but the plugin still lacks a
+  proven import-only path that excludes status reconciliation, wakes, retries, and writes.
+- **#130:** Open. The shell-free launcher fix is merged in plugin PR #3; CRLF and target
+  Windows harness qualification remain separate.
+- **#56:** Open. Private branch `agent/codex/56-fixture-custody` contains commit
+  `2b83e6702063cad7cfe52192d8ff93828f349a9e` for child `TEMP`/`TMP`/`TMPDIR` containment.
+  Focused tests passed; abnormal-exit custody and cleanup are still unproved.
+- **#118:** Open. The pinned PostgreSQL 18.1 line is below the advisory's fixed 18.6
+  release; no qualified patched native Windows supplier was identified.
+- **#35:** Open. Merged lifecycle changes still need either the documented unelevated-test
+  acceptance path with its exact refusal regression or native elevated lifecycle evidence.
+- **#33:** Open. Cleanup refuses to reclaim data while stop is unresolved; native Windows
+  process-ownership and disk-reclamation evidence remains outstanding.
+- **#121:** Open. Private branch `agent/codex/121-review-gate` is at
+  `c2666be856180a9af8404414c13079b0d58de009`; its focused suite passes 19/19. Hosted
+  `pull_request_target` behavior and required-check/branch-protection configuration are
+  not established.
+- **#41:** Open, critical. Ambiguous callback-bridge launches still lack durable run-to-
+  process identity and heartbeat custody; no implementation branch is held here.
+- **#29:** Open. A private, uncommitted storage slice hashes lease tokens; its DB migration
+  and rollback tests are unavailable, and the idempotency ledger/tenant-FK contract remains.
+- **#28:** Open and observe-only. Do not enable live mutation authority until host, agent,
+  task, lease, and restart evidence is bound to durable identities.
+- **#30:** Open. Quality verdicts still need exact work-unit and source identity, with #28/#29
+  authority and artifact contracts unresolved.
+- **#94:** Open. Existing source fixes cover only part of the browser findings; fresh
+  browser evidence is needed for the remaining accessibility defects.
+- **#89:** Open. A private two-file Skill Studio header wrap is untested. The retained
+  overflow capture is coarse-pointer and predates the current build, so it does not qualify
+  fine-pointer 390px reflow.
+- **#20:** Open. A fresh complete Windows stable-suite receipt and zero-survivor process
+  evidence remain required; nine recovery tests are still a separate tracked follow-up.
 
 1. [paperclip#129 - Modernize Factory host for GitHub integration](https://github.com/iMelki/paperclip/issues/129): Resolve the isolated upstream merge, preserve deployed migrations, and qualify recovery before replacing the live host.
 2. [paperclip#126 - Qualify the GitHub issue import pilot](https://github.com/iMelki/paperclip/issues/126): Prove one allowlisted repository imports without GitHub writes or agent dispatch and repeats without duplicate issues.
