@@ -11,8 +11,8 @@ A Claude ACP failure can have error code `acpx_turn_failed` and message
 accepted neither that error code nor that quota wording. It therefore missed
 the existing provider-quota wait path.
 
-The classifier now accepts this adapter error code, recognizes session limits,
-and parses both `resets` and `resets at`. It uses the existing timezone parser,
+The classifier now accepts this adapter error code, recognizes Claude's own
+`You've hit your session limit` statement, and parses both `resets` and `resets at`. It uses the existing timezone parser,
 one-hour fallback, and provider-quota recovery monitor. This change adds no
 scheduler, provider route, credential behavior, or paid fallback.
 
@@ -29,6 +29,15 @@ Focused command, from `server`:
 | New fixtures against the unchanged classifier | 4 failed, 11 passed | 1 | 25.84 s |
 | Fixtures after the classifier change | 15 passed | 0 | 66.08 s |
 | Server TypeScript check | Passed | 0 | See local receipt |
+| Generic `session limit` ACP controls (3) against the first fix | 3 failed, 15 passed | 1 | 10.9 s |
+| Fixtures after narrowing session-limit wording | 18 passed | 0 | 10.9 s |
+
+Review follow-up: bare `session limit`, `session limit reached` and
+`session limit exceeded` also occur in unrelated tool, MCP and terminal
+failures. Only the provider statement `You've hit your session limit`, as
+Claude Code prints it (`You've hit your session limit · resets 1:50am
+(Asia/Tokyo)`), now counts as quota evidence. Three generic ACP controls
+containing that phrase stay out of quota recovery.
 
 Implementation commit: `4e3bdfd0`. The unmodified repository pre-commit hook
 passed server and dependent CLI typechecks, 12 selected regression suites

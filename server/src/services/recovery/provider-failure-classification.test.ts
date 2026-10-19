@@ -41,6 +41,18 @@ describe("classifyAdapterFailureForRecovery", () => {
     })).toBeNull();
   });
 
+  it.each([
+    "Browser tool error: session limit reached (max 5 concurrent sessions)",
+    "MCP server rejected the request: session limit exceeded for this workspace",
+    "Terminal session limit is 4; close a terminal and try again",
+  ])("does not treat generic ACP session-limit wording as a provider quota: %s", (error) => {
+    expect(classifyAdapterFailureForRecovery({
+      errorCode: "acpx_turn_failed",
+      error,
+      resultJson: { status: "failed" },
+    })).toBeNull();
+  });
+
   it("does not turn a non-adapter session-limit message into an automatic retry", () => {
     expect(classifyAdapterFailureForRecovery({
       errorCode: "issue_paused",

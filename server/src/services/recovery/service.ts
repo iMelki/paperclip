@@ -372,8 +372,11 @@ const CONTINUATION_RECOVERY_DEFAULT_MAX_ATTEMPTS = 1;
 const CONTINUATION_RECOVERY_TRANSIENT_BASE_BACKOFF_MS = 60_000;
 export const PROVIDER_QUOTA_RECOVERY_DEFAULT_BACKOFF_MS = 60 * 60 * 1000;
 
+// Session-limit wording counts only as Claude's own statement ("You've hit your
+// session limit · resets …"); bare "session limit" also appears in unrelated
+// tool, MCP and terminal failures and must not enter quota recovery.
 const PROVIDER_QUOTA_ERROR_RE =
-  /(?:you(?:'|’)ve hit your (?:usage|session) limit|(?:usage|session) limit(?: reached| exceeded)?|provider quota|quota (?:limit )?exceeded|model (?:is )?at capacity)/i;
+  /(?:you(?:'|’)ve hit your (?:usage|session) limit|usage limit(?: reached| exceeded)?|provider quota|quota (?:limit )?exceeded|model (?:is )?at capacity)/i;
 const CONFIGURATION_INCOMPLETE_ERROR_RE =
   /(?:model_not_found|model [^\n]{0,120} not found|missing (?:api )?(?:key|credentials?)|credentials? (?:are |is )?missing|no (?:api )?(?:key|credentials?) (?:was |were )?(?:found|configured|provided)|api key (?:is )?(?:not set|unavailable))/i;
 

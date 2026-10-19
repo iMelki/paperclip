@@ -26,9 +26,10 @@ integration outcome; later rows remain queued and do not imply concurrent execut
 ## Current work
 
 - [#162 — Recognize Claude ACP session quota waits](https://github.com/iMelki/paperclip/issues/162):
-  The local candidate recognizes session-limit messages with `acpx_turn_failed`
-  and parses their reset clock through the existing quota recovery path. The
-  focused suite passes 15 cases; the old classifier fails four new cases.
+  The local candidate recognizes Claude's session-limit statement with
+  `acpx_turn_failed` and parses its reset clock through the existing quota
+  recovery path. Generic `session limit` wording stays out of quota recovery.
+  The focused suite passes 18 cases.
   Independent review, publication, installed adoption, and a native recovery
   observation remain open. See
   [verification and rollout conditions](doc/evidence/acp-session-quota/verification.md).
