@@ -37,7 +37,7 @@ on:
 
 jobs:
   smoke:
-    runs-on: [box-paperclip]
+    runs-on: ubuntu-latest
     timeout-minutes: 45
 
     steps:

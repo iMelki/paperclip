@@ -20,7 +20,7 @@ concurrency:
 
 jobs:
   build-and-push:
-    runs-on: [box-paperclip]
+    runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
       - name: Checkout
@@ -177,7 +177,7 @@ jobs:
   # separate runner, so this one carries its own copy of the prep steps
   # (checkout through schema labels) — the accepted cost of that isolation.
   build-and-push-cloud:
-    runs-on: [box-paperclip]
+    runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
       - name: Checkout
