@@ -53,7 +53,7 @@ npx paperclipai run
 Prerequisites: Node.js 20+, pnpm 9+
 
 ```powershell
-cd S:\source\CCAI\Assistants\tools\paperclip
+cd <workspace>\tools\paperclip
 pnpm install
 pnpm dev
 # Server at http://localhost:3100 (API) and http://localhost:3101 (UI)
@@ -209,7 +209,7 @@ Based on your active projects across all workspace roots and Obsidian notes, her
 
 Paperclip exports companies to markdown (`COMPANY.md`, `AGENT.md`, etc.). These live well in Obsidian:
 
-1. Export each company to `C:\Obsidian\Vaults\Personal\001 Projects\Companies\<name>/`
+1. Export each company to `<vault>\Companies\<name>/`
 2. Link from the corresponding Obsidian project note (e.g. `001 Projects/Projects/OpenClaw.md`) via Obsidian wiki link.
 3. Agents can write status updates into `HEARTBEAT.md` files inside the company folder — these become Obsidian-native notes.
 4. The `companies-spec` supports a `SOUL.md` file for the company's values and principles — great for the Obsidian vault.
@@ -252,7 +252,7 @@ Paperclip exports companies to markdown (`COMPANY.md`, `AGENT.md`, etc.). These 
    Goal association: company goal
 
 5. Import existing skills from agent-settings:
-   paperclipai company import --from S:\source\CCAI\Assistants\agent-settings\shared\sub-agents
+   paperclipai company import --from <agent-settings checkout>\shared\sub-agents
 
 6. Set company budget: $100/month total
    Agent budgets: CEO $10, CTO $20, engineers $15 each
@@ -261,7 +261,7 @@ Paperclip exports companies to markdown (`COMPANY.md`, `AGENT.md`, etc.). These 
    Let CEO create the initial strategy and sub-tasks
 
 8. Export to Obsidian:
-   paperclipai company export <id> --out "C:\Obsidian\Vaults\Personal\001 Projects\Companies\asimtop"
+   paperclipai company export <id> --out "<vault>\Companies\asimtop"
 ```
 
 ### CEO Agent Starter Prompt (Asimtop)
