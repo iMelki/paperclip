@@ -12,6 +12,8 @@ All notable changes to this repository should be recorded here.
   extensions, default exclusions, stale-file filters, and maintenance suites.
   It reuses the pinned canonical scratch helper and confines child temp output.
   This does not repair embedded PostgreSQL startup or process cleanup.
+  The scratch helper now rejects unsafe file extensions and unique suffixes,
+  keeps every created path inside its root, and creates owner-only scratch.
 
 - **[#164]** Refresh Lockfile accepts manual `ref` and `base` inputs that default
   to `dev`. Each base has its own refresh branch and matching PR lookup. Master

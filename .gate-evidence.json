@@ -45,7 +45,7 @@
     {
       "id": "db-discovery-canonical-scratch-provenance",
       "path": "scripts/lib/ephemeral-scratch.mjs",
-      "description": "Keep the standalone scratch helper byte-equivalent to its pinned canonical source after line-ending normalization.",
+      "description": "Keep the standalone scratch helper byte-equivalent to its pinned source after line-ending normalization. The pin moved from the canonical copy (a296c167...) to 19463bfdcc3311ed0de967fb491c28c003e50e2c759b3b16500930a32688e385 for the extension/unique/mode containment fix; the canonical upstream copy still needs the same fix.",
       "negativeFixture": "packages/db/src/test-discovery.test.ts",
       "observedFailure": {
         "date": "2026-10-01",
@@ -53,6 +53,20 @@
         "breakApplied": "Added one inert comment to the isolated vendored helper; the module remained valid and its consumer still launched.",
         "reason": "Exit 1 at the canonical SHA-256 assertion; the three CLI-backed discovery tests passed. The failure was source drift, not syntax, import, launch, or timeout.",
         "restoredPass": "Restored the canonical helper text. The identical caller exited 0, 4/4 tests passed; normalized SHA-256 a296c167b1d77fcb4b665152917f38f02d9b7c8c9458601d96bb678eeb38a6be.",
+        "artifactPath": "doc/evidence/db-test-discovery-2026-10-01.md"
+      }
+    },
+    {
+      "id": "ephemeral-scratch-extension-containment",
+      "path": "scripts/lib/ephemeral-scratch.mjs",
+      "description": "createEphemeralFile accepts only a single safe extension suffix, ephemeralName accepts only a governed unique suffix, every created path is a direct child of the requested root, and scratch is created owner-only (0700 dirs, 0600 files).",
+      "negativeFixture": "packages/db/src/test-discovery.test.ts",
+      "observedFailure": {
+        "date": "2026-10-19",
+        "command": "node scripts/run-vitest-stable.mjs --files packages/db/src/test-discovery.test.ts",
+        "breakApplied": "Ran the new containment tests against the unfixed helper. An extension of '/../../escape' wrote a file one directory above the requested root.",
+        "reason": "Exit 1: 3 failed / 5 passed. Missing TypeError for traversal extensions and for an unsafe unique suffix; directory mode was not 0700.",
+        "restoredPass": "With the fix and the updated pin, the same command exited 0 with 8/8 tests passing.",
         "artifactPath": "doc/evidence/db-test-discovery-2026-10-01.md"
       }
     },

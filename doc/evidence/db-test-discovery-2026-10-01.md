@@ -76,6 +76,23 @@ three discovery tests passing. Restoring the canonical text gave exit 0 and
 4/4 again. Logs: `scratch-drift-negative.log`, `scratch-restored.log`.
 Earlier 3/3 runs below are historical, before the fourth guard was added.
 
+### 2026-10-19 containment fix (pin moved)
+
+Review found that `createEphemeralFile` appended `ext` without validation, so
+an extension such as `/../../escape` wrote a file outside the requested root
+even with exclusive creation. The helper now accepts only one extension suffix
+(`/^\.[A-Za-z0-9][A-Za-z0-9._-]{0,15}$/`, no `..`), rejects a `unique` value
+that is not six lowercase alphanumerics, checks that each created path is a
+direct child of the root, and creates directories `0700` and files `0600`.
+Validation runs before any filesystem write.
+
+Four new tests in the same file failed first (3 failed, 5 passed; the
+positive-extension case already passed), then passed 8/8 with the fix. The
+LF-normalized SHA-256 pin is now
+`19463bfdcc3311ed0de967fb491c28c003e50e2c759b3b16500930a32688e385`. This copy
+is no longer byte-equal to the canonical helper. The canonical upstream copy
+needs the same fix before the two can be re-pinned to one hash.
+
 Removing only the helper's declared test mapping made
 `node --test scripts/pre-push-test-selection.test.mjs` exit 1: the new contract
 expected the DB suite but received an empty selection. The other 20 tests passed.

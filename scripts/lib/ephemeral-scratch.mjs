@@ -47,6 +47,35 @@ export const EPHEMERAL_NAME_PATTERN =
   /^eph-([a-z0-9]{2,24})-([a-z0-9]{2,32})-(\d{8}T\d{6}Z)-([a-z0-9]{6})$/;
 
 const SLUG_PATTERN = /^[a-z0-9]+$/;
+const UNIQUE_PATTERN = /^[a-z0-9]{6}$/;
+
+/**
+ * A file extension is one name suffix, never a path: a leading dot, an
+ * alphanumeric first character, at most 16 characters, no separators and no
+ * `..`. Anything else could add segments that path.join() resolves outside
+ * the requested root, and exclusive creation would not stop that.
+ */
+const EXTENSION_PATTERN = /^\.[A-Za-z0-9][A-Za-z0-9._-]{0,15}$/;
+
+function normalizeExtension(ext) {
+  if (ext === undefined || ext === null || ext === "") return "";
+  const value = typeof ext === "string" && !ext.startsWith(".") ? `.${ext}` : ext;
+  if (typeof value !== "string" || !EXTENSION_PATTERN.test(value) || value.includes("..")) {
+    throw new TypeError(
+      "ephemeral-scratch: ext must be a dot and 1-16 characters from [A-Za-z0-9._-], " +
+        `starting alphanumeric, with no separators or '..'; got ${JSON.stringify(ext)}`,
+    );
+  }
+  return value;
+}
+
+/** Throw unless `candidate` is a direct child of `base` after resolution. */
+function assertDirectChild(base, candidate) {
+  if (path.dirname(path.resolve(candidate)) !== path.resolve(base)) {
+    throw new Error(`ephemeral-scratch: ${JSON.stringify(candidate)} escapes ${JSON.stringify(base)}`);
+  }
+  return candidate;
+}
 
 function assertSlug(value, field, min, max) {
   const slug = String(value ?? "");
@@ -97,6 +126,11 @@ export function ephemeralName({ owner, purpose, date, unique } = {}) {
   const ownerSlug = assertSlug(owner, "owner", 2, 24);
   const purposeSlug = assertSlug(purpose, "purpose", 2, 32);
   const suffix = unique ?? uniqueSuffix();
+  if (!UNIQUE_PATTERN.test(String(suffix))) {
+    throw new TypeError(
+      `ephemeral-scratch: unique must be 6 lowercase alphanumeric characters; got ${JSON.stringify(unique)}`,
+    );
+  }
   return `${EPHEMERAL_PREFIX}${ownerSlug}-${purposeSlug}-${ephemeralStamp(date)}-${suffix}`;
 }
 
@@ -133,9 +167,11 @@ export function createEphemeralDir({ owner, purpose, root, date } = {}) {
   // rather than silently sharing a directory, so this keeps mkdtemp's
   // collision guarantee while keeping mkdtemp's mixed-case alphabet out.
   for (let attempt = 0; attempt < 8; attempt += 1) {
-    const dir = path.join(base, ephemeralName({ owner, purpose, date }));
+    const dir = assertDirectChild(base, path.join(base, ephemeralName({ owner, purpose, date })));
     try {
-      mkdirSync(dir);
+      // 0o700 matches mkdtemp: scratch may hold secrets, so other local users
+      // must not read it from a shared temp root. Ignored on Windows.
+      mkdirSync(dir, { mode: 0o700 });
       return dir;
     } catch (error) {
       if (error?.code !== "EEXIST") throw error;
@@ -154,11 +190,14 @@ export function createEphemeralDir({ owner, purpose, root, date } = {}) {
  * by the same convention is what brings them into scope.
  */
 export function createEphemeralFile({ owner, purpose, ext, root, contents, date } = {}) {
+  // Validate before touching the filesystem so a rejected call creates nothing.
+  const suffix = normalizeExtension(ext);
   const base = root ?? ephemeralRoot();
+  const file = assertDirectChild(base, path.join(base, `${ephemeralName({ owner, purpose, date })}${suffix}`));
   mkdirSync(base, { recursive: true });
-  const suffix = ext ? (ext.startsWith(".") ? ext : `.${ext}`) : "";
-  const file = path.join(base, `${ephemeralName({ owner, purpose, date })}${suffix}`);
-  writeFileSync(file, contents ?? "", { flag: "wx" });
+  // "wx" is O_CREAT|O_EXCL: it refuses an existing path, including a planted
+  // symlink, so the write cannot be redirected. 0o600 keeps it owner-only.
+  writeFileSync(file, contents ?? "", { flag: "wx", mode: 0o600 });
   return file;
 }
 

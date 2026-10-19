@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "vitest";
@@ -10,7 +10,13 @@ const repoRoot = fileURLToPath(new URL("../../../", import.meta.url));
 const scratchModule = new URL("../../../scripts/lib/ephemeral-scratch.mjs", import.meta.url);
 // A variable URL preserves the standalone module boundary without adding JS
 // emission to the DB TypeScript build.
-const { createEphemeralDir, ephemeralChildEnv, isEphemeralName } = await import(scratchModule.href);
+const {
+  createEphemeralDir,
+  createEphemeralFile,
+  ephemeralChildEnv,
+  ephemeralName,
+  isEphemeralName,
+} = await import(scratchModule.href);
 const dbConfig = path.join(repoRoot, "packages/db/vitest.config.ts");
 const vitestCli = path.join(repoRoot, "node_modules/vitest/vitest.mjs");
 const fixtureRoot = createEphemeralDir({ owner: "paperclip", purpose: "dbdiscovery" });
@@ -81,6 +87,53 @@ test("discovery reuses the pinned canonical scratch primitive", () => {
   // Ignore checkout line endings only; all other source drift must fail.
   const source = readFileSync(scratchModule, "utf8").replaceAll("\r\n", "\n");
   const digest = createHash("sha256").update(source).digest("hex");
-  assert.equal(digest, "a296c167b1d77fcb4b665152917f38f02d9b7c8c9458601d96bb678eeb38a6be");
+  assert.equal(digest, "19463bfdcc3311ed0de967fb491c28c003e50e2c759b3b16500930a32688e385");
   assert.equal(isEphemeralName(path.basename(fixtureRoot)), true);
+});
+
+test("scratch files with safe extensions stay inside the requested root", () => {
+  const root = createEphemeralDir({ owner: "paperclip", purpose: "extok", root: fixtureRoot });
+  const cases: [string | undefined, string][] = [
+    [".json", ".json"], ["txt", ".txt"], [".tar.gz", ".tar.gz"], [undefined, ""],
+  ];
+  for (const [ext, suffix] of cases) {
+    const file: string = createEphemeralFile({ owner: "paperclip", purpose: "extok", ext, root });
+    const name = path.basename(file);
+    assert.equal(path.dirname(file), path.resolve(root));
+    assert.equal(name.endsWith(suffix), true);
+    assert.equal(isEphemeralName(name.slice(0, name.length - suffix.length)), true);
+  }
+});
+
+test("scratch file extensions cannot traverse or add path segments", () => {
+  const outer = createEphemeralDir({ owner: "paperclip", purpose: "extbad", root: fixtureRoot });
+  const root = path.join(outer, "inner");
+  const unsafe = [
+    "/../../escape", "../escape", ".x/../../escape", ".x/y", "/x", ".x\\..\\escape",
+    ".x\\y", ".", "..", "...", ".a..b", ". x", ".x\0", ".abcdefghijklmnopq", 42,
+  ];
+  for (const ext of unsafe) {
+    assert.throws(
+      () => createEphemeralFile({ owner: "paperclip", purpose: "extbad", ext, root }),
+      TypeError,
+      `extension ${JSON.stringify(ext)} must be rejected`,
+    );
+  }
+  // Nothing may have been written beside or above the requested root.
+  assert.deepEqual(readdirSync(outer).filter((name) => name !== "inner"), []);
+  assert.equal(existsSync(root) ? readdirSync(root).length : 0, 0);
+});
+
+test("scratch name unique suffix must match the governed grammar", () => {
+  for (const unique of ["../../x", "a/b/cd", "ABCDEF", "abc", "abcdefg"]) {
+    assert.throws(() => ephemeralName({ owner: "paperclip", purpose: "unique", unique }), TypeError);
+  }
+  assert.equal(isEphemeralName(ephemeralName({ owner: "paperclip", purpose: "unique", unique: "abc123" })), true);
+});
+
+test("scratch directories and files are private to the creating user", { skip: process.platform === "win32" }, () => {
+  const dir = createEphemeralDir({ owner: "paperclip", purpose: "mode", root: fixtureRoot });
+  assert.equal(statSync(dir).mode & 0o777, 0o700);
+  const file = createEphemeralFile({ owner: "paperclip", purpose: "mode", ext: ".txt", root: dir });
+  assert.equal(statSync(file).mode & 0o777, 0o600);
 });
