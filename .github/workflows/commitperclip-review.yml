@@ -28,6 +28,10 @@ jobs:
         with:
           node-version: '20'
 
+      - name: Verify trusted workflow and record policy contract
+        id: policy-contract
+        run: node .github/scripts/check-trusted-review-workflow.mjs --record-policy-contract "$RUNNER_TEMP"
+
       - name: Generate commitperclip token
         id: app-token
         if: ${{ !github.event.repository.fork }}
@@ -50,6 +54,9 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           ref: ${{ github.event.pull_request.base.sha }}
+
+      - name: Verify base policy matches trusted contract
+        run: node "${{ steps.policy-contract.outputs.contract_dir }}/check-trusted-review-workflow.mjs" --verify-policy-contract "${{ steps.policy-contract.outputs.contract_dir }}/policy-contract.json"
 
       - name: Dependency Review
         if: ${{ !github.event.repository.fork }}

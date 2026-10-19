@@ -76,6 +76,18 @@
       }
     },
     {
+      "id": "trusted-review-execution-contract",
+      "path": ".github/workflows/commitperclip-review.yml",
+      "description": "The privileged workflow runs only from the trusted workflow SHA, preserves the exact base SHA checkout, and rejects drift in the fork dependency policy script and its direct helper closure before executing base-ref policy code.",
+      "negativeFixture": ".github/scripts/tests/check-trusted-review-workflow.test.mjs",
+      "observedFailure": {
+        "date": "2026-10-19",
+        "command": "node --test .github/scripts/tests/check-trusted-review-workflow.test.mjs",
+        "reason": "The deliberately changed check-fork-dependency-policy.mjs fixture was rejected with a drift report naming that file.",
+        "restoredPass": "The identical trusted/base policy fixture passed; focused suite completed with 18 tests passed, 0 failed, 0 skipped. Local contract tests do not establish hosted Actions runtime or branch protection."
+      }
+    },
+    {
       "id": "default-branch-history-secret-allowlist",
       "path": ".gitleaksignore",
       "description": "Pins only exact reviewed historical test-fixture fingerprints while leaving new secret-like values detectable by the complete-history PR scan.",
