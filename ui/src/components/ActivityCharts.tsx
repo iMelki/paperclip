@@ -1,4 +1,11 @@
-import type { DashboardRunActivityDay, HeartbeatRun } from "@paperclipai/shared";
+import type {
+  DashboardRunActivityDay,
+  DashboardSpendBreakdownRow,
+  DashboardSpendDay,
+  HeartbeatRun,
+} from "@paperclipai/shared";
+import { formatCents, formatTokens } from "../lib/utils";
+import { formatSpendCents } from "../lib/month-spend";
 
 /* ---- Utilities ---- */
 
@@ -322,6 +329,125 @@ export function SuccessRateChart(props: RunChartProps) {
         })}
       </div>
       <DateLabels days={days} />
+    </div>
+  );
+}
+
+/* ---- Spend ---- */
+
+// Billed = cents in the cost ledger. Estimated = API-list-price value of
+// subscription token usage booked at $0; never a real charge. Unpriced = tokens
+// with neither, shown as their own strip because they have no dollar height.
+const spendSegmentColors = {
+  billed: "var(--hex-10b981)",
+  estimated: "var(--hex-6366f1)",
+  unpriced: "var(--hex-64748b)",
+} as const;
+
+type SpendEntry = { billedCents: number; estimatedCents: number; tokens: number; unpricedTokens?: number };
+
+function spendTooltip(label: string, entry: SpendEntry): string {
+  const lines = [label];
+  if (entry.billedCents > 0) lines.push(`  billed: ${formatCents(entry.billedCents)}`);
+  if (entry.estimatedCents > 0) lines.push(`  estimated: ~${formatSpendCents(entry.estimatedCents)} at API prices`);
+  if ((entry.unpricedTokens ?? 0) > 0) lines.push(`  unpriced: ${formatTokens(entry.unpricedTokens ?? 0)} tokens`);
+  lines.push(`  tokens: ${formatTokens(entry.tokens)}`);
+  return lines.join("\n");
+}
+
+function spendLegend(rows: readonly SpendEntry[]) {
+  const hasBilled = rows.some((row) => row.billedCents > 0);
+  const hasEstimated = rows.some((row) => row.estimatedCents > 0);
+  const hasUnpriced = rows.some((row) => (row.unpricedTokens ?? 0) > 0);
+  return [
+    ...(hasBilled ? [{ color: spendSegmentColors.billed, label: "Billed" }] : []),
+    ...(hasEstimated ? [{ color: spendSegmentColors.estimated, label: "Estimated (API prices)" }] : []),
+    ...(hasUnpriced ? [{ color: spendSegmentColors.unpriced, label: "Unpriced usage" }] : []),
+  ];
+}
+
+export function SpendChart({ days: spendDays }: { days?: DashboardSpendDay[] | null }) {
+  const activity = spendDays ?? [];
+  const hasSpend = activity.some((day) => day.billedCents > 0 || day.estimatedCents > 0);
+  const hasUnpriced = activity.some((day) => (day.unpricedTokens ?? 0) > 0);
+  if (!hasSpend && !hasUnpriced) return <p className="text-xs text-muted-foreground">No spend recorded</p>;
+  const days = activity.map((day) => day.date);
+  const maxValue = Math.max(...activity.map((day) => day.billedCents + day.estimatedCents), 1);
+
+  return (
+    <div>
+      <div className="flex items-end gap-(--sz-3px) h-20">
+        {activity.map((entry) => {
+          const total = entry.billedCents + entry.estimatedCents;
+          const heightPct = (total / maxValue) * 100;
+          return (
+            <div key={entry.date} className="flex-1 h-full flex flex-col justify-end" title={spendTooltip(entry.date, entry)}>
+              {total > 0 ? (
+                <div className="flex flex-col-reverse gap-px overflow-hidden" style={{ height: `${heightPct}%`, minHeight: 2 }}>
+                  {entry.billedCents > 0 && <div style={{ flex: entry.billedCents, backgroundColor: spendSegmentColors.billed }} />}
+                  {entry.estimatedCents > 0 && <div style={{ flex: entry.estimatedCents, backgroundColor: spendSegmentColors.estimated }} />}
+                </div>
+              ) : (
+                <div className="bg-muted/30 rounded-sm" style={{ height: 2 }} />
+              )}
+            </div>
+          );
+        })}
+      </div>
+      {hasUnpriced && (
+        <div className="mt-px flex gap-(--sz-3px)" data-testid="spend-unpriced-strip">
+          {activity.map((entry) => (
+            <div
+              key={entry.date}
+              className="flex-1 h-1 rounded-sm"
+              title={(entry.unpricedTokens ?? 0) > 0 ? `${entry.date}: ${formatTokens(entry.unpricedTokens)} tokens unpriced` : undefined}
+              style={(entry.unpricedTokens ?? 0) > 0 ? { backgroundColor: spendSegmentColors.unpriced } : undefined}
+            />
+          ))}
+        </div>
+      )}
+      <DateLabels days={days} />
+      <ChartLegend items={spendLegend(activity)} />
+    </div>
+  );
+}
+
+export function SpendBreakdownChart({ rows, emptyLabel = "No spend this month" }: { rows?: DashboardSpendBreakdownRow[] | null; emptyLabel?: string }) {
+  const entries = (rows ?? []).filter(
+    (row) => row.billedCents > 0 || row.estimatedCents > 0 || (row.unpricedTokens ?? 0) > 0,
+  );
+  if (entries.length === 0) return <p className="text-xs text-muted-foreground">{emptyLabel}</p>;
+  const maxValue = Math.max(...entries.map((row) => row.billedCents + row.estimatedCents), 1);
+
+  return (
+    <div>
+      <div className="space-y-1.5">
+        {entries.map((row) => {
+          const total = row.billedCents + row.estimatedCents;
+          const unpriced = row.unpricedTokens ?? 0;
+          const money = total === 0 ? null : row.estimatedCents === 0 ? formatCents(total) : `~${formatSpendCents(total)}`;
+          const amount = [money, unpriced > 0 ? `${formatTokens(unpriced)} tok unpriced` : null].filter(Boolean).join(" + ");
+          return (
+            <div key={row.key} className="min-w-0" title={spendTooltip(row.label, row)}>
+              <div className="flex items-baseline justify-between gap-2 text-(length:--text-nano)">
+                <span className="truncate text-muted-foreground">{row.label}</span>
+                <span className="shrink-0 tabular-nums text-muted-foreground">{amount}</span>
+              </div>
+              <div className="mt-0.5 flex h-1.5 overflow-hidden rounded-sm bg-muted/30">
+                {total > 0 ? (
+                  <div className="flex gap-px" style={{ width: `${(total / maxValue) * 100}%` }}>
+                    {row.billedCents > 0 && <div style={{ flex: row.billedCents, backgroundColor: spendSegmentColors.billed }} />}
+                    {row.estimatedCents > 0 && <div style={{ flex: row.estimatedCents, backgroundColor: spendSegmentColors.estimated }} />}
+                  </div>
+                ) : (
+                  <div className="w-full" style={{ backgroundColor: spendSegmentColors.unpriced }} />
+                )}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+      <ChartLegend items={spendLegend(entries)} />
     </div>
   );
 }
