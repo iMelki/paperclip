@@ -4,14 +4,18 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createAcpRuntime, createAgentRegistry, createRuntimeStore } from "acpx/runtime";
 import { expect, it } from "vitest";
-import { createAcpxEngineExecutor } from "./execute.js";
+import { createAcpxEngineExecutor, summarizeAcpxTurnUsage } from "./execute.js";
 
 const repoRoot = fileURLToPath(new URL("../../../..", import.meta.url));
 const fixturePath = path.join(repoRoot, "scripts/mcp-fixtures/servers/acp-echo-agent.mjs");
 const providerTitle = "Synthetic provider request rejected";
 const agentCommand = `${JSON.stringify(process.execPath.replaceAll("\\", "/"))} ${JSON.stringify(fixturePath.replaceAll("\\", "/"))}`;
 
-async function runFixture(mode: "oneshot" | "persistent", severity: "error" | "warning") {
+async function runFixture(
+  mode: "oneshot" | "persistent",
+  severity: "error" | "warning",
+  extraEnv: Record<string, string> = {},
+) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-acpx-typed-failure-"));
   const initializePath = path.join(root, "initialize.jsonl");
   const result = await createAcpxEngineExecutor()({
@@ -29,6 +33,7 @@ async function runFixture(mode: "oneshot" | "persistent", severity: "error" | "w
         PAPERCLIP_ACPX_TYPED_FAILURE_CANARY: providerTitle,
         PAPERCLIP_ACPX_TYPED_FAILURE_SEVERITY: severity,
         PAPERCLIP_ACPX_INITIALIZE_CANARY: initializePath,
+        ...extraEnv,
       },
     },
     context: {},
@@ -103,4 +108,74 @@ for (const mode of ["oneshot", "persistent"] as const) {
     expect(result.errorCode).toBeNull();
     expect(result.resultJson?.stopReason).toBe("end_turn");
   }, 30_000);
+}
+
+type ScriptedTurn = {
+  severity?: "error" | "warning";
+  usage: { inputTokens: number; outputTokens: number };
+  streamedUsage?: { inputTokens: number; outputTokens: number };
+};
+
+// Response-only usage first, then the same outcomes with an earlier streamed
+// usage_update whose values differ from the final prompt-response usage.
+const usageScript: ScriptedTurn[] = [
+  { severity: "error", usage: { inputTokens: 101, outputTokens: 11 } },
+  { severity: "warning", usage: { inputTokens: 202, outputTokens: 22 } },
+  { usage: { inputTokens: 303, outputTokens: 33 } },
+  { severity: "error", usage: { inputTokens: 404, outputTokens: 44 }, streamedUsage: { inputTokens: 7, outputTokens: 1 } },
+  { severity: "warning", usage: { inputTokens: 505, outputTokens: 55 }, streamedUsage: { inputTokens: 8, outputTokens: 2 } },
+  { usage: { inputTokens: 606, outputTokens: 66 }, streamedUsage: { inputTokens: 9, outputTokens: 3 } },
+];
+
+it("records prompt-response usage exactly once for failure, warning and success on consecutive turns", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-acpx-typed-usage-"));
+  const runtime = createAcpRuntime({
+    cwd: root,
+    sessionStore: createRuntimeStore({ stateDir: root }),
+    agentRegistry: createAgentRegistry({ overrides: { custom: agentCommand } }),
+    permissionMode: "approve-all",
+    onAgentStderr: () => {},
+  });
+  const handle = await runtime.ensureSession({
+    sessionKey: "typed-usage", agent: "custom", mode: "persistent", cwd: root,
+    sessionOptions: { env: { PAPERCLIP_ACPX_TURN_SCRIPT: JSON.stringify(usageScript) } },
+  });
+  try {
+    for (const [index, turn] of usageScript.entries()) {
+      const preStatus = await runtime.getStatus!({ handle });
+      const started = runtime.startTurn({
+        handle, text: `paperclip-turn:${index}`, mode: "prompt", requestId: `usage-${index}`,
+      });
+      let eventBreakdown = null;
+      for await (const event of started.events) {
+        if (event.type === "status" && event.tag === "usage_update") eventBreakdown = event.breakdown ?? eventBreakdown;
+      }
+      const terminal = await started.result;
+      expect(terminal.status).toBe(turn.severity === "error" ? "failed" : "completed");
+      const postStatus = await runtime.getStatus!({ handle });
+      // The persisted usage is this turn's prompt-response usage, not the
+      // streamed value and not a sum of the two.
+      expect(postStatus?.usage?.cumulative).toEqual(turn.usage);
+      const perRequest = Object.values(postStatus?.usage?.perRequest ?? {});
+      expect(perRequest).toEqual(usageScript.slice(0, index + 1).map((entry) => entry.usage));
+      const summary = summarizeAcpxTurnUsage({ preStatus, postStatus, eventBreakdown, eventCostUsd: null });
+      expect(summary.usage).toEqual({ ...turn.usage, cachedInputTokens: 0 });
+      expect(summary.usageDetail).toEqual(turn.usage);
+    }
+  } finally {
+    await runtime.close({ handle, reason: "typed-failure usage test complete" });
+  }
+}, 60_000);
+
+for (const mode of ["oneshot", "persistent"] as const) {
+  for (const severity of ["error", "warning", "success"] as const) {
+    it(`${mode}: reports response-only usage on a ${severity} turn`, async () => {
+      const usage = { inputTokens: 41, outputTokens: 5 };
+      const script: ScriptedTurn[] = [{ ...(severity === "success" ? {} : { severity }), usage }];
+      const { result } = await runFixture(mode, "warning", { PAPERCLIP_ACPX_TURN_SCRIPT: JSON.stringify(script) });
+      expect(result.exitCode).toBe(severity === "error" ? 1 : 0);
+      expect(result.usage).toEqual({ ...usage, cachedInputTokens: 0 });
+      expect(result.resultJson?.usage).toEqual(usage);
+    }, 30_000);
+  }
 }

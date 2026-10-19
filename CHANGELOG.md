@@ -5,6 +5,7 @@
   returns `end_turn`. Warnings stay successful. Per-turn callbacks receive the
   complete title and details for later diagnostic handling. The current
   codex-acp 1.1.14 ignores this capability; its existing behavior is unchanged.
+  Prompt-response usage is recorded once per turn, including failed turns.
   Refresh the lockfile patch hash in a separate dependency pull request.
 
 - Preserve historical browser proof variants in a verified private archive and dated index without replacing current gauntlet images or receipts.
