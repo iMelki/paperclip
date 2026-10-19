@@ -101,6 +101,27 @@ test("the unsharded general-server lane transports exclusions outside Windows ar
   );
 });
 
+test("Vitest scratch routes TEMP, TMP, and TMPDIR to the same invocation root", async () => {
+  const { createVitestScratchEnvironment } = await import("../vitest-scratch-env.mjs");
+  const env = createVitestScratchEnvironment({
+    baseEnv: {
+      TEMP: "C:\\outside\\temp",
+      TMP: "C:\\outside\\tmp",
+      TMPDIR: "/outside/tmpdir",
+    },
+    testRoot: path.join("C:\\scratch", "invocation-1"),
+    invocationId: "vt-test-1",
+    pathApi: path.win32,
+  });
+  const expectedTemp = path.win32.join("C:\\scratch", "invocation-1", "t");
+
+  assert.equal(env.TEMP, expectedTemp);
+  assert.equal(env.TMP, expectedTemp);
+  assert.equal(env.TMPDIR, expectedTemp);
+  assert.equal(env.PAPERCLIP_HOME, path.win32.join("C:\\scratch", "invocation-1", "h"));
+  assert.equal(env.PAPERCLIP_INSTANCE_ID, "vt-test-1");
+});
+
 test("shard flags are rejected for the parallel workspace groups", () => {
   const result = dryRun(["--mode", "general", "--group", "general-workspaces-a", "--shard-index", "0", "--shard-count", "3"]);
   assert.notEqual(result.status, 0, "workspace groups must not accept shard flags");
