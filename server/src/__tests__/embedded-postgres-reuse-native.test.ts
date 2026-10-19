@@ -20,6 +20,8 @@ async function unusedPort(): Promise<number> {
   return address.port;
 }
 
+const adminUrl = (port: number) => `postgres://paperclip:paperclip@127.0.0.1:${port}/postgres`;
+
 it("rejects an actual node PID on a closed port, then starts and reuses actual PostgreSQL", async () => {
   await prepareEmbeddedPostgresNativeRuntime();
   const dataDir = realpathSync(mkdtempSync(join(tmpdir(), "embedded-pg-native-identity-")));
@@ -39,7 +41,7 @@ it("rejects an actual node PID on a closed port, then starts and reuses actual P
   const stale = `${process.pid}\n${dataDir}\n${Math.floor(Date.now() / 1000)}\n${port}\n\nlocalhost\n\nready\n`;
   writeFileSync(pidFile, stale);
   expect(process.kill(process.pid, 0)).toBe(true);
-  expect(await readRunningEmbeddedPostgres(dataDir, port)).toBeNull();
+  expect(await readRunningEmbeddedPostgres(dataDir, port, adminUrl)).toBeNull();
   expect(readFileSync(pidFile, "utf8")).toBe(stale);
 
   // This is the existing server start path: it removes the stale lock before
@@ -49,13 +51,13 @@ it("rejects an actual node PID on a closed port, then starts and reuses actual P
     await pg.start();
     const postgresPid = Number(readFileSync(pidFile, "utf8").split("\n")[0]);
     expect(postgresPid).not.toBe(process.pid);
-    expect(await readRunningEmbeddedPostgres(dataDir, port)).toEqual({ pid: postgresPid, port });
+    expect(await readRunningEmbeddedPostgres(dataDir, port, adminUrl)).toEqual({ pid: postgresPid, port });
     // A prior startup may have selected another port; the PID file owns it.
-    expect(await readRunningEmbeddedPostgres(dataDir, 54329)).toEqual({ pid: postgresPid, port });
+    expect(await readRunningEmbeddedPostgres(dataDir, 54329, adminUrl)).toEqual({ pid: postgresPid, port });
     expect(process.kill(process.pid, 0)).toBe(true);
   } finally {
     await pg.stop();
   }
   // The stopped server has no reusable identity. Retain all test data for audit.
-  expect(await readRunningEmbeddedPostgres(dataDir, port)).toBeNull();
+  expect(await readRunningEmbeddedPostgres(dataDir, port, adminUrl)).toBeNull();
 }, 60_000);

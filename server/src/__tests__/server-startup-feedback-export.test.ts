@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { ensurePostgresDatabase, getPostgresDataDirectory } from "@paperclipai/db";
@@ -423,6 +423,87 @@ describe("startServer embedded PostgreSQL identity", () => {
     } finally {
       kill.mockRestore();
     }
+  });
+
+  const foreignLiveness: Array<[string, () => true]> = [
+    ["live", () => true],
+    ["EPERM", () => { throw Object.assign(new Error("permission denied"), { code: "EPERM" }); }],
+    ["EIO", () => { throw Object.assign(new Error("i/o error"), { code: "EIO" }); }],
+  ];
+  const identityFailures: Array<[string, () => void]> = [
+    ["unreachable/null", () => vi.mocked(getPostgresDataDirectory).mockResolvedValue(null)],
+    ["recovery", () => vi.mocked(getPostgresDataDirectory).mockRejectedValue(new Error("the database system is in recovery mode"))],
+    ["permission", () => vi.mocked(getPostgresDataDirectory).mockRejectedValue(new Error("password authentication failed"))],
+  ];
+  for (const [livenessName, killOutcome] of foreignLiveness) {
+    for (const [failureName, failIdentity] of identityFailures) {
+      it(`keeps the lock and refuses a second start for a foreign ${livenessName} PID with a failed identity query (${failureName})`, async () => {
+        writeFileSync(pidFile, `424242\n${dataDir}\n1700000000\n55432\n\nlocalhost\n\nready\n`);
+        const lockBefore = readFileSync(pidFile);
+        failIdentity();
+        const kill = vi.spyOn(process, "kill").mockImplementation(killOutcome);
+        try {
+          await expect(startServer()).rejects.toThrow("identity could not be verified");
+        } finally {
+          kill.mockRestore();
+        }
+        expect(readFileSync(pidFile).equals(lockBefore)).toBe(true);
+        expect(pgCtorMock).not.toHaveBeenCalled();
+        expect(pgStartMock).not.toHaveBeenCalled();
+        expect(ensurePostgresDatabase).not.toHaveBeenCalled();
+        expect(createDbMock).not.toHaveBeenCalled();
+      });
+    }
+  }
+
+  it("reuses verified PostgreSQL reached through a symlinked data directory", async () => {
+    const root = realpathSync(mkdtempSync(path.join(tmpdir(), "server-pg-alias-")));
+    const physical = path.join(root, "physical");
+    const alias = path.join(root, "alias");
+    mkdirSync(physical);
+    symlinkSync(physical, alias, "dir");
+    writeFileSync(path.join(physical, "PG_VERSION"), "18\n");
+    writeFileSync(path.join(physical, "postmaster.pid"), `${process.pid}\n${physical}\n1700000000\n55432\n`);
+    loadConfigMock.mockReturnValue(buildTestConfig({
+      databaseMode: "embedded-postgres",
+      databaseUrl: undefined,
+      embeddedPostgresDataDir: alias,
+      embeddedPostgresPort: 55432,
+    }));
+    vi.mocked(getPostgresDataDirectory).mockResolvedValue(physical);
+    await expect(startServer()).rejects.toThrow("database phase reached");
+    expect(pgCtorMock).not.toHaveBeenCalled();
+    expect(pgStartMock).not.toHaveBeenCalled();
+    expect(existsSync(path.join(physical, "postmaster.pid"))).toBe(true);
+  });
+
+  it("reuses a verified PID-less server through a symlinked data directory", async () => {
+    const root = realpathSync(mkdtempSync(path.join(tmpdir(), "server-pg-alias-")));
+    const physical = path.join(root, "physical");
+    const alias = path.join(root, "alias");
+    mkdirSync(physical);
+    symlinkSync(physical, alias, "dir");
+    writeFileSync(path.join(physical, "PG_VERSION"), "18\n");
+    loadConfigMock.mockReturnValue(buildTestConfig({
+      databaseMode: "embedded-postgres",
+      databaseUrl: undefined,
+      embeddedPostgresDataDir: alias,
+      embeddedPostgresPort: 55432,
+    }));
+    vi.mocked(getPostgresDataDirectory).mockResolvedValue(physical);
+    vi.mocked(ensurePostgresDatabase).mockReset()
+      .mockResolvedValueOnce("exists")
+      .mockRejectedValue(new Error("database phase reached"));
+    await expect(startServer()).rejects.toThrow("database phase reached");
+    expect(pgCtorMock).not.toHaveBeenCalled();
+    expect(pgStartMock).not.toHaveBeenCalled();
+  });
+
+  it("probes identity with the same login it uses to open the database", async () => {
+    vi.mocked(getPostgresDataDirectory).mockResolvedValue(dataDir);
+    await expect(startServer()).rejects.toThrow("database phase reached");
+    const probeUrl = vi.mocked(getPostgresDataDirectory).mock.calls[0]?.[0];
+    expect(probeUrl).toBe(vi.mocked(ensurePostgresDatabase).mock.calls[0]?.[0]);
   });
 
   it("refuses another PostgreSQL instance without removing the lock or starting", async () => {
