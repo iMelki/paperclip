@@ -1,11 +1,36 @@
 import { and, eq, gte, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { agents, approvals, companies, costEvents, heartbeatRuns, issues } from "@paperclipai/db";
+import { estimateTokenCostCents, toExclusiveTokenCounts } from "@paperclipai/shared";
+import type { DashboardSpendBreakdownRow, DashboardSpendDay } from "@paperclipai/shared";
 import { notFound } from "../errors.js";
 import { budgetService } from "./budgets.js";
 import { visibleIssueCondition } from "./issue-visibility.js";
 
 const DASHBOARD_RUN_ACTIVITY_DAYS = 14;
+const DASHBOARD_SPEND_BREAKDOWN_LIMIT = 6;
+
+type SpendAccumulator = { billedCents: number; estimatedCents: number; tokens: number; unpricedTokens: number };
+
+// Billing states whose $0 ledger amount is a known non-charge for metered
+// work (normalizeBilledCostCents books subscription runs at 0), so the tokens
+// can be priced at API rates. Fixed, credits, unknown and metered rows keep
+// their ledger amount; when the ledger marks them `unpriced` their tokens are
+// reported as unpriced usage instead of being estimated.
+const ESTIMABLE_BILLING_TYPES: ReadonlySet<string> = new Set(["subscription_included"]);
+
+function topSpendRows(
+  rows: Map<string, SpendAccumulator & { label: string }>,
+): DashboardSpendBreakdownRow[] {
+  return Array.from(rows.entries())
+    .map(([key, row]) => ({ key, ...row }))
+    .filter((row) => row.billedCents > 0 || row.estimatedCents > 0 || row.tokens > 0)
+    .sort(
+      (a, b) =>
+        b.billedCents + b.estimatedCents - (a.billedCents + a.estimatedCents) || b.tokens - a.tokens,
+    )
+    .slice(0, DASHBOARD_SPEND_BREAKDOWN_LIMIT);
+}
 
 function formatUtcDateKey(date: Date): string {
   return date.toISOString().slice(0, 10);
@@ -84,19 +109,103 @@ export function dashboardService(db: Db) {
       const monthStart = getUtcMonthStart(now);
       const runActivityDays = getRecentUtcDateKeys(now, DASHBOARD_RUN_ACTIVITY_DAYS);
       const runActivityStart = new Date(`${runActivityDays[0]}T00:00:00.000Z`);
-      const [{ monthSpend }] = await db
+      // One grouped read feeds the month tile, the 14-day spend chart and the
+      // agent/model breakdowns. Subscription rows (booked at costCents = 0,
+      // see normalizeBilledCostCents) are priced here at API list rates as a
+      // clearly separate estimate; nothing is written back, so budgets keep
+      // enforcing billed cents only. Grouping by adapter type lets token counts
+      // be normalized per producer (Codex input includes cache reads).
+      const spendWindowStart = runActivityStart < monthStart ? runActivityStart : monthStart;
+      const spendRows = await db
         .select({
-          monthSpend: sql<number>`coalesce(sum(${costEvents.costCents}), 0)::double precision`,
+          date: sql<string>`to_char(${costEvents.occurredAt} AT TIME ZONE 'UTC', 'YYYY-MM-DD')`,
+          agentId: costEvents.agentId,
+          agentName: agents.name,
+          adapterType: agents.adapterType,
+          model: costEvents.model,
+          billingType: costEvents.billingType,
+          costStatus: costEvents.costStatus,
+          costCents: sql<number>`coalesce(sum(${costEvents.costCents}), 0)::double precision`,
+          inputTokens: sql<number>`coalesce(sum(${costEvents.inputTokens}), 0)::double precision`,
+          cachedInputTokens: sql<number>`coalesce(sum(${costEvents.cachedInputTokens}), 0)::double precision`,
+          outputTokens: sql<number>`coalesce(sum(${costEvents.outputTokens}), 0)::double precision`,
         })
         .from(costEvents)
-        .where(
-          and(
-            eq(costEvents.companyId, companyId),
-            gte(costEvents.occurredAt, monthStart),
-          ),
+        .leftJoin(agents, eq(agents.id, costEvents.agentId))
+        .where(and(eq(costEvents.companyId, companyId), gte(costEvents.occurredAt, spendWindowStart)))
+        .groupBy(
+          sql`to_char(${costEvents.occurredAt} AT TIME ZONE 'UTC', 'YYYY-MM-DD')`,
+          costEvents.agentId,
+          agents.name,
+          agents.adapterType,
+          costEvents.model,
+          costEvents.billingType,
+          costEvents.costStatus,
         );
 
-      const monthSpendCents = Number(monthSpend);
+      const monthStartKey = formatUtcDateKey(monthStart);
+      const spendDays = new Map<string, DashboardSpendDay>(
+        runActivityDays.map((date) => [
+          date,
+          { date, billedCents: 0, estimatedCents: 0, tokens: 0, unpricedTokens: 0 },
+        ]),
+      );
+      const byAgent = new Map<string, SpendAccumulator & { label: string }>();
+      const byModel = new Map<string, SpendAccumulator & { label: string }>();
+      let monthSpendCents = 0;
+      let monthEstimatedCents = 0;
+      let monthEstimatedTokens = 0;
+      let monthInputTokens = 0;
+      let monthCachedInputTokens = 0;
+      let monthOutputTokens = 0;
+      let monthUnpricedTokens = 0;
+      for (const row of spendRows) {
+        const date = String(row.date);
+        const billedCents = Number(row.costCents);
+        const usage = toExclusiveTokenCounts(row.adapterType, {
+          inputTokens: Number(row.inputTokens),
+          cachedInputTokens: Number(row.cachedInputTokens),
+          outputTokens: Number(row.outputTokens),
+        });
+        const tokens = usage.inputTokens + usage.cachedInputTokens + usage.outputTokens;
+        let estimatedCents = 0;
+        let unpricedTokens = 0;
+        if (ESTIMABLE_BILLING_TYPES.has(row.billingType) && billedCents === 0) {
+          const estimate = estimateTokenCostCents(row.model, usage);
+          if (estimate === null) unpricedTokens = tokens;
+          else estimatedCents = estimate;
+        } else if (row.costStatus === "unpriced" && billedCents === 0) {
+          unpricedTokens = tokens;
+        }
+
+        const day = spendDays.get(date);
+        if (day) {
+          day.billedCents += billedCents;
+          day.estimatedCents += estimatedCents;
+          day.tokens += tokens;
+          day.unpricedTokens += unpricedTokens;
+        }
+        if (date < monthStartKey) continue;
+
+        monthSpendCents += billedCents;
+        monthEstimatedCents += estimatedCents;
+        if (estimatedCents > 0) monthEstimatedTokens += tokens;
+        monthInputTokens += usage.inputTokens;
+        monthCachedInputTokens += usage.cachedInputTokens;
+        monthOutputTokens += usage.outputTokens;
+        monthUnpricedTokens += unpricedTokens;
+        for (const [map, key, label] of [
+          [byAgent, row.agentId, row.agentName ?? "Unknown agent"],
+          [byModel, row.model, row.model],
+        ] as const) {
+          const entry = map.get(key) ?? { label, billedCents: 0, estimatedCents: 0, tokens: 0, unpricedTokens: 0 };
+          entry.billedCents += billedCents;
+          entry.estimatedCents += estimatedCents;
+          entry.tokens += tokens;
+          entry.unpricedTokens += unpricedTokens;
+          map.set(key, entry);
+        }
+      }
       // Per-day run breakdown. A run is "recovered" when its retry chain later
       // succeeded (recovered_runs = all ancestors of a succeeded retry), so a
       // restart-killed run whose retry succeeded is pulled out of the headline
@@ -198,6 +307,15 @@ export function dashboardService(db: Db) {
           monthSpendCents,
           monthBudgetCents: company.budgetMonthlyCents,
           monthUtilizationPercent: Number(utilization.toFixed(2)),
+          monthInputTokens,
+          monthCachedInputTokens,
+          monthOutputTokens,
+          monthEstimatedCents,
+          monthEstimatedTokens,
+          monthUnpricedTokens,
+          spendDays: Array.from(spendDays.values()),
+          byAgent: topSpendRows(byAgent),
+          byModel: topSpendRows(byModel),
         },
         pendingApprovals,
         budgets: {

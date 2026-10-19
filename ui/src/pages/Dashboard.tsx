@@ -20,11 +20,20 @@ import { usePublishSharedQueryData, useSharedPollingQuery } from "../hooks/useSh
 import { ActivityRow } from "../components/ActivityRow";
 import { Identity } from "../components/Identity";
 import { timeAgo } from "../lib/timeAgo";
-import { cn, formatCents } from "../lib/utils";
+import { cn } from "../lib/utils";
+import { monthSpendTile } from "../lib/month-spend";
 import { SHOW_TASK_PRIORITY_UI } from "../lib/ui-flags";
 import { Bot, CircleDot, DollarSign, ShieldCheck, LayoutDashboard, PauseCircle } from "lucide-react";
 import { ActiveAgentsPanel } from "../components/ActiveAgentsPanel";
-import { ChartCard, RunActivityChart, PriorityChart, IssueStatusChart, SuccessRateChart } from "../components/ActivityCharts";
+import {
+  ChartCard,
+  RunActivityChart,
+  PriorityChart,
+  IssueStatusChart,
+  SuccessRateChart,
+  SpendBreakdownChart,
+  SpendChart,
+} from "../components/ActivityCharts";
 import { PageSkeleton } from "../components/PageSkeleton";
 import { Card } from "@/components/ui/card";
 import type { Agent, Issue } from "@paperclipai/shared";
@@ -285,16 +294,8 @@ export function Dashboard() {
             />
             <MetricCard
               icon={DollarSign}
-              value={formatCents(data.costs.monthSpendCents)}
-              label="Month Spend"
+              {...monthSpendTile(data.costs)}
               to="/costs"
-              description={
-                <span>
-                  {data.costs.monthBudgetCents > 0
-                    ? `${data.costs.monthUtilizationPercent}% of ${formatCents(data.costs.monthBudgetCents)} budget`
-                    : "Unlimited budget"}
-                </span>
-              }
             />
             <MetricCard
               icon={ShieldCheck}
@@ -328,6 +329,15 @@ export function Dashboard() {
             </ChartCard>
             <ChartCard title="Success Rate" subtitle="Last 14 days">
               <SuccessRateChart activity={data.runActivity} />
+            </ChartCard>
+            <ChartCard title="Spend" subtitle="Last 14 days">
+              <SpendChart days={data.costs.spendDays} />
+            </ChartCard>
+            <ChartCard title="Spend by Agent" subtitle="This month">
+              <SpendBreakdownChart rows={data.costs.byAgent} />
+            </ChartCard>
+            <ChartCard title="Spend by Model" subtitle="This month">
+              <SpendBreakdownChart rows={data.costs.byModel} />
             </ChartCard>
           </div>
 
