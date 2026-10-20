@@ -33,6 +33,7 @@ import detectPort from "detect-port";
 import { createApp } from "./app.js";
 import { loadConfig } from "./config.js";
 import { resolveListenPort } from "./listen-port.js";
+import { resolveDefaultLogsDir } from "./home-paths.js";
 import { logger } from "./middleware/logger.js";
 import {
   getManagedInstanceConfig,
@@ -465,6 +466,9 @@ export async function startServer(): Promise<StartedServer> {
           password: "paperclip",
           port,
           persistent: true,
+          // Windows: pg_ctl keeps this file open, so it must stay outside the data
+          // directory or crash recovery cannot fsync it (sharing violation).
+          logFile: resolve(resolveDefaultLogsDir(), "postgres.log"),
           initdbFlags: ["--encoding=UTF8", "--locale=C", "--lc-messages=C"],
           onLog: appendEmbeddedPostgresLog,
           onError: appendEmbeddedPostgresLog,

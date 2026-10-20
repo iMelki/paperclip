@@ -6,6 +6,12 @@ All notable changes to this repository should be recorded here.
 
 ## Unreleased
 
+- Windows embedded PostgreSQL now writes its server log outside the data
+  directory (`<instance>/logs/postgres.log`, or a sibling of the data directory
+  when no path is given) and allows up to 600 seconds to start when the last
+  shutdown was unclean. An open log inside the data directory made crash recovery
+  fail with a sharing violation and outlast pg_ctl's 60-second wait.
+
 - **[#164]** Refresh Lockfile accepts manual `ref` and `base` inputs that default
   to `dev`. Each base has its own refresh branch and matching PR lookup. Master
   pushes still refresh their triggering commit and retain auto-merge; other bases
