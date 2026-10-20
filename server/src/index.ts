@@ -33,7 +33,7 @@ import detectPort from "detect-port";
 import { createApp } from "./app.js";
 import { loadConfig } from "./config.js";
 import { resolveListenPort } from "./listen-port.js";
-import { isSameDataDirectory, readRunningEmbeddedPostgres } from "./embedded-postgres-reuse.js";
+import { EmbeddedPostgresLockRefusal, isSameDataDirectory, readRunningEmbeddedPostgres } from "./embedded-postgres-reuse.js";
 import { logger } from "./middleware/logger.js";
 import {
   getManagedInstanceConfig,
@@ -1522,6 +1522,8 @@ function isMainModule(metaUrl: string): boolean {
 if (isMainModule(import.meta.url)) {
   void startServer().catch((err) => {
     logger.error({ err }, "Paperclip server failed to start");
-    process.exit(1);
+    // A distinct code lets service managers and health checks tell "an existing
+    // PostgreSQL may own the data directory" apart from other startup failures.
+    process.exit(err instanceof EmbeddedPostgresLockRefusal ? err.exitCode : 1);
   });
 }

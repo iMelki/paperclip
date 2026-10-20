@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { existsSync, readFileSync, renameSync } from "node:fs";
+import { existsSync, readFileSync, readlinkSync, renameSync } from "node:fs";
 import { realpath } from "node:fs/promises";
 import { resolve } from "node:path";
 import { getPostgresDataDirectory } from "@paperclipai/db";
@@ -39,10 +39,151 @@ export async function readProcessName(pid: number): Promise<string | null> {
 
 const POSTGRES_PROCESS_NAME_RE = /^(?:postgres|postmaster)(?:\.exe)?$/i;
 
+/**
+ * Process exit code for a startup refused because a PostgreSQL that may own the
+ * data directory could not be ruled out. Distinct from the generic failure code
+ * 1 so service managers and health checks can tell it apart.
+ */
+export const EMBEDDED_POSTGRES_LOCK_REFUSAL_EXIT_CODE = 75;
+
+export class EmbeddedPostgresLockRefusal extends Error {
+  readonly exitCode = EMBEDDED_POSTGRES_LOCK_REFUSAL_EXIT_CODE;
+  constructor(message: string) {
+    super(message);
+    this.name = "EmbeddedPostgresLockRefusal";
+  }
+}
+
+export type PostgresProcess = { pid: number; command: string };
+
+const stopCommand = (pid: number) => (process.platform === "win32" ? `taskkill /PID ${pid}` : `kill ${pid}`);
+
+/**
+ * Finds PostgreSQL server processes that reference `dataDir` (by command line
+ * or, where readable, working directory). Returns `null` when the process list
+ * itself cannot be read, so callers can tell "none found" from "could not look".
+ */
+export async function listPostgresProcessesForDataDir(dataDir: string): Promise<PostgresProcess[] | null> {
+  const run = (file: string, args: string[]) =>
+    new Promise<string | null>((done) => {
+      execFile(file, args, { timeout: 10000, windowsHide: true, maxBuffer: 16 * 1024 * 1024 }, (error, stdout) =>
+        done(error ? null : stdout),
+      );
+    });
+  const wanted = await canonicalDataDirectory(dataDir);
+  const norm = (value: string) =>
+    process.platform === "win32" ? value.replace(/\\/g, "/").toLowerCase() : value;
+  const needles = [...new Set([wanted, resolve(dataDir)])].map(norm);
+  const found: PostgresProcess[] = [];
+  if (process.platform === "win32") {
+    const out = await run("powershell", [
+      "-NoProfile",
+      "-Command",
+      "Get-CimInstance Win32_Process -Filter \"Name='postgres.exe'\" | Select-Object ProcessId,CommandLine | ConvertTo-Json -Compress",
+    ]);
+    if (out === null) return null;
+    const trimmed = out.trim();
+    if (!trimmed) return found;
+    let rows: Array<{ ProcessId?: number; CommandLine?: string | null }>;
+    try {
+      const parsed = JSON.parse(trimmed);
+      rows = Array.isArray(parsed) ? parsed : [parsed];
+    } catch {
+      return null;
+    }
+    for (const row of rows) {
+      const command = row.CommandLine ?? "";
+      if (typeof row.ProcessId === "number" && needles.some((n) => norm(command).includes(n))) {
+        found.push({ pid: row.ProcessId, command });
+      }
+    }
+    return found;
+  }
+  const out = await run("ps", ["-eo", "pid=,args="]);
+  if (out === null) return null;
+  for (const line of out.split("\n")) {
+    const match = line.trim().match(/^(\d+)\s+(\S.*)$/);
+    if (!match) continue;
+    const pid = Number(match[1]);
+    const command = match[2];
+    if (pid === process.pid || !POSTGRES_PROCESS_NAME_RE.test((command.split(/\s+/)[0] ?? "").split("/").pop() ?? "")) continue;
+    let owns = needles.some((n) => command.includes(n));
+    if (!owns) {
+      // A postmaster's working directory is its data directory.
+      const cwd = (() => {
+        try {
+          return readlinkSync(`/proc/${pid}/cwd`);
+        } catch {
+          return null;
+        }
+      })();
+      owns = cwd !== null && (await isSameDataDirectory(cwd, dataDir));
+    }
+    if (owns) found.push({ pid, command });
+  }
+  return found;
+}
+
 export type EmbeddedPostgresReuseOptions = {
   /** Test seam: resolves the executable name of a live PID. */
   readProcessName?: (pid: number) => Promise<string | null>;
+  /** Test seam: PostgreSQL processes that reference the data directory, or null if unreadable. */
+  listPostgresProcesses?: (dataDir: string) => Promise<PostgresProcess[] | null>;
 };
+
+/**
+ * Handles a `postmaster.pid` whose owner cannot be read from the file (unreadable
+ * or no valid PID). The owner is looked up without it: a server answering on the
+ * configured port, or any PostgreSQL process referencing this data directory,
+ * keeps the lock and refuses with the exact process and command to resolve it.
+ * Only when nothing is found is the lock renamed aside so startup can proceed.
+ */
+async function recoverLockWithUnknownOwner(
+  pidFile: string,
+  dataDir: string,
+  configuredPort: number,
+  adminUrl: EmbeddedPostgresAdminUrl,
+  options: EmbeddedPostgresReuseOptions,
+  problem: string,
+): Promise<null> {
+  const refuse = (detail: string) =>
+    new EmbeddedPostgresLockRefusal(
+      `Refusing to start embedded PostgreSQL: postmaster.pid ${problem}, and ${detail} ` +
+        "The lock file was left unchanged.",
+    );
+  if ((await getPostgresDataDirectory(adminUrl(configuredPort)).catch(() => null)) !== null) {
+    throw refuse(
+      `a PostgreSQL server is answering on port ${configuredPort}. Stop it (or point the server at that instance), then start again.`,
+    );
+  }
+  const owners = await (options.listPostgresProcesses ?? listPostgresProcessesForDataDir)(dataDir);
+  if (owners === null) {
+    throw refuse(
+      "the process list could not be read, so a running PostgreSQL cannot be ruled out. " +
+        `Once no PostgreSQL uses ${dataDir}, move postmaster.pid aside and start again.`,
+    );
+  }
+  if (owners.length > 0) {
+    const first = owners[0];
+    throw refuse(
+      `PostgreSQL process ${first.pid} (${first.command}) references this data directory. ` +
+        `Stop it with \`${stopCommand(first.pid)}\`, then start again; the stale lock is handled automatically.`,
+    );
+  }
+  const aside = `${pidFile}.stale-${Date.now()}`;
+  try {
+    renameSync(pidFile, aside);
+  } catch (error) {
+    throw refuse(
+      `it could not be moved aside (${(error as NodeJS.ErrnoException).code ?? "unknown error"}). Fix its permissions and start again.`,
+    );
+  }
+  logger.warn(
+    { pidFile, aside, problem },
+    "postmaster.pid could not name its owner, no PostgreSQL answers or references this data directory; moved the lock file aside and trying normal startup",
+  );
+  return null;
+}
 
 export async function isSameDataDirectory(a: string, b: string): Promise<boolean> {
   const [left, right] = await Promise.all([canonicalDataDirectory(a), canonicalDataDirectory(b)]);
@@ -52,10 +193,11 @@ export async function isSameDataDirectory(a: string, b: string): Promise<boolean
 /**
  * Returns the PostgreSQL recorded in `postmaster.pid` when it is verified to
  * serve `dataDir`, or `null` only when the lock is affirmatively stale (no
- * PID file, a dead PID, or this process's own PID). Throws, leaving the lock
- * untouched, whenever a possibly-live owner cannot be identified (including a
- * lock that cannot be read or holds no valid PID), because removing it could
- * start a second postmaster.
+ * PID file, a dead PID, this process's own PID, a recycled non-PostgreSQL PID,
+ * or an unreadable/garbled lock with no PostgreSQL answering or referencing the
+ * data directory). Throws `EmbeddedPostgresLockRefusal`, leaving the lock
+ * untouched, whenever a possibly-live owner cannot be ruled out, because
+ * removing it could start a second postmaster.
  */
 export async function readRunningEmbeddedPostgres(
   dataDir: string,
@@ -69,16 +211,24 @@ export async function readRunningEmbeddedPostgres(
   try {
     lines = readFileSync(pidFile, "utf8").split("\n");
   } catch (error) {
-    throw new Error(
-      `Refusing to start embedded PostgreSQL: postmaster.pid could not be read (${(error as NodeJS.ErrnoException).code ?? "unknown error"}). ` +
-        "The lock file was left unchanged. Fix its permissions, or remove it only after confirming no PostgreSQL uses this data directory.",
+    return recoverLockWithUnknownOwner(
+      pidFile,
+      dataDir,
+      configuredPort,
+      adminUrl,
+      options,
+      `could not be read (${(error as NodeJS.ErrnoException).code ?? "unknown error"})`,
     );
   }
   const pid = Number(lines[0]?.trim());
   if (!Number.isSafeInteger(pid) || pid <= 0) {
-    throw new Error(
-      "Refusing to start embedded PostgreSQL: postmaster.pid does not hold a valid process id, so its owner is unknown. " +
-        "The lock file was left unchanged. Remove it only after confirming no PostgreSQL uses this data directory.",
+    return recoverLockWithUnknownOwner(
+      pidFile,
+      dataDir,
+      configuredPort,
+      adminUrl,
+      options,
+      "does not hold a valid process id",
     );
   }
   try {
@@ -91,7 +241,7 @@ export async function readRunningEmbeddedPostgres(
 
   const port = Number(lines[3]?.trim() || configuredPort);
   if (!Number.isInteger(port) || port < 1 || port > 65535) {
-    throw new Error("Refusing to reuse PostgreSQL: postmaster.pid has an invalid port.");
+    throw new EmbeddedPostgresLockRefusal("Refusing to reuse PostgreSQL: postmaster.pid has an invalid port.");
   }
   // PID occupancy alone is not PostgreSQL identity: the OS may recycle it.
   // A query also distinguishes PostgreSQL from an unrelated TCP listener.
@@ -125,15 +275,15 @@ export async function readRunningEmbeddedPostgres(
         return null;
       }
     }
-    throw new Error(
+    throw new EmbeddedPostgresLockRefusal(
       `Refusing to start embedded PostgreSQL: postmaster.pid names process ${pid}, which may still be alive, ` +
         `but PostgreSQL identity could not be verified on port ${port} (it may be starting, recovering, ` +
-        "or refusing the login). The lock file was left unchanged. Stop that process, or remove " +
-        "postmaster.pid only after confirming no PostgreSQL uses this data directory.",
+        `or refusing the login). The lock file was left unchanged. Stop that process with \`${stopCommand(pid)}\` ` +
+        "and start again; if it is not PostgreSQL, the stale lock is then handled automatically.",
     );
   }
   if (!(await isSameDataDirectory(actualDataDir, dataDir))) {
-    throw new Error("Refusing to reuse PostgreSQL: its data directory belongs to another instance.");
+    throw new EmbeddedPostgresLockRefusal("Refusing to reuse PostgreSQL: its data directory belongs to another instance.");
   }
   return { pid, port };
 }

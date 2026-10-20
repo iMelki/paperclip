@@ -33,14 +33,22 @@ PID is affirmatively not PostgreSQL (the OS recycled it, checked with `ps` or
 renames the lock to `postmaster.pid.stale-<timestamp>` instead of deleting it,
 then starts normally.
 
-In every other uncertain case startup stops with an error and leaves
-`postmaster.pid` unchanged: the PID may still be alive but the identity query
-fails (PostgreSQL is starting, recovering, or refusing the login), its process
-name cannot be read, or the file cannot be read or holds no valid process id.
-Stop that process, or remove the file only after confirming no PostgreSQL uses
-the data directory. A reachable server that reports another data directory is
-also refused without removing the lock. This check applies to server startup;
-the CLI lifecycle checks remain separate.
+If `postmaster.pid` cannot be read or holds no valid process id, the owner is
+looked up without it. A server answering on the configured port, or any
+PostgreSQL process whose command line or working directory is this data
+directory, keeps the lock in place. Otherwise the lock is renamed to
+`postmaster.pid.stale-<timestamp>` with a warning and startup continues.
+
+Startup stops, leaving `postmaster.pid` unchanged, only when a PostgreSQL that
+may own the directory is found or the process list cannot be read. The error
+names the process found and the one command that resolves it (`kill <pid>` or
+`taskkill /PID <pid>`); after that, the next start handles any leftover lock by
+itself. The same refusal applies when a live PID is not verified as non-PostgreSQL
+and the identity query fails (PostgreSQL may be starting or recovering), and when
+a reachable server reports another data directory. These refusals exit with code
+75 (all other startup failures exit 1), so a service manager or health check can
+tell them apart. This check applies to server startup; the CLI lifecycle checks
+remain separate.
 
 If you need to apply pending migrations manually, run:
 
