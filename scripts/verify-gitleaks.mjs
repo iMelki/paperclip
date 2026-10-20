@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { spawnSync } from "node:child_process";
+import { resolveNativeExecutable, runGateChild } from "./gate-child.mjs";
 
 const expectedVersion = "8.30.1";
 const argv = process.argv.slice(2);
@@ -27,9 +27,15 @@ if (rangeIndex >= 0 && !/^(?:[0-9a-f]{40}|[0-9a-f]{64})\.\.(?:[0-9a-f]{40}|[0-9a
   console.error("--range requires full hexadecimal base and head object ids separated by '..'.");
   process.exit(3);
 }
-const binary =
+const binaryCommand =
   process.env.PAPERCLIP_GITLEAKS_BIN?.trim() ||
   (process.platform === "win32" ? "gitleaks.exe" : "gitleaks");
+let binary;
+try { binary = resolveNativeExecutable(binaryCommand); }
+catch (error) {
+  console.error(`Gitleaks executable selection failed: ${error.message}`);
+  process.exit(3);
+}
 let binaryPrefix = [];
 if (process.env.PAPERCLIP_GITLEAKS_BIN_ARGS_JSON) {
   try {
@@ -44,16 +50,15 @@ if (process.env.PAPERCLIP_GITLEAKS_BIN_ARGS_JSON) {
   }
 }
 
-function run(commandArgs, stdio = "pipe") {
-  return spawnSync(binary, [...binaryPrefix, ...commandArgs], {
+async function run(commandArgs, capture = true) {
+  return await runGateChild(binary, [...binaryPrefix, ...commandArgs], {
     cwd: process.cwd(),
-    encoding: "utf8",
-    stdio,
-    windowsHide: true,
+    capture,
+    ...(capture ? { timeoutMs: 120_000 } : {}),
   });
 }
 
-const versionResult = run(["version"]);
+const versionResult = await run(["version"]);
 if (versionResult.error) {
   console.error(
     `Gitleaks ${expectedVersion} is required but could not be started from ${binary}: ${versionResult.error.message}`,
@@ -85,7 +90,7 @@ if (staged) {
 }
 scanArgs.push(".");
 
-const scanResult = run(scanArgs, "inherit");
+const scanResult = await run(scanArgs, false);
 if (scanResult.error) {
   console.error(`Gitleaks scan could not start: ${scanResult.error.message}`);
   process.exit(3);

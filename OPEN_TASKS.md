@@ -25,6 +25,26 @@ integration outcome; later rows remain queued and do not imply concurrent execut
 
 ## Current work
 
+- [#35 / PR #169 — Canonical directory recovery, 2026-10-14](https://github.com/iMelki/paperclip/pull/169):
+  the original CTO author has prepared native canonical-path comparison in both
+  startup consumers, with typed refusal escaping the no-PID fallback. Existing
+  query-failure lock preservation and first-boot behavior are retained. New unit,
+  caller and actual-PostgreSQL alias controls are source only and UNRUN while the
+  exact outer launch and resource admission remain unqualified. No new branch or
+  worktree. Next: focused independent delta review, admitted tests/negative proof,
+  normal hooks, exact new public-write approval and installed startup proof.
+
+- [#35 / PR #169 — Complete the normal pre-push launch repair](https://github.com/iMelki/paperclip/pull/169):
+  the existing topic now contains a local source repair for the hook's native
+  launch, streamed output, awaited exact-suite execution and project-pinned
+  pnpm binding. Transport, refusal and isolated caller fixtures are added;
+  they have not run for this new candidate. The existing startup fix remains
+  in place. Owner: existing PR169 author/CTO lane. Next: validate under fresh
+  resource admission, obtain independent review, then approve the exact new
+  public write. Transitive process ownership, launch-time window observation
+  and installed/live acceptance remain separate proof. See
+  [the launch contract](doc/PRE-PUSH-LAUNCH.md).
+
 - [#35 - Embedded PostgreSQL lifecycle](https://github.com/iMelki/paperclip/issues/35),
   [PR #169](https://github.com/iMelki/paperclip/pull/169): the local query-failure
   repair refuses ambiguous live ownership before lock removal or a second start.
@@ -838,3 +858,9 @@ This file is the durable local index for active `paperclip` issues.
   - Fixed in `paperclip-github-plugin` PR #3 (`2cff6ee`): Windows harnesses now
     invoke npm's bundled npx CLI through Node without a shell. The full local
     aggregate suite still has a separate CRLF assertion on an unchanged file.
+
+- [ ] **#35 / PR #169 — normal hook direct dispatch:** source implementation
+  preserves all workspace/compiler/migration/token checks; owner must qualify
+  failure/restored fixtures and the complete normal hook before relying on it.
+  See `doc/PRE-PUSH-LAUNCH.md`; publication and installed/served acceptance are
+  separate records.

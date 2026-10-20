@@ -6,6 +6,8 @@ import path from "node:path";
 import process from "node:process";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { resolveNativeExecutable } from "./gate-child.mjs";
+import { resolveGitLocalEnvironmentVariableNames, sanitizeGitLocalEnvironment } from "./git-local-env.mjs";
 
 import {
   PrePushIntegrityError,
@@ -25,13 +27,26 @@ const ZERO = "0".repeat(40);
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const runnerScript = path.join(repoRoot, "scripts", "run-pre-push-tests.mjs");
 
+let scratchEnvironment;
 function runScratchGit(scratchRoot, args) {
-  const result = spawnSync("git", args, {
+  scratchEnvironment ??= sanitizeGitLocalEnvironment(process.env, resolveGitLocalEnvironmentVariableNames({ cwd: repoRoot }));
+  const git = resolveNativeExecutable("git", { env: scratchEnvironment });
+  const options = {
     cwd: scratchRoot,
+    env: scratchEnvironment,
     encoding: "utf8",
     windowsHide: true,
     shell: false,
-  });
+    stdio: ["ignore", "pipe", "pipe"],
+    timeout: 120_000,
+    maxBuffer: 4 * 1024 * 1024,
+  };
+  if (args[0] !== "init") {
+    const identity = spawnSync(git, ["rev-parse", "--show-toplevel"], options);
+    assert.equal(identity.status, 0, identity.stderr);
+    assert.equal(realpathSync(identity.stdout.trim()), realpathSync(scratchRoot), "Git fixture must own its root before mutation");
+  }
+  const result = spawnSync(git, args, options);
   assert.equal(result.status, 0, `${args.join(" ")}: ${result.stderr}`);
   return result.stdout.trim();
 }
@@ -209,7 +224,8 @@ test("Git subprocesses fail closed within finite timeout and buffer bounds", () 
     },
   });
   assert.equal(output, "ok\n");
-  assert.equal(observed.command, "git");
+  assert.equal(path.isAbsolute(observed.command), true);
+  assert.equal(path.basename(observed.command).replace(/\.exe$/iu, ""), "git");
   assert.deepEqual(observed.args, ["ls-remote", "origin"]);
   assert.equal(observed.options.timeout, 120_000);
   assert.equal(observed.options.killSignal, "SIGKILL");
@@ -412,9 +428,9 @@ function baseSelection(overrides = {}) {
   };
 }
 
-test("direct protected-branch pushes fail closed when hosted CI is required", () => {
+test("direct protected-branch pushes fail closed when hosted CI is required", async () => {
   const errors = [];
-  const status = executeTestPlan(
+  const status = await executeTestPlan(
     {
       selection: baseSelection({ hostedCiFiles: [".github/workflows/pr.yml"] }),
       targetRefs: ["refs/heads/dev"],
@@ -425,29 +441,29 @@ test("direct protected-branch pushes fail closed when hosted CI is required", ()
   assert.match(errors.join("\n"), /cannot be pushed directly to refs\/heads\/dev/);
 });
 
-test("an exact test child exit 19 is propagated and restored exit 0 passes", () => {
+test("an exact test child exit 19 is propagated and restored exit 0 passes", async () => {
   const plan = {
     selection: baseSelection({ nodeTestFiles: ["scripts/probe.test.mjs"] }),
     targetRefs: ["refs/heads/topic"],
   };
-  const failing = executeTestPlan(plan, {
-    spawn: () => ({ status: 19 }),
+  const failing = await executeTestPlan(plan, {
+    run: async () => ({ status: 19 }),
     log: () => {},
     error: () => {},
   });
   assert.equal(failing, 19);
 
-  const passing = executeTestPlan(plan, {
-    spawn: () => ({ status: 0 }),
+  const passing = await executeTestPlan(plan, {
+    run: async () => ({ status: 0 }),
     log: () => {},
     error: () => {},
   });
   assert.equal(passing, 0);
 });
 
-test("Node suites run before exact Vitest suites with literal argv", () => {
+test("Node suites run before exact Vitest suites with literal argv", async () => {
   const calls = [];
-  const status = executeTestPlan(
+  const status = await executeTestPlan(
     {
       selection: baseSelection({
         nodeTestFiles: ["scripts/probe.test.mjs"],
@@ -457,7 +473,7 @@ test("Node suites run before exact Vitest suites with literal argv", () => {
     },
     {
       repoRoot: "C:/repo",
-      spawn: (command, args, options) => {
+      run: async (command, args, options) => {
         calls.push({ command, args, options });
         return { status: 0 };
       },
@@ -472,5 +488,5 @@ test("Node suites run before exact Vitest suites with literal argv", () => {
     [path.join("C:/repo", "scripts/run-vitest-stable.mjs"), "--files", "server/src/probe.test.ts"],
   ]);
   assert.ok(calls.every(({ command }) => command === process.execPath));
-  assert.ok(calls.every(({ options }) => options.shell === false));
+  assert.ok(calls.every(({ options }) => options.stdio === undefined));
 });

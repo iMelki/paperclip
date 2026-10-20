@@ -40,8 +40,10 @@ const HOSTED_CI_PATH_PATTERNS = [
   /^pnpm-workspace\.yaml$/,
   /(^|\/)vitest(?:\.workspace|\.config)?\.[mc]?[jt]s$/,
   /(^|\/)playwright\.config\.[mc]?[jt]s$/,
-  /^scripts\/pre-push-check\.(?:ps1|sh)$/,
-  /^scripts\/(?:run-vitest-stable|run-pre-push-tests|pre-push-test-selection)\.mjs$/,
+  /^scripts\/pre-(?:push|commit)-check\.(?:ps1|sh)$/,
+  /^scripts\/gate-native\.ps1$/,
+  /^scripts\/ensure-workspace-package-links\.ts$/,
+  /^scripts\/(?:run-vitest-stable|run-pre-push-tests|pre-push-test-selection|run-pre-push-pwsh|run-pre-commit|run-workspace-gate|gate-typescript-loader)\.mjs$/,
 ];
 
 const NON_PRODUCTION_PATH_PATTERNS = [
@@ -55,6 +57,10 @@ const NON_PRODUCTION_PATH_PATTERNS = [
 // those exceptions explicit and exact instead of widening test discovery to
 // an unbounded import-graph scan.
 const DECLARED_SOURCE_TESTS = new Map([
+  ["scripts/ensure-workspace-package-links.ts", ["scripts/gate-typescript-loader.test.mjs"]],
+  ["scripts/pre-commit-check.ps1", ["scripts/run-pre-commit.test.mjs"]],
+  ["scripts/gate-native.ps1", ["scripts/pre-push-callers.test.mjs"]],
+  ["scripts/run-vitest-stable.mjs", ["scripts/run-vitest-direct.test.mjs", "scripts/run-vitest-stable.test.mjs"]],
   [
     "server/src/index.ts",
     ["server/src/__tests__/server-startup-feedback-export.test.ts"],
@@ -141,11 +147,11 @@ export function isTestFile(file) {
 
 export function isTestBearingProductionFile(file) {
   const normalized = normalizeRepoPath(file);
+  if (DECLARED_SOURCE_TESTS.has(normalized)) return true;
   if (!SOURCE_FILE_PATTERN.test(normalized) || isTestFile(normalized) || /\.d\.[mc]?ts$/i.test(normalized)) {
     return false;
   }
   if (GENERATED_PATH_PATTERN.test(normalized)) return false;
-  if (DECLARED_SOURCE_TESTS.has(normalized)) return true;
   return (
     /^(?:server|ui|cli)\/src\//.test(normalized) ||
     /^packages\/.+\/src\//.test(normalized) ||

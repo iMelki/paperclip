@@ -19,6 +19,7 @@ import {
   normalizeRepoPath,
   selectPrePushTests,
 } from "./pre-push-test-selection.mjs";
+import { executeTestPlan } from "./run-pre-push-tests.mjs";
 
 function withFixture(run) {
   const temporaryRoot = mkdtempSync(path.join(os.tmpdir(), "paperclip-pre-push-selector-"));
@@ -35,6 +36,62 @@ function withFixture(run) {
   } finally {
     rmSync(temporaryRoot, { recursive: true, force: true });
   }
+}
+
+test("PowerShell native transport selects its declared caller contract and missing coverage refuses", () => {
+  withFixture(({ repoRoot, trackedFiles, write }) => {
+    write("scripts/gate-native.ps1", "function Invoke-GateNative {}\n");
+    write("scripts/pre-push-callers.test.mjs", "// inert selection fixture\n");
+    const selected = selectPrePushTests({ repoRoot, changedFiles: ["scripts/gate-native.ps1"], trackedFiles });
+    assert.deepEqual(selected.nodeTestFiles, ["scripts/pre-push-callers.test.mjs"]);
+    assert.deepEqual(selected.hostedCiFiles, ["scripts/gate-native.ps1"]);
+    assert.deepEqual(selected.selectionErrors, []);
+    rmSync(path.join(repoRoot, "scripts/pre-push-callers.test.mjs"));
+    const missing = selectPrePushTests({ repoRoot, changedFiles: ["scripts/gate-native.ps1"], trackedFiles });
+    assert.match(missing.selectionErrors.join("\n"), /declared deterministic test is not a regular file/);
+  });
+});
+
+for (const [source, contract] of [
+  ["scripts/gate-native.ps1", "scripts/pre-push-callers.test.mjs"],
+  ["scripts/run-pre-push-pwsh.mjs", "scripts/run-pre-push-pwsh.test.mjs"],
+  ["scripts/pre-commit-check.ps1", "scripts/run-pre-commit.test.mjs"],
+  ["scripts/run-pre-commit.mjs", "scripts/run-pre-commit.test.mjs"],
+  ["scripts/run-workspace-gate.mjs", "scripts/run-workspace-gate.test.mjs"],
+  ["scripts/gate-typescript-loader.mjs", "scripts/gate-typescript-loader.test.mjs"],
+  ["scripts/ensure-workspace-package-links.ts", "scripts/gate-typescript-loader.test.mjs"],
+]) {
+  test(`${path.basename(source)}-only changes require hosted CI, refuse dev/master and retain the topic plan`, async () => {
+    let selection;
+    withFixture(({ repoRoot, trackedFiles, write }) => {
+      write(source, "// inert selector input\n");
+      write(contract, "// inert caller contract\n");
+      selection = selectPrePushTests({ repoRoot, changedFiles: [source], trackedFiles });
+      assert.deepEqual(selection.nodeTestFiles, [contract]);
+      assert.deepEqual(selection.hostedCiFiles, [source]);
+      assert.deepEqual(selection.selectionErrors, []);
+    });
+    // Selection is the real classifier result. Execution uses simulated child
+    // results; neither this fixture nor a protected-target refusal launches Git.
+    for (const ref of ["refs/heads/dev", "refs/heads/master"]) {
+      let launches = 0;
+      const errors = [];
+      const status = await executeTestPlan({ selection, targetRefs: [ref] }, {
+        run: async () => { launches += 1; return { status: 0 }; },
+        log: () => {}, error: (message) => errors.push(message),
+      });
+      assert.equal(status, 2, `${source} must refuse protected target ${ref}`);
+      assert.equal(launches, 0, "protected refusal happens before any local child");
+      assert.match(errors.join("\n"), /cannot be pushed directly/);
+    }
+    const calls = [];
+    const topic = await executeTestPlan({ selection, targetRefs: ["refs/heads/topic"] }, {
+      run: async (executable, args) => { calls.push({ executable, args }); return { status: 0 }; },
+      log: () => {}, error: () => {},
+    });
+    assert.equal(topic, 0);
+    assert.deepEqual(calls, [{ executable: process.execPath, args: ["--test", contract] }]);
+  });
 }
 
 test("selects an exact changed Vitest suite without tracing its import graph", () => {

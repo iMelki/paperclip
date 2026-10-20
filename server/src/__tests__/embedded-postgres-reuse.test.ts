@@ -1,8 +1,8 @@
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { readRunningEmbeddedPostgres } from "../embedded-postgres-reuse.js";
+import { assertMatchingEmbeddedPostgresDirectory, EmbeddedPostgresDirectoryIdentityError, readRunningEmbeddedPostgres } from "../embedded-postgres-reuse.js";
 
 const { probe, warn } = vi.hoisted(() => ({ probe: vi.fn(), warn: vi.fn() }));
 vi.mock("@paperclipai/db", () => ({ getPostgresDataDirectory: probe }));
@@ -81,7 +81,9 @@ describe("embedded PostgreSQL reuse identity", () => {
 
   it("refuses another PostgreSQL data directory and preserves the lock", async () => {
     writePid();
-    probe.mockResolvedValue(resolve(dataDir, "another-instance"));
+    const other = resolve(dataDir, "another-instance");
+    mkdirSync(other);
+    probe.mockResolvedValue(other);
     await expect(readRunningEmbeddedPostgres(dataDir, 55432)).rejects.toThrow("data directory belongs to another instance");
     expect(existsSync(pidFile)).toBe(true);
   });
@@ -108,4 +110,69 @@ describe("embedded PostgreSQL reuse identity", () => {
       expect(readFileSync(pidFile, "utf8")).toBe(original);
     },
   );
+  it("reuses the actual directory through a native junction or symlink", async () => {
+    writePid();
+    const alias = `${dataDir}-alias`;
+    symlinkSync(dataDir, alias, process.platform === "win32" ? "junction" : "dir");
+    expect(await readRunningEmbeddedPostgres(alias, 55432)).toEqual({ pid: 4242, port: 55432 });
+  });
+
+  it("uses the filesystem case contract instead of unconditional case folding", async () => {
+    writePid();
+    const variant = dataDir.toUpperCase();
+    if (existsSync(variant)) {
+      expect(await readRunningEmbeddedPostgres(variant, 55432)).toEqual({ pid: 4242, port: 55432 });
+    } else {
+      expect(() => assertMatchingEmbeddedPostgresDirectory(dataDir, variant))
+        .toThrow(EmbeddedPostgresDirectoryIdentityError);
+    }
+  });
+
+  it("does not merge case-distinct directories on a case-sensitive filesystem", () => {
+    const upper = resolve(dataDir, "Case");
+    const lower = resolve(dataDir, "case");
+    mkdirSync(upper);
+    if (existsSync(lower)) {
+      expect(() => assertMatchingEmbeddedPostgresDirectory(upper, lower)).not.toThrow();
+    } else {
+      mkdirSync(lower);
+      expect(() => assertMatchingEmbeddedPostgresDirectory(upper, lower))
+        .toThrow("data directory belongs to another instance");
+    }
+  });
+
+  it("refuses a reported file and retains the PID file", async () => {
+    writePid();
+    const original = readFileSync(pidFile, "utf8");
+    probe.mockResolvedValue(pidFile);
+    await expect(readRunningEmbeddedPostgres(dataDir, 55432)).rejects
+      .toThrow("data directory identity could not be verified");
+    expect(readFileSync(pidFile, "utf8")).toBe(original);
+  });
+
+  it.each([1, 2, 3, 4])("refuses native resolution failure at boundary %s without discarding the lock", async (failureAt) => {
+    writePid();
+    const original = readFileSync(pidFile, "utf8");
+    const canonical = realpathSync.native(dataDir, { encoding: "buffer" });
+    const native = vi.spyOn(realpathSync, "native");
+    for (let i = 1; i < failureAt; i += 1) native.mockReturnValueOnce(canonical);
+    native.mockImplementationOnce(() => { throw Object.assign(new Error("native lookup unavailable"), { code: "EIO" }); });
+    await expect(readRunningEmbeddedPostgres(dataDir, 55432)).rejects
+      .toThrow("data directory identity could not be verified");
+    expect(readFileSync(pidFile, "utf8")).toBe(original);
+  });
+
+  it("refuses observable alias retargeting", () => {
+    const other = resolve(dataDir, "other");
+    mkdirSync(other);
+    const canonical = realpathSync.native(dataDir, { encoding: "buffer" });
+    const retargeted = realpathSync.native(other, { encoding: "buffer" });
+    vi.spyOn(realpathSync, "native")
+      .mockReturnValueOnce(canonical)
+      .mockReturnValueOnce(canonical)
+      .mockReturnValueOnce(retargeted);
+    expect(() => assertMatchingEmbeddedPostgresDirectory(dataDir, dataDir))
+      .toThrow("data directory identity could not be verified");
+  });
+
 });

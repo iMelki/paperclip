@@ -429,7 +429,9 @@ describe("startServer embedded PostgreSQL identity", () => {
 
   it("refuses another PostgreSQL instance without removing the lock or starting", async () => {
     writeFileSync(pidFile, `4242\n${dataDir}\n1700000000\n55432\n`);
-    vi.mocked(getPostgresDataDirectory).mockResolvedValue(path.resolve(dataDir, "another-instance"));
+    const other = path.resolve(dataDir, "another-instance");
+    mkdirSync(other);
+    vi.mocked(getPostgresDataDirectory).mockResolvedValue(other);
     await expect(startServer()).rejects.toThrow("data directory belongs to another instance");
     expect(pgStartMock).not.toHaveBeenCalled();
     expect(existsSync(pidFile)).toBe(true);
@@ -458,6 +460,34 @@ describe("startServer embedded PostgreSQL identity", () => {
       expect(ensurePostgresDatabase).not.toHaveBeenCalled();
     },
   );
+  it.each(["another-directory", "missing-directory", "file"])(
+    "does not swallow affirmative no-PID identity failure: %s", async (reported) => {
+      writeFileSync(pidFile, "0\n"); // Invalid PID takes the existing no-PID recovery branch.
+      const original = readFileSync(pidFile, "utf8");
+      const other = path.resolve(dataDir, "another-instance");
+      if (reported === "another-directory") mkdirSync(other);
+      vi.mocked(getPostgresDataDirectory).mockResolvedValue(reported === "file" ? pidFile : other);
+      await expect(startServer()).rejects.toThrow(
+        reported === "another-directory"
+          ? "data directory belongs to another instance"
+          : "data directory identity could not be verified",
+      );
+      expect(readFileSync(pidFile, "utf8")).toBe(original);
+      expect(detectPortMock).not.toHaveBeenCalled();
+      expect(pgCtorMock).not.toHaveBeenCalled();
+      expect(pgStartMock).not.toHaveBeenCalled();
+      expect(ensurePostgresDatabase).not.toHaveBeenCalled();
+    },
+  );
+
+  it("retains first-boot startup when there is no PID file or affirmative database identity", async () => {
+    rmSync(pidFile);
+    vi.mocked(getPostgresDataDirectory).mockResolvedValue(null);
+    await expect(startServer()).rejects.toThrow("database phase reached");
+    expect(pgCtorMock).toHaveBeenCalledOnce();
+    expect(pgStartMock).toHaveBeenCalledOnce();
+  });
+
 });
 
 describe("startServer feedback export wiring", () => {

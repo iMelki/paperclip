@@ -33,7 +33,11 @@ import detectPort from "detect-port";
 import { createApp } from "./app.js";
 import { loadConfig } from "./config.js";
 import { resolveListenPort } from "./listen-port.js";
-import { readRunningEmbeddedPostgres } from "./embedded-postgres-reuse.js";
+import {
+  assertMatchingEmbeddedPostgresDirectory,
+  EmbeddedPostgresDirectoryIdentityError,
+  readRunningEmbeddedPostgres,
+} from "./embedded-postgres-reuse.js";
 import { logger } from "./middleware/logger.js";
 import {
   getManagedInstanceConfig,
@@ -422,17 +426,16 @@ export async function startServer(): Promise<StartedServer> {
       const configuredAdminConnectionString = `postgres://paperclip:paperclip@127.0.0.1:${configuredPort}/postgres`;
       try {
         const actualDataDir = await getPostgresDataDirectory(configuredAdminConnectionString);
-        if (
-          typeof actualDataDir !== "string" ||
-          resolve(actualDataDir) !== resolve(dataDir)
-        ) {
+        if (typeof actualDataDir !== "string") {
           throw new Error("reachable postgres does not use the expected embedded data directory");
         }
+        assertMatchingEmbeddedPostgresDirectory(dataDir, actualDataDir);
         await ensurePostgresDatabase(configuredAdminConnectionString, "paperclip");
         logger.warn(
           `Embedded PostgreSQL appears to already be reachable without a pid file; reusing existing server on configured port ${configuredPort}`,
         );
-      } catch {
+      } catch (error) {
+        if (error instanceof EmbeddedPostgresDirectoryIdentityError) throw error;
         const detectedPort = await detectPort(configuredPort);
         if (detectedPort !== configuredPort) {
           logger.warn(`Embedded PostgreSQL port is in use; using next free port (requestedPort=${configuredPort}, selectedPort=${detectedPort})`);

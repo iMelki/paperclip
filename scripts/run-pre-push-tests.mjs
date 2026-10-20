@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { spawnSync } from "node:child_process";
+import { resolveNativeExecutable, runGateChild } from "./gate-child.mjs";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import process from "node:process";
@@ -78,13 +79,14 @@ export function runGit(
     spawn = spawnSync,
   } = {},
 ) {
-  const result = spawn("git", args, {
+  const result = spawn(resolveNativeExecutable("git"), args, {
     cwd: repoRoot,
     encoding,
     killSignal: "SIGKILL",
     maxBuffer,
     windowsHide: true,
     shell: false,
+    stdio: ["ignore", "pipe", "pipe"],
     timeout,
   });
   if (result.error) {
@@ -282,17 +284,14 @@ export function resolveOutgoingChangedFiles({
   return [...changedFiles].sort();
 }
 
-function runChild(
+async function runChild(
   label,
   args,
-  { spawn = spawnSync, log = console.log, error = console.error, cwd = process.cwd() } = {},
+  { run = runGateChild, log = console.log, error = console.error, cwd = process.cwd() } = {},
 ) {
   log(`Running ${label}...`);
-  const result = spawn(process.execPath, args, {
+  const result = await run(process.execPath, args, {
     cwd,
-    stdio: "inherit",
-    windowsHide: true,
-    shell: false,
   });
   if (result.error) {
     error(`ERROR: ${label} could not start: ${result.error.message}`);
@@ -305,9 +304,9 @@ function runChild(
   return 0;
 }
 
-export function executeTestPlan(
+export async function executeTestPlan(
   { selection, targetRefs },
-  { spawn = spawnSync, log = console.log, error = console.error, repoRoot = process.cwd() } = {},
+  { run = runGateChild, log = console.log, error = console.error, repoRoot = process.cwd() } = {},
 ) {
   if (selection.selectionErrors.length > 0) {
     error("ERROR: deterministic pre-push test selection failed closed:");
@@ -331,19 +330,19 @@ export function executeTestPlan(
   }
 
   if (selection.nodeTestFiles.length > 0) {
-    const status = runChild(
+    const status = await runChild(
       `exact Node test suites (${selection.nodeTestFiles.length})`,
       ["--test", ...selection.nodeTestFiles],
-      { spawn, log, error, cwd: repoRoot },
+      { run, log, error, cwd: repoRoot },
     );
     if (status !== 0) return status;
   }
 
   if (selection.vitestFiles.length > 0) {
-    const status = runChild(
+    const status = await runChild(
       `exact Vitest suites (${selection.vitestFiles.length})`,
       [path.join(repoRoot, "scripts/run-vitest-stable.mjs"), "--files", ...selection.vitestFiles],
-      { spawn, log, error, cwd: repoRoot },
+      { run, log, error, cwd: repoRoot },
     );
     if (status !== 0) return status;
   }
@@ -436,7 +435,7 @@ if (isMainModule(import.meta.url)) {
       process.stdout.write(`${JSON.stringify(plan, null, 2)}\n`);
       process.exit(selection.selectionErrors.length > 0 ? 2 : 0);
     }
-    process.exit(executeTestPlan(plan, { repoRoot: options.repoRoot }));
+    process.exitCode = await executeTestPlan(plan, { repoRoot: options.repoRoot });
   } catch (error) {
     process.stderr.write(`ERROR: Pre-push plan integrity failure: ${error.message}\n`);
     process.exit(2);

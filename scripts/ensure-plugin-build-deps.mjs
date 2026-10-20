@@ -1,9 +1,10 @@
 #!/usr/bin/env node
 
-import { spawnSync } from "node:child_process";
+import { runGateChild } from "./gate-child.mjs";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { isMainModule } from "./is-main-module.mjs";
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const rootDir = path.resolve(scriptDir, "..");
@@ -42,8 +43,8 @@ const buildTargets = [
   },
 ];
 
-if (!fs.existsSync(tscCliPath)) {
-  throw new Error(`TypeScript CLI not found at ${tscCliPath}`);
+export async function runPluginCompiler(target, { compiler = tscCliPath, cwd = rootDir, run = runGateChild } = {}) {
+  return await run(process.execPath, [compiler, "-p", target.tsconfig], { cwd });
 }
 
 function newestInputMtimeMs(inputPath) {
@@ -98,6 +99,10 @@ function waitForLockRelease() {
   throw new Error(`Timed out waiting for plugin build dependency lock at ${lockDir}`);
 }
 
+if (isMainModule(import.meta.url)) {
+if (!fs.existsSync(tscCliPath)) {
+  throw new Error(`TypeScript CLI not found at ${tscCliPath}`);
+}
 if (allOutputsCurrent()) {
   process.exit(0);
 }
@@ -126,10 +131,7 @@ try {
       continue;
     }
 
-    const result = spawnSync(process.execPath, [tscCliPath, "-p", target.tsconfig], {
-      cwd: rootDir,
-      stdio: "inherit",
-    });
+    const result = await runPluginCompiler(target);
 
     if (result.error) {
       throw result.error;
@@ -147,5 +149,6 @@ try {
 }
 
 if (exitCode !== 0) {
-  process.exit(exitCode);
+  process.exitCode = exitCode;
+}
 }

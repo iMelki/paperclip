@@ -329,7 +329,7 @@ function selectSerializedSuites(routeTests, shardIndex, shardCount) {
   return routeTests.filter((_, index) => index % shardCount === shardIndex);
 }
 
-function runVitest(args, label, { serverExcludes = [], subcommand = "run" } = {}) {
+async function runVitest(args, label, { serverExcludes = [], subcommand = "run" } = {}) {
   console.log(`\n[test:run] ${label}`);
   invocationIndex += 1;
   const tempRootParent = process.platform === "win32" ? os.tmpdir() : "/tmp";
@@ -352,33 +352,32 @@ function runVitest(args, label, { serverExcludes = [], subcommand = "run" } = {}
     writeFileSync(excludeFile, `${JSON.stringify(serverExcludes)}\n`, "utf8");
     env.PAPERCLIP_VITEST_EXCLUDE_FILE = excludeFile;
   }
-  const result = runVitestDirect([subcommand, ...commonVitestArgs, ...args], {
+  const result = await runVitestDirect([subcommand, ...commonVitestArgs, ...args], {
     cwd: repoRoot,
     env,
-    stdio: "inherit",
   });
   if (result.error) {
     console.error(`[test:run] Failed to start Vitest: ${result.error.message}`);
-    process.exit(1);
+    throw Object.assign(new Error("Vitest transport failed"), { exitCode: 1 });
   }
   if (result.status !== 0) {
-    process.exit(result.status ?? 1);
+    throw Object.assign(new Error(`Vitest exited ${result.status ?? "unknown"}`), { exitCode: result.status ?? 1 });
   }
 }
 
-function runGeneralSuites(routeTests) {
+async function runGeneralSuites(routeTests) {
   for (const groupName of generalGroupNames) {
-    runGeneralGroup(routeTests, groupName);
+    await runGeneralGroup(routeTests, groupName);
   }
 }
 
-function runProjectGroup(projects, groupName) {
+async function runProjectGroup(projects, groupName) {
   for (const project of projects) {
-    runVitest(["--project", project], `${groupName} project ${project}`);
+    await runVitest(["--project", project], `${groupName} project ${project}`);
   }
 }
 
-function runGeneralGroup(routeTests, groupName, shardIndex = null, shardCount = null) {
+async function runGeneralGroup(routeTests, groupName, shardIndex = null, shardCount = null) {
   if (groupName === generalServerGroupName) {
     if (shardCount !== null && shardCount > 1) {
       const shardFiles = selectGeneralServerShard(
@@ -394,7 +393,7 @@ function runGeneralGroup(routeTests, groupName, shardIndex = null, shardCount = 
         return;
       }
 
-      runVitest(
+      await runVitest(
         [
           "--project",
           "@paperclipai/server",
@@ -406,7 +405,7 @@ function runGeneralGroup(routeTests, groupName, shardIndex = null, shardCount = 
       return;
     }
 
-    runVitest(
+    await runVitest(
       [
         "--project",
         "@paperclipai/server",
@@ -419,12 +418,12 @@ function runGeneralGroup(routeTests, groupName, shardIndex = null, shardCount = 
   }
 
   if (groupName === generalWorkspacesAGroupName) {
-    runProjectGroup(generalWorkspacesAProjects, groupName);
+    await runProjectGroup(generalWorkspacesAProjects, groupName);
     return;
   }
 
   if (groupName === generalWorkspacesBGroupName) {
-    runProjectGroup(generalWorkspacesBProjects, groupName);
+    await runProjectGroup(generalWorkspacesBProjects, groupName);
     return;
   }
 
@@ -575,7 +574,7 @@ async function runRelatedSuites(files) {
   }
 
   if (cap === 0) {
-    runRelatedFilesIndependently(
+    await runRelatedFilesIndependently(
       selected,
       `uncapped related selection for ${files.length} changed file(s)`,
     );
@@ -583,7 +582,7 @@ async function runRelatedSuites(files) {
   }
 
   if (selected.length <= cap) {
-    runRelatedFilesIndependently(
+    await runRelatedFilesIndependently(
       selected,
       `related to ${files.length} changed file(s): ${selected.length} suite(s)`,
     );
@@ -601,22 +600,22 @@ async function runRelatedSuites(files) {
       `[test:run] For a full local sweep before pushing: PAPERCLIP_PRECOMMIT_ALL=1 git commit ...` +
       ` (or PAPERCLIP_PRECOMMIT_RELATED_CAP=0 to run all ${selected.length}).`,
   );
-  runRelatedFilesIndependently(
+  await runRelatedFilesIndependently(
     subset,
     `related subset: ${subset.length} of ${selected.length} suite(s)`,
   );
 }
 
-function runRelatedFilesIndependently(files, label) {
-  forEachExactVitestFile(files, (file) => {
-    runVitest(
+async function runRelatedFilesIndependently(files, label) {
+  await forEachExactVitestFile(files, async (file) => {
+    await runVitest(
       ["--pool=forks", "--isolate", ...serializedServerVitestArgs, file],
       `${label}: ${file}`,
     );
   });
 }
 
-function runExactSuites(files) {
+async function runExactSuites(files) {
   const invalid = files.filter((file) => !/\.(?:test|spec)\.[mc]?[jt]sx?$/i.test(file));
   if (invalid.length > 0) {
     fail(`--files accepts only exact test paths; received: ${invalid.join(", ")}`);
@@ -624,22 +623,22 @@ function runExactSuites(files) {
   // Run each exact file separately. Some workspace projects deliberately include
   // only *.test.ts while others include *.spec.ts; one accepted file must never
   // let an excluded file disappear behind an otherwise successful invocation.
-  forEachExactVitestFile(files, (file) => {
-    runVitest(
+  await forEachExactVitestFile(files, async (file) => {
+    await runVitest(
       ["--pool=forks", "--isolate", ...serializedServerVitestArgs, file],
       `exact pre-push selection: ${file}`,
     );
   });
 }
 
-function runSerializedSuites(routeTests, shardIndex, shardCount) {
+async function runSerializedSuites(routeTests, shardIndex, shardCount) {
   const shardTests = selectSerializedSuites(routeTests, shardIndex, shardCount);
   console.log(
     `\n[test:run] serialized shard ${shardIndex + 1}/${shardCount} running ${shardTests.length} of ${routeTests.length} suites`,
   );
 
   for (const routeTest of shardTests) {
-    runVitest(
+    await runVitest(
       [
         "--project",
         "@paperclipai/server",
@@ -673,6 +672,7 @@ const generalServerTestFiles = walk(serverSrcDir)
   .filter((repoPath) => !isRouteOrAuthzTest(repoPath))
   .sort((a, b) => a.localeCompare(b));
 
+async function main() {
 const options = parseCliOptions(process.argv.slice(2));
 if (options.dryRun) {
   const serializedSuites =
@@ -715,28 +715,35 @@ if (options.dryRun) {
       2,
     ),
   );
-  process.exit(0);
+  return;
 }
 
 if (options.related) {
   // Top-level await: resolving the related set needs vitest's async Node API.
   await runRelatedSuites(options.relatedFiles);
-  process.exit(0);
+  return;
 }
 
 if (options.exact) {
-  runExactSuites(options.exactFiles);
-  process.exit(0);
+  await runExactSuites(options.exactFiles);
+  return;
 }
 
 if (options.mode === generalModeName || options.mode === allModeName) {
   if (options.group) {
-    runGeneralGroup(routeTests, options.group, options.shardIndex, options.shardCount);
+    await runGeneralGroup(routeTests, options.group, options.shardIndex, options.shardCount);
   } else {
-    runGeneralSuites(routeTests);
+    await runGeneralSuites(routeTests);
   }
 }
 
 if (options.mode === serializedModeName || options.mode === allModeName) {
-  runSerializedSuites(routeTests, options.shardIndex ?? 0, options.shardCount ?? 1);
+  await runSerializedSuites(routeTests, options.shardIndex ?? 0, options.shardCount ?? 1);
+}
+}
+
+try { await main(); }
+catch (error) {
+  console.error(`[test:run] ${error.message}`);
+  process.exitCode = Number.isInteger(error.exitCode) && error.exitCode > 0 ? error.exitCode : 1;
 }

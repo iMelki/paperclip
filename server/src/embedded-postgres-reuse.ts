@@ -1,7 +1,45 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { resolve } from "node:path";
 import { getPostgresDataDirectory } from "@paperclipai/db";
 import { logger } from "./middleware/logger.js";
+
+export class EmbeddedPostgresDirectoryIdentityError extends Error {
+  constructor(reason: "mismatch" | "unknown", cause?: unknown) {
+    super(
+      reason === "mismatch"
+        ? "Refusing to reuse PostgreSQL: its data directory belongs to another instance."
+        : "Refusing embedded PostgreSQL startup: data directory identity could not be verified.",
+      { cause },
+    );
+    this.name = "EmbeddedPostgresDirectoryIdentityError";
+  }
+}
+
+// Canonical-path check under the existing stable-namespace startup contract.
+// This does not hold directory handles or prove identity across concurrent replacement.
+export function assertMatchingEmbeddedPostgresDirectory(expectedDir: string, reportedDir: string): void {
+  try {
+    const expected = realpathSync.native(expectedDir, { encoding: "buffer" });
+    const reported = realpathSync.native(reportedDir, { encoding: "buffer" });
+    if (!statSync(expected).isDirectory() || !statSync(reported).isDirectory()) {
+      throw new EmbeddedPostgresDirectoryIdentityError("unknown");
+    }
+    // Do not case-fold: Windows directories can also be case-sensitive.
+    if (!expected.equals(reported)) {
+      throw new EmbeddedPostgresDirectoryIdentityError("mismatch");
+    }
+    // Refuse observable retargeting; repeated resolution is not an atomic object check.
+    if (
+      !realpathSync.native(expectedDir, { encoding: "buffer" }).equals(expected)
+      || !realpathSync.native(reportedDir, { encoding: "buffer" }).equals(reported)
+    ) {
+      throw new EmbeddedPostgresDirectoryIdentityError("unknown");
+    }
+  } catch (error) {
+    if (error instanceof EmbeddedPostgresDirectoryIdentityError) throw error;
+    throw new EmbeddedPostgresDirectoryIdentityError("unknown", error);
+  }
+}
 
 export async function readRunningEmbeddedPostgres(
   dataDir: string,
@@ -48,8 +86,6 @@ export async function readRunningEmbeddedPostgres(
     }
     return null;
   }
-  if (resolve(actualDataDir) !== resolve(dataDir)) {
-    throw new Error("Refusing to reuse PostgreSQL: its data directory belongs to another instance.");
-  }
+  assertMatchingEmbeddedPostgresDirectory(dataDir, actualDataDir);
   return { pid, port };
 }

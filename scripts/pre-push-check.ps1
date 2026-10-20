@@ -34,16 +34,17 @@ if (Get-Variable -Name PSNativeCommandUseErrorActionPreference -ErrorAction Sile
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repoRoot = Resolve-Path (Join-Path $scriptDir '..') | Select-Object -ExpandProperty Path
 Set-Location $repoRoot
+. (Join-Path $scriptDir 'gate-native.ps1')
 
-$nodeCommand = Get-Command node -ErrorAction SilentlyContinue
-if (-not $nodeCommand) { throw 'node was not found on PATH.' }
-$node = $nodeCommand.Source
+$node = Resolve-GateExecutable $(if ($IsWindows) { 'node.exe' } else { 'node' })
+$git = Resolve-GateExecutable $(if ($IsWindows) { 'git.exe' } else { 'git' })
 
 $previousErrorActionPreference = $ErrorActionPreference
 try {
   $ErrorActionPreference = 'Continue'
-  $gitLogOutput = @(& git rev-parse --git-path 'paperclip-gate-logs/pre-push' 2>&1)
-  $gitLogExit = $LASTEXITCODE
+  $gitLogResult = Invoke-GateNative -FilePath $git -ArgumentList @('rev-parse', '--git-path', 'paperclip-gate-logs/pre-push') -WorkingDirectory $repoRoot -Capture -TimeoutMs 120000
+  $gitLogOutput = @($gitLogResult.Stdout.TrimEnd() -split "`r?`n")
+  $gitLogExit = $gitLogResult.ExitCode
 } finally {
   $ErrorActionPreference = $previousErrorActionPreference
 }
@@ -100,14 +101,14 @@ if ($ChangedFiles -and $ChangedFiles.Count -gt 0) {
 }
 
 if ($DryRun) {
-  & $node @planArgs --dry-run
-  exit $LASTEXITCODE
+  $dryResult = Invoke-GateNative -FilePath $node -ArgumentList @($planArgs + '--dry-run') -WorkingDirectory $repoRoot
+  exit $dryResult.ExitCode
 }
 
-$pnpmCommand = Get-Command pnpm.cmd -ErrorAction SilentlyContinue
-if (-not $pnpmCommand) { $pnpmCommand = Get-Command pnpm -ErrorAction SilentlyContinue }
-if (-not $pnpmCommand) { throw 'pnpm was not found on PATH.' }
-$pnpm = $pnpmCommand.Source
+function Invoke-WorkspaceGate {
+  param([string[]]$Arguments)
+  return Invoke-GateNative -FilePath $node -ArgumentList (@('scripts/run-workspace-gate.mjs') + $Arguments) -WorkingDirectory $repoRoot -NativeLogPath $LogPath
+}
 
 New-Item -ItemType Directory -Force -Path $logDirectory | Out-Null
 [IO.File]::AppendAllText(
@@ -145,12 +146,8 @@ function Invoke-Step {
   $previousErrorActionPreference = $ErrorActionPreference
   try {
     $ErrorActionPreference = 'Continue'
-    & $Action 2>&1 | ForEach-Object {
-      $rendered = [string]$_
-      Add-Content -LiteralPath $LogPath -Value $rendered -ErrorAction Stop
-      Write-Host $rendered
-    }
-    $stepExit = $LASTEXITCODE
+    $stepResult = & $Action
+    $stepExit = $stepResult.ExitCode
   } finally {
     $ErrorActionPreference = $previousErrorActionPreference
   }
@@ -172,48 +169,44 @@ Write-GateLine -Message "Started $($start.ToString('HH:mm:ss'))."
 Write-GateLine -Message 'Exact local suites plus hosted dev PR CI replace uncapped import-graph selection.'
 
 Invoke-Step -Name 'adapter/runtime no-git-push policy' `
-  -Action { & $node scripts/check-no-git-push.mjs } `
+  -Action { Invoke-GateNative -FilePath $node -ArgumentList @('scripts/check-no-git-push.mjs') -WorkingDirectory $repoRoot -NativeLogPath $LogPath } `
   -FailureMessage 'Adapter/runtime git-push policy failed or could not scan its full subject.'
 
 if (-not $failed) {
   Invoke-Step -Name 'PR workflow trigger policy' `
-    -Action { & $node scripts/check-pr-workflow-trigger.mjs } `
+    -Action { Invoke-GateNative -FilePath $node -ArgumentList @('scripts/check-pr-workflow-trigger.mjs') -WorkingDirectory $repoRoot -NativeLogPath $LogPath } `
     -FailureMessage 'PR workflow must cover master and dev without a push:dev trigger.'
 }
 
 if (-not $failed) {
   Invoke-Step -Name 'outgoing commit secret scan' `
     -Action {
-      & $node scripts/scan-pre-push-secrets.mjs `
-        --repo-root $repoRoot `
-        --remote-name $RemoteName `
-        --remote-location $RemoteLocation `
-        --updates-file $updatesPath
+      Invoke-GateNative -FilePath $node -ArgumentList @('scripts/scan-pre-push-secrets.mjs', '--repo-root', [string]$repoRoot, '--remote-name', $RemoteName, '--remote-location', $RemoteLocation, '--updates-file', $updatesPath) -WorkingDirectory $repoRoot -NativeLogPath $LogPath
     } `
     -FailureMessage 'An outgoing commit contains a secret or its exact scan failed.'
 }
 
 if (-not $failed) {
   Invoke-Step -Name 'workspace link preflight' `
-    -Action { & $pnpm @('run', 'preflight:workspace-links') } `
+    -Action { Invoke-WorkspaceGate -Arguments @('preflight') } `
     -FailureMessage 'Workspace link preflight failed.'
 }
 
 if (-not $failed) {
   Invoke-Step -Name 'forbidden token check' `
-    -Action { & $pnpm @('run', 'check:tokens') } `
+    -Action { Invoke-WorkspaceGate -Arguments @('tokens') } `
     -FailureMessage 'Forbidden tokens found.'
 }
 
 if (-not $failed) {
   Invoke-Step -Name 'full TypeScript check (pnpm -r typecheck)' `
-    -Action { & $pnpm @('-r', 'typecheck') } `
+    -Action { Invoke-WorkspaceGate -Arguments @('typecheck') } `
     -FailureMessage 'TypeScript check failed.'
 }
 
 if (-not $failed) {
   Invoke-Step -Name 'deterministic exact test plan' `
-    -Action { & $node @planArgs } `
+    -Action { Invoke-GateNative -FilePath $node -ArgumentList $planArgs -WorkingDirectory $repoRoot -NativeLogPath $LogPath } `
     -FailureMessage 'Exact test selection, hosted-CI policy, or a selected test failed.'
 }
 

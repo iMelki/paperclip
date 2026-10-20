@@ -20,6 +20,10 @@
  */
 import { spawnSync } from "node:child_process";
 import path from "node:path";
+import { appendFileSync, mkdirSync, realpathSync, statSync } from "node:fs";
+import { resolveNativeExecutable } from "./gate-child.mjs";
+import { resolvePnpmCli } from "./resolve-pnpm-cli.mjs";
+import { isMainModule } from "./is-main-module.mjs";
 import { fileURLToPath } from "node:url";
 
 const FULL_SWEEP_PATTERNS = [
@@ -31,22 +35,46 @@ const FULL_SWEEP_PATTERNS = [
 ];
 
 function fail(message) {
-  console.error(`[affected-packages] ${message}`);
-  process.exit(1);
+  throw new Error(message);
 }
 
 function toPosix(value) {
   return value.split(path.sep).join("/");
 }
 
-function readStagedFiles() {
-  const result = spawnSync("git", ["diff", "--cached", "--name-only", "--diff-filter=ACMR"], {
-    encoding: "utf8",
+export function runCaptured(executable, args, { cwd, env = process.env, logPrefix, spawn = spawnSync } = {}) {
+  const result = spawn(executable, args, {
+    cwd, env, encoding: "utf8", windowsHide: true, shell: false,
+    stdio: ["ignore", "pipe", "pipe"], timeout: 120_000,
+    maxBuffer: 128 * 1024, killSignal: "SIGKILL",
   });
-  if (result.status !== 0) {
-    fail(`git diff --cached failed: ${result.stderr?.trim() || "unknown error"}`);
+  // Sync buffers are finite; the enclosing native supervisor still owns the tree.
+  // Preserve both raw streams privately rather than mixing membership JSON into stdout.
+  if (logPrefix) {
+    appendFileSync(logPrefix + ".stdout.log", result.stdout ?? "");
+    appendFileSync(logPrefix + ".stderr.log", result.stderr ?? "");
   }
+  if (result.error || result.status !== 0) {
+    throw new Error(`native query failed (exit ${result.status ?? "unknown"}): ${result.error?.message ?? result.stderr?.trim() ?? "unknown error"}`);
+  }
+  return result;
+}
+
+export function readStagedFiles(options = {}) {
+  const git = resolveNativeExecutable("git", { env: options.env ?? process.env });
+  const result = runCaptured(git, ["diff", "--cached", "--name-only", "--diff-filter=ACMR"], options);
   return result.stdout.split("\n").map((line) => line.trim()).filter(Boolean);
+}
+
+function selectedPnpmCommand(env) {
+  for (const directory of (env.PATH ?? env.Path ?? "").split(path.delimiter)) {
+    if (!directory || !path.isAbsolute(directory)) continue;
+    for (const name of process.platform === "win32" ? ["pnpm.cmd", "pnpm.exe"] : ["pnpm"]) {
+      const candidate = path.join(directory, name);
+      try { if (statSync(candidate).isFile()) return candidate; } catch { /* metadata only */ }
+    }
+  }
+  return undefined;
 }
 
 /**
@@ -54,30 +82,10 @@ function readStagedFiles() {
  * by hand would miss the `!`-prefixed exclusions (sandbox-provider plugins, the orchestration
  * smoke fixture), and filtering on a package pnpm does not know about makes it exit non-zero.
  */
-function listWorkspacePackages(repoRoot) {
-  // Node refuses to spawn a .cmd shim without a shell (CVE-2024-27980 mitigation), and passing
-  // an args array *with* `shell: true` concatenates argv unescaped (DEP0190). Passing one static
-  // command string is the form that is both supported and warning-free; there is no interpolation
-  // here, so nothing user-controlled reaches the shell.
-  const result =
-    process.platform === "win32"
-      ? spawnSync("pnpm list -r --depth -1 --json", {
-          cwd: repoRoot,
-          encoding: "utf8",
-          shell: true,
-        })
-      : spawnSync("pnpm", ["list", "-r", "--depth", "-1", "--json"], {
-          cwd: repoRoot,
-          encoding: "utf8",
-        });
-  if (result.error) {
-    fail(`could not run pnpm list: ${result.error.message}`);
-  }
-  if (result.status !== 0) {
-    fail(
-      `pnpm list exited ${result.status ?? "null"}: ${result.stderr?.trim() || "no stderr output"}`,
-    );
-  }
+export function listWorkspacePackages(repoRoot, options = {}) {
+  const env = options.env ?? process.env;
+  const binding = resolvePnpmCli({ repoRoot, selectedCommand: selectedPnpmCommand(env), env });
+  const result = runCaptured(process.execPath, [binding.cli, "list", "-r", "--depth", "-1", "--json"], { ...options, cwd: repoRoot, env });
   let parsed;
   try {
     parsed = JSON.parse(result.stdout);
@@ -108,19 +116,7 @@ function matchPackage(packages, file) {
   );
 }
 
-function main() {
-  const argv = process.argv.slice(2);
-  const asJson = argv.includes("--json");
-  const files = argv.filter((arg) => !arg.startsWith("--"));
-  const changed = files.length > 0 ? files.map(toPosix) : readStagedFiles().map(toPosix);
-
-  const fullSweepTrigger = changed.find((file) =>
-    FULL_SWEEP_PATTERNS.some((pattern) => pattern.test(file)),
-  );
-
-  const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-  const packages = fullSweepTrigger ? [] : listWorkspacePackages(repoRoot);
-
+export function affectedPayload(changed, packages, fullSweepTrigger = null) {
   const affected = new Set();
   const unmatched = [];
   if (!fullSweepTrigger) {
@@ -141,6 +137,36 @@ function main() {
     unmatchedFiles: unmatched,
   };
 
+  return payload;
+}
+
+export function main() {
+  const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+  const git = resolveNativeExecutable("git");
+  const identity = runCaptured(git, ["rev-parse", "--show-toplevel"], { cwd: repoRoot });
+  const normalize = (value) => process.platform === "win32" ? value.toLowerCase() : value;
+  if (normalize(realpathSync(identity.stdout.trim())) !== normalize(realpathSync(repoRoot))) throw new Error("Git root does not match the affected-workspace source root");
+  const logResult = runCaptured(git, ["rev-parse", "--git-path", "paperclip-gate-logs/pre-commit"], { cwd: repoRoot });
+  const logPath = logResult.stdout.trim();
+  if (!logPath || /[\r\n]/u.test(logPath)) throw new Error("Git-private query log path is invalid");
+  const logDirectory = path.resolve(repoRoot, logPath);
+  mkdirSync(logDirectory, { recursive: true });
+  const options = { cwd: repoRoot, logPrefix: path.join(logDirectory, `affected-${Date.now()}-${process.pid}`) };
+  appendFileSync(options.logPrefix + ".stdout.log", identity.stdout + logResult.stdout);
+  appendFileSync(options.logPrefix + ".stderr.log", (identity.stderr ?? "") + (logResult.stderr ?? ""));
+  const argv = process.argv.slice(2);
+  const asJson = argv.includes("--json");
+  const files = argv.filter((arg) => !arg.startsWith("--"));
+  const changed = files.length > 0 ? files.map(toPosix) : readStagedFiles(options).map(toPosix);
+
+  const fullSweepTrigger = changed.find((file) =>
+    FULL_SWEEP_PATTERNS.some((pattern) => pattern.test(file)),
+  );
+
+  const packages = fullSweepTrigger ? [] : listWorkspacePackages(repoRoot, options);
+
+  const payload = affectedPayload(changed, packages, fullSweepTrigger);
+
   if (asJson) {
     console.log(JSON.stringify(payload, null, 2));
     return;
@@ -148,4 +174,6 @@ function main() {
   for (const name of payload.packages) console.log(name);
 }
 
-main();
+if (isMainModule(import.meta.url)) {
+  try { main(); } catch (error) { console.error(`[affected-packages] ${error.message}`); process.exitCode = 1; }
+}

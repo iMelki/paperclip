@@ -31,6 +31,22 @@ can be verified. A reachable server that reports another data directory is also
 refused without removing the lock. This check applies to server startup; the
 CLI lifecycle checks remain separate.
 
+Both server startup recovery paths resolve the configured and reported data
+directories with the native filesystem realpath operation and require exact
+canonical bytes. This supports native junction/symlink aliases without blanket
+case folding; a directory that cannot be resolved or verified as a directory is
+refused conservatively. After an affirmative database response, mismatch or a
+filesystem error escapes no-PID recovery instead of selecting another port and
+starting a second cluster. The ordinary first-boot null-query fallback and the
+live-PID query-failure lock-preservation rule remain separate.
+
+This is a canonical-path check in a stable startup namespace, not simultaneous
+held-handle object identity or protection against arbitrary concurrent directory
+replacement. Regression controls cover aliases, filesystem case behavior,
+resolution errors, observable retargeting and no-PID refusal. The new candidate
+has not run those controls or been installed; normal checks and native acceptance
+are still required.
+
 If you need to apply pending migrations manually, run:
 
 ```sh

@@ -6,6 +6,17 @@ All notable changes to this repository should be recorded here.
 
 ## Unreleased
 
+- **[#35 / PR #169]** Preserve every local hook check through direct, bounded
+  Node dispatch, with authoritative pnpm LIST membership and a scoped pure
+  TypeScript loader. Avoid pnpm/tsx inherited-console lifecycle launches.
+
+- **[#35 / PR #169]** Repair the local pre-push launch chain without changing
+  its policy, secret ranges, full typecheck or exact test selection. Native
+  children use explicit windowless creation and consumed pipes; async callers
+  await output completion and natural failures. Select an installed pnpm CLI
+  matching the project declaration without invoking a CMD/version-manager shim.
+  Local validation, independent review and publication remain pending.
+
 - **[#35 / PR #169]** Preserve the embedded PostgreSQL PID file when identity
   cannot be verified for a live or inaccessible process. Refuse a second start.
   Keep explicit dead-PID and current-Node-PID recovery, and verified PostgreSQL

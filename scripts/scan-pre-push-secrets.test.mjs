@@ -136,43 +136,43 @@ test("rejects a push destination that does not match the configured remote", () 
   );
 });
 
-test("propagates the first verifier failure and restored children pass", () => {
+test("propagates the first verifier failure and restored children pass", async () => {
   const scans = [
     { localRef: "refs/heads/a", remoteRef: "refs/heads/a", args: ["--range", `${A}..${B}`] },
     { localRef: "refs/heads/b", remoteRef: "refs/heads/b", args: ["--range", `${B}..${C}`] },
   ];
   let calls = 0;
-  const failing = executePrePushSecretScans(scans, {
-    spawn: () => ({ status: ++calls === 2 ? 23 : 0 }),
+  const failing = await executePrePushSecretScans(scans, {
+    run: async () => ({ status: ++calls === 2 ? 23 : 0 }),
     log: () => {},
     error: () => {},
   });
   assert.equal(failing, 23);
   assert.equal(calls, 2);
 
-  const passing = executePrePushSecretScans(scans, {
-    spawn: () => ({ status: 0 }),
+  const passing = await executePrePushSecretScans(scans, {
+    run: async () => ({ status: 0 }),
     log: () => {},
     error: () => {},
   });
   assert.equal(passing, 0);
 });
 
-test("verifier spawn errors and signals fail closed with attributable output", () => {
+test("verifier spawn errors and signals fail closed with attributable output", async () => {
   const scans = [
     { localRef: "refs/heads/a", remoteRef: "refs/heads/a", args: ["--range", `${A}..${B}`] },
   ];
   const spawnErrors = [];
-  assert.equal(executePrePushSecretScans(scans, {
-    spawn: () => ({ error: new Error("sentinel spawn failure") }),
+  assert.equal(await executePrePushSecretScans(scans, {
+    run: async () => ({ error: new Error("sentinel spawn failure") }),
     log: () => {},
     error: (message) => spawnErrors.push(message),
   }), 2);
   assert.match(spawnErrors.join("\n"), /could not start: sentinel spawn failure/);
 
   const signalErrors = [];
-  assert.equal(executePrePushSecretScans(scans, {
-    spawn: () => ({ status: null, signal: "SIGTERM" }),
+  assert.equal(await executePrePushSecretScans(scans, {
+    run: async () => ({ status: null, signal: "SIGTERM" }),
     log: () => {},
     error: (message) => signalErrors.push(message),
   }), 2);

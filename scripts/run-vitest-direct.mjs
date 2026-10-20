@@ -1,4 +1,4 @@
-import { spawnSync } from "node:child_process";
+import { runGateChild } from "./gate-child.mjs";
 import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import path from "node:path";
@@ -31,27 +31,23 @@ export function resolveVitestCli(
 }
 
 /** Launches Vitest without a command shell so Git-controlled test paths remain argv data. */
-export function runVitestDirect(
+export async function runVitestDirect(
   args,
   {
     cwd,
     env,
-    stdio = "inherit",
-    spawn = spawnSync,
+    run = runGateChild,
     resolvePackage = require.resolve,
     readManifest = readFileSync,
   } = {},
 ) {
-  return spawn(process.execPath, [resolveVitestCli(resolvePackage, readManifest), ...args], {
+  return await run(process.execPath, [resolveVitestCli(resolvePackage, readManifest), ...args], {
     cwd,
     env,
-    stdio,
-    windowsHide: true,
-    shell: false,
   });
 }
 
 /** Invokes each exact suite independently so one collected file cannot mask an unmatched file. */
-export function forEachExactVitestFile(files, runFile) {
-  for (const file of files) runFile(file);
+export async function forEachExactVitestFile(files, runFile) {
+  for (const file of files) await runFile(file);
 }

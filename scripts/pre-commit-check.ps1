@@ -20,18 +20,24 @@ $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repoRoot = Resolve-Path (Join-Path $scriptDir "..") | Select-Object -ExpandProperty Path
 Set-Location $repoRoot
 
+# Keep every native descendant on the same explicit transport as pre-push.
+. (Join-Path $scriptDir 'gate-native.ps1')
+$node = Resolve-GateExecutable $(if ($IsWindows) { 'node.exe' } else { 'node' })
+$git = Resolve-GateExecutable $(if ($IsWindows) { 'git.exe' } else { 'git' })
+$logResult = Invoke-GateNative -FilePath $git -ArgumentList @('rev-parse', '--git-path', 'paperclip-gate-logs/pre-commit') -WorkingDirectory $repoRoot -Capture -TimeoutMs 120000
+if ($logResult.ExitCode -ne 0 -or [string]::IsNullOrWhiteSpace($logResult.Stdout) -or $logResult.Stdout.Trim() -match '[\r\n]') {
+  throw 'Could not resolve the Git-private pre-commit log directory.'
+}
+$logDirectory = [IO.Path]::GetFullPath($(if ([IO.Path]::IsPathRooted($logResult.Stdout.Trim())) { $logResult.Stdout.Trim() } else { Join-Path $repoRoot $logResult.Stdout.Trim() }))
+New-Item -ItemType Directory -Force -Path $logDirectory | Out-Null
+$nativeLogPath = Join-Path $logDirectory ("{0:yyyyMMddTHHmmssZ}-{1}" -f [DateTime]::UtcNow, $PID)
+
 $failed = $false
 $runAll = $All -or ($env:PAPERCLIP_PRECOMMIT_ALL -eq "1")
-$stagedFiles = @(& git diff --cached --name-only --diff-filter=ACMR)
+$stagedResult = Invoke-GateNative -FilePath $git -ArgumentList @('diff', '--cached', '--name-only', '--diff-filter=ACMR') -WorkingDirectory $repoRoot -NativeLogPath $nativeLogPath -Capture -TimeoutMs 120000
+if ($stagedResult.ExitCode -ne 0) { throw 'Could not read staged paths; pre-commit cannot select its checks.' }
+$stagedFiles = @($stagedResult.Stdout -split "`r?`n" | Where-Object { $_ -ne '' })
 
-$pnpmCommand = Get-Command pnpm.cmd -ErrorAction SilentlyContinue
-if (-not $pnpmCommand) {
-  $pnpmCommand = Get-Command pnpm -ErrorAction SilentlyContinue
-}
-if (-not $pnpmCommand) {
-  throw "pnpm was not found on PATH."
-}
-$pnpm = $pnpmCommand.Source
 
 function Write-Fail {
   param([string]$Message)
@@ -58,9 +64,9 @@ function Test-StagedMatch {
   return $false
 }
 
-function Invoke-Pnpm {
+function Invoke-WorkspaceGate {
   param([string[]]$Arguments)
-  & $pnpm @Arguments
+  return Invoke-GateNative -FilePath $node -ArgumentList (@('scripts/run-workspace-gate.mjs') + $Arguments) -WorkingDirectory $repoRoot -NativeLogPath $nativeLogPath
 }
 
 Write-Host "Paperclip - Pre-Commit Check"
@@ -80,15 +86,18 @@ if ($runAll -or (Test-StagedMatch '^package\.json$|^pnpm-workspace\.yaml$')) {
 Write-Host ""
 Write-Host "Running TypeScript check..."
 if ($runAll -or (Test-StagedMatch '^(server|ui|cli|packages)/|(^|/)(package\.json|pnpm-workspace\.yaml|tsconfig\.[^/]+|tsconfig\.json)$|\.tsx?$|\.mts$|\.cts$')) {
+  $typeExit = 0
   if ($runAll) {
-    Invoke-Pnpm @("-r", "typecheck")
+    $typeExit = (Invoke-WorkspaceGate -Arguments @("typecheck")).ExitCode
   } else {
     # Scope the typecheck to the packages the staged files actually touch, expanded to their
     # dependents via pnpm's "...<pkg>" selector so a changed type surface is still checked
     # against every consumer. A staged root build input (lockfile, workspace manifest, root
     # tsconfig) reports fullSweep and falls back to the full -r run.
-    $affectedRaw = & node scripts/affected-workspace-packages.mjs --json
-    $affectedExit = $LASTEXITCODE
+    $affectedResult = Invoke-GateNative -FilePath $node -ArgumentList @('scripts/affected-workspace-packages.mjs', '--json') -WorkingDirectory $repoRoot -NativeLogPath $nativeLogPath -Capture -TimeoutMs 120000
+    $affectedRaw = $affectedResult.Stdout
+    $affectedExit = $affectedResult.ExitCode
+    $typeExit = $affectedExit
     if ($affectedExit -ne 0) {
       Write-Fail "Could not resolve affected workspace packages (exit $affectedExit)."
       $affected = $null
@@ -100,24 +109,24 @@ if ($runAll -or (Test-StagedMatch '^(server|ui|cli|packages)/|(^|/)(package\.jso
       # Already recorded a failure above; do not silently skip the check.
     } elseif ($affected.fullSweep) {
       Write-InfoLine "Full typecheck sweep: $($affected.fullSweepReason)"
-      Invoke-Pnpm @("-r", "typecheck")
+      $typeExit = (Invoke-WorkspaceGate -Arguments @("typecheck")).ExitCode
     } else {
       $affectedPackages = @($affected.packages)
       if ($affectedPackages.Count -eq 0) {
         Write-InfoLine "Skipping TypeScript check (staged files are outside every workspace package)."
-        $LASTEXITCODE = 0
+        $typeExit = 0
       } else {
         Write-InfoLine "Typechecking $($affectedPackages.Count) affected package(s) plus dependents: $($affectedPackages -join ', ')"
         $filterArgs = @()
         foreach ($package in $affectedPackages) {
           $filterArgs += @("--filter", "...$package")
         }
-        Invoke-Pnpm ($filterArgs + @("typecheck"))
+        $typeExit = (Invoke-WorkspaceGate -Arguments (@("typecheck") + $filterArgs)).ExitCode
       }
     }
   }
 
-  if ($LASTEXITCODE -eq 0) {
+  if ($typeExit -eq 0) {
     Write-Pass
   } else {
     Write-Fail "TypeScript check failed."
@@ -129,8 +138,8 @@ if ($runAll -or (Test-StagedMatch '^(server|ui|cli|packages)/|(^|/)(package\.jso
 Write-Host ""
 Write-Host "Running unit tests..."
 if ($runAll) {
-  Invoke-Pnpm @("run", "test:run")
-  if ($LASTEXITCODE -eq 0) {
+  $unitResult = Invoke-WorkspaceGate -Arguments @("test-run")
+  if ($unitResult.ExitCode -eq 0) {
     Write-Pass
   } else {
     Write-Fail "Unit tests failed."
@@ -152,12 +161,12 @@ if ($runAll) {
     Write-InfoLine "Running suites related to $($relatedSeeds.Count) staged source file(s)."
     # Mirrors the `test:run` script: the workspace-link preflight has to run before vitest,
     # then the stable runner supplies the isolated PAPERCLIP_HOME/TMPDIR sandbox.
-    Invoke-Pnpm @("run", "preflight:workspace-links")
-    if ($LASTEXITCODE -ne 0) {
+    $preflightResult = Invoke-WorkspaceGate -Arguments @("preflight")
+    if ($preflightResult.ExitCode -ne 0) {
       Write-Fail "Workspace link preflight failed."
     } else {
-      & node scripts/run-vitest-stable.mjs --related @relatedSeeds
-      if ($LASTEXITCODE -eq 0) {
+      $relatedResult = Invoke-GateNative -FilePath $node -ArgumentList (@('scripts/run-vitest-stable.mjs', '--related') + $relatedSeeds) -WorkingDirectory $repoRoot -NativeLogPath $nativeLogPath
+      if ($relatedResult.ExitCode -eq 0) {
         Write-Pass
       } else {
         Write-Fail "Unit tests failed."
@@ -170,8 +179,8 @@ if ($runAll) {
 
 Write-Host ""
 Write-Host "Checking forbidden tokens..."
-Invoke-Pnpm @("run", "check:tokens")
-if ($LASTEXITCODE -eq 0) {
+$tokenResult = Invoke-WorkspaceGate -Arguments @("tokens")
+if ($tokenResult.ExitCode -eq 0) {
   Write-Pass
 } else {
   Write-Fail "Forbidden tokens found."
@@ -179,8 +188,8 @@ if ($LASTEXITCODE -eq 0) {
 
 Write-Host ""
 Write-Host "Running pinned Gitleaks staged scan..."
-& node scripts/verify-gitleaks.mjs --staged
-if ($LASTEXITCODE -eq 0) {
+$secretResult = Invoke-GateNative -FilePath $node -ArgumentList @('scripts/verify-gitleaks.mjs', '--staged') -WorkingDirectory $repoRoot -NativeLogPath $nativeLogPath
+if ($secretResult.ExitCode -eq 0) {
   Write-Pass
 } else {
   Write-Fail "Pinned Gitleaks scan failed or detected potential secrets."

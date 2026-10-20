@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -22,7 +22,7 @@ async function unusedPort(): Promise<number> {
 
 it("rejects an actual node PID on a closed port, then starts and reuses actual PostgreSQL", async () => {
   await prepareEmbeddedPostgresNativeRuntime();
-  const dataDir = realpathSync(mkdtempSync(join(tmpdir(), "embedded-pg-native-identity-")));
+  const dataDir = mkdtempSync(join(tmpdir(), "embedded-pg-native-identity-"));
   const port = await unusedPort();
   const pg = new EmbeddedPostgres({
     databaseDir: dataDir,
@@ -50,6 +50,12 @@ it("rejects an actual node PID on a closed port, then starts and reuses actual P
     const postgresPid = Number(readFileSync(pidFile, "utf8").split("\n")[0]);
     expect(postgresPid).not.toBe(process.pid);
     expect(await readRunningEmbeddedPostgres(dataDir, port)).toEqual({ pid: postgresPid, port });
+    const alias = `${dataDir}-alias`;
+    symlinkSync(dataDir, alias, process.platform === "win32" ? "junction" : "dir");
+    expect(await readRunningEmbeddedPostgres(alias, port)).toEqual({ pid: postgresPid, port });
+    if (process.platform === "win32" && existsSync(dataDir.toUpperCase())) {
+      expect(await readRunningEmbeddedPostgres(dataDir.toUpperCase(), port)).toEqual({ pid: postgresPid, port });
+    }
     // A prior startup may have selected another port; the PID file owns it.
     expect(await readRunningEmbeddedPostgres(dataDir, 54329)).toEqual({ pid: postgresPid, port });
     expect(process.kill(process.pid, 0)).toBe(true);

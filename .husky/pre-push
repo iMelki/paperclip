@@ -5,8 +5,9 @@
 # Exit status is propagated explicitly rather than relying on the husky dispatcher's
 # `sh -e`, so this hook rejects a push for exactly one reason: a step failed.
 if command -v pwsh >/dev/null 2>&1; then
-  pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/pre-push-check.ps1 \
-    -RemoteName "$1" -RemoteLocation "$2"
+  node_path=$(command -v node) || exit 2
+  pwsh_path=$(command -v pwsh) || exit 2
+  "$node_path" scripts/run-pre-push-pwsh.mjs "$pwsh_path" "$1" "$2"
   status=$?
 else
   sh scripts/pre-push-check.sh "$@"

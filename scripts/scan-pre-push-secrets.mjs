@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { spawnSync } from "node:child_process";
+import { runGateChild } from "./gate-child.mjs";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import process from "node:process";
@@ -65,11 +65,11 @@ export function buildPrePushSecretScans({
   });
 }
 
-export function executePrePushSecretScans(
+export async function executePrePushSecretScans(
   scans,
   {
     repoRoot = process.cwd(),
-    spawn = spawnSync,
+    run = runGateChild,
     log = console.log,
     error = console.error,
   } = {},
@@ -77,11 +77,8 @@ export function executePrePushSecretScans(
   const verifier = path.join(repoRoot, "scripts", "verify-gitleaks.mjs");
   for (const scan of scans) {
     log(`Scanning outgoing secrets for ${scan.localRef} -> ${scan.remoteRef}...`);
-    const result = spawn(process.execPath, [verifier, ...scan.args], {
+    const result = await run(process.execPath, [verifier, ...scan.args], {
       cwd: repoRoot,
-      stdio: "inherit",
-      windowsHide: true,
-      shell: false,
     });
     if (result.error) {
       error(`ERROR: outgoing secret scan could not start: ${result.error.message}`);
@@ -137,7 +134,7 @@ if (isMainModule(import.meta.url)) {
       remoteLocation: options.remoteLocation,
       updates,
     });
-    process.exit(executePrePushSecretScans(scans, { repoRoot: options.repoRoot }));
+    process.exitCode = await executePrePushSecretScans(scans, { repoRoot: options.repoRoot });
   } catch (error) {
     process.stderr.write(`ERROR: Pre-push secret scan integrity failure: ${error.message}\n`);
     process.exit(2);

@@ -1,4 +1,5 @@
 import { spawnSync } from "node:child_process";
+import { resolveNativeExecutable } from "./gate-child.mjs";
 import process from "node:process";
 
 export const GIT_CHILD_MAX_BUFFER = 64 * 1024 * 1024;
@@ -95,13 +96,14 @@ export function parseTrackedManifest(output, repoRoot = ".") {
 }
 
 export function readTrackedManifest(repoRoot, spawn = spawnSync) {
-  const result = spawn("git", ["-C", repoRoot, "ls-files", "-v", "-z"], {
+  const result = spawn(resolveNativeExecutable("git"), ["-C", repoRoot, "ls-files", "-v", "-z"], {
     encoding: null,
     killSignal: "SIGKILL",
     maxBuffer: GIT_CHILD_MAX_BUFFER,
     timeout: GIT_CHILD_TIMEOUT_MS,
     windowsHide: true,
     shell: false,
+    stdio: ["ignore", "pipe", "pipe"],
   });
   if (result.error || result.status !== 0) {
     throw new ScanIntegrityError(
