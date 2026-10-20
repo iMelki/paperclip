@@ -141,6 +141,12 @@ All notable changes to this repository should be recorded here.
   directory. Any lock still present just before start is moved aside the same
   way; if it cannot be moved, startup refuses (exit code 75).
 
+- **[#148]** Preserve declared Codex model ordering after discovery and keep
+  ordinary model picker entries in the adapter’s order. GPT-6 entries stay
+  ahead of older declared models; unknown discovered IDs remain available and
+  deterministic. Detected-model promotion, provider groups, manual IDs, saved
+  selections and model discovery caching retain their existing behavior.
+
 - **[#164]** Refresh Lockfile accepts manual `ref` and `base` inputs that default
   to `dev`. Each base has its own refresh branch and matching PR lookup. Master
   pushes still refresh their triggering commit and retain auto-merge; other bases

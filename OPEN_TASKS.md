@@ -50,6 +50,18 @@ integration outcome; later rows remain queued and do not imply concurrent execut
   `doc/evidence/issue-154/verification.md`. Co-CTO review, merge, and hosted CI
   remain open; this change does not update a live instance.
 
+- [#148 — Keep newer Codex models visible in the picker](https://github.com/iMelki/paperclip/issues/148):
+  The isolated candidate preserves declared Codex ordering in discovery and the
+  ordinary picker. The exact server suite passed 21/21 and UI suite passed 14/14,
+  including eight added regressions. Old production code failed the six expected
+  sorting assertions, then the exact candidate was restored. The official token
+  gate and full server no-emit typecheck passed. After repairing private SDK React
+  bindings, the original full UI no-emit compiler passed in 121.84 seconds with
+  empty complete captures and an owned process tree of zero. Its prior 120-second
+  deadline remains recorded. Complete React warning captures are retained.
+  Normal repository publication hooks, exact public-write approval,
+  installed picker verification and saved-model/provider execution remain required.
+
 - [#164 — Let Refresh Lockfile target dev](https://github.com/iMelki/paperclip/issues/164):
   Manual branch/base selection and isolated refresh branches are under CTO review.
   After the restart merge freeze lifts, merge the workflow fix and observe a dev

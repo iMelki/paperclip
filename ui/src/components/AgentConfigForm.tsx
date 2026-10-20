@@ -1817,7 +1817,7 @@ export function ModelDropdown({
       return [
         {
           provider: "models",
-          entries: [...filteredModels].sort((a, b) => a.id.localeCompare(b.id)),
+          entries: [...filteredModels],
         },
       ];
     }
