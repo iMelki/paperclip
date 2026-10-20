@@ -29,9 +29,18 @@ Linux x64 `8.30.1` release, verifies SHA-256
 and scans only the pull request's commit range (`base..head`, by exact SHA) with
 `node scripts/verify-gitleaks.mjs --range`. A real-scanner test in the same job
 proves that an in-range secret fails, an out-of-range one is skipped, and a range
-whose commits are missing fails closed. Existing `verify` and `e2e` jobs depend on
+whose commits are missing fails closed. The range scan passes `-m` to `git log`,
+so a secret that exists only in a merge commit's own diff is caught too (a
+real-scanner test builds such a merge). Existing `verify` and `e2e` jobs depend on
 that result, so the normal PR verification chain cannot pass after a scanner
 finding or tool failure.
+
+`pr.yml` does not run when only the base branch changes. The separate
+`secret-scan-retarget` job in `.github/workflows/pr-retarget-secret-scan.yml`
+re-scans the new `base..head` range on a base change and skips title and body
+edits; it has its own concurrency group so it never cancels the main PR checks.
+It is a distinct check name, so add it to branch protection if retargets should
+be required to pass it.
 
 The range scan does not cover commits that never pass through a pull request:
 direct pushes and upstream-sync commits. Run `node scripts/verify-gitleaks.mjs

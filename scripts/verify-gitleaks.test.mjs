@@ -71,7 +71,7 @@ test("runs the exact pull-request commit range without scanning all history", ()
   assert.equal(result.status, 0, result.stderr);
   assert.equal(
     readFileSync(fake.argsLog, "utf8").trim(),
-    `git --redact --verbose --exit-code 2 --log-opts=${base}..${head} .`,
+    `git --redact --verbose --exit-code 2 --log-opts=-m ${base}..${head} .`,
   );
 });
 
@@ -142,6 +142,31 @@ function createRangeFixture() {
   return { repo, base, leaked, head };
 }
 
+function createMergeFixture() {
+  const repo = mkdtempSync(join(tmpdir(), "paperclip-gitleaks-range-"));
+  git(repo, "init", "-q", "-b", "main");
+  git(repo, "config", "user.email", "fixture@example.invalid");
+  git(repo, "config", "user.name", "Fixture");
+  const commit = (file, text, message) => {
+    writeFileSync(join(repo, file), text);
+    git(repo, "add", file);
+    git(repo, "commit", "-q", "-m", message);
+  };
+  commit("README.md", "clean\n", "base");
+  const base = git(repo, "rev-parse", "HEAD");
+  git(repo, "checkout", "-q", "-b", "topic");
+  commit("topic.md", "clean topic\n", "topic work");
+  git(repo, "checkout", "-q", "main");
+  commit("main.md", "clean main\n", "main work");
+  // The secret exists only in the merge commit's own diff.
+  git(repo, "merge", "--no-ff", "--no-commit", "topic");
+  const fixtureSecret = ["n8Zk3vQ2xT9p", "Lw4Rb7YcHd1s", "Ue6JfGm0Xa5V", "b2Nq"].join("");
+  writeFileSync(join(repo, "merged.txt"), `${"api"}_${"key"} = "${fixtureSecret}"\n`);
+  git(repo, "add", "merged.txt");
+  git(repo, "commit", "-q", "-m", "merge topic");
+  return { repo, base, head: git(repo, "rev-parse", "HEAD") };
+}
+
 function verifyReal(repo, range) {
   return spawnSync(process.execPath, [verifier, "--range", range], {
     cwd: repo,
@@ -153,6 +178,12 @@ function verifyReal(repo, range) {
 
 test("real Gitleaks: a secret inside the range is caught", { skip: !realGitleaks }, () => {
   const { repo, base, head } = createRangeFixture();
+  const result = verifyReal(repo, `${base}..${head}`);
+  assert.equal(result.status, 2, result.stderr);
+});
+
+test("real Gitleaks: a secret added only inside a merge commit is caught", { skip: !realGitleaks }, () => {
+  const { repo, base, head } = createMergeFixture();
   const result = verifyReal(repo, `${base}..${head}`);
   assert.equal(result.status, 2, result.stderr);
 });

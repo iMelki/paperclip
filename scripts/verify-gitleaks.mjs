@@ -81,7 +81,8 @@ if (staged) {
 } else if (history) {
   scanArgs.push("--log-opts=--all");
 } else {
-  scanArgs.push(`--log-opts=${range}`);
+  // -m makes `git log -p` emit merge-commit diffs, which are otherwise empty.
+  scanArgs.push(`--log-opts=-m ${range}`);
 }
 scanArgs.push(".");
 
