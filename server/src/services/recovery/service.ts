@@ -377,6 +377,9 @@ export const PROVIDER_QUOTA_RECOVERY_DEFAULT_BACKOFF_MS = 60 * 60 * 1000;
 // tool, MCP and terminal failures and must not enter quota recovery.
 const PROVIDER_QUOTA_ERROR_RE =
   /(?:you(?:'|’)ve hit your (?:usage|session) limit|usage limit(?: reached| exceeded)?|provider quota|quota (?:limit )?exceeded|model (?:is )?at capacity)/i;
+const CLAUDE_SESSION_LIMIT_RE = /you(?:'|’)ve hit your (?:usage|session) limit/i;
+// A reset clock only counts when it sits right next to the quota statement.
+const PROVIDER_QUOTA_RESET_WINDOW_CHARS = 120;
 const CONFIGURATION_INCOMPLETE_ERROR_RE =
   /(?:model_not_found|model [^\n]{0,120} not found|missing (?:api )?(?:key|credentials?)|credentials? (?:are |is )?missing|no (?:api )?(?:key|credentials?) (?:was |were )?(?:found|configured|provided)|api key (?:is )?(?:not set|unavailable))/i;
 
@@ -387,7 +390,7 @@ export type AdapterFailureRecoveryClassification =
 
 function parseProviderQuotaClockReset(error: string, now: Date) {
   const match = error.match(
-    /(?:try again at|resets(?: at)?)\s+(\d{1,2})(?::(\d{2}))?\s*(?:([ap])\.?\s*m\.?)?(?:\s*\(([^)]+)\)|\s+([A-Z]{2,5}))?/i,
+    /\b(?:try again at|resets(?: at)?)\s+(\d{1,2})(?::(\d{2}))?\s*(?:([ap])\.?\s*m\.?)?(?:\s*\(([^)]+)\)|\s+([A-Z]{2,5}))?/i,
   );
   if (!match) return null;
 
@@ -466,12 +469,30 @@ export function classifyAdapterFailureForRecovery(
     return null;
   }
   const resultJson = parseObject(latestRun.resultJson);
+  if (latestRun.errorCode === "acpx_turn_failed") {
+    // Every failed ACP turn carries this code, so only Claude's own statement in the
+    // error, stop reason or summary counts; transcript text elsewhere in the result
+    // must not park the issue in quota wait or mark it blocked.
+    const evidence = [latestRun.error, resultJson.stopReason, resultJson.summary]
+      .filter((value): value is string => typeof value === "string")
+      .join("\n");
+    if (!CLAUDE_SESSION_LIMIT_RE.test(evidence)) return null;
+    return buildProviderQuotaClassification(resultJson, evidence, now);
+  }
   const error = [latestRun.errorCode ?? "", latestRun.error ?? "", JSON.stringify(resultJson)].join("\n");
   if (latestRun.errorCode === "configuration_incomplete" || CONFIGURATION_INCOMPLETE_ERROR_RE.test(error)) {
     return { kind: "configuration_incomplete" };
   }
   if (latestRun.errorCode !== "provider_quota" && !PROVIDER_QUOTA_ERROR_RE.test(error)) return null;
 
+  return buildProviderQuotaClassification(resultJson, error, now);
+}
+
+function buildProviderQuotaClassification(
+  resultJson: Record<string, unknown>,
+  error: string,
+  now: Date,
+): AdapterFailureRecoveryClassification {
   const persistedRetryAt = readNonEmptyString(resultJson.retryNotBefore) ??
     readNonEmptyString(resultJson.transientRetryNotBefore) ??
     readNonEmptyString(resultJson.providerQuotaRetryNotBefore);
@@ -480,7 +501,11 @@ export function classifyAdapterFailureForRecovery(
     return { kind: "provider_quota", retryAt: parsedPersistedRetryAt, parsedResetTime: true };
   }
 
-  const parsedClockReset = parseProviderQuotaClockReset(error, now);
+  const quotaMatch = PROVIDER_QUOTA_ERROR_RE.exec(error);
+  const resetText = quotaMatch
+    ? error.slice(quotaMatch.index, quotaMatch.index + quotaMatch[0].length + PROVIDER_QUOTA_RESET_WINDOW_CHARS)
+    : error;
+  const parsedClockReset = parseProviderQuotaClockReset(resetText, now);
   if (parsedClockReset) {
     return { kind: "provider_quota", retryAt: parsedClockReset, parsedResetTime: true };
   }

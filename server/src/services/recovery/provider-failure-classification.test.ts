@@ -89,6 +89,56 @@ describe("classifyAdapterFailureForRecovery", () => {
     });
   });
 
+  it("ignores quota and credential wording that only appears in an ACP transcript", () => {
+    const now = new Date("2026-10-13T18:00:38.000Z");
+    for (const text of [
+      "The docs say: usage limit exceeded means retry later.",
+      "Set the key: API key is not set in the sample config.",
+      "quota exceeded and missing credentials are listed in the test names.",
+    ]) {
+      expect(classifyAdapterFailureForRecovery({
+        errorCode: "acpx_turn_failed",
+        error: "Process exited with code 1",
+        resultJson: { stopReason: "error", summary: "done", transcript: [{ text }], output: text },
+      }, now)).toBeNull();
+    }
+  });
+
+  it("takes the exact Claude statement from the ACP summary or stop reason", () => {
+    const now = new Date("2026-10-13T18:00:38.000Z");
+    for (const resultJson of [
+      { summary: "You've hit your session limit · resets 10:40pm (Asia/Jerusalem)" },
+      { stopReason: "You\u2019ve hit your session limit · resets 10:40pm (Asia/Jerusalem)" },
+    ]) {
+      expect(classifyAdapterFailureForRecovery({
+        errorCode: "acpx_turn_failed",
+        error: null,
+        resultJson,
+      }, now)).toEqual({
+        kind: "provider_quota",
+        retryAt: new Date("2026-10-13T19:40:00.000Z"),
+        parsedResetTime: true,
+      });
+    }
+  });
+
+  it("ignores reset clocks that are far from the quota statement or lack a word boundary", () => {
+    const now = new Date("2026-10-13T18:00:38.000Z");
+    const far = `You've hit your session limit.${" x".repeat(100)} resets 10:40pm (Asia/Jerusalem)`;
+    const glued = "You've hit your session limit. See presets 10:40pm for options";
+    for (const error of [far, glued]) {
+      expect(classifyAdapterFailureForRecovery({
+        errorCode: "adapter_failed",
+        error,
+        resultJson: {},
+      }, now)).toEqual({
+        kind: "provider_quota",
+        retryAt: new Date(now.getTime() + PROVIDER_QUOTA_RECOVERY_DEFAULT_BACKOFF_MS),
+        parsedResetTime: false,
+      });
+    }
+  });
+
   it("uses the default recovery backoff when quota reset time is absent", () => {
     const now = new Date("2026-07-15T20:00:00.000Z");
     const classification = classifyAdapterFailureForRecovery({
