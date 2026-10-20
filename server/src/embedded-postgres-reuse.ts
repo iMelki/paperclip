@@ -270,7 +270,14 @@ export async function readRunningEmbeddedPostgres(
         (await getPostgresDataDirectory(adminUrl(configuredPort)).catch(() => null)) !== null;
       if (!configuredAnswers) {
         const aside = `${pidFile}.stale-${Date.now()}`;
-        renameSync(pidFile, aside);
+        try {
+          renameSync(pidFile, aside);
+        } catch (error) {
+          throw new EmbeddedPostgresLockRefusal(
+            `Refusing to start embedded PostgreSQL: postmaster.pid names process ${pid} (${processName}), which is not PostgreSQL, ` +
+              `but the lock could not be moved aside (${(error as NodeJS.ErrnoException).code ?? "unknown error"}). Fix its permissions and start again.`,
+          );
+        }
         logger.warn(
           { pid, processName, port, aside },
           "postmaster.pid names a live process that is not PostgreSQL and no PostgreSQL answers; moved the lock file aside and trying normal startup",
