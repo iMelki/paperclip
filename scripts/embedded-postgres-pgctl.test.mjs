@@ -197,6 +197,24 @@ test('start allows crash recovery up to 600s when a postmaster.pid was left behi
   assert.ok(subject.probes.some((file) => file.endsWith('postmaster.pid')));
 });
 
+test('start honours an explicit startTimeoutSeconds even when the lock was already removed', async () => {
+  const subject = harness();
+  subject.state.postmasterPidPresent = false;
+  subject.instance.options.startTimeoutSeconds = 600;
+  await subject.start();
+  const args = subject.calls[0].args;
+  assert.equal(args[args.indexOf('-t') + 1], '600');
+});
+
+test('start rejects an invalid startTimeoutSeconds before spawning pg_ctl', async () => {
+  for (const value of [0, -5, 1.5, 3601, '60', Number.NaN]) {
+    const subject = harness();
+    subject.instance.options.startTimeoutSeconds = value;
+    await assert.rejects(subject.start(), /^Error: startTimeoutSeconds must be an integer from 1 to 3600$/);
+    assert.deepEqual(subject.calls, [], 'must reject before spawn');
+  }
+});
+
 test('start rejects a log file inside the data directory before any effect', async () => {
   for (const logFile of ['C:\\DB Dir\\server.log', 'C:\\DB Dir\\logs\\postgres.log', 'C:\\DB Dir']) {
     const subject = harness();

@@ -117,6 +117,7 @@ type EmbeddedPostgresCtor = new (opts: {
   port: number;
   persistent: boolean;
   logFile?: string;
+  startTimeoutSeconds?: number;
   initdbFlags?: string[];
   onLog?: (message: unknown) => void;
   onError?: (message: unknown) => void;
@@ -470,6 +471,10 @@ export async function startServer(): Promise<StartedServer> {
           // Windows: pg_ctl keeps this file open, so it must stay outside the data
           // directory or crash recovery cannot fsync it (sharing violation).
           logFile: resolve(resolveDefaultLogsDir(), "postgres.log"),
+          // A leftover lock means the last shutdown was unclean, so start-up runs crash
+          // recovery. The lock is removed just before start(), which would hide that from
+          // the patch, so the wait is decided here while the lock is still present.
+          ...(existsSync(postmasterPidFile) ? { startTimeoutSeconds: 600 } : {}),
           initdbFlags: ["--encoding=UTF8", "--locale=C", "--lc-messages=C"],
           onLog: appendEmbeddedPostgresLog,
           onError: appendEmbeddedPostgresLog,
