@@ -9,9 +9,14 @@ concurrency:
   group: pr-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
+# Pull-request code runs on a persistent runner: keep the token read-only and
+# do not leave it in the checkout.
+permissions:
+  contents: read
+
 jobs:
   secret-scan:
-    runs-on: ubuntu-latest
+    runs-on: [box-paperclip]
     timeout-minutes: 10
     permissions:
       contents: read
@@ -39,12 +44,14 @@ jobs:
           echo "PAPERCLIP_GITLEAKS_BIN=$install_dir/gitleaks" >> "$GITHUB_ENV"
           "$install_dir/gitleaks" version
 
-      - name: Scan complete repository history
-        run: node scripts/verify-gitleaks.mjs --history
+      - name: Scan pull-request commit range
+        run: >-
+          node scripts/verify-gitleaks.mjs --range
+          "${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }}"
 
   policy:
     needs: [secret-scan]
-    runs-on: ubuntu-latest
+    runs-on: [box-paperclip]
     timeout-minutes: 5
     outputs:
       lockfile_regenerated: ${{ steps.regen_lockfile.outputs.regenerated }}
@@ -54,6 +61,7 @@ jobs:
         uses: actions/checkout@v7
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Block manual lockfile edits
         if: >-
@@ -140,12 +148,14 @@ jobs:
   typecheck_release_registry:
     name: Typecheck + Release Registry
     needs: [policy]
-    runs-on: ubuntu-latest
+    runs-on: [box-paperclip]
     timeout-minutes: 20
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
+        with:
+          persist-credentials: false
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v6
@@ -177,7 +187,7 @@ jobs:
   general_tests:
     name: General tests (${{ matrix.group_label }})
     needs: [policy]
-    runs-on: ubuntu-latest
+    runs-on: [box-paperclip]
     timeout-minutes: 20
     strategy:
       fail-fast: false
@@ -218,6 +228,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
+        with:
+          persist-credentials: false
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v6
@@ -254,7 +266,7 @@ jobs:
     name: verify
     if: ${{ always() }}
     needs: [typecheck_release_registry, general_tests, build]
-    runs-on: ubuntu-latest
+    runs-on: [box-paperclip]
     timeout-minutes: 5
 
     steps:
@@ -271,12 +283,14 @@ jobs:
   build:
     name: Build
     needs: [policy]
-    runs-on: ubuntu-latest
+    runs-on: [box-paperclip]
     timeout-minutes: 20
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
+        with:
+          persist-credentials: false
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v6
@@ -305,7 +319,7 @@ jobs:
   verify_serialized_server:
     name: Verify serialized server suites (${{ matrix.shard_label }})
     needs: [policy]
-    runs-on: ubuntu-latest
+    runs-on: [box-paperclip]
     timeout-minutes: 20
     strategy:
       fail-fast: false
@@ -334,6 +348,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
+        with:
+          persist-credentials: false
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v6
@@ -362,12 +378,14 @@ jobs:
   canary_dry_run:
     name: Canary Dry Run
     needs: [policy]
-    runs-on: ubuntu-latest
+    runs-on: [box-paperclip]
     timeout-minutes: 20
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
+        with:
+          persist-credentials: false
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v6
@@ -417,7 +435,7 @@ jobs:
   e2e_shards:
     name: e2e shard (${{ matrix.shard_label }})
     needs: [policy]
-    runs-on: ubuntu-latest
+    runs-on: [box-paperclip]
     timeout-minutes: 30
     strategy:
       fail-fast: false
@@ -443,6 +461,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
+        with:
+          persist-credentials: false
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v6
@@ -470,6 +490,13 @@ jobs:
         # directly for the headless e2e lane instead of downloading Playwright
         # browser bundles inside the 30 minute job budget.
         run: google-chrome --version
+
+      - name: Isolate HOME for this job
+        # The runner user's home persists between jobs; keep instance config and
+        # caches written by test code inside the job's temporary directory.
+        run: |
+          mkdir -p "$RUNNER_TEMP/home"
+          echo "HOME=$RUNNER_TEMP/home" >> "$GITHUB_ENV"
 
       - name: Generate Paperclip config
         run: |
@@ -515,7 +542,7 @@ jobs:
     name: e2e
     if: ${{ always() }}
     needs: [e2e_shards]
-    runs-on: ubuntu-latest
+    runs-on: [box-paperclip]
     timeout-minutes: 5
 
     steps:
