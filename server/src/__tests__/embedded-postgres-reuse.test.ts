@@ -7,6 +7,7 @@ import {
   EMBEDDED_POSTGRES_LOCK_REFUSAL_EXIT_CODE,
   EmbeddedPostgresLockRefusal,
   listPostgresProcessesForDataDir,
+  moveStaleLockAside,
   readRunningEmbeddedPostgres as readRunning,
   type PostgresProcess,
 } from "../embedded-postgres-reuse.js";
@@ -310,5 +311,31 @@ describe("embedded PostgreSQL reuse identity", () => {
       probe.mockResolvedValue(dataDir.toUpperCase());
       await expect(readRunningEmbeddedPostgres(dataDir, 55432)).rejects.toThrow("data directory belongs to another instance");
     });
+  });
+});
+
+describe("moveStaleLockAside", () => {
+  it("renames the lock next to itself and keeps its contents", () => {
+    const dir = mkdtempSync(join(tmpdir(), "embedded-pg-aside-"));
+    const lock = join(dir, "postmaster.pid");
+    writeFileSync(lock, "4242\n");
+    const aside = moveStaleLockAside(lock);
+    expect(existsSync(lock)).toBe(false);
+    expect(aside.startsWith(`${lock}.stale-`)).toBe(true);
+    expect(readFileSync(aside, "utf8")).toBe("4242\n");
+  });
+
+  it("refuses with the lock exit code when the lock cannot be moved", () => {
+    const dir = mkdtempSync(join(tmpdir(), "embedded-pg-aside-"));
+    const missing = join(dir, "no-such-dir", "postmaster.pid");
+    let thrown: unknown;
+    try {
+      moveStaleLockAside(missing);
+    } catch (error) {
+      thrown = error;
+    }
+    expect(thrown).toBeInstanceOf(EmbeddedPostgresLockRefusal);
+    expect((thrown as EmbeddedPostgresLockRefusal).exitCode).toBe(EMBEDDED_POSTGRES_LOCK_REFUSAL_EXIT_CODE);
+    expect((thrown as Error).message).toContain("could not be moved aside");
   });
 });

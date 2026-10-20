@@ -54,6 +54,23 @@ export class EmbeddedPostgresLockRefusal extends Error {
   }
 }
 
+/**
+ * Moves a leftover lock out of the way before start-up. The file is never deleted, so
+ * an operator can still inspect it. Throws a lock refusal when it cannot be moved.
+ */
+export function moveStaleLockAside(pidFile: string): string {
+  const aside = `${pidFile}.stale-${Date.now()}`;
+  try {
+    renameSync(pidFile, aside);
+  } catch (error) {
+    throw new EmbeddedPostgresLockRefusal(
+      `Refusing to start embedded PostgreSQL: the leftover lock ${pidFile} could not be moved aside ` +
+        `(${(error as NodeJS.ErrnoException).code ?? "unknown error"}). Fix its permissions and start again.`,
+    );
+  }
+  return aside;
+}
+
 export type PostgresProcess = { pid: number; command: string };
 
 const inspectCommand = (pid: number) =>

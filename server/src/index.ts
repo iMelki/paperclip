@@ -4,7 +4,7 @@
 // instrumentationReady before opening DB connections or constructing the
 // HTTP server, so trace coverage does not depend on incidental timing.
 import { instrumentationReady, shutdownInstrumentation } from "./instrumentation.js";
-import { existsSync, rmSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { createServer } from "node:http";
 import { resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
@@ -33,7 +33,7 @@ import detectPort from "detect-port";
 import { createApp } from "./app.js";
 import { loadConfig } from "./config.js";
 import { resolveListenPort } from "./listen-port.js";
-import { EmbeddedPostgresLockRefusal, isSameDataDirectory, readRunningEmbeddedPostgres } from "./embedded-postgres-reuse.js";
+import { EmbeddedPostgresLockRefusal, isSameDataDirectory, moveStaleLockAside, readRunningEmbeddedPostgres } from "./embedded-postgres-reuse.js";
 import { logger } from "./middleware/logger.js";
 import {
   getManagedInstanceConfig,
@@ -471,8 +471,8 @@ export async function startServer(): Promise<StartedServer> {
         }
 
         if (existsSync(postmasterPidFile)) {
-          logger.warn("Removing stale embedded PostgreSQL lock file");
-          rmSync(postmasterPidFile, { force: true });
+          const aside = moveStaleLockAside(postmasterPidFile);
+          logger.warn({ aside }, "Moved stale embedded PostgreSQL lock file aside");
         }
         try {
           await embeddedPostgres.start();

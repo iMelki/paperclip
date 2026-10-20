@@ -15,7 +15,8 @@ All notable changes to this repository should be recorded here.
   is dead, is the server's own, belongs to a live process that is not PostgreSQL
   while nothing answers on the recorded or configured port, or when the lock is
   unreadable or garbled and no PostgreSQL answers or references this data
-  directory.
+  directory. Any lock still present just before start is moved aside the same
+  way; if it cannot be moved, startup refuses (exit code 75).
 
 - **[#164]** Refresh Lockfile accepts manual `ref` and `base` inputs that default
   to `dev`. Each base has its own refresh branch and matching PR lookup. Master
