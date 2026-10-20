@@ -81,8 +81,10 @@ if (staged) {
 } else if (history) {
   scanArgs.push("--log-opts=--all");
 } else {
-  // -m makes `git log -p` emit merge-commit diffs, which are otherwise empty.
-  scanArgs.push(`--log-opts=-m ${range}`);
+  // `git log -p` shows no diff for merges. remerge shows only what a merge changed
+  // relative to an automatic re-merge of its parents, so conflict-resolution secrets
+  // are scanned without re-reporting already-reviewed content under merge SHAs.
+  scanArgs.push(`--log-opts=--diff-merges=remerge ${range}`);
 }
 scanArgs.push(".");
 

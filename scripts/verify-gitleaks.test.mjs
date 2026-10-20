@@ -71,7 +71,7 @@ test("runs the exact pull-request commit range without scanning all history", ()
   assert.equal(result.status, 0, result.stderr);
   assert.equal(
     readFileSync(fake.argsLog, "utf8").trim(),
-    `git --redact --verbose --exit-code 2 --log-opts=-m ${base}..${head} .`,
+    `git --redact --verbose --exit-code 2 --log-opts=--diff-merges=remerge ${base}..${head} .`,
   );
 });
 
