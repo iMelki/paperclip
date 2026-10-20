@@ -77,10 +77,19 @@ describe("embedded PostgreSQL reuse identity", () => {
     expect(probe).not.toHaveBeenCalled();
   });
 
-  it.each(["0", "-1", "1oops", "1.5", "9007199254740992"])("does not reuse invalid PID %s", async (pid) => {
+  it.each(["0", "-1", "1oops", "1.5", "9007199254740992", ""])("refuses and preserves the lock for invalid PID %j", async (pid) => {
     writePid(pid);
-    expect(await readRunningEmbeddedPostgres(dataDir, 55432)).toBeNull();
+    await expect(readRunningEmbeddedPostgres(dataDir, 55432)).rejects.toThrow("does not hold a valid process id");
+    expect(existsSync(pidFile)).toBe(true);
     expect(process.kill).not.toHaveBeenCalled();
+    expect(probe).not.toHaveBeenCalled();
+  });
+
+  it("refuses and preserves the lock when postmaster.pid cannot be read", async () => {
+    // A directory at the lock path exists but cannot be read as a file.
+    mkdirSync(pidFile);
+    await expect(readRunningEmbeddedPostgres(dataDir, 55432)).rejects.toThrow("postmaster.pid could not be read");
+    expect(existsSync(pidFile)).toBe(true);
     expect(probe).not.toHaveBeenCalled();
   });
 
@@ -153,7 +162,9 @@ describe("embedded PostgreSQL reuse identity", () => {
       expect(await readRunningEmbeddedPostgres(dataDir, 55432)).toEqual({ pid: process.pid, port: 55432 });
     });
 
-    it("keeps case-sensitive comparison off Windows", async () => {
+    // The faked platform cannot change the real filesystem: on Windows the real
+    // realpath folds case, so this behavior is only observable elsewhere.
+    it.skipIf(process.platform === "win32")("keeps case-sensitive comparison off Windows", async () => {
       Object.defineProperty(process, "platform", { value: "linux" });
       writePid();
       probe.mockResolvedValue(dataDir.toUpperCase());

@@ -30,7 +30,8 @@ The lock is removed and PostgreSQL started only when the lock is stale: the
 PID no longer exists (`ESRCH`), or it is the server's own process. If the PID
 may still be alive but the identity query fails (PostgreSQL is starting,
 recovering, or refusing the login), startup stops with an error and leaves
-`postmaster.pid` unchanged. Stop that process, or remove the file only after
+`postmaster.pid` unchanged. The same applies when the file cannot be read or
+holds no valid process id: the owner is unknown, so the lock is kept. Stop that process, or remove the file only after
 confirming no PostgreSQL uses the data directory. A reachable server that
 reports another data directory is also refused without removing the lock. This
 check applies to server startup; the CLI lifecycle checks remain separate.

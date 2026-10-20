@@ -24,9 +24,10 @@ export async function isSameDataDirectory(a: string, b: string): Promise<boolean
 /**
  * Returns the PostgreSQL recorded in `postmaster.pid` when it is verified to
  * serve `dataDir`, or `null` only when the lock is affirmatively stale (no
- * PID file, unparseable PID, a dead PID, or this process's own PID). Throws,
- * leaving the lock untouched, whenever a possibly-live owner cannot be
- * identified, because removing its lock could start a second postmaster.
+ * PID file, a dead PID, or this process's own PID). Throws, leaving the lock
+ * untouched, whenever a possibly-live owner cannot be identified (including a
+ * lock that cannot be read or holds no valid PID), because removing it could
+ * start a second postmaster.
  */
 export async function readRunningEmbeddedPostgres(
   dataDir: string,
@@ -38,11 +39,19 @@ export async function readRunningEmbeddedPostgres(
   let lines: string[];
   try {
     lines = readFileSync(pidFile, "utf8").split("\n");
-  } catch {
-    return null;
+  } catch (error) {
+    throw new Error(
+      `Refusing to start embedded PostgreSQL: postmaster.pid could not be read (${(error as NodeJS.ErrnoException).code ?? "unknown error"}). ` +
+        "The lock file was left unchanged. Fix its permissions, or remove it only after confirming no PostgreSQL uses this data directory.",
+    );
   }
   const pid = Number(lines[0]?.trim());
-  if (!Number.isSafeInteger(pid) || pid <= 0) return null;
+  if (!Number.isSafeInteger(pid) || pid <= 0) {
+    throw new Error(
+      "Refusing to start embedded PostgreSQL: postmaster.pid does not hold a valid process id, so its owner is unknown. " +
+        "The lock file was left unchanged. Remove it only after confirming no PostgreSQL uses this data directory.",
+    );
+  }
   try {
     process.kill(pid, 0);
   } catch (error) {
