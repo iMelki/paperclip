@@ -41,10 +41,12 @@ directory, keeps the lock in place. Otherwise the lock is renamed to
 
 Startup stops, leaving `postmaster.pid` unchanged, only when a PostgreSQL that
 may own the directory is found or the process list cannot be read. The error
-names the process found and the one command that resolves it (`kill <pid>` or
+names the process found and the command that resolves it (`kill <pid>` or
 `taskkill /PID <pid>`); after that, the next start handles any leftover lock by
 itself. The same refusal applies when a live PID is not verified as non-PostgreSQL
-and the identity query fails (PostgreSQL may be starting or recovering), and when
+and the identity query fails (PostgreSQL may be starting or recovering). It names
+a stop command only for a PID confirmed to be PostgreSQL for this data directory;
+otherwise it shows how to inspect the process first. It also applies when
 a reachable server reports another data directory. These refusals exit with code
 75 (all other startup failures exit 1), so a service manager or health check can
 tell them apart. This check applies to server startup; the CLI lifecycle checks

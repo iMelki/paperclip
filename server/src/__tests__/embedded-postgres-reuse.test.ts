@@ -222,6 +222,28 @@ describe("embedded PostgreSQL reuse identity", () => {
     expect(existsSync(pidFile)).toBe(true);
   });
 
+  it("names a stop command only for a PID verified as PostgreSQL for this data directory", async () => {
+    writePid(String(FOREIGN_PID));
+    probe.mockRejectedValue(new Error("the database system is starting up"));
+    const owners = [{ pid: FOREIGN_PID, command: `postgres -D ${dataDir}` }];
+    const error = await readRunningEmbeddedPostgres(dataDir, 55432, "postgres", owners).catch((e) => e);
+    expect(error).toBeInstanceOf(EmbeddedPostgresLockRefusal);
+    expect(error.message).toContain(`postgres -D ${dataDir}`);
+    expect(error.message).toMatch(new RegExp(`\`(kill|taskkill /PID) ${FOREIGN_PID}\``));
+  });
+
+  it("does not tell the operator to kill a PID that was never tied to this data directory", async () => {
+    for (const [name, owners] of [["postgres", []], [null, []], ["postgres", null]] as const) {
+      writePid(String(FOREIGN_PID));
+      probe.mockRejectedValue(new Error("connection refused"));
+      const error = await readRunningEmbeddedPostgres(dataDir, 55432, name, owners ? [...owners] : null).catch((e) => e);
+      expect(error).toBeInstanceOf(EmbeddedPostgresLockRefusal);
+      expect(error.message).not.toMatch(/\`(kill|taskkill \/PID) \d+\`/);
+      expect(error.message).toContain("was not confirmed to be PostgreSQL for this data directory");
+      expect(error.message).toMatch(/\`(ps -p|tasklist)/);
+    }
+  });
+
   it("keeps refusing when PostgreSQL answers on the configured port instead of the recorded one", async () => {
     writePid(String(FOREIGN_PID), "55433");
     probe.mockImplementation(async (url: string) => {

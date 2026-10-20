@@ -56,6 +56,9 @@ export class EmbeddedPostgresLockRefusal extends Error {
 
 export type PostgresProcess = { pid: number; command: string };
 
+const inspectCommand = (pid: number) =>
+  process.platform === "win32" ? `tasklist /FI "PID eq ${pid}" /V` : `ps -p ${pid} -o pid,args`;
+
 const stopCommand = (pid: number) => (process.platform === "win32" ? `taskkill /PID ${pid}` : `kill ${pid}`);
 
 /**
@@ -275,11 +278,18 @@ export async function readRunningEmbeddedPostgres(
         return null;
       }
     }
+    // Only name a stop command for a process that is verified to be a PostgreSQL
+    // referencing this data directory; otherwise the PID may belong to anything.
+    const owners = await (options.listPostgresProcesses ?? listPostgresProcessesForDataDir)(dataDir);
+    const verified = owners?.find((owner) => owner.pid === pid);
+    const action = verified
+      ? `It is PostgreSQL for this data directory (${verified.command}). Stop it with \`${stopCommand(pid)}\` and start again.`
+      : `It was not confirmed to be PostgreSQL for this data directory${processName ? ` (the process is named ${processName})` : ""}. ` +
+        `Check what process ${pid} is (\`${inspectCommand(pid)}\`) and stop it only if it is PostgreSQL using ${dataDir}, then start again.`;
     throw new EmbeddedPostgresLockRefusal(
       `Refusing to start embedded PostgreSQL: postmaster.pid names process ${pid}, which may still be alive, ` +
         `but PostgreSQL identity could not be verified on port ${port} (it may be starting, recovering, ` +
-        `or refusing the login). The lock file was left unchanged. Stop that process with \`${stopCommand(pid)}\` ` +
-        "and start again; if it is not PostgreSQL, the stale lock is then handled automatically.",
+        `or refusing the login). The lock file was left unchanged. ${action}`,
     );
   }
   if (!(await isSameDataDirectory(actualDataDir, dataDir))) {
