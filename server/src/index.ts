@@ -416,6 +416,9 @@ export async function startServer(): Promise<StartedServer> {
     const clusterVersionFile = resolve(dataDir, "PG_VERSION");
     const clusterAlreadyInitialized = existsSync(clusterVersionFile);
     const postmasterPidFile = resolve(dataDir, "postmaster.pid");
+    // Recorded before anything inspects or removes the lock (the reuse check can move a
+    // stale one aside), so the crash-recovery wait below sees what the last shutdown left.
+    const leftoverLockAtStart = existsSync(postmasterPidFile);
     const isPidRunning = (pid: number): boolean => {
       try {
         process.kill(pid, 0);
@@ -473,8 +476,8 @@ export async function startServer(): Promise<StartedServer> {
           logFile: resolve(resolveDefaultLogsDir(), "postgres.log"),
           // A leftover lock means the last shutdown was unclean, so start-up runs crash
           // recovery. The lock is removed just before start(), which would hide that from
-          // the patch, so the wait is decided here while the lock is still present.
-          ...(existsSync(postmasterPidFile) ? { startTimeoutSeconds: 600 } : {}),
+          // the patch, so the wait is decided from the flag recorded at the top.
+          ...(leftoverLockAtStart ? { startTimeoutSeconds: 600 } : {}),
           initdbFlags: ["--encoding=UTF8", "--locale=C", "--lc-messages=C"],
           onLog: appendEmbeddedPostgresLog,
           onError: appendEmbeddedPostgresLog,
