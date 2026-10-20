@@ -1,4 +1,5 @@
-import { existsSync, readFileSync } from "node:fs";
+import { execFile } from "node:child_process";
+import { existsSync, readFileSync, renameSync } from "node:fs";
 import { realpath } from "node:fs/promises";
 import { resolve } from "node:path";
 import { getPostgresDataDirectory } from "@paperclipai/db";
@@ -15,6 +16,33 @@ async function canonicalDataDirectory(dir: string): Promise<string> {
   const physical = await realpath(absolute).catch(() => absolute);
   return process.platform === "win32" ? physical.toLowerCase() : physical;
 }
+
+/**
+ * Best-effort executable name of a live process, or `null` when it cannot be
+ * determined (unsupported platform, missing tool, or the process is gone).
+ */
+export async function readProcessName(pid: number): Promise<string | null> {
+  const run = (file: string, args: string[]) =>
+    new Promise<string | null>((done) => {
+      execFile(file, args, { timeout: 5000, windowsHide: true }, (error, stdout) =>
+        done(error ? null : stdout.trim() || null),
+      );
+    });
+  if (process.platform === "win32") {
+    const row = await run("tasklist", ["/FI", `PID eq ${pid}`, "/FO", "CSV", "/NH"]);
+    const match = row?.match(/^"([^"]+)"/);
+    return match?.[1] ?? null;
+  }
+  const name = await run("ps", ["-p", String(pid), "-o", "comm="]);
+  return name ? (name.split("/").pop() ?? null) : null;
+}
+
+const POSTGRES_PROCESS_NAME_RE = /^(?:postgres|postmaster)(?:\.exe)?$/i;
+
+export type EmbeddedPostgresReuseOptions = {
+  /** Test seam: resolves the executable name of a live PID. */
+  readProcessName?: (pid: number) => Promise<string | null>;
+};
 
 export async function isSameDataDirectory(a: string, b: string): Promise<boolean> {
   const [left, right] = await Promise.all([canonicalDataDirectory(a), canonicalDataDirectory(b)]);
@@ -33,6 +61,7 @@ export async function readRunningEmbeddedPostgres(
   dataDir: string,
   configuredPort: number,
   adminUrl: EmbeddedPostgresAdminUrl,
+  options: EmbeddedPostgresReuseOptions = {},
 ): Promise<{ pid: number; port: number } | null> {
   const pidFile = resolve(dataDir, "postmaster.pid");
   if (!existsSync(pidFile)) return null;
@@ -75,6 +104,26 @@ export async function readRunningEmbeddedPostgres(
         "Embedded PostgreSQL identity could not be verified and postmaster.pid names the current process; treating postmaster.pid as stale and trying normal startup",
       );
       return null;
+    }
+    // A live PID that is affirmatively not PostgreSQL (the OS recycled it), with
+    // nothing answering on the recorded or configured port, is a leftover lock.
+    // The lock is moved aside, never deleted, so an operator can still inspect it.
+    // An unknown process name keeps the refusal below.
+    const processName = await (options.readProcessName ?? readProcessName)(pid);
+    if (processName !== null && !POSTGRES_PROCESS_NAME_RE.test(processName)) {
+      // The recorded port was already probed above; probe the configured one too.
+      const configuredAnswers =
+        port !== configuredPort &&
+        (await getPostgresDataDirectory(adminUrl(configuredPort)).catch(() => null)) !== null;
+      if (!configuredAnswers) {
+        const aside = `${pidFile}.stale-${Date.now()}`;
+        renameSync(pidFile, aside);
+        logger.warn(
+          { pid, processName, port, aside },
+          "postmaster.pid names a live process that is not PostgreSQL and no PostgreSQL answers; moved the lock file aside and trying normal startup",
+        );
+        return null;
+      }
     }
     throw new Error(
       `Refusing to start embedded PostgreSQL: postmaster.pid names process ${pid}, which may still be alive, ` +

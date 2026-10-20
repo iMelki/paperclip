@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -10,7 +10,11 @@ vi.mock("../middleware/logger.js", () => ({ logger: { warn } }));
 
 // The caller owns the embedded login; the helper must not hard-code one.
 const adminUrl = (port: number) => `postgres://configured-user:configured-secret@127.0.0.1:${port}/postgres`;
-const readRunningEmbeddedPostgres = (dataDir: string, port: number) => readRunning(dataDir, port, adminUrl);
+const readRunningEmbeddedPostgres = (
+  dataDir: string,
+  port: number,
+  processName: string | null = null,
+) => readRunning(dataDir, port, adminUrl, { readProcessName: async () => processName });
 const FOREIGN_PID = 424242;
 
 describe("embedded PostgreSQL reuse identity", () => {
@@ -112,6 +116,44 @@ describe("embedded PostgreSQL reuse identity", () => {
     probe.mockRejectedValue(new Error("connection refused"));
     expect(await readRunningEmbeddedPostgres(dataDir, 55432)).toBeNull();
     expect(warn).toHaveBeenCalledOnce();
+  });
+
+  it("moves a leftover lock aside when its live PID is not PostgreSQL and no server answers", async () => {
+    writePid(String(FOREIGN_PID));
+    probe.mockRejectedValue(new Error("connection refused"));
+    const original = readFileSync(pidFile, "utf8");
+    expect(await readRunningEmbeddedPostgres(dataDir, 55432, "node")).toBeNull();
+    expect(existsSync(pidFile)).toBe(false);
+    const aside = readdirSync(dataDir).find((name) => name.startsWith("postmaster.pid.stale-"));
+    expect(aside).toBeDefined();
+    expect(readFileSync(join(dataDir, aside!), "utf8")).toBe(original);
+    expect(warn).toHaveBeenCalledOnce();
+  });
+
+  it("keeps refusing when the live PID is PostgreSQL, whatever its extension", async () => {
+    for (const name of ["postgres", "postmaster", "postgres.exe"]) {
+      writePid(String(FOREIGN_PID));
+      probe.mockRejectedValue(new Error("the database system is starting up"));
+      await expect(readRunningEmbeddedPostgres(dataDir, 55432, name)).rejects.toThrow("identity could not be verified");
+      expect(existsSync(pidFile)).toBe(true);
+    }
+  });
+
+  it("keeps refusing when the process name cannot be determined", async () => {
+    writePid(String(FOREIGN_PID));
+    probe.mockRejectedValue(new Error("connection refused"));
+    await expect(readRunningEmbeddedPostgres(dataDir, 55432, null)).rejects.toThrow("identity could not be verified");
+    expect(existsSync(pidFile)).toBe(true);
+  });
+
+  it("keeps refusing when PostgreSQL answers on the configured port instead of the recorded one", async () => {
+    writePid(String(FOREIGN_PID), "55433");
+    probe.mockImplementation(async (url: string) => {
+      if (url === adminUrl(55432)) return dataDir;
+      throw new Error("connection refused");
+    });
+    await expect(readRunningEmbeddedPostgres(dataDir, 55432, "node")).rejects.toThrow("identity could not be verified");
+    expect(existsSync(pidFile)).toBe(true);
   });
 
   const liveness: Array<[string, () => true]> = [
