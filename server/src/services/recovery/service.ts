@@ -378,7 +378,7 @@ export const PROVIDER_QUOTA_RECOVERY_DEFAULT_BACKOFF_MS = 60 * 60 * 1000;
 const PROVIDER_QUOTA_ERROR_RE =
   /(?:you(?:'|’)ve hit your (?:usage|session) limit|usage limit(?: reached| exceeded)?|provider quota|quota (?:limit )?exceeded|model (?:is )?at capacity)/i;
 const CLAUDE_SESSION_LIMIT_RE = /you(?:'|’)ve hit your (?:usage|session) limit/i;
-// A reset clock only counts when it sits right next to the quota statement.
+// On the ACP path a reset clock only counts when it sits right next to the quota statement.
 const PROVIDER_QUOTA_RESET_WINDOW_CHARS = 120;
 const CONFIGURATION_INCOMPLETE_ERROR_RE =
   /(?:model_not_found|model [^\n]{0,120} not found|missing (?:api )?(?:key|credentials?)|credentials? (?:are |is )?missing|no (?:api )?(?:key|credentials?) (?:was |were )?(?:found|configured|provided)|api key (?:is )?(?:not set|unavailable))/i;
@@ -477,7 +477,7 @@ export function classifyAdapterFailureForRecovery(
       .filter((value): value is string => typeof value === "string")
       .join("\n");
     if (!CLAUDE_SESSION_LIMIT_RE.test(evidence)) return null;
-    return buildProviderQuotaClassification(resultJson, evidence, now);
+    return buildProviderQuotaClassification(resultJson, evidence, now, { boundResetWindow: true });
   }
   const error = [latestRun.errorCode ?? "", latestRun.error ?? "", JSON.stringify(resultJson)].join("\n");
   if (latestRun.errorCode === "configuration_incomplete" || CONFIGURATION_INCOMPLETE_ERROR_RE.test(error)) {
@@ -492,6 +492,7 @@ function buildProviderQuotaClassification(
   resultJson: Record<string, unknown>,
   error: string,
   now: Date,
+  options: { boundResetWindow?: boolean } = {},
 ): AdapterFailureRecoveryClassification {
   const persistedRetryAt = readNonEmptyString(resultJson.retryNotBefore) ??
     readNonEmptyString(resultJson.transientRetryNotBefore) ??
@@ -502,7 +503,11 @@ function buildProviderQuotaClassification(
   }
 
   const quotaMatch = PROVIDER_QUOTA_ERROR_RE.exec(error);
-  const resetText = quotaMatch
+  // Only the ACP path bounds the window: its evidence joins several fields, so a clock far
+  // from Claude's statement belongs to something else. Other adapters (for example Codex's
+  // "...or try again at 3:42 PM") put the clock after long upgrade text, so the whole
+  // message is parsed as before.
+  const resetText = options.boundResetWindow && quotaMatch
     ? error.slice(quotaMatch.index, quotaMatch.index + quotaMatch[0].length + PROVIDER_QUOTA_RESET_WINDOW_CHARS)
     : error;
   const parsedClockReset = parseProviderQuotaClockReset(resetText, now);

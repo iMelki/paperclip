@@ -122,13 +122,13 @@ describe("classifyAdapterFailureForRecovery", () => {
     }
   });
 
-  it("ignores reset clocks that are far from the quota statement or lack a word boundary", () => {
+  it("ignores ACP reset clocks that are far from the quota statement or lack a word boundary", () => {
     const now = new Date("2026-10-13T18:00:38.000Z");
     const far = `You've hit your session limit.${" x".repeat(100)} resets 10:40pm (Asia/Jerusalem)`;
     const glued = "You've hit your session limit. See presets 10:40pm for options";
     for (const error of [far, glued]) {
       expect(classifyAdapterFailureForRecovery({
-        errorCode: "adapter_failed",
+        errorCode: "acpx_turn_failed",
         error,
         resultJson: {},
       }, now)).toEqual({
@@ -137,6 +137,26 @@ describe("classifyAdapterFailureForRecovery", () => {
         parsedResetTime: false,
       });
     }
+  });
+
+  it("still reads a reset clock that follows long upgrade text on non-ACP adapters", () => {
+    const now = new Date("2026-10-13T18:00:38.000Z");
+    const error = `You've hit your usage limit. Upgrade to Pro (https://example.test/upgrade), visit ${"settings ".repeat(30)}to purchase more credits or try again at 10:40pm (Asia/Jerusalem).`;
+    expect(classifyAdapterFailureForRecovery({
+      errorCode: "adapter_failed",
+      error,
+      resultJson: {},
+    }, now)).toEqual({
+      kind: "provider_quota",
+      retryAt: new Date("2026-10-13T19:40:00.000Z"),
+      parsedResetTime: true,
+    });
+    const glued = "You've hit your session limit. See presets 10:40pm for options";
+    expect(classifyAdapterFailureForRecovery({ errorCode: "adapter_failed", error: glued, resultJson: {} }, now)).toEqual({
+      kind: "provider_quota",
+      retryAt: new Date(now.getTime() + PROVIDER_QUOTA_RECOVERY_DEFAULT_BACKOFF_MS),
+      parsedResetTime: false,
+    });
   });
 
   it("uses the default recovery backoff when quota reset time is absent", () => {
