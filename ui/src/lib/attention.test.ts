@@ -6,6 +6,7 @@ import {
   attentionBadgeCount,
   attentionDateBucket,
   attentionDetailLine,
+  attentionExcerptRepeatedByResolver,
   attentionIsNewToday,
   attentionKind,
   attentionStatus,
@@ -25,6 +26,41 @@ import {
   sortAttentionItems,
   sourceMeta,
 } from "./attention";
+import { pendingRequestConfirmationInteraction } from "../fixtures/issueThreadInteractionFixtures";
+
+describe("confirmation excerpt visibility", () => {
+  const interaction = { ...pendingRequestConfirmationInteraction,
+    payload: { ...pendingRequestConfirmationInteraction.payload,
+      target: { ...pendingRequestConfirmationInteraction.payload.target!, key: "decision-recommendation" } },
+  };
+  const item = buildItem({
+    sourceKind: "issue_thread_interaction", companyId: interaction.companyId,
+    subject: { kind: "interaction", id: interaction.id, companyId: interaction.companyId,
+      title: interaction.title ?? null, identifier: null, status: "pending", href: null,
+      metadata: { kind: "request_confirmation", issueId: interaction.issueId } },
+    detail: { kind: "confirmation", promptExcerpt: interaction.payload.prompt, isPlanTarget: false, images: [] },
+  });
+
+  it("requires the exact pending regular confirmation and a nonempty rendered prompt", () => {
+    expect(attentionExcerptRepeatedByResolver(item, interaction)).toBe(true);
+  });
+
+  it.each([
+    undefined, {}, { ...interaction, payload: null }, { ...interaction, payload: [] },
+    { ...interaction, payload: { prompt: "" } }, { ...interaction, payload: { prompt: 42 } },
+    { ...interaction, payload: { ...interaction.payload, toolAction: {} } },
+    { ...interaction, status: "accepted" }, { ...interaction, status: "expired" },
+    { ...interaction, id: "different-interaction" }, { ...interaction, issueId: "different-issue" },
+    { ...interaction, companyId: "different-company" },
+  ])("keeps the excerpt when full parity is unproven: %j", (value) => {
+    expect(attentionExcerptRepeatedByResolver(item, value)).toBe(false);
+  });
+
+  it("keeps distinct plan-document context", () => {
+    const planItem = { ...item, detail: { kind: "plan_approval" as const, issueTitle: "Feature", planTitle: "Budget plan", summaryExcerpt: null, images: [] } };
+    expect(attentionExcerptRepeatedByResolver(planItem, interaction)).toBe(false);
+  });
+});
 
 function buildItem(overrides: Partial<AttentionItem> = {}): AttentionItem {
   return {

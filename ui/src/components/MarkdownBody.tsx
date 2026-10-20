@@ -59,6 +59,8 @@ export type MarkdownExternalReferenceMap = Record<string, MarkdownExternalRefere
 
 interface MarkdownBodyProps {
   children: string;
+  /** Passive text formatting: no links, focus stops, media loads or code controls. */
+  textOnly?: boolean;
   className?: string;
   style?: React.CSSProperties;
   softBreaks?: boolean;
@@ -695,6 +697,7 @@ function MermaidDiagramBlock({ source, darkMode }: { source: string; darkMode: b
 
 function MarkdownBodyImpl({
   children,
+  textOnly = false,
   className,
   style,
   softBreaks = true,
@@ -772,7 +775,7 @@ function MarkdownBodyImpl({
       </blockquote>
     ),
     table: ({ node: _node, style: tableStyle, children: tableChildren, ...tableProps }) => (
-      <div className="paperclip-markdown-table-scroll" role="region" aria-label="Scrollable table" tabIndex={0}>
+      <div className="paperclip-markdown-table-scroll" role="region" aria-label="Scrollable table" tabIndex={textOnly ? undefined : 0}>
         <table {...tableProps} style={tableStyle as React.CSSProperties | undefined}>
           {tableChildren}
         </table>
@@ -789,8 +792,9 @@ function MarkdownBodyImpl({
       </th>
     ),
     pre: ({ node: _node, children: preChildren, ...preProps }) => {
+      if (textOnly) return <pre {...preProps}>{preChildren}</pre>;
       const mermaidSource = extractMermaidSource(preChildren);
-      if (mermaidSource) {
+      if (mermaidSource && !textOnly) {
         return <MermaidDiagramBlock source={mermaidSource} darkMode={theme === "dark"} />;
       }
       return <CodeBlock preProps={preProps}>{preChildren}</CodeBlock>;
@@ -801,6 +805,7 @@ function MarkdownBodyImpl({
       </code>
     ),
     a: ({ node: _node, href, style: linkStyle, children: linkChildren, ...anchorProps }) => {
+      if (textOnly) return <span>{linkChildren}{href ? ` (${href})` : ""}</span>;
       const workspaceFileRef = parseWorkspaceFileHref(href);
       if (workspaceFileRef) {
         return (
@@ -901,7 +906,10 @@ function MarkdownBodyImpl({
       );
     },
     };
-    if (resolveImageSrc || onImageClick) {
+    if (textOnly) {
+      map.img = ({ alt, src }) => <span>{alt || "Image reference"}{src ? ` (${src})` : ""}</span>;
+      map.input = ({ checked }) => <span>{checked ? "[x]" : "[ ]"}</span>;
+    } else if (resolveImageSrc || onImageClick) {
       map.img = ({ node: _node, src, alt, ...imgProps }) => {
         const resolved = resolveImageSrc && src ? resolveImageSrc(src) : null;
         const finalSrc = resolved ?? src;
@@ -917,7 +925,7 @@ function MarkdownBodyImpl({
       };
     }
     return map;
-  }, [theme, linkIssueReferences, linkCaseReferences, externalReferenceLookup, resolveImageSrc, onImageClick]);
+  }, [theme, textOnly, linkIssueReferences, linkCaseReferences, externalReferenceLookup, resolveImageSrc, onImageClick]);
 
   return (
     <div

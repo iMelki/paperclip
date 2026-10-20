@@ -52,6 +52,23 @@ afterEach(() => {
   mockUseOptionalCompany.mockReturnValue(null);
 });
 
+describe("passive text formatting", () => {
+  it("preserves formatted links, code, tables and checklists without controls or focus stops", () => {
+    const html = renderMarkdown(
+      "**Read this:** [reference](https://example.invalid/reference)\n\n```ts\nconst answer = 42;\n```\n\n| A | B |\n| - | - |\n| one | two |\n\n- [x] Done\n- [ ] Pending",
+      [],
+      { textOnly: true, linkIssueReferences: false },
+    );
+    expect(html).toContain("<strong>Read this:</strong>");
+    expect(html).toContain("https://example.invalid/reference");
+    expect(html).toContain("const answer = 42;");
+    expect(html).toContain("one");
+    expect(html).toContain("[x]");
+    expect(html).toContain("[ ]");
+    expect(html).not.toMatch(/<(a|button|input)\b|tabindex=/i);
+  });
+});
+
 function renderMarkdown(
   children: string,
   seededIssues: Array<{ identifier: string; status: string; title?: string }> = [],

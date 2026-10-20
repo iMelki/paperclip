@@ -41,6 +41,8 @@ const OTHER_ANSWER_ID = "__paperclip_other__";
 
 interface IssueThreadInteractionCardProps {
   interaction: IssueThreadInteraction;
+  /** The attention queue already supplies the decision title. */
+  showTitle?: boolean;
   agentMap?: Map<string, Agent>;
   currentUserId?: string | null;
   userLabelMap?: ReadonlyMap<string, string> | null;
@@ -1993,9 +1995,9 @@ function RequestConfirmationCard({
     <div className="space-y-4">
       {interaction.status === "pending" ? (
         <div className="space-y-3 rounded-sm border border-border/70 bg-background/75 p-4">
-          <div className="text-sm leading-6 text-foreground">
+          <MarkdownBody textOnly linkIssueReferences={false} className="text-sm leading-6 text-foreground">
             {interaction.payload.prompt}
-          </div>
+          </MarkdownBody>
           {interaction.payload.detailsMarkdown ? (
             <div className="border-t border-border/60 pt-3 text-sm">
               <MarkdownBody externalReferences={externalReferences}>{interaction.payload.detailsMarkdown}</MarkdownBody>
@@ -3084,6 +3086,7 @@ function VerdictProgressBadge({
 
 export function IssueThreadInteractionCard({
   interaction,
+  showTitle = true,
   agentMap,
   currentUserId,
   userLabelMap,
@@ -3099,6 +3102,11 @@ export function IssueThreadInteractionCard({
   const isPlan = isPlanConfirmation(interaction);
   const isToolAction =
     interaction.kind === "request_confirmation" && isToolActionConfirmation(interaction);
+  // Remove only exact repetition; distinct context and approval limits remain visible.
+  const summaryRepeatsPrompt = interaction.kind === "request_confirmation"
+    && interaction.status === "pending"
+    && !isToolAction
+    && interaction.summary?.trim() === interaction.payload.prompt.trim();
   const toolActionState =
     isToolAction && interaction.kind === "request_confirmation"
       ? toolActionCardState(interaction)
@@ -3219,7 +3227,7 @@ export function IssueThreadInteractionCard({
             ) : null}
           </div>
 
-          <div className="mt-3 text-lg font-bold text-foreground">
+          {showTitle ? <div className="mt-3 text-lg font-bold text-foreground">
             {interaction.title
               ?? (interaction.kind === "suggest_tasks"
                 ? "Suggested task tree"
@@ -3234,11 +3242,11 @@ export function IssueThreadInteractionCard({
                       : isPlan
                         ? "Plan review"
                         : "Confirmation requested")}
-          </div>
-          {interaction.summary ? (
-            <p className="mt-2 max-w-3xl text-sm leading-6 text-muted-foreground">
+          </div> : null}
+          {interaction.summary && !summaryRepeatsPrompt ? (
+            <MarkdownBody textOnly linkIssueReferences={false} className="mt-2 max-w-3xl text-sm leading-6 text-muted-foreground">
               {interaction.summary}
-            </p>
+            </MarkdownBody>
           ) : null}
         </div>
 

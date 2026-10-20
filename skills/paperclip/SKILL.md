@@ -235,6 +235,29 @@ Issue-thread interactions are first-class cards that render in the issue thread 
 
 Five issue-thread interaction kinds are supported. Pick the smallest kind that fits the decision shape:
 
+Write for the human who must answer. Use a short title that asks a concrete
+question. In the prompt, explain what the person needs to do, the time or cost,
+and why their answer is needed. Use familiar words: "check the Windows app"
+rather than "attended native verification." Avoid repeating the title in the
+summary and repeating the summary in the prompt.
+
+Use `detailsMarkdown` for the full approval scope: what each choice authorizes,
+what happens next, and any separate permissions still required. Keep essential
+consequences explicit; calling a field "details" does not make them optional.
+Use paragraphs or a short list, and action labels that describe the actual
+authorized action. A choice to schedule a check must not imply starting the
+check, accepting its results, or approving a later launch. Link the exact
+revision separately instead of filling the question with identifiers and logs.
+Check the rendered card before handing it to the board. Presentation fixes do
+not authorize rewriting or resolving an existing revision-bound request.
+
+Before requesting human testing, complete the already-authorized agent checks
+and inspect existing receipts. Bind each result to the exact intended build;
+a similar app or a worker pass cannot establish native UI or audible acceptance.
+Ask the human only for observations that still require their judgment or physical
+setup, and name any actual tool or authority blocker. Preserve a pending decision
+when adding research; comments or revisions can supersede its bound request.
+
 | Kind                            | When to use                                                                                  | When **not** to use                                                                                |
 | ------------------------------- | -------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
 | `request_confirmation`          | Single yes/no decision bound to a target (e.g. accept a plan revision, approve a launch).    | Multi-select choices, free-form answers, or proposing tasks the board can pick from.               |
@@ -415,6 +438,32 @@ Load `references/workflows.md` when the task matches one of these:
 
 Load `references/cases.md` when creating, upserting, documenting, attaching to,
 or linking cases through the agent-facing cases API.
+
+## Bounded Agent Responsibilities
+
+Before hiring or revising a worker, read the actual company reporting tree,
+current assignments, selected instructions and effective permissions. A name,
+title, machine role, reporting line and permission grant are separate fields.
+A title such as "Product Engineer" describes skills; it does not grant product
+strategy, architecture approval, hiring, task assignment or release authority.
+
+A generalist may implement connected frontend, backend and integration changes
+for one approved, scoped issue. Name the product, repository, accountable owner,
+acceptance conditions and handoffs. A one-task limit alone does not define a job;
+state the product area the worker builds or maintains, with a concrete example.
+When two engineers overlap, assign distinct issues under one technical owner;
+a provider difference is not a separate business responsibility. Keep product priorities with the product owner,
+technical decisions with the technical owner, and independent verification with
+reviewers and testers. Do not make the worker its own final approver. Keep
+deployment, spending, credentials and external commitments separately authorized.
+
+Use existing specialist roles when the task needs them; inspect their source,
+installation and live availability separately. Do not create duplicate roles or
+hire a full specialist roster from a catalog alone. Remove obsolete descriptions
+such as "sole engineer" or "reports to the CTO once hired" when the company has
+changed, through an approved saved update. A rename alone does not narrow access.
+Check the actual effective permission before and after any approved change;
+defaults or other grants can retain authority when one checkbox is cleared.
 
 ## Company Skills Workflow
 

@@ -1,5 +1,5 @@
 import { memo, useState, type KeyboardEvent, type ReactNode } from "react";
-import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   AlarmClock,
   CalendarClock,
@@ -19,9 +19,11 @@ import { approvalsApi } from "../api/approvals";
 import { issuesApi } from "../api/issues";
 import { useToastActions } from "../context/ToastContext";
 import { queryKeys } from "../lib/queryKeys";
+import type { IssueThreadInteraction } from "../lib/issue-thread-interactions";
 import {
   attentionDetailImages,
   attentionDetailLine,
+  attentionExcerptRepeatedByResolver,
   attentionImageUrl,
   attentionStatus,
   attentionTaskRef,
@@ -47,6 +49,7 @@ import {
   DropdownMenuTrigger,
 } from "./ui/dropdown-menu";
 import { AttentionInteractionResolver } from "./AttentionInteractionResolver";
+import { MarkdownBody } from "./MarkdownBody";
 import { DecisionResolver } from "./DecisionResolver";
 import { StalledReviewActions } from "./StalledReviewActions";
 
@@ -134,6 +137,21 @@ export const AttentionQueueRow = memo(function AttentionQueueRow({
   const href = item.subject.href;
   const snoozedUntil = item.dismissal?.kind === "snooze" ? item.dismissal.snoozedUntil : null;
   const detailLine = attentionDetailLine(item) ?? item.whyNow;
+  const sourceIssueId = item.sourceKind === "issue_thread_interaction"
+    ? (item.subject.metadata?.issueId as string | undefined) ?? item.relatedIssue?.id
+    : undefined;
+  // Observe the resolver's existing cache only; this does not fetch per-row data.
+  const { data: sourceInteractions } = useQuery<IssueThreadInteraction[]>({
+    queryKey: queryKeys.issues.interactions(sourceIssueId ?? ""),
+    queryFn: () => sourceIssueId ? issuesApi.listInteractions(sourceIssueId) : Promise.resolve([]),
+    enabled: false,
+  });
+  const sourceInteraction = Array.isArray(sourceInteractions)
+    ? sourceInteractions.find((entry) => entry?.id === item.subject.id)
+    : undefined;
+  // A typed excerpt alone does not prove the resolver shows it: tool actions
+  // and resolved requests use different bodies. Keep context until full proof.
+  const promptShownInResolver = expanded && attentionExcerptRepeatedByResolver(item, sourceInteraction);
   const images = attentionDetailImages(item);
   const hasImages = images.length > 0;
   // The issue (or source) this row points at — used as the target for the
@@ -395,7 +413,11 @@ export const AttentionQueueRow = memo(function AttentionQueueRow({
         <span className="line-clamp-2 text-sm font-medium text-foreground" title={item.subject.title ?? undefined}>
           {item.subject.title ?? meta.label}
         </span>
-        <p className="mt-0.5 line-clamp-2 text-xs text-muted-foreground">{detailLine}</p>
+        {item.sourceKind === "issue_thread_interaction" ? (
+          !promptShownInResolver && <MarkdownBody textOnly linkIssueReferences={false} className="mt-0.5 line-clamp-2 text-xs text-muted-foreground">{detailLine}</MarkdownBody>
+        ) : (
+          <p className="mt-0.5 line-clamp-2 text-xs text-muted-foreground">{detailLine}</p>
+        )}
       </div>
 
       {/* Collapsed-only content. It has no counterpart to morph into — the
@@ -818,6 +840,7 @@ function InlineResolver({
           companyId={companyId}
           issueId={issueId}
           interactionId={item.subject.id}
+          titleAlreadyShown={item.subject.title}
           agentMap={agentMap}
           currentUserId={currentUserId}
           userLabelMap={userLabelMap}

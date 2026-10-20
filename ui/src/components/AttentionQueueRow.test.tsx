@@ -11,6 +11,11 @@ import { issuesApi } from "../api/issues";
 import { ToastViewport } from "./ToastViewport";
 import { ToastProvider } from "../context/ToastContext";
 import { AttentionQueueRow } from "./AttentionQueueRow";
+import { ThemeProvider } from "../context/ThemeContext";
+import { TooltipProvider } from "./ui/tooltip";
+import { pendingRequestConfirmationInteraction, pendingToolActionWriteInteraction, acceptedRequestConfirmationInteraction } from "../fixtures/issueThreadInteractionFixtures";
+import { queryKeys } from "../lib/queryKeys";
+import type { IssueThreadInteraction } from "../lib/issue-thread-interactions";
 
 vi.mock("@/lib/router", () => ({
   Link: ({ children, to, ...props }: AnchorHTMLAttributes<HTMLAnchorElement> & { to: string }) => (
@@ -31,6 +36,7 @@ vi.mock("../api/issues", () => ({
     acceptInteraction: vi.fn(),
     rejectInteraction: vi.fn(),
     decideStalledReview: vi.fn(() => Promise.resolve({})),
+    listInteractions: vi.fn(() => Promise.resolve([])),
   },
 }));
 
@@ -61,18 +67,23 @@ afterEach(() => {
   container?.remove();
   container = null;
   vi.clearAllMocks();
+  vi.mocked(issuesApi.listInteractions).mockReset().mockResolvedValue([]);
 });
 
-function render(element: ReactElement) {
+function render(element: ReactElement, interaction?: IssueThreadInteraction, queryClient?: QueryClient) {
   container = document.createElement("div");
   document.body.appendChild(container);
   root = createRoot(container);
-  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const client = queryClient ?? new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  if (interaction) {
+    client.setQueryDefaults(queryKeys.issues.interactions(interaction.issueId), { staleTime: Infinity });
+    client.setQueryData(queryKeys.issues.interactions(interaction.issueId), [interaction]);
+  }
   act(() =>
     root?.render(
       <ToastProvider>
         <QueryClientProvider client={client}>
-          {element}
+          <ThemeProvider><TooltipProvider>{element}</TooltipProvider></ThemeProvider>
           <ToastViewport />
         </QueryClientProvider>
       </ToastProvider>,
@@ -133,6 +144,152 @@ function buildItem(overrides: Partial<AttentionItem> = {}): AttentionItem {
 const noop = () => {};
 
 describe("AttentionQueueRow", () => {
+  function confirmationItem(interaction: IssueThreadInteraction, title = interaction.title): AttentionItem {
+    return buildItem({
+      sourceKind: "issue_thread_interaction", companyId: interaction.companyId,
+      subject: {
+        kind: "interaction", id: interaction.id, companyId: interaction.companyId,
+        title: title ?? null, identifier: null, status: "pending",
+        href: "/PAP/issues/issue-1", metadata: { kind: interaction.kind, issueId: interaction.issueId },
+      },
+      whyNow: "The person needs to decide.",
+    });
+  }
+
+  it("preserves distinct plan titles, document context and the exact revision when expanded", () => {
+    const interaction = {
+      ...pendingRequestConfirmationInteraction,
+      title: "Approve the two-week implementation budget?",
+      summary: null,
+    };
+    const item = confirmationItem(interaction, "Plan approval - New reporting feature");
+    item.detail = { kind: "plan_approval", planTitle: "Budget and staffing plan", issueTitle: "New reporting feature", summaryExcerpt: null, images: [] };
+    const host = render(
+      <AttentionQueueRow item={item} companyId="c1" expanded onToggleExpand={noop} onDismiss={noop} />,
+      interaction,
+    );
+    expect(host.textContent).toContain("Plan approval - New reporting feature");
+    expect(host.textContent).toContain("Budget and staffing plan");
+    expect(host.textContent).toContain("Approve the two-week implementation budget?");
+    expect(host.querySelector('a[href$="#document-plan"]')?.textContent).toContain("Plan v3");
+  });
+
+  it.each([
+    { label: "tool action", interaction: pendingToolActionWriteInteraction },
+    { label: "resolved confirmation", interaction: acceptedRequestConfirmationInteraction },
+  ])("keeps the feed prompt for a $label whose resolver body differs", ({ interaction }) => {
+    const item = confirmationItem(interaction);
+    item.detail = { kind: "confirmation", promptExcerpt: "Distinct feed context must remain visible", isPlanTarget: false, images: [] };
+    const host = render(
+      <AttentionQueueRow item={item} companyId="c1" expanded onToggleExpand={noop} onDismiss={noop} />,
+      interaction,
+    );
+    expect(host.textContent).toContain("Distinct feed context must remain visible");
+  });
+
+  it("keeps a fallback title when the interaction has no saved title", () => {
+    const interaction = { ...pendingRequestConfirmationInteraction, title: null };
+    const host = render(
+      <AttentionQueueRow item={confirmationItem(interaction, "Plan approval - New reporting feature")} companyId="c1" expanded onToggleExpand={noop} onDismiss={noop} />,
+      interaction,
+    );
+    expect(host.textContent).toContain("Plan review");
+  });
+
+  it("keeps formatted excerpts inside the expand control passive and makes no per-row fetch", () => {
+    const item = confirmationItem(pendingRequestConfirmationInteraction);
+    item.whyNow = "[Reference](https://example.invalid/ref)\n\n```js\nconst answer = 42;\n```";
+    const onToggleExpand = vi.fn();
+    const host = render(<AttentionQueueRow item={item} companyId="c1" expanded={false} onToggleExpand={onToggleExpand} onDismiss={noop} />);
+    const header = host.querySelector('[aria-label="Expand decision"]');
+    expect(header?.textContent).toContain("https://example.invalid/ref");
+    expect(header?.querySelector("a, button, input, [tabindex]")).toBeNull();
+    act(() => header?.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })));
+    expect(onToggleExpand).toHaveBeenCalledTimes(1);
+    expect(issuesApi.listInteractions).not.toHaveBeenCalled();
+    expect(issuesApi.acceptInteraction).not.toHaveBeenCalled();
+    expect(issuesApi.rejectInteraction).not.toHaveBeenCalled();
+  });
+
+  it("keeps collapsed context when a passive cache entry is malformed", () => {
+    const interaction = pendingRequestConfirmationInteraction;
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    client.setQueryData(queryKeys.issues.interactions(interaction.issueId), [{ ...interaction, payload: null }]);
+    const item = confirmationItem(interaction);
+    item.detail = { kind: "confirmation", promptExcerpt: "Keep this context", isPlanTarget: false, images: [] };
+    const host = render(<AttentionQueueRow item={item} companyId="c1" expanded={false} onToggleExpand={noop} onDismiss={noop} />, undefined, client);
+    expect(host.textContent).toContain("Keep this context");
+    expect(issuesApi.listInteractions).not.toHaveBeenCalled();
+  });
+
+  it("observes resolver cache arrival and preserves its active refresh without a second fetch", async () => {
+    const interaction = {
+      ...pendingRequestConfirmationInteraction, companyId: "c1", summary: null,
+      payload: { ...pendingRequestConfirmationInteraction.payload,
+        prompt: "Schedule this private check?", target: null },
+    };
+    const item = confirmationItem(interaction);
+    item.detail = { kind: "confirmation", promptExcerpt: interaction.payload.prompt, isPlanTarget: false, images: [] };
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    vi.mocked(issuesApi.listInteractions).mockResolvedValueOnce([interaction]).mockResolvedValueOnce([interaction]);
+    const host = render(
+      <AttentionQueueRow item={item} companyId="c1" expanded onToggleExpand={noop} onDismiss={noop} />,
+      undefined, client,
+    );
+    expect(host.textContent).toContain("Schedule this private check?");
+    await vi.waitFor(() => {
+      expect(host.textContent?.split("Schedule this private check?").length).toBe(2);
+      expect(issuesApi.listInteractions).toHaveBeenCalledTimes(1);
+    });
+    await client.invalidateQueries({ queryKey: queryKeys.issues.interactions(interaction.issueId) });
+    await vi.waitFor(() => expect(issuesApi.listInteractions).toHaveBeenCalledTimes(2));
+    expect(host.textContent?.split("Schedule this private check?").length).toBe(2);
+    expect(issuesApi.acceptInteraction).not.toHaveBeenCalled();
+    expect(issuesApi.rejectInteraction).not.toHaveBeenCalled();
+  });
+
+  it("shows an expanded confirmation title and prompt once without hiding the exact approval target", () => {
+    const prompt = "**Question:** Can you set aside 15–20 minutes for a Windows check?";
+    const interaction = {
+      ...pendingRequestConfirmationInteraction,
+      id: "interaction-1",
+      companyId: "c1",
+      issueId: "issue-1",
+      title: "Plan the Windows check",
+      summary: prompt,
+      payload: {
+        ...pendingRequestConfirmationInteraction.payload,
+        prompt,
+        detailsMarkdown: "This schedules a private check only. The pilot needs separate approval.",
+        target: {
+          ...pendingRequestConfirmationInteraction.payload.target!,
+          key: "decision-recommendation", label: "Reviewed recommendation v3",
+        },
+      },
+    };
+    const item = buildItem({
+      sourceKind: "issue_thread_interaction",
+      subject: {
+        kind: "interaction", id: interaction.id, companyId: "c1",
+        title: interaction.title, identifier: null, status: "pending",
+        href: "/PAP/issues/issue-1", metadata: { kind: "request_confirmation", issueId: "issue-1" },
+      },
+      whyNow: prompt,
+      detail: { kind: "confirmation", promptExcerpt: prompt, isPlanTarget: false, images: [] },
+    });
+    const host = render(
+      <AttentionQueueRow item={item} companyId="c1" expanded onToggleExpand={noop} onDismiss={noop} />,
+      interaction,
+    );
+    expect(host.textContent?.split(interaction.title).length).toBe(2);
+    expect(host.textContent?.split("Can you set aside").length).toBe(2);
+    expect(host.textContent).not.toContain("**Question:**");
+    expect(host.textContent).toContain("The pilot needs separate approval.");
+    expect(host.querySelector('a[href$="#document-decision-recommendation"]')?.textContent).toContain("Reviewed recommendation v3");
+    expect(issuesApi.acceptInteraction).not.toHaveBeenCalled();
+    expect(issuesApi.rejectInteraction).not.toHaveBeenCalled();
+  });
+
   it("renders an inline approval resolver when expanded", () => {
     const el = render(
       <AttentionQueueRow

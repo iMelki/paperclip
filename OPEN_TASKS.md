@@ -25,6 +25,13 @@ integration outcome; later rows remain queued and do not imply concurrent execut
 
 ## Current work
 
+- Readable decision confirmations (issue publication pending): Remove repeated
+  titles/prompts and render text formatting without automatic media loads.
+  Keep full approval limits, target revisions and action semantics visible.
+  Source guidance now asks agents to write for the human who must answer.
+  See `doc/plans/2026-10-13-readable-decision-cards.md`. Review, publication and
+  installation remain separate steps.
+
 - [#154 — Stabilize workspace containment test completion](https://github.com/iMelki/paperclip/issues/154):
   Await tracked heartbeat executions before reading final state. The isolated
   database fixture delays agent finalization to expose the old one-second wait.

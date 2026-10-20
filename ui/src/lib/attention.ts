@@ -9,6 +9,21 @@ import type {
   AttentionSourceKind,
   AttentionWorkspaceRef,
 } from "@paperclipai/shared";
+import { isIssueThreadInteraction } from "./issue-thread-interactions";
+
+/** Hide only a generated prompt excerpt whose full pending body is rendered. */
+export function attentionExcerptRepeatedByResolver(item: AttentionItem, interaction: unknown): boolean {
+  const issueId = (item.subject.metadata?.issueId as string | undefined) ?? item.relatedIssue?.id;
+  if (item.sourceKind !== "issue_thread_interaction" || item.detail?.kind !== "confirmation"
+    || !isIssueThreadInteraction(interaction)
+    || interaction.id !== item.subject.id || interaction.companyId !== item.companyId
+    || interaction.issueId !== issueId || interaction.kind !== "request_confirmation"
+    || interaction.status !== "pending") return false;
+  const payload = interaction.payload;
+  return typeof payload === "object" && payload !== null && !Array.isArray(payload)
+    && typeof payload.prompt === "string" && payload.prompt.trim().length > 0
+    && payload.toolAction == null;
+}
 
 export type AttentionListOptions = AttentionFeedQuery;
 

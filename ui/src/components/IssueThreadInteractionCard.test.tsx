@@ -92,6 +92,69 @@ afterEach(() => {
 });
 
 describe("IssueThreadInteractionCard", () => {
+  it("shows a repeated confirmation prompt once, with readable formatting and full approval limits", () => {
+    const prompt = "**Decision needed:** Plan a 15–20 minute Windows check, or defer.";
+    const host = renderCard({
+      interaction: {
+        ...pendingRequestConfirmationInteraction,
+        title: "Plan the Windows check",
+        summary: prompt,
+        payload: {
+          ...pendingRequestConfirmationInteraction.payload,
+          prompt,
+          detailsMarkdown: "Accept only schedules the private check. It does not approve the pilot.",
+          acceptLabel: "Schedule attended check",
+          rejectLabel: "Defer check",
+        },
+      },
+      onAcceptInteraction: vi.fn(),
+      onRejectInteraction: vi.fn(),
+    });
+
+    expect(host.textContent?.split("Decision needed:").length).toBe(2);
+    expect(host.textContent).not.toContain("**Decision needed:**");
+    expect(host.querySelector("strong")?.textContent).toBe("Decision needed:");
+    expect(host.textContent).toContain("It does not approve the pilot.");
+    const buttons = [...host.querySelectorAll("button")].map((button) => button.textContent);
+    expect(buttons).toContain("Schedule attended check");
+    expect(buttons).toContain("Defer check");
+  });
+
+  it("keeps distinct confirmation context and omits only the title already supplied by the queue", () => {
+    const host = renderCard({
+      showTitle: false,
+      interaction: {
+        ...pendingRequestConfirmationInteraction,
+        title: "Title supplied by parent",
+        summary: "**Why now:** The Windows playback check is still missing.",
+        payload: { ...pendingRequestConfirmationInteraction.payload, prompt: "Schedule the check?" },
+      },
+    });
+    expect(host.textContent).not.toContain("Title supplied by parent");
+    expect(host.textContent).toContain("The Windows playback check is still missing.");
+    expect(host.textContent).not.toContain("**Why now:**");
+    expect(host.textContent).toContain("Schedule the check?");
+  });
+
+  it("formats confirmation text without loading remote images, HTML or diagrams", () => {
+    const host = renderCard({
+      interaction: {
+        ...pendingRequestConfirmationInteraction,
+        summary: null,
+        payload: {
+          ...pendingRequestConfirmationInteraction.payload,
+          prompt: "**Question:** Continue? ![Tracking image](https://example.invalid/pixel) <img src='https://example.invalid/raw'>\n\n```mermaid\ngraph TD; A-->B\n```\n\n[unsafe](javascript:alert(1))",
+          detailsMarkdown: null,
+        },
+      },
+    });
+    expect(host.querySelector("strong")?.textContent).toBe("Question:");
+    expect(host.querySelector("img, script, .paperclip-mermaid")).toBeNull();
+    expect(host.textContent).toContain("Tracking image");
+    expect(host.textContent).toContain("graph TD; A-->B");
+    expect(host.querySelector('a[href^="javascript:"]')).toBeNull();
+  });
+
   it("exposes pending question options as selectable radio and checkbox controls", () => {
     const host = renderCard({
       interaction: pendingAskUserQuestionsInteraction,

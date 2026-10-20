@@ -21,6 +21,7 @@ interface AttentionInteractionResolverProps {
   companyId: string;
   issueId: string;
   interactionId: string;
+  titleAlreadyShown?: string | null;
   agentMap?: Map<string, Agent>;
   currentUserId?: string | null;
   userLabelMap?: ReadonlyMap<string, string> | null;
@@ -38,6 +39,7 @@ export function AttentionInteractionResolver({
   companyId,
   issueId,
   interactionId,
+  titleAlreadyShown,
   agentMap,
   currentUserId,
   userLabelMap,
@@ -120,6 +122,7 @@ export function AttentionInteractionResolver({
   return (
     <IssueThreadInteractionCard
       interaction={interaction}
+      showTitle={typeof interaction.title !== "string" || !interaction.title.trim() || interaction.title !== titleAlreadyShown}
       agentMap={agentMap}
       currentUserId={currentUserId}
       userLabelMap={userLabelMap}
