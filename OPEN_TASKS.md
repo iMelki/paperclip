@@ -25,6 +25,52 @@ integration outcome; later rows remain queued and do not imply concurrent execut
 
 ## Current work
 
+- [#126 / #129 — Personal GitHub Projects and browser connection](https://github.com/iMelki/paperclip/issues/126):
+  2026-10-13 private continuation: correct OAuth app registered metadata read back
+  without secrets; exact approved callback uses5113. Human secret/consent remain
+  pending. Native RW OAuth wizard, twelve bounded
+  operations, current-account/scope/expiry verification and formal write
+  approval are source candidates, not installed. Latest admitted run385 passed
+  across9 files; one model suite collected0 due borrowed acpx/runtime resolution.
+  The existing patched dependency was found and narrow resolver/pins reviewed;
+  full406 rerun pending. Earlier scrollIntoView failure now passes AppsConnect28/28.
+  Newer-model form render14/14 passed; installed/provider proof remains absent.
+  Newer-model four-file source integration and
+  host-owned Project12 OAuth binding/fixed reader/attestation are in parallel
+  private qualification. Existing Asimtop/MemSys browser is usable on HTTPS5113,
+  but its board link is still reference-only and live import pass count remains0.
+  Effective dependency declarations match the lock after pinned pnpm overrides;
+  preliminary raw Lexical mismatch classification is withdrawn. No lock rewrite.
+  Guarded-call assertion and legacy fake-act/root/client cleanup repaired.
+  Native service/state source review accepted; full candidate review and all
+  latest reruns/native fixtures/full compilers remain open. Latest admission
+  refused95.6316317381% RAM at23:46:00Z after resolver repair (90% limit),
+  no child; raw66786036/2917460 total/freeKiB. The earlier actual385 run was
+  53.712s/exit1;15 processes terminal,0active, complete captures/no drift.
+  New conservative CIM-start/age guards source reviewed, negatives pending.
+  Host hooks/commit remain pending.
+  Single-transaction credential/binding/attestation custody and contradictory
+  complete-result recovery are source repaired/reviewed; new fixtures unrun.
+  Human safe-close action acknowledged; it did not clear admission. No unknown
+  processes stopped, protected Kanban3021 unchanged. Same app healthok23:51:40Z.
+  Private adoption also needs qualified launcher candidate-vs-remote-base pins,
+  preservation-safe backup/artifact replacement and durable stock-sync fencing:
+  ordinary backup can prune; plugin unload(purge=false) can remove artifacts;
+  current upgrade cannot change local path and load can resume paused jobs.
+  These are newly tracked rollout defects, not executed operations or permission.
+  No agent grants, installs or imports run on Connect. Publication is held;
+  see [OAuth qualification and bug log](doc/evidence/github-oauth-workspace-20261013.md).
+  Earlier import-specific qualification follows (not current full-OAuth proof):
+  Private native atomic-import service, SDK boundary and generic-update protection
+  are source candidates, not installed changes. Native service23/23, host boundary
+  21/21 and SDK34/34 cases pass. OAuth compatibility43/43 and an attributable
+  JSON-format negative/restored control pass; exact-source non-author review is
+  source-only. Actual Connect wizard, registered app metadata, server-only read
+  bridge, full host qualification, paired SDK/plugin artifacts, recovery and
+  two live imports remain open. No new public tracking write, push, installation,
+  restart, credential access or live import was performed. See the
+  [private checkpoint](doc/evidence/github-project-board-import-20261012.md).
+
 - [#144 — Keep the listen port when only another address holds it](https://github.com/iMelki/paperclip/issues/144):
   The server now probes only its bind host, with an opt-in strict port. Seven
   real-socket tests and the startup suite pass locally; hosted CI and a

@@ -1817,7 +1817,7 @@ export function ModelDropdown({
       return [
         {
           provider: "models",
-          entries: [...filteredModels].sort((a, b) => a.id.localeCompare(b.id)),
+          entries: [...filteredModels],
         },
       ];
     }
@@ -1883,6 +1883,7 @@ export function ModelDropdown({
             {modelSearch && (
               <button
                 type="button"
+                aria-label="Clear model search"
                 className="absolute right-1.5 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
                 onClick={() => setModelSearch("")}
               >

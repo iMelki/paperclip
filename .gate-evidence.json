@@ -45,6 +45,22 @@
   },
   "gates": [
     {
+      "id": "github-oauth-json-response-contract",
+      "path": "server/src/services/tool-access.ts",
+      "description": "Request GitHub's documented JSON token response and reject missing/error token results using the production helper.",
+      "negativeFixture": "server/src/__tests__/tool-oauth-github-compatibility.test.ts",
+      "observedFailure": {
+        "date": "2026-10-12",
+        "command": "Invoke-Project12SdkCheck.ps1 -Mode OAuth (private bounded NativeJob qualification runner)",
+        "breakApplied": "Removed only Accept application/json from the private production exchange helper. No live OAuth transport or credential was used.",
+        "reason": "Exactly the GitHub-shaped JSON-request case failed with oauth_access_token_missing; 42 passed, 1 failed, exit 1. No syntax/import/dependency/deadline failure in this accepted negative run.",
+        "exitCode": 1,
+        "artifactPath": "doc/evidence/github-project-board-import-20261012.md",
+        "restoredPass": "The exact source SHA3873F32AF399231BE5FB5374B5624757AB97D7DEFEC0ACD20266083E0C46656A was restored. Same caller and 1.5GiB Job/512MiB process limits: 43 passed, zero skipped, exit0, 9110ms, zero active members. The earlier allocation-failed negative attempt was inconclusive and is not this proof.",
+        "restoredExitCode": 0
+      }
+    },
+    {
       "id": "hermes-local-strict-isolation-launch",
       "path": "packages/adapters/hermes/src/server/strict-isolation.ts",
       "description": "Reject unsafe Hermes Local profile/home/env/limit/API-host inputs before child spawn.",

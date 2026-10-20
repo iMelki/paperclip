@@ -282,6 +282,8 @@ export type PluginRpcErrorCode =
  */
 export interface PluginInvocationScope {
   companyId: string;
+  /** Host-authenticated action principal, looked up by invocation id; never worker supplied. */
+  actor?: { type: "user" | "agent" | "system"; userId?: string | null };
 }
 
 /**
@@ -1444,6 +1446,10 @@ export interface WorkerToHostMethods {
   ];
 
   // Issues
+  "issues.importedBoard": [
+    params: import("./imported-board-types.js").PluginImportedBoardRequest,
+    result: unknown,
+  ];
   "issues.list": [
     params: {
       companyId: string;

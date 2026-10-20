@@ -1420,6 +1420,8 @@ export interface PluginIssueAttachmentContent {
  * - `issue.documents.write` for `documents.upsert` and `documents.delete`
  */
 export interface PluginIssuesClient {
+  /** Optional on older hosts. Never emulate this with ordinary create/update calls. */
+  importedBoard?(input: import("./imported-board-types.js").PluginImportedBoardRequest): Promise<unknown>;
   list(input: {
     companyId: string;
     projectId?: string;

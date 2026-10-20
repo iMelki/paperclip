@@ -47,6 +47,7 @@ import { badRequest, forbidden, notFound, unprocessable } from "../errors.js";
 import { accessService, googleSheetsRobotEmailFromEnv, logActivity, toolAccessPolicyService, toolAccessService } from "../services/index.js";
 import { ToolGatewayHttpError, type ToolGatewayService } from "../services/tool-gateway.js";
 import { toolCatalogReviewService } from "../services/tool-catalog-review.js";
+import { GITHUB_OAUTH_REQUESTED_SCOPES } from "@paperclipai/shared/github-oauth";
 
 /** Allowlist (e.g. Google Sheets allowed spreadsheet ids) lives in connection config. */
 function allowlistIds(config: Record<string, unknown> | null | undefined): string[] {
@@ -252,6 +253,16 @@ export function toolAccessRoutes(
             }
           : { ...app, ownershipAvailability: DEFAULT_OWNERSHIP_AVAILABILITY },
       ),
+    });
+  });
+
+  router.get("/companies/:companyId/tools/github/oauth/setup", async (req, res) => {
+    assertBoard(req);
+    assertCompanyAccess(req, req.params.companyId as string);
+    res.json({
+      callbackUrl: oauthRedirectUri(),
+      registrationUrl: "https://github.com/settings/applications/new",
+      requestedScopes: [...GITHUB_OAUTH_REQUESTED_SCOPES],
     });
   });
 
