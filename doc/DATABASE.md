@@ -26,12 +26,14 @@ same login it uses for the embedded database, and checks that its
 physical location first (symlinks and junctions), and compared without case on
 Windows.
 
-PostgreSQL is started only when the lock is stale: the PID no longer exists
+On server startup, PostgreSQL is started only when the lock is stale: the PID no longer exists
 (`ESRCH`), or it is the server's own process. If the live PID is affirmatively
 not PostgreSQL (the OS recycled it, checked with `ps` or `tasklist`) and nothing
 answers on the recorded or configured port, the lock is stale too. A stale lock is
 never deleted: startup renames it to `postmaster.pid.stale-<timestamp>`, then
-starts normally. If the rename fails, startup refuses (exit code 75).
+starts normally. If the rename fails, startup refuses (exit code 75). Moved-aside
+locks are never pruned automatically; delete old `postmaster.pid.stale-*` files by hand
+once you no longer need them.
 
 If `postmaster.pid` cannot be read or holds no valid process id, the owner is
 looked up without it. A server answering on the configured port, or any

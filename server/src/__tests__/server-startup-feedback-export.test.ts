@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { ensurePostgresDatabase, getPostgresDataDirectory } from "@paperclipai/db";
@@ -392,11 +392,17 @@ describe("startServer embedded PostgreSQL identity", () => {
     vi.mocked(ensurePostgresDatabase).mockReset();
   });
 
-  it("starts PostgreSQL and removes the recycled-PID lock instead of reusing node", async () => {
+  // A stale lock is moved aside, never deleted; the moved file keeps its contents.
+  const staleLocks = () => readdirSync(dataDir).filter((name) => name.startsWith("postmaster.pid.stale-"));
+
+  it("starts PostgreSQL and moves the recycled-PID lock aside instead of reusing node", async () => {
     expect(process.kill(process.pid, 0)).toBe(true);
+    const lockBefore = readFileSync(pidFile);
     await expect(startServer()).rejects.toThrow("database phase reached");
     expect(pgStartMock).toHaveBeenCalledOnce();
     expect(existsSync(pidFile)).toBe(false);
+    expect(staleLocks()).toHaveLength(1);
+    expect(readFileSync(path.join(dataDir, staleLocks()[0])).equals(lockBefore)).toBe(true);
     expect(process.kill(process.pid, 0)).toBe(true);
   });
 
@@ -412,7 +418,8 @@ describe("startServer embedded PostgreSQL identity", () => {
     expect(existsSync(pidFile)).toBe(true);
   });
 
-  it("starts PostgreSQL and removes the dead-PID lock", async () => {
+  it("starts PostgreSQL and moves the dead-PID lock aside", async () => {
+    const lockBefore = readFileSync(pidFile);
     const kill = vi.spyOn(process, "kill").mockImplementation(() => {
       throw Object.assign(new Error("no such process"), { code: "ESRCH" });
     });
@@ -420,6 +427,8 @@ describe("startServer embedded PostgreSQL identity", () => {
       await expect(startServer()).rejects.toThrow("database phase reached");
       expect(pgStartMock).toHaveBeenCalledOnce();
       expect(existsSync(pidFile)).toBe(false);
+      expect(staleLocks()).toHaveLength(1);
+      expect(readFileSync(path.join(dataDir, staleLocks()[0])).equals(lockBefore)).toBe(true);
     } finally {
       kill.mockRestore();
     }

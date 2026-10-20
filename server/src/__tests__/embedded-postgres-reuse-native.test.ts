@@ -1,11 +1,11 @@
-import { mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import EmbeddedPostgres from "embedded-postgres";
 import { prepareEmbeddedPostgresNativeRuntime } from "@paperclipai/db";
 import { expect, it } from "vitest";
-import { readRunningEmbeddedPostgres } from "../embedded-postgres-reuse.js";
+import { moveStaleLockAside, readRunningEmbeddedPostgres } from "../embedded-postgres-reuse.js";
 
 async function unusedPort(): Promise<number> {
   const server = createServer();
@@ -44,9 +44,11 @@ it("rejects an actual node PID on a closed port, then starts and reuses actual P
   expect(await readRunningEmbeddedPostgres(dataDir, port, adminUrl)).toBeNull();
   expect(readFileSync(pidFile, "utf8")).toBe(stale);
 
-  // This is the existing server start path: it removes the stale lock before
-  // start(). The dependency itself does not clean up a recycled-PID lock.
-  rmSync(pidFile, { force: true });
+  // This is the server start path: it moves the stale lock aside before start().
+  // The dependency itself does not clean up a recycled-PID lock.
+  const aside = moveStaleLockAside(pidFile);
+  expect(readFileSync(aside, "utf8")).toBe(stale);
+  expect(readdirSync(dataDir).filter((name) => name.startsWith("postmaster.pid.stale-"))).toHaveLength(1);
   try {
     await pg.start();
     const postgresPid = Number(readFileSync(pidFile, "utf8").split("\n")[0]);
