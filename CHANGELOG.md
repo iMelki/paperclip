@@ -6,6 +6,8 @@ All notable changes to this repository should be recorded here.
 
 ## Unreleased
 
+- Paperclip #41 / Agent Settings #575: suppress Windows consoles for local CLI adapter processes and bypass Codex ACP batch/Node-wrapper hops with an exact native executable. The pinned Codex ACP 1.1.14 patch preserves protocol pipes and EOF cleanup, refuses ambiguous configured paths and retains non-Windows behavior. Focused mocked checks pass 16/16 after 12 attributed old-source failures and a separately reproduced Windows quoting failure with the installed ACPX parser; dependency install, serving adoption and live descendant proof remain open.
+
 - **[#159]** A Codex ACP run whose whole reply is a provider error object now
   fails. codex-acp 1.1.14 sends a rejected request (for example an unsupported
   model id) as reply text and ends the turn normally, so the run was recorded

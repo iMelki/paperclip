@@ -1,0 +1,59 @@
+diff --git a/dist/index.js b/dist/index.js
+--- a/dist/index.js
++++ b/dist/index.js
+@@ -22068,12 +22068,43 @@
+-function startCodexConnection(codexPath, env) {
+-  const spawnEnv = env ?? process.env;
+-  let codex;
+-  if (codexPath) {
+-    codex = process.platform === "win32" ? spawn(`"${codexPath}" app-server`, { shell: true, env: spawnEnv }) : spawn(codexPath, ["app-server"], { env: spawnEnv });
+-  } else {
+-    const bundledCodexPath = createRequire(import.meta.url).resolve("@openai/codex/bin/codex.js");
+-    codex = spawn(process.execPath, [bundledCodexPath, "app-server"], { env: spawnEnv });
+-  }
+-  attachLogs(codex);
+-  const reader = createJSONRPCReader(codex.stdout);
+-  const writer = createJSONRPCWriter(codex.stdin);
++function resolveWindowsCodexExecutable(codexPath) {
++  const requireCodex = createRequire(import.meta.url);
++  const nativeFs = requireCodex("node:fs");
++  const nativePath = requireCodex("node:path");
++  let executable = codexPath;
++  if (!executable) {
++    const bundledCodexPath = requireCodex.resolve("@openai/codex/bin/codex.js");
++    const target = process.arch === "x64" ? "x86_64-pc-windows-msvc" : process.arch === "arm64" ? "aarch64-pc-windows-msvc" : null;
++    if (!target) throw new Error("Unsupported Windows Codex architecture");
++    const platformPackage = process.arch === "x64" ? "@openai/codex-win32-x64" : "@openai/codex-win32-arm64";
++    let vendorRoot;
++    try {
++      const platformJson = createRequire(bundledCodexPath).resolve(platformPackage + "/package.json");
++      vendorRoot = nativePath.join(nativePath.dirname(platformJson), "vendor");
++    } catch {
++      vendorRoot = nativePath.resolve(nativePath.dirname(bundledCodexPath), "..", "vendor");
++    }
++    executable = nativePath.join(vendorRoot, target, "bin", "codex.exe");
++  }
++  if (!nativePath.isAbsolute(executable) || nativePath.extname(executable).toLowerCase() !== ".exe") {
++    throw new Error("Windows CODEX_PATH must be an absolute native .exe path; shell shims are refused");
++  }
++  const realExecutable = nativeFs.realpathSync(executable);
++  if (nativePath.extname(realExecutable).toLowerCase() !== ".exe" || !nativeFs.statSync(realExecutable).isFile()) {
++    throw new Error("Windows Codex target must resolve to a native .exe file");
++  }
++  return realExecutable;
++}
++function startCodexConnection(codexPath, env) {
++  const spawnEnv = env ?? process.env;
++  const options = { shell: false, windowsHide: true, stdio: ["pipe", "pipe", "pipe"], env: spawnEnv };
++  let codex;
++  if (process.platform === "win32") {
++    codex = spawn(resolveWindowsCodexExecutable(codexPath), ["app-server"], options);
++  } else if (codexPath) {
++    codex = spawn(codexPath, ["app-server"], options);
++  } else {
++    const bundledCodexPath = createRequire(import.meta.url).resolve("@openai/codex/bin/codex.js");
++    codex = spawn(process.execPath, [bundledCodexPath, "app-server"], options);
++  }
++  attachLogs(codex);
++  const reader = createJSONRPCReader(codex.stdout);
++  const writer = createJSONRPCWriter(codex.stdin);

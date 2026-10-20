@@ -6,6 +6,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { createHash, randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
+import { createRequire } from "node:module";
 import type {
   AdapterBillingType,
   AdapterExecutionContext,
@@ -582,6 +583,14 @@ async function resolveBuiltInAgentCommand(input: {
   if (!binName) return null;
   if (executionTargetIsRemote) {
     return { command: binName, shellCommand: binName };
+  }
+  if (agent === "codex" && process.platform === "win32") {
+    // Bypass the batch shim: ACPX starts this exact Node executable with the
+    // pinned package entrypoint as an argument, without cmd.exe in the chain.
+    const requireFromAdapter = createRequire(path.join(packageRootDir, "package.json"));
+    const entrypoint = requireFromAdapter.resolve("@agentclientprotocol/codex-acp/dist/index.js");
+    const command = `"${process.execPath}" "${entrypoint}"`;
+    return { command, shellCommand: command };
   }
   const resolved = (await findAncestorBin(packageRootDir, binName)) ?? binName;
   return { command: resolved, shellCommand: shellQuote(resolved) };
