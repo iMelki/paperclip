@@ -70,7 +70,11 @@ it.each(["startTurn", "runTurn"] as const)("%s: binds complete diagnostics to th
         for await (const _event of turn.events) { /* Drain before reading the terminal result. */ }
         expect((await turn.result).status).toBe("failed");
       } else {
-        for await (const _event of runtime.runTurn(input)) { /* Drain the real ACP turn. */ }
+        const events: Array<{ type: string }> = [];
+        for await (const event of runtime.runTurn(input)) events.push(event);
+        // runTurn reports the terminal failure as an error event, not a done event.
+        expect(events.map((event) => event.type)).toContain("error");
+        expect(events.map((event) => event.type)).not.toContain("done");
       }
       expect(failures[index]).toEqual([{ category: "request", title }]);
       expect(failures[0]).toHaveLength(1);

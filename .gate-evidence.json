@@ -145,6 +145,16 @@
             ]
           }
         ]
+      },
+      "currentHeadRerun": {
+        "head": "3fdd6b8dc49e18e5f537283ea0d31fdfada39ce4",
+        "baseHead": "95956f99516afaf23bccff2b34005c30c97a2c1a",
+        "patchGitBlob": "1a6b4816aadaa293cb6abe7e9072449253582139",
+        "patchSha256": "01dddc6f0fb228cb181a8987eb5ac68c50aae9027b2dce6ba13395014f47f3fa",
+        "date": "2026-10-20",
+        "command": "pnpm exec vitest run packages/adapter-utils/src/acpx-engine/typed-failure.test.ts --project @paperclipai/adapter-utils --maxWorkers=1 --no-file-parallelism",
+        "result": "15 passed, 0 failed, 0 skipped, exit 0; the test resolved the runtime built from this patch (verified byte-identical to the patch applied to the pristine package).",
+        "note": "The observedFailure and 'restoredPass' entries above (8 tests, base 42ef1700, patch 0016168d) record the earlier candidate and were not re-run against this head; the focused file now holds 15 tests."
       }
     },
     {
@@ -277,6 +287,16 @@
             ]
           }
         ]
+      },
+      "currentHeadRerun": {
+        "head": "3fdd6b8dc49e18e5f537283ea0d31fdfada39ce4",
+        "baseHead": "95956f99516afaf23bccff2b34005c30c97a2c1a",
+        "patchGitBlob": "1a6b4816aadaa293cb6abe7e9072449253582139",
+        "patchSha256": "01dddc6f0fb228cb181a8987eb5ac68c50aae9027b2dce6ba13395014f47f3fa",
+        "date": "2026-10-20",
+        "command": "pnpm exec vitest run packages/adapter-utils/src/acpx-engine/typed-failure.test.ts --project @paperclipai/adapter-utils --maxWorkers=1 --no-file-parallelism",
+        "result": "15 passed, 0 failed, 0 skipped, exit 0; the test resolved the runtime built from this patch (verified byte-identical to the patch applied to the pristine package).",
+        "note": "The observedFailure and 'restoredPass' entries above (8 tests, base 42ef1700, patch 0016168d) record the earlier candidate and were not re-run against this head; the focused file now holds 15 tests."
       }
     },
     {
@@ -884,7 +904,7 @@
       "negativeFixture": "doctor.genome.json",
       "observedFailure": {
         "date": "2026-08-25",
-        "command": "pwsh -NoLogo -NoProfile -File S:/source/CCAI/Assistants/tools/git-toolkit/hooks/Resolve-RepoDoctorGenome.ps1 -RepoPath S:/source/CCAI/Assistants/tools/paperclip-factory-dev -Gate on_demand -Json after adding missing-source-set to the gate",
+        "command": "pwsh -NoLogo -NoProfile -File <git-toolkit>/hooks/Resolve-RepoDoctorGenome.ps1 -RepoPath <repo-checkout> -Gate on_demand -Json after adding missing-source-set to the gate",
         "breakApplied": "Readback confirmed the on_demand sourceSets array contained missing-source-set while no source-set declaration used that ID.",
         "reason": "The exact resolver exited 2 with status=invalid, plan=null, and named only that gate on_demand selected missing-source-set without an exact declaration.",
         "restoredPass": "After removing the undeclared ID, the exact resolver exited 0 with status=resolved and the shared adapter exited 0 with diagnosticCode=plan-resolved. Both selected 3,246 authored files, excluded the two declared generated files, retained profile=observe and mutationIntent=none, and ran no analyzer."
