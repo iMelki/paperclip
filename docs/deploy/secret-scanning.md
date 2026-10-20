@@ -40,8 +40,15 @@ finding or tool failure.
 `secret-scan-retarget` job in `.github/workflows/pr-retarget-secret-scan.yml`
 re-scans the current `base..head` range on every PR edit (so a retarget is
 covered); it has its own concurrency group so it never cancels the main PR checks.
-It is a distinct check name, so add it to branch protection if retargets should
-be required to pass it.
+It runs only on edit events, so a PR that was never edited has no
+`secret-scan-retarget` check; do not make it a required check in branch
+protection, or every unedited PR would wait for it forever. Read it as an
+advisory result next to `secret-scan`.
+
+`--diff-merges=remerge` does not apply to octopus merges (three or more parents),
+so a secret added only by the conflict resolution of an octopus merge is not
+scanned. The repository history has none today; if one appears in a PR range,
+review it by hand.
 
 The range scan does not cover commits that never pass through a pull request:
 direct pushes and upstream-sync commits. Run `node scripts/verify-gitleaks.mjs
