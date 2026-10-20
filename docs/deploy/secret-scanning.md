@@ -26,9 +26,17 @@ means the pinned binary or scanner runtime failed. Both block the commit.
 The `secret-scan` job in `.github/workflows/pr.yml` downloads the official
 Linux x64 `8.30.1` release, verifies SHA-256
 `551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb`,
-and scans complete fetched history. Existing `verify` and `e2e` jobs depend on
+and scans only the pull request's commit range (`base..head`, by exact SHA) with
+`node scripts/verify-gitleaks.mjs --range`. A real-scanner test in the same job
+proves that an in-range secret fails, an out-of-range one is skipped, and a range
+whose commits are missing fails closed. Existing `verify` and `e2e` jobs depend on
 that result, so the normal PR verification chain cannot pass after a scanner
 finding or tool failure.
+
+The range scan does not cover commits that never pass through a pull request:
+direct pushes and upstream-sync commits. Run `node scripts/verify-gitleaks.mjs
+--history` on a GitHub-hosted runner for those until a scheduled full-history
+scan exists (not part of this change).
 
 ## Historical fixture review
 

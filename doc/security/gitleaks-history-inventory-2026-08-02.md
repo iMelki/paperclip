@@ -53,3 +53,9 @@ The prior 7,260-commit artifact is historical evidence only; it is intentionally
 outside the repository because these logs contain detector
 metadata and commit references that are represented by the exact ignore
 entries.
+
+## Update: pull-request CI scans the commit range
+
+The statement above that CI uses `git --all` is historical. Master pull-request CI now scans only the
+pull request's `base..head` range (`verify-gitleaks.mjs --range`), so this full-history inventory is
+not refreshed by CI. Re-run `--history` after upstream merges and for direct pushes.

@@ -39,8 +39,17 @@ jobs:
           echo "PAPERCLIP_GITLEAKS_BIN=$install_dir/gitleaks" >> "$GITHUB_ENV"
           "$install_dir/gitleaks" version
 
-      - name: Scan complete repository history
-        run: node scripts/verify-gitleaks.mjs --history
+      - name: Prove range scanning with the pinned Gitleaks
+        # Real-scanner check: an in-range secret fails, an out-of-range one is
+        # skipped, and an unreadable range fails closed.
+        run: node --test scripts/verify-gitleaks.test.mjs
+        env:
+          PAPERCLIP_GITLEAKS_REAL_BIN: ${{ env.PAPERCLIP_GITLEAKS_BIN }}
+
+      - name: Scan pull-request commit range
+        run: >-
+          node scripts/verify-gitleaks.mjs --range
+          "${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }}"
 
   policy:
     needs: [secret-scan]
