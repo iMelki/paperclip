@@ -2,7 +2,8 @@
 
 - **[#162]** The patched acpx 0.12.0 client now advertises AIR `sessionFailure`
   support and fails error-severity typed terminal turns even when the agent
-  returns `end_turn`. Warnings stay successful. Per-turn callbacks receive the
+  returns `end_turn`. A record with no severity counts as an error, as the AIR
+  contract defines. Only an explicit warning stays successful. Per-turn callbacks receive the
   complete title and details for later diagnostic handling. The current
   codex-acp 1.1.14 ignores this capability; its existing behavior is unchanged.
   Prompt-response usage is recorded once per turn, including failed turns.

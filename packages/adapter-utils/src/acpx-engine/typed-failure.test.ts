@@ -115,7 +115,7 @@ for (const mode of ["oneshot", "persistent"] as const) {
 }
 
 type ScriptedTurn = {
-  severity?: "error" | "warning";
+  severity?: "error" | "warning" | "unset";
   usage: { inputTokens: number; outputTokens: number };
   streamedUsage?: { inputTokens: number; outputTokens: number };
 };
@@ -172,12 +172,13 @@ it("records prompt-response usage exactly once for failure, warning and success 
 }, 60_000);
 
 for (const mode of ["oneshot", "persistent"] as const) {
-  for (const severity of ["error", "warning", "success"] as const) {
+  for (const severity of ["error", "warning", "unset", "success"] as const) {
+    // "unset" is a failure record without a severity key, which the AIR contract reads as an error.
     it(`${mode}: reports response-only usage on a ${severity} turn`, async () => {
       const usage = { inputTokens: 41, outputTokens: 5 };
       const script: ScriptedTurn[] = [{ ...(severity === "success" ? {} : { severity }), usage }];
       const { result } = await runFixture(mode, "warning", { PAPERCLIP_ACPX_TURN_SCRIPT: JSON.stringify(script) });
-      expect(result.exitCode).toBe(severity === "error" ? 1 : 0);
+      expect(result.exitCode).toBe(severity === "error" || severity === "unset" ? 1 : 0);
       expect(result.usage).toEqual({ ...usage, cachedInputTokens: 0 });
       expect(result.resultJson?.usage).toEqual(usage);
     }, 30_000);

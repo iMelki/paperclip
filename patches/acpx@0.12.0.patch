@@ -94,7 +94,7 @@ index 243c9d13bcba520923b63adfddad75cf2d94362d..b65e04a64d220ff213af8f4fcff5a7cb
 +	if (air === null || typeof air !== "object" || Array.isArray(air)) return null;
 +	if (!Number.isInteger(air.version) || air.version < 1) return null;
 +	const failure = air.sessionFailure;
-+	if (failure === null || typeof failure !== "object" || Array.isArray(failure) || failure.severity !== "error") return null;
++	if (failure === null || typeof failure !== "object" || Array.isArray(failure) || failure.severity === "warning") return null;
 +	return typeof failure.category === "string" && TYPED_SESSION_FAILURE_CATEGORIES.has(failure.category) ? failure.category : "unknown";
 +}
  async function runPromptTurn(params) {

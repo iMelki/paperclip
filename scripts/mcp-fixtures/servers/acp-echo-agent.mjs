@@ -11,7 +11,8 @@ function writeMessage(message) {
 
 // PAPERCLIP_ACPX_TURN_SCRIPT is a JSON array of turns. A prompt containing
 // "paperclip-turn:<n>" selects entry n (default 0), so the script survives agent restarts.
-// Entry fields: severity ("error" | "warning" | absent for a plain success),
+// Entry fields: severity ("error" | "warning" | "unset" for a failure record
+// with no severity key | absent for a plain success),
 // usage (sent only in the prompt response), streamedUsage (sent first as a
 // usage_update session notification).
 function scriptedPromptTurn(request) {
@@ -36,7 +37,12 @@ function scriptedPromptTurn(request) {
   if (turn.severity && typedSessionFailureSupported) {
     response._meta = { jetbrains: { air: {
       version: 1,
-      sessionFailure: { version: 1, severity: turn.severity, category: "request", title: `scripted ${turn.severity} ${index}` },
+      sessionFailure: {
+        version: 1,
+        ...(turn.severity === "unset" ? {} : { severity: turn.severity }),
+        category: "request",
+        title: `scripted ${turn.severity} ${index}`,
+      },
     } } };
   }
   return response;
