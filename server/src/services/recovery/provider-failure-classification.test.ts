@@ -173,6 +173,35 @@ describe("classifyAdapterFailureForRecovery", () => {
     });
   });
 
+  it("does not read unrelated 'resets N' prose as a clock on either path", () => {
+    const now = new Date("2026-10-13T18:00:38.000Z");
+    const fallback = {
+      kind: "provider_quota",
+      retryAt: new Date(now.getTime() + PROVIDER_QUOTA_RECOVERY_DEFAULT_BACKOFF_MS),
+      parsedResetTime: false,
+    };
+    for (const errorCode of ["acpx_turn_failed", "adapter_failed"]) {
+      expect(classifyAdapterFailureForRecovery({
+        errorCode,
+        error: "You've hit your session limit; the cache resets 7 days ago and the counter resets 8 times",
+        resultJson: {},
+      }, now)).toEqual(fallback);
+    }
+  });
+
+  it("keeps 'try again at' winning over earlier unrelated 'resets N' prose on non-ACP adapters", () => {
+    const now = new Date("2026-10-13T12:00:00.000Z");
+    expect(classifyAdapterFailureForRecovery({
+      errorCode: "adapter_failed",
+      error: `The cache resets 7 days ago. ${"filler ".repeat(30)}You've hit your usage limit. Try again at 3:42 PM.`,
+      resultJson: {},
+    }, now)).toEqual({
+      kind: "provider_quota",
+      retryAt: new Date("2026-10-13T15:42:00.000Z"),
+      parsedResetTime: true,
+    });
+  });
+
   it("retries now when the ACP reset clock elapsed moments ago instead of waiting a day", () => {
     const now = new Date("2026-10-13T19:40:20.000Z");
     for (const error of [
