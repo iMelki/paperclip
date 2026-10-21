@@ -216,7 +216,7 @@ test('start rejects an invalid startTimeoutSeconds before spawning pg_ctl', asyn
 });
 
 test('start rejects a log file inside the data directory before any effect', async () => {
-  for (const logFile of ['C:\\DB Dir\\server.log', 'C:\\DB Dir\\logs\\postgres.log', 'C:\\DB Dir']) {
+  for (const logFile of ['C:\\DB Dir\\server.log', 'C:\\DB Dir\\logs\\postgres.log', 'C:\\DB Dir\\..logs\\postgres.log', 'C:\\DB Dir']) {
     const subject = harness();
     subject.instance.options.logFile = logFile;
     await rejectsBeforeEffects(subject, /^Error: The PostgreSQL log file must be outside the data directory$/);

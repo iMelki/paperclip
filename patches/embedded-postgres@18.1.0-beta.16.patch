@@ -79,7 +79,7 @@ diff --git a/dist/index.js b/dist/index.js
 +                requireSafePath(logFile, 'log path');
 +                {
 +                    const relative = path.relative(this.options.databaseDir, logFile);
-+                    if (relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative))) {
++                    if (relative === '' || (relative !== '..' && !relative.startsWith('..' + path.sep) && !path.isAbsolute(relative))) {
 +                        throw new Error('The PostgreSQL log file must be outside the data directory');
 +                    }
 +                }
