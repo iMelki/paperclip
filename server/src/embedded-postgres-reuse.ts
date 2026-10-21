@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
 import { existsSync, readFileSync, readlinkSync, renameSync } from "node:fs";
 import { realpath } from "node:fs/promises";
-import { resolve } from "node:path";
+import { isAbsolute, resolve } from "node:path";
 import { getPostgresDataDirectory } from "@paperclipai/db";
 import { logger } from "./middleware/logger.js";
 
@@ -171,9 +171,19 @@ export async function scanPsOutputForDataDir(
     const command = match[2];
     if (pid === process.pid || !POSTGRES_PROCESS_NAME_RE.test((command.split(/\s+/)[0] ?? "").split("/").pop() ?? "")) continue;
     let owns = needles.some((n) => commandReferencesPath(command, n));
-    // An explicit -D / --data-directory that names another directory settles it.
-    const namesOtherDir = !owns && /(?:^|\s)(?:-D\s*|--data-directory[=\s])\S/.test(command);
-    if (!owns && !namesOtherDir) {
+    // An explicit absolute -D / --data-directory settles it: the same directory through an
+    // alias (symlink, case, short name) is ours, an existing other directory is not. A value
+    // that cannot be resolved (relative, missing, cut at a space by `ps`) is no evidence.
+    let settled = owns;
+    if (!owns) {
+      const named = /(?:^|\s)(?:-D\s*|--data-directory[=\s])(?:"([^"]+)"|'([^']+)'|(\S+))/.exec(command);
+      const value = named?.[1] ?? named?.[2] ?? named?.[3];
+      if (value && isAbsolute(value) && existsSync(value)) {
+        owns = await isSameDataDirectory(value, dataDir);
+        settled = true;
+      }
+    }
+    if (!settled) {
       // A postmaster's working directory is its data directory (also when it was
       // started through PGDATA instead of -D).
       const cwd = (() => {

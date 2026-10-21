@@ -43,7 +43,7 @@ directory, keeps the lock in place. Otherwise the lock is renamed to
 
 Startup stops, leaving `postmaster.pid` unchanged, only when a PostgreSQL that
 may own the directory is found or the process list cannot be read. A PostgreSQL
-process that names no data directory and whose working directory cannot be read
+process that names no resolvable data directory and whose working directory cannot be read
 (no `/proc` on macOS or BSD, or no permission) counts as "cannot be read", since it
 may have been started through `PGDATA`. The error
 names the process found and the command that resolves it (`kill <pid>` or

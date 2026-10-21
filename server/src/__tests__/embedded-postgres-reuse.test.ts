@@ -385,9 +385,23 @@ describe("scanPsOutputForDataDir", () => {
     expect(await scanPsOutputForDataDir(out, [dir], dir, unreadable)).toBeNull();
   });
 
-  it("is conclusive when the command names another data directory", async () => {
-    const out = "  901 /usr/bin/postgres -D /var/lib/postgresql/16/main -c config_file=/etc/pg.conf\n";
+  it("is conclusive when the command names another existing data directory", async () => {
+    const other = mkdtempSync(join(tmpdir(), "other-pg-"));
+    const out = `  901 /usr/bin/postgres -D ${other} -c config_file=/etc/pg.conf\n`;
     expect(await scanPsOutputForDataDir(out, [dir], dir, unreadable)).toEqual([]);
+  });
+
+  it("recognizes our data directory named through a symlink alias", async () => {
+    const real = mkdtempSync(join(tmpdir(), "alias-pg-"));
+    const alias = join(mkdtempSync(join(tmpdir(), "alias-link-")), "pgdata");
+    symlinkSync(real, alias);
+    const out = `  901 /usr/bin/postgres -D ${alias}\n`;
+    expect((await scanPsOutputForDataDir(out, [real], real, unreadable))?.map((p) => p.pid)).toEqual([901]);
+  });
+
+  it("treats an unresolvable -D value as no evidence", async () => {
+    const out = "  901 /usr/bin/postgres -D /does/not/exist/anywhere\n";
+    expect(await scanPsOutputForDataDir(out, [dir], dir, unreadable)).toBeNull();
   });
 
   it("finds a server by command line or by working directory", async () => {
