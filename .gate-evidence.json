@@ -45,7 +45,7 @@
     {
       "id": "db-discovery-canonical-scratch-provenance",
       "path": "scripts/lib/ephemeral-scratch.mjs",
-      "description": "Keep the standalone scratch helper byte-equivalent to its pinned source after line-ending normalization. The pin moved from the canonical copy (a296c167...) to 19463bfdcc3311ed0de967fb491c28c003e50e2c759b3b16500930a32688e385 for the extension/unique/mode containment fix; the canonical upstream copy still needs the same fix.",
+      "description": "Keep the standalone scratch helper byte-equivalent to its pinned source after line-ending normalization. The pin moved from the canonical copy (a296c167...) to 4c29cea62dbba24e737f3e8776b504bd7c710c3fbc6dc3ad1c980243cef11af2 for the extension/unique/mode containment fix, the extension-aware name grammar, file-collision retry and private child roots; the canonical upstream copy still needs the same fix.",
       "negativeFixture": "packages/db/src/test-discovery.test.ts",
       "observedFailure": {
         "date": "2026-10-01",

@@ -87,7 +87,7 @@ test("discovery reuses the pinned canonical scratch primitive", () => {
   // Ignore checkout line endings only; all other source drift must fail.
   const source = readFileSync(scratchModule, "utf8").replaceAll("\r\n", "\n");
   const digest = createHash("sha256").update(source).digest("hex");
-  assert.equal(digest, "19463bfdcc3311ed0de967fb491c28c003e50e2c759b3b16500930a32688e385");
+  assert.equal(digest, "4c29cea62dbba24e737f3e8776b504bd7c710c3fbc6dc3ad1c980243cef11af2");
   assert.equal(isEphemeralName(path.basename(fixtureRoot)), true);
 });
 

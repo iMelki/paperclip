@@ -89,7 +89,9 @@ Validation runs before any filesystem write.
 Four new tests in the same file failed first (3 failed, 5 passed; the
 positive-extension case already passed), then passed 8/8 with the fix. The
 LF-normalized SHA-256 pin is now
-`19463bfdcc3311ed0de967fb491c28c003e50e2c759b3b16500930a32688e385`. This copy
+`4c29cea62dbba24e737f3e8776b504bd7c710c3fbc6dc3ad1c980243cef11af2`, after a
+later review round also made the name grammar accept the optional extension,
+retried file-name collisions and created child temp roots `0700`. This copy
 is no longer byte-equal to the canonical helper. The canonical upstream copy
 needs the same fix before the two can be re-pinned to one hash.
 
