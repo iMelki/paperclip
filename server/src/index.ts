@@ -34,6 +34,7 @@ import { createApp } from "./app.js";
 import { loadConfig } from "./config.js";
 import { resolveListenPort } from "./listen-port.js";
 import { resolveDefaultLogsDir } from "./home-paths.js";
+import { resolveEmbeddedPostgresLogFile } from "./embedded-postgres-log-file.js";
 import { logger } from "./middleware/logger.js";
 import {
   getManagedInstanceConfig,
@@ -472,8 +473,9 @@ export async function startServer(): Promise<StartedServer> {
           port,
           persistent: true,
           // Windows: pg_ctl keeps this file open, so it must stay outside the data
-          // directory or crash recovery cannot fsync it (sharing violation).
-          logFile: resolve(resolveDefaultLogsDir(), "postgres.log"),
+          // directory or crash recovery cannot fsync it (sharing violation). A custom data
+          // directory that contains the default logs directory gets a sibling log file.
+          logFile: resolveEmbeddedPostgresLogFile(dataDir, resolveDefaultLogsDir()),
           // A leftover lock means the last shutdown was unclean, so start-up runs crash
           // recovery. The lock is removed just before start(), which would hide that from
           // the patch, so the wait is decided from the flag recorded at the top.
