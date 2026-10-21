@@ -84,6 +84,39 @@ it.each(["startTurn", "runTurn"] as const)("%s: binds complete diagnostics to th
   }
 }, 30_000);
 
+it("reports the typed failure category in the run result", async () => {
+  const { result } = await runFixture("persistent", "error", { PAPERCLIP_ACPX_TYPED_FAILURE_CATEGORY: "limit" });
+  expect(result.errorCode).toBe("acpx_turn_failed");
+  expect(result.resultJson?.sessionFailureCategory).toBe("limit");
+  expect(result.errorMessage).not.toContain(providerTitle);
+}, 30_000);
+
+it("shows a warning that arrives on session_info_update instead of dropping it", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-acpx-typed-update-"));
+  const runtime = createAcpRuntime({
+    cwd: root,
+    sessionStore: createRuntimeStore({ stateDir: root }),
+    agentRegistry: createAgentRegistry({ overrides: { custom: agentCommand } }),
+    permissionMode: "approve-all",
+    onAgentStderr: () => {},
+  });
+  const handle = await runtime.ensureSession({
+    sessionKey: "update-carrier", agent: "custom", mode: "persistent", cwd: root,
+    sessionOptions: { env: {
+      PAPERCLIP_ACPX_TYPED_FAILURE_CANARY: "Approaching the weekly usage limit",
+      PAPERCLIP_ACPX_TYPED_FAILURE_CARRIER: "update",
+    } },
+  });
+  try {
+    const events: Array<{ type: string; text?: string }> = [];
+    for await (const event of runtime.runTurn({ handle, text: "typed warning", mode: "prompt", requestId: "update-0" })) events.push(event);
+    expect(events.map((event) => event.type)).toContain("done");
+    expect(events.map((event) => event.text ?? "").join("\n")).toContain("Approaching the weekly usage limit");
+  } finally {
+    await runtime.close({ handle, reason: "typed-failure update carrier test complete" });
+  }
+}, 30_000);
+
 for (const mode of ["oneshot", "persistent"] as const) {
   it(`${mode}: fails a negotiated typed terminal error despite end_turn`, async () => {
     const { result } = await runFixture(mode, "error");

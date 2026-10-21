@@ -6,6 +6,11 @@
   contract defines. Only an explicit warning stays successful. Per-turn callbacks receive the
   complete title and details for later diagnostic handling. The current
   codex-acp 1.1.14 ignores this capability; its existing behavior is unchanged.
+  A warning or incident that an agent sends on `session_info_update` is shown as
+  status text (its title, else the category) instead of the generic "session
+  updated". The failed run result records the typed category as
+  `resultJson.sessionFailureCategory`; mapping it to quota or retry handling is
+  left to the recovery changes.
   Prompt-response usage is recorded once per turn, including failed turns.
   Refresh the lockfile patch hash in a separate dependency pull request.
 

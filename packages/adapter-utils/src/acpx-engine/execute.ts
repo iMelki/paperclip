@@ -3605,6 +3605,7 @@ export function createAcpxEngineExecutor(deps: AcpxEngineExecutorOptions = {}) {
       const textParts: string[] = [];
       let eventBreakdown: AcpRuntimeUsageBreakdown | null = null;
       let eventCostUsd: number | null = null;
+      let terminalSessionFailureCategory: string | null = null;
       // Open the agent turn span as a child of the run root span. It wraps the
       // whole turn: the executor holds `turnSpan.parentContext` for later exec
       // parenting, and the `finally` below ends the span once on every path. The
@@ -3628,6 +3629,9 @@ export function createAcpxEngineExecutor(deps: AcpxEngineExecutorOptions = {}) {
           }, timeoutMs);
         }
         const turn = runtime.startTurn({
+          onTerminalSessionFailure: (failure) => {
+            terminalSessionFailureCategory = failure.category;
+          },
           handle: sessionHandle,
           text: runPrompt,
           mode: "prompt",
@@ -3766,6 +3770,7 @@ export function createAcpxEngineExecutor(deps: AcpxEngineExecutorOptions = {}) {
             requestedModel: prepared.requestedModel || null,
             requestedThinkingEffort: prepared.requestedThinkingEffort || null,
             fastMode: prepared.fastMode,
+            ...(terminalSessionFailureCategory ? { sessionFailureCategory: terminalSessionFailureCategory } : {}),
             ...(turnUsage.usageDetail ? { usage: turnUsage.usageDetail } : {}),
             ...(turnUsage.cumulativeCostUsd != null
               ? { cumulativeCostUsd: turnUsage.cumulativeCostUsd }

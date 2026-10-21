@@ -1,5 +1,5 @@
 diff --git a/dist/live-checkpoint-ClPCSdrW.js b/dist/live-checkpoint-ClPCSdrW.js
-index 243c9d13bcba520923b63adfddad75cf2d94362d..b65e04a64d220ff213af8f4fcff5a7cb7a666906 100644
+index 243c9d13bcba520923b63adfddad75cf2d94362d..ab17fa37c3a6e78f60599bacf8ddc87e1f3e899c 100644
 --- a/dist/live-checkpoint-ClPCSdrW.js
 +++ b/dist/live-checkpoint-ClPCSdrW.js
 @@ -1532,7 +1532,7 @@ const ZED_TAG_KEYS = /* @__PURE__ */ new Set([
@@ -100,12 +100,12 @@ index 243c9d13bcba520923b63adfddad75cf2d94362d..b65e04a64d220ff213af8f4fcff5a7cb
  async function runPromptTurn(params) {
  	try {
  		const promptPromise = params.client.prompt(params.sessionId, params.prompt);
-@@ -6079,6 +6120,21 @@ async function runPromptTurn(params) {
+@@ -6079,7 +6120,23 @@ async function runPromptTurn(params) {
  			idleMs: SESSION_REPLY_IDLE_MS,
  			timeoutMs: SESSION_REPLY_DRAIN_TIMEOUT_MS
  		}).catch(() => {});
 +		// Record response-only usage first: a failed turn can still consume tokens.
-+		recordPromptResponseUsage(params.conversation, response.usage, params.promptMessageId);
+ 		recordPromptResponseUsage(params.conversation, response.usage, params.promptMessageId);
 +		const terminalFailureCategory = typedTerminalSessionFailureCategory(response);
 +		if (terminalFailureCategory !== null) {
 +			// Pass complete provider text to the diagnostic callback. Consumers redact
@@ -118,11 +118,12 @@ index 243c9d13bcba520923b63adfddad75cf2d94362d..b65e04a64d220ff213af8f4fcff5a7cb
 +					...(typeof failure.details === "string" ? { details: failure.details } : {})
 +				});
 +			} catch {}
-+			throw new Error(`ACP agent reported a terminal ${terminalFailureCategory} failure.`);
++			// The category rides on the error so callers without the callback can still classify it.
++			throw Object.assign(new Error(`ACP agent reported a terminal ${terminalFailureCategory} failure.`), { sessionFailureCategory: terminalFailureCategory });
 +		}
--		recordPromptResponseUsage(params.conversation, response.usage, params.promptMessageId);
  		return {
  			stopReason: response.stopReason,
+ 			source: "rpc"
 diff --git a/dist/runtime.d.ts b/dist/runtime.d.ts
 index ccdbe5b032521518022223733049b8b38793473b..e28408d9c4ff35c44fd2ff63899566a7acb29f2e 100644
 --- a/dist/runtime.d.ts
@@ -162,10 +163,26 @@ index ccdbe5b032521518022223733049b8b38793473b..e28408d9c4ff35c44fd2ff63899566a7
      text: string;
      attachments?: AcpRuntimeTurnAttachment[];
 diff --git a/dist/runtime.js b/dist/runtime.js
-index 6c9cc999e50a11c399c68b3a0f1b7af4bc2317c0..b25eeddaba4c51e187edaae2da4db61f348762d7 100644
+index 6c9cc999e50a11c399c68b3a0f1b7af4bc2317c0..8004abcc4d29139232c2462fbeb618efd0d11df7 100644
 --- a/dist/runtime.js
 +++ b/dist/runtime.js
-@@ -744,7 +744,8 @@ var AcpRuntimeManager = class {
+@@ -101,7 +101,14 @@ function configOptionStatusText(payload) {
+ 	return id ? `config updated: ${id}` : "config updated";
+ }
+ function sessionInfoStatusText(payload) {
+-	return asTrimmedString(payload.summary) || asTrimmedString(payload.message) || "session updated";
++	return asTrimmedString(payload.summary) || asTrimmedString(payload.message) || typedSessionFailureStatusText(payload) || "session updated";
++}
++function typedSessionFailureStatusText(payload) {
++	// Warnings and background incidents arrive here once sessionFailure is negotiated.
++	const failure = isRecord(payload._meta) && isRecord(payload._meta.jetbrains) && isRecord(payload._meta.jetbrains.air) ? payload._meta.jetbrains.air.sessionFailure : null;
++	if (!isRecord(failure)) return "";
++	const label = asTrimmedString(failure.severity) === "warning" ? "warning" : "failure";
++	return asTrimmedString(failure.title) || (asTrimmedString(failure.category) ? `session ${label}: ${asTrimmedString(failure.category)}` : `session ${label}`);
+ }
+ function planStatusText(payload) {
+ 	const content = asTrimmedString((Array.isArray(payload.entries) ? payload.entries : []).find((entry) => isRecord(entry))?.content);
+@@ -744,7 +751,8 @@ var AcpRuntimeManager = class {
  		this.deps = deps;
  	}
  	createClient(options) {
@@ -175,7 +192,7 @@ index 6c9cc999e50a11c399c68b3a0f1b7af4bc2317c0..b25eeddaba4c51e187edaae2da4db61f
  	}
  	async readPendingPersistentClient(record, options) {
  		const pendingClient = this.pendingPersistentClients.get(record.acpxRecordId);
-@@ -982,6 +983,7 @@ var AcpRuntimeManager = class {
+@@ -982,6 +990,7 @@ var AcpRuntimeManager = class {
  				client: turn.client,
  				sessionId,
  				prompt: task.promptInput,
@@ -183,7 +200,7 @@ index 6c9cc999e50a11c399c68b3a0f1b7af4bc2317c0..b25eeddaba4c51e187edaae2da4db61f
  				timeoutMs: task.input.timeoutMs ?? this.options.timeoutMs,
  				conversation: turn.conversation,
  				promptMessageId: turn.promptMessageId
-@@ -1586,6 +1588,7 @@ var AcpxRuntime = class {
+@@ -1586,6 +1595,7 @@ var AcpxRuntime = class {
  		const turnPromise = this.getManager().then((manager) => manager.startTurn({
  			handle,
  			text: input.text,
@@ -191,7 +208,7 @@ index 6c9cc999e50a11c399c68b3a0f1b7af4bc2317c0..b25eeddaba4c51e187edaae2da4db61f
  			attachments: input.attachments,
  			mode: input.mode,
  			sessionMode: state.mode,
-@@ -1614,6 +1617,7 @@ var AcpxRuntime = class {
+@@ -1614,6 +1624,7 @@ var AcpxRuntime = class {
  		yield* (await this.getManager()).runTurn({
  			handle,
  			text: input.text,
