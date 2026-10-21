@@ -3,8 +3,8 @@ title: Secret scanning
 description: Pinned local and pull-request Gitleaks enforcement for Paperclip contributors.
 ---
 
-Paperclip uses Gitleaks `8.30.1` for staged local changes and complete Git
-history in pull requests. A missing binary, a different version, a scanner
+Paperclip uses Gitleaks `8.30.1` for staged local changes and for the commit
+range of each pull request. A missing binary, a different version, a scanner
 runtime error, or a finding all fail closed.
 
 ## Local commits
