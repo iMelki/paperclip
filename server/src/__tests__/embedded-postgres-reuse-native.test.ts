@@ -5,6 +5,7 @@ import { join } from "node:path";
 import EmbeddedPostgres from "embedded-postgres";
 import { prepareEmbeddedPostgresNativeRuntime } from "@paperclipai/db";
 import { expect, it } from "vitest";
+import { getEmbeddedPostgresTestSupport } from "./helpers/embedded-postgres.js";
 import { moveStaleLockAside, readRunningEmbeddedPostgres } from "../embedded-postgres-reuse.js";
 
 async function unusedPort(): Promise<number> {
@@ -20,9 +21,17 @@ async function unusedPort(): Promise<number> {
   return address.port;
 }
 
+const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
+
+if (!embeddedPostgresSupport.supported) {
+  console.warn(
+    `Skipping native embedded Postgres reuse test on this host: ${embeddedPostgresSupport.reason ?? "unsupported environment"}`,
+  );
+}
+
 const adminUrl = (port: number) => `postgres://paperclip:paperclip@127.0.0.1:${port}/postgres`;
 
-it("rejects an actual node PID on a closed port, then starts and reuses actual PostgreSQL", async () => {
+it.skipIf(!embeddedPostgresSupport.supported)("rejects an actual node PID on a closed port, then starts and reuses actual PostgreSQL", async () => {
   await prepareEmbeddedPostgresNativeRuntime();
   const dataDir = realpathSync(mkdtempSync(join(tmpdir(), "embedded-pg-native-identity-")));
   const port = await unusedPort();
