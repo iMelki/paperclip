@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   EMBEDDED_POSTGRES_LOCK_REFUSAL_EXIT_CODE,
   EmbeddedPostgresLockRefusal,
+  commandReferencesPath,
   listPostgresProcessesForDataDir,
   moveStaleLockAside,
   readRunningEmbeddedPostgres as readRunning,
@@ -325,6 +326,24 @@ describe("moveStaleLockAside", () => {
     expect(readFileSync(aside, "utf8")).toBe("4242\n");
   });
 
+  it("never replaces an earlier archive that has the same timestamp", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-10-21T22:00:00.000Z"));
+    try {
+      const dir = mkdtempSync(join(tmpdir(), "embedded-pg-aside-"));
+      const lock = join(dir, "postmaster.pid");
+      writeFileSync(lock, "first\n");
+      const first = moveStaleLockAside(lock);
+      writeFileSync(lock, "second\n");
+      const second = moveStaleLockAside(lock);
+      expect(second).not.toBe(first);
+      expect(readFileSync(first, "utf8")).toBe("first\n");
+      expect(readFileSync(second, "utf8")).toBe("second\n");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("refuses with the lock exit code when the lock cannot be moved", () => {
     const dir = mkdtempSync(join(tmpdir(), "embedded-pg-aside-"));
     const missing = join(dir, "no-such-dir", "postmaster.pid");
@@ -337,5 +356,18 @@ describe("moveStaleLockAside", () => {
     expect(thrown).toBeInstanceOf(EmbeddedPostgresLockRefusal);
     expect((thrown as EmbeddedPostgresLockRefusal).exitCode).toBe(EMBEDDED_POSTGRES_LOCK_REFUSAL_EXIT_CODE);
     expect((thrown as Error).message).toContain("could not be moved aside");
+  });
+});
+
+describe("commandReferencesPath", () => {
+  it("matches only whole data-directory paths", () => {
+    const dir = "/srv/paperclip/db";
+    expect(commandReferencesPath(`postgres -D ${dir}`, dir)).toBe(true);
+    expect(commandReferencesPath(`postgres --data-directory=${dir} -p 5432`, dir)).toBe(true);
+    expect(commandReferencesPath(`postgres -D "${dir}"`, dir)).toBe(true);
+    expect(commandReferencesPath(`postgres -c config_file=${dir}/postgresql.conf`, dir)).toBe(true);
+    expect(commandReferencesPath(`postgres -D ${dir}-backup`, dir)).toBe(false);
+    expect(commandReferencesPath(`postgres -D ${dir}2`, dir)).toBe(false);
+    expect(commandReferencesPath(`postgres -D /mnt${dir}`, dir)).toBe(false);
   });
 });

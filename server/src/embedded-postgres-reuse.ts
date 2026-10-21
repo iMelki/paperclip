@@ -55,11 +55,37 @@ export class EmbeddedPostgresLockRefusal extends Error {
 }
 
 /**
+ * A destination for a moved-aside lock that does not exist yet. A same-millisecond
+ * timestamp (two rapid recoveries, a clock rollback) must not let rename() replace an
+ * earlier archive, so a counter is appended until the name is free.
+ */
+function uniqueAsidePath(pidFile: string): string {
+  const base = `${pidFile}.stale-${Date.now()}`;
+  let candidate = base;
+  for (let n = 1; existsSync(candidate); n += 1) candidate = `${base}-${n}`;
+  return candidate;
+}
+
+/**
+ * True when `command` names `needle` as a whole path: it must start at a token or
+ * option-value boundary and end at the end, whitespace, a quote or a separator, so
+ * `/srv/db-backup` and `/mnt/srv/db` never count as `/srv/db`.
+ */
+export function commandReferencesPath(command: string, needle: string): boolean {
+  for (let from = command.indexOf(needle); from !== -1; from = command.indexOf(needle, from + 1)) {
+    const before = from === 0 ? "" : command[from - 1];
+    const after = command[from + needle.length] ?? "";
+    if (/^(?:|[\s"'=])$/.test(before) && /^(?:|[\s"'/\\])$/.test(after)) return true;
+  }
+  return false;
+}
+
+/**
  * Moves a leftover lock out of the way before start-up. The file is never deleted, so
  * an operator can still inspect it. Throws a lock refusal when it cannot be moved.
  */
 export function moveStaleLockAside(pidFile: string): string {
-  const aside = `${pidFile}.stale-${Date.now()}`;
+  const aside = uniqueAsidePath(pidFile);
   try {
     renameSync(pidFile, aside);
   } catch (error) {
@@ -113,7 +139,7 @@ export async function listPostgresProcessesForDataDir(dataDir: string): Promise<
     }
     for (const row of rows) {
       const command = row.CommandLine ?? "";
-      if (typeof row.ProcessId === "number" && needles.some((n) => norm(command).includes(n))) {
+      if (typeof row.ProcessId === "number" && needles.some((n) => commandReferencesPath(norm(command), n))) {
         found.push({ pid: row.ProcessId, command });
       }
     }
@@ -127,7 +153,7 @@ export async function listPostgresProcessesForDataDir(dataDir: string): Promise<
     const pid = Number(match[1]);
     const command = match[2];
     if (pid === process.pid || !POSTGRES_PROCESS_NAME_RE.test((command.split(/\s+/)[0] ?? "").split("/").pop() ?? "")) continue;
-    let owns = needles.some((n) => command.includes(n));
+    let owns = needles.some((n) => commandReferencesPath(command, n));
     if (!owns) {
       // A postmaster's working directory is its data directory.
       const cwd = (() => {
@@ -190,7 +216,7 @@ async function recoverLockWithUnknownOwner(
         `Stop it with \`${stopCommand(first.pid)}\`, then start again; the stale lock is handled automatically.`,
     );
   }
-  const aside = `${pidFile}.stale-${Date.now()}`;
+  const aside = uniqueAsidePath(pidFile);
   try {
     renameSync(pidFile, aside);
   } catch (error) {
@@ -286,7 +312,7 @@ export async function readRunningEmbeddedPostgres(
         port !== configuredPort &&
         (await getPostgresDataDirectory(adminUrl(configuredPort)).catch(() => null)) !== null;
       if (!configuredAnswers) {
-        const aside = `${pidFile}.stale-${Date.now()}`;
+        const aside = uniqueAsidePath(pidFile);
         try {
           renameSync(pidFile, aside);
         } catch (error) {
