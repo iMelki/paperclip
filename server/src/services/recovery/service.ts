@@ -380,6 +380,10 @@ const PROVIDER_QUOTA_ERROR_RE =
 const CLAUDE_SESSION_LIMIT_RE = /you(?:'|’)ve hit your (?:usage|session) limit/i;
 // On the ACP path a reset clock only counts when it sits right next to the quota statement.
 const PROVIDER_QUOTA_RESET_WINDOW_CHARS = 120;
+// A reset clock that passed moments ago (clock skew, a slow failure report) means the limit is
+// already lifting, so retry now instead of waiting a full day for the next occurrence.
+const PROVIDER_QUOTA_RESET_ELAPSED_GRACE_MS = 30 * 60 * 1000;
+type ProviderQuotaResetScope = { start: number; end: number; elapsedGraceMs: number };
 const CONFIGURATION_INCOMPLETE_ERROR_RE =
   /(?:model_not_found|model [^\n]{0,120} not found|missing (?:api )?(?:key|credentials?)|credentials? (?:are |is )?missing|no (?:api )?(?:key|credentials?) (?:was |were )?(?:found|configured|provided)|api key (?:is )?(?:not set|unavailable))/i;
 
@@ -388,11 +392,19 @@ export type AdapterFailureRecoveryClassification =
   | { kind: "configuration_incomplete" }
   | null;
 
-function parseProviderQuotaClockReset(error: string, now: Date) {
-  const match = error.match(
-    /\b(?:try again at|resets(?: at)?)\s+(\d{1,2})(?::(\d{2}))?\s*(?:([ap])\.?\s*m\.?)?(?:\s*\(([^)]+)\)|\s+([A-Z]{2,5}))?/i,
+function parseProviderQuotaClockReset(error: string, now: Date, scope?: ProviderQuotaResetScope) {
+  const matches = error.matchAll(
+    /\b(?:try again at|resets(?: at)?)\s+(\d{1,2})(?::(\d{2}))?\s*(?:([ap])\.?\s*m\.?)?(?:\s*\(([^)]+)\)|\s+([A-Z]{2,5}))?/gi,
   );
+  const match = scope
+    ? [...matches].find((candidate) => candidate.index >= scope.start && candidate.index <= scope.end)
+    : matches.next().value;
   if (!match) return null;
+  const elapsedGraceMs = scope?.elapsedGraceMs ?? 0;
+  const settle = (candidate: Date, next: () => Date) => {
+    if (candidate.getTime() > now.getTime()) return candidate;
+    return now.getTime() - candidate.getTime() <= elapsedGraceMs ? new Date(now) : next();
+  };
 
   const hourValue = Number.parseInt(match[1] ?? "", 10);
   const minute = Number.parseInt(match[2] ?? "0", 10);
@@ -407,8 +419,10 @@ function parseProviderQuotaClockReset(error: string, now: Date) {
   if (!timeZone) {
     const retryAt = new Date(now);
     retryAt.setUTCHours(hour, minute, 0, 0);
-    if (retryAt.getTime() <= now.getTime()) retryAt.setUTCDate(retryAt.getUTCDate() + 1);
-    return retryAt;
+    return settle(retryAt, () => {
+      retryAt.setUTCDate(retryAt.getUTCDate() + 1);
+      return retryAt;
+    });
   }
 
   try {
@@ -450,7 +464,7 @@ function parseProviderQuotaClockReset(error: string, now: Date) {
       return candidate;
     };
     const sameDay = buildRetryAt(0);
-    return sameDay.getTime() > now.getTime() ? sameDay : buildRetryAt(1);
+    return settle(sameDay, () => buildRetryAt(1));
   } catch {
     return null;
   }
@@ -471,9 +485,9 @@ export function classifyAdapterFailureForRecovery(
   const resultJson = parseObject(latestRun.resultJson);
   if (latestRun.errorCode === "acpx_turn_failed") {
     // Every failed ACP turn carries this code, so only Claude's own statement in the
-    // error, stop reason or summary counts; transcript text elsewhere in the result
+    // error or stop reason counts; transcript text elsewhere in the result
     // must not park the issue in quota wait or mark it blocked.
-    const evidence = [latestRun.error, resultJson.stopReason, resultJson.summary]
+    const evidence = [latestRun.error, resultJson.stopReason]
       .filter((value): value is string => typeof value === "string")
       .join("\n");
     if (!CLAUDE_SESSION_LIMIT_RE.test(evidence)) return null;
@@ -503,14 +517,18 @@ function buildProviderQuotaClassification(
   }
 
   const quotaMatch = PROVIDER_QUOTA_ERROR_RE.exec(error);
-  // Only the ACP path bounds the window: its evidence joins several fields, so a clock far
-  // from Claude's statement belongs to something else. Other adapters (for example Codex's
-  // "...or try again at 3:42 PM") put the clock after long upgrade text, so the whole
-  // message is parsed as before.
-  const resetText = options.boundResetWindow && quotaMatch
-    ? error.slice(quotaMatch.index, quotaMatch.index + quotaMatch[0].length + PROVIDER_QUOTA_RESET_WINDOW_CHARS)
-    : error;
-  const parsedClockReset = parseProviderQuotaClockReset(resetText, now);
+  // Only the ACP path scopes the clock: its evidence joins several fields, so a clock far
+  // from Claude's statement belongs to something else, and the clock is parsed whole (a
+  // timezone suffix is never cut off). Other adapters (for example Codex's "...or try again
+  // at 3:42 PM") put the clock after long upgrade text, so the whole message is parsed.
+  const scope: ProviderQuotaResetScope | undefined = options.boundResetWindow && quotaMatch
+    ? {
+      start: quotaMatch.index,
+      end: quotaMatch.index + quotaMatch[0].length + PROVIDER_QUOTA_RESET_WINDOW_CHARS,
+      elapsedGraceMs: PROVIDER_QUOTA_RESET_ELAPSED_GRACE_MS,
+    }
+    : undefined;
+  const parsedClockReset = parseProviderQuotaClockReset(error, now, scope);
   if (parsedClockReset) {
     return { kind: "provider_quota", retryAt: parsedClockReset, parsedResetTime: true };
   }

@@ -821,7 +821,7 @@
         "reason": "The old classifier returned null for four quota cases; 4 failed, 11 passed.",
         "exitCode": 1,
         "artifactPath": "doc/evidence/acp-session-quota/verification.md",
-        "restoredPass": "15 passed, 0 failed after applying the classifier change.",
+        "restoredPass": "15 passed, 0 failed after applying the classifier change; the final suite after review rounds is 26 passed, 0 failed.",
         "restoredExitCode": 0,
         "scope": "Isolated local source tests; no installed runtime or native recovery proof.",
         "restoredArtifactPath": "doc/evidence/acp-session-quota/verification.md"

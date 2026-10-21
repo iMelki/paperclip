@@ -31,6 +31,7 @@ Focused command, from `server`:
 | Server TypeScript check | Passed | 0 | See local receipt |
 | Generic `session limit` ACP controls (3) against the first fix | 3 failed, 15 passed | 1 | 10.9 s |
 | Fixtures after narrowing session-limit wording | 18 passed | 0 | 10.9 s |
+| Final fixtures after the second review round (summary excluded, whole-clock scoping, just-elapsed clock) | 26 passed | 0 | 12.5 s |
 
 Review follow-up: bare `session limit`, `session limit reached` and
 `session limit exceeded` also occur in unrelated tool, MCP and terminal
@@ -38,6 +39,15 @@ failures. Only the provider statement `You've hit your session limit`, as
 Claude Code prints it (`You've hit your session limit · resets 1:50am
 (Asia/Tokyo)`), now counts as quota evidence. Three generic ACP controls
 containing that phrase stay out of quota recovery.
+
+Second review round: the ACP evidence is the error and stop reason only, because
+a result summary can quote Claude's statement (for example in a test name). On
+the ACP path the reset clock must begin within 120 characters of the statement
+and is parsed whole, so a timezone suffix is never cut and an unrelated
+`resets 8` elsewhere is ignored; other adapters still parse the whole message.
+A clock that elapsed within the last 30 minutes means retry now rather than
+tomorrow. Eight new or changed fixtures cover these cases; the final suite is
+26 passed.
 
 Implementation commit: `4e3bdfd0`. The unmodified repository pre-commit hook
 passed server and dependent CLI typechecks, 12 selected regression suites

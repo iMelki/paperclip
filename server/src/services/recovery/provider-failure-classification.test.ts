@@ -4,6 +4,8 @@ import {
   classifyAdapterFailureForRecovery,
 } from "./service.js";
 
+const PROVIDER_QUOTA_WINDOW_FOR_TEST = 120;
+
 describe("classifyAdapterFailureForRecovery", () => {
   it.each(["adapter_failed", "acpx_turn_failed"])(
     "waits for the explicit Claude session reset on %s instead of retrying immediately",
@@ -21,11 +23,11 @@ describe("classifyAdapterFailureForRecovery", () => {
     },
   );
 
-  it("uses the explicit reset clock from the ACP result summary", () => {
+  it("uses the explicit reset clock from the ACP stop reason", () => {
     expect(classifyAdapterFailureForRecovery({
       errorCode: "acpx_turn_failed",
       error: "Provider turn failed",
-      resultJson: { summary: "You've hit your session limit - resets at 21:30 (UTC)" },
+      resultJson: { stopReason: "You've hit your session limit - resets at 21:30 (UTC)" },
     }, new Date("2026-10-13T18:00:00.000Z"))).toEqual({
       kind: "provider_quota",
       retryAt: new Date("2026-10-13T21:30:00.000Z"),
@@ -104,10 +106,17 @@ describe("classifyAdapterFailureForRecovery", () => {
     }
   });
 
-  it("takes the exact Claude statement from the ACP summary or stop reason", () => {
+  it("does not read quota evidence from the ACP summary, which can quote the statement", () => {
+    expect(classifyAdapterFailureForRecovery({
+      errorCode: "acpx_turn_failed",
+      error: "Process exited with code 1",
+      resultJson: { summary: "Added a test for \"You've hit your session limit · resets 10:40pm (Asia/Jerusalem)\"" },
+    }, new Date("2026-10-13T18:00:38.000Z"))).toBeNull();
+  });
+
+  it("takes the exact Claude statement from the ACP stop reason", () => {
     const now = new Date("2026-10-13T18:00:38.000Z");
     for (const resultJson of [
-      { summary: "You've hit your session limit · resets 10:40pm (Asia/Jerusalem)" },
       { stopReason: "You\u2019ve hit your session limit · resets 10:40pm (Asia/Jerusalem)" },
     ]) {
       expect(classifyAdapterFailureForRecovery({
@@ -135,6 +144,45 @@ describe("classifyAdapterFailureForRecovery", () => {
         kind: "provider_quota",
         retryAt: new Date(now.getTime() + PROVIDER_QUOTA_RECOVERY_DEFAULT_BACKOFF_MS),
         parsedResetTime: false,
+      });
+    }
+  });
+
+  it("keeps the whole timezone when the ACP clock ends at the window boundary", () => {
+    const now = new Date("2026-10-13T18:00:38.000Z");
+    const statement = "You've hit your session limit";
+    const lead = " ".repeat(PROVIDER_QUOTA_WINDOW_FOR_TEST - "resets ".length - 1);
+    expect(classifyAdapterFailureForRecovery({
+      errorCode: "acpx_turn_failed",
+      error: `${statement}${lead}resets 10:40pm (Asia/Jerusalem)`,
+      resultJson: {},
+    }, now)).toEqual({
+      kind: "provider_quota",
+      retryAt: new Date("2026-10-13T19:40:00.000Z"),
+      parsedResetTime: true,
+    });
+  });
+
+  it("ignores an unrelated 'resets' counter elsewhere in the ACP evidence", () => {
+    const now = new Date("2026-10-13T18:00:38.000Z");
+    const error = `Retry counter resets 8 times.${" x".repeat(100)} You've hit your session limit`;
+    expect(classifyAdapterFailureForRecovery({ errorCode: "acpx_turn_failed", error, resultJson: {} }, now)).toEqual({
+      kind: "provider_quota",
+      retryAt: new Date(now.getTime() + PROVIDER_QUOTA_RECOVERY_DEFAULT_BACKOFF_MS),
+      parsedResetTime: false,
+    });
+  });
+
+  it("retries now when the ACP reset clock elapsed moments ago instead of waiting a day", () => {
+    const now = new Date("2026-10-13T19:40:20.000Z");
+    for (const error of [
+      "You've hit your session limit · resets 10:40pm (Asia/Jerusalem)",
+      "You've hit your session limit · resets 19:40 (UTC)",
+    ]) {
+      expect(classifyAdapterFailureForRecovery({ errorCode: "acpx_turn_failed", error, resultJson: {} }, now)).toEqual({
+        kind: "provider_quota",
+        retryAt: now,
+        parsedResetTime: true,
       });
     }
   });
