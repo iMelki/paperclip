@@ -9,6 +9,7 @@ import {
   commandReferencesPath,
   listPostgresProcessesForDataDir,
   moveStaleLockAside,
+  scanPsOutputForDataDir,
   readRunningEmbeddedPostgres as readRunning,
   type PostgresProcess,
 } from "../embedded-postgres-reuse.js";
@@ -369,5 +370,29 @@ describe("commandReferencesPath", () => {
     expect(commandReferencesPath(`postgres -D ${dir}-backup`, dir)).toBe(false);
     expect(commandReferencesPath(`postgres -D ${dir}2`, dir)).toBe(false);
     expect(commandReferencesPath(`postgres -D /mnt${dir}`, dir)).toBe(false);
+  });
+});
+
+describe("scanPsOutputForDataDir", () => {
+  const dir = "/srv/paperclip/db";
+  const unreadable = () => {
+    throw new Error("ENOENT");
+  };
+
+  it("reports the scan as inconclusive when a PostgreSQL server's directory cannot be read", async () => {
+    // Started through PGDATA, on a host without /proc/<pid>/cwd.
+    const out = "  901 /usr/lib/postgresql/16/bin/postgres\n  902 sshd: me\n";
+    expect(await scanPsOutputForDataDir(out, [dir], dir, unreadable)).toBeNull();
+  });
+
+  it("is conclusive when the command names another data directory", async () => {
+    const out = "  901 /usr/bin/postgres -D /var/lib/postgresql/16/main -c config_file=/etc/pg.conf\n";
+    expect(await scanPsOutputForDataDir(out, [dir], dir, unreadable)).toEqual([]);
+  });
+
+  it("finds a server by command line or by working directory", async () => {
+    const out = `  901 postgres -D ${dir}\n  902 /usr/bin/postgres\n  903 /usr/bin/postgres\n`;
+    const cwd = (pid: number) => (pid === 902 ? dir : "/elsewhere");
+    expect((await scanPsOutputForDataDir(out, [dir], dir, cwd))?.map((p) => p.pid)).toEqual([901, 902]);
   });
 });

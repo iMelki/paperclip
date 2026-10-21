@@ -147,6 +147,23 @@ export async function listPostgresProcessesForDataDir(dataDir: string): Promise<
   }
   const out = await run("ps", ["-eo", "pid=,args="]);
   if (out === null) return null;
+  return scanPsOutputForDataDir(out, needles, dataDir, (pid) => readlinkSync(`/proc/${pid}/cwd`));
+}
+
+/**
+ * Picks the PostgreSQL servers in `ps -eo pid=,args=` output that use the data directory:
+ * by command line, else by working directory. Returns `null` when a PostgreSQL server
+ * matched nothing but its working directory could not be read (no /proc on macOS or BSD,
+ * or no permission), because that server may still own the directory.
+ */
+export async function scanPsOutputForDataDir(
+  out: string,
+  needles: string[],
+  dataDir: string,
+  readCwd: (pid: number) => string,
+): Promise<PostgresProcess[] | null> {
+  const found: PostgresProcess[] = [];
+  let cwdUnknown = false;
   for (const line of out.split("\n")) {
     const match = line.trim().match(/^(\d+)\s+(\S.*)$/);
     if (!match) continue;
@@ -154,19 +171,27 @@ export async function listPostgresProcessesForDataDir(dataDir: string): Promise<
     const command = match[2];
     if (pid === process.pid || !POSTGRES_PROCESS_NAME_RE.test((command.split(/\s+/)[0] ?? "").split("/").pop() ?? "")) continue;
     let owns = needles.some((n) => commandReferencesPath(command, n));
-    if (!owns) {
-      // A postmaster's working directory is its data directory.
+    // An explicit -D / --data-directory that names another directory settles it.
+    const namesOtherDir = !owns && /(?:^|\s)(?:-D\s*|--data-directory[=\s])\S/.test(command);
+    if (!owns && !namesOtherDir) {
+      // A postmaster's working directory is its data directory (also when it was
+      // started through PGDATA instead of -D).
       const cwd = (() => {
         try {
-          return readlinkSync(`/proc/${pid}/cwd`);
+          return readCwd(pid);
         } catch {
           return null;
         }
       })();
-      owns = cwd !== null && (await isSameDataDirectory(cwd, dataDir));
+      // No /proc (macOS, BSD) or an unreadable entry: this server's directory is unknown.
+      if (cwd === null) cwdUnknown = true;
+      else owns = await isSameDataDirectory(cwd, dataDir);
     }
     if (owns) found.push({ pid, command });
   }
+  // Nothing matched, but a PostgreSQL server whose directory could not be inspected may
+  // still own this one, so report "could not look" and let the caller refuse.
+  if (found.length === 0 && cwdUnknown) return null;
   return found;
 }
 

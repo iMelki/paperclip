@@ -42,7 +42,10 @@ directory, keeps the lock in place. Otherwise the lock is renamed to
 `postmaster.pid.stale-<timestamp>` with a warning and startup continues.
 
 Startup stops, leaving `postmaster.pid` unchanged, only when a PostgreSQL that
-may own the directory is found or the process list cannot be read. The error
+may own the directory is found or the process list cannot be read. A PostgreSQL
+process that names no data directory and whose working directory cannot be read
+(no `/proc` on macOS or BSD, or no permission) counts as "cannot be read", since it
+may have been started through `PGDATA`. The error
 names the process found and the command that resolves it (`kill <pid>` or
 `taskkill /PID <pid>`); after that, the next start handles any leftover lock by
 itself. The same refusal applies when a live PID is not verified as non-PostgreSQL
