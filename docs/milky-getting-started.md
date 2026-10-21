@@ -53,7 +53,7 @@ npx paperclipai run
 Prerequisites: Node.js 20+, pnpm 9+
 
 ```powershell
-cd <workspace>\tools\paperclip
+cd "<workspace>\tools\paperclip"
 pnpm install
 pnpm dev
 # Server at http://localhost:3100 (API) and http://localhost:3101 (UI)
@@ -252,7 +252,7 @@ Paperclip exports companies to markdown (`COMPANY.md`, `AGENT.md`, etc.). These 
    Goal association: company goal
 
 5. Import existing skills from agent-settings:
-   paperclipai company import --from <agent-settings checkout>\shared\sub-agents
+   paperclipai company import --from "<agent-settings checkout>\shared\sub-agents"
 
 6. Set company budget: $100/month total
    Agent budgets: CEO $10, CTO $20, engineers $15 each
