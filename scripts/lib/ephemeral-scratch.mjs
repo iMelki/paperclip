@@ -42,9 +42,11 @@ export const EPHEMERAL_PREFIX = "eph-";
  *   stamp   - UTC creation time ENCODED IN THE NAME, so age survives a failed
  *             stat() and a filesystem with no reliable birthtime
  *   unique  - collision suffix
+ * Files may carry one trailing extension (see EXTENSION_PATTERN); it follows
+ * the unique suffix, so the fields before it parse the same way.
  */
 export const EPHEMERAL_NAME_PATTERN =
-  /^eph-([a-z0-9]{2,24})-([a-z0-9]{2,32})-(\d{8}T\d{6}Z)-([a-z0-9]{6})$/;
+  /^eph-([a-z0-9]{2,24})-([a-z0-9]{2,32})-(\d{8}T\d{6}Z)-([a-z0-9]{6})(?:\.[A-Za-z0-9][A-Za-z0-9._-]{0,15})?$/;
 
 const SLUG_PATTERN = /^[a-z0-9]+$/;
 const UNIQUE_PATTERN = /^[a-z0-9]{6}$/;
@@ -193,12 +195,21 @@ export function createEphemeralFile({ owner, purpose, ext, root, contents, date 
   // Validate before touching the filesystem so a rejected call creates nothing.
   const suffix = normalizeExtension(ext);
   const base = root ?? ephemeralRoot();
-  const file = assertDirectChild(base, path.join(base, `${ephemeralName({ owner, purpose, date })}${suffix}`));
   mkdirSync(base, { recursive: true });
-  // "wx" is O_CREAT|O_EXCL: it refuses an existing path, including a planted
-  // symlink, so the write cannot be redirected. 0o600 keeps it owner-only.
-  writeFileSync(file, contents ?? "", { flag: "wx", mode: 0o600 });
-  return file;
+  // Same retry as the directory path: a colliding random suffix is an
+  // allocator detail, so draw a fresh name instead of surfacing EEXIST.
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    const file = assertDirectChild(base, path.join(base, `${ephemeralName({ owner, purpose, date })}${suffix}`));
+    try {
+      // "wx" is O_CREAT|O_EXCL: it refuses an existing path, including a planted
+      // symlink, so the write cannot be redirected. 0o600 keeps it owner-only.
+      writeFileSync(file, contents ?? "", { flag: "wx", mode: 0o600 });
+      return file;
+    } catch (error) {
+      if (error?.code !== "EEXIST") throw error;
+    }
+  }
+  throw new Error("ephemeral-scratch: could not create a unique scratch file in 8 attempts");
 }
 
 /**
@@ -214,7 +225,8 @@ export function createEphemeralFile({ owner, purpose, ext, root, contents, date 
  */
 export function ephemeralChildEnv(dir) {
   if (!dir) throw new TypeError("ephemeral-scratch: ephemeralChildEnv requires a directory");
-  mkdirSync(dir, { recursive: true });
+  // Scratch may hold secrets: any directory created here is owner-only (ignored on Windows).
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
   return { TEMP: dir, TMP: dir, TMPDIR: dir };
 }
 
