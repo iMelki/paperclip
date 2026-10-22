@@ -619,13 +619,17 @@ describe("startServer embedded PostgreSQL identity", () => {
     });
 
     const startPostmaster = async (commandLine: string[]) => {
+      // A shell script named `postgres`: the kernel names such a process after the script. A symlink
+      // to node would not do, because Node 24 renames its main thread ("MainThread") and `ps` would
+      // no longer list the process as `postgres`.
       const bin = path.join(mkdtempSync(path.join(tmpdir(), "pg-bin-")), "postgres");
-      symlinkSync(process.execPath, bin);
-      child = spawn(bin, ["-e", "setInterval(() => {}, 1000)", "--", ...commandLine], { cwd: dataDir, stdio: "ignore" });
+      writeFileSync(bin, "#!/bin/sh\nwhile :; do sleep 1; done\n");
+      chmodSync(bin, 0o755);
+      child = spawn(bin, ["--stand-in-postmaster", "--", ...commandLine], { cwd: dataDir, stdio: "ignore" });
       // Wait until `ps` lists it as `postgres` with its arguments; a loaded CI runner needs longer than a fixed delay.
       const listed = () => {
         const row = spawnSync("ps", ["-p", String(child?.pid), "-o", "comm=,args="], { encoding: "utf8" }).stdout;
-        return /(?:^|\/)postgres\s/.test(row) && row.includes("setInterval");
+        return /(?:^|\/)postgres\s/.test(row.trim()) && row.includes("--stand-in-postmaster");
       };
       for (let waited = 0; !listed(); waited += 50) {
         if (waited > 15_000) throw new Error("the stand-in postgres process was never listed by ps");
