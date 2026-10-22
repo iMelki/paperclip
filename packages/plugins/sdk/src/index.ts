@@ -326,6 +326,7 @@ export type {
 export type {
   PaperclipPluginManifestV1,
   PluginJobDeclaration,
+  PluginJobScope,
   PluginWebhookDeclaration,
   PluginToolDeclaration,
   PluginEnvironmentDriverDeclaration,

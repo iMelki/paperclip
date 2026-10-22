@@ -22,7 +22,10 @@
  *
  * 4. **Job run recording** — Every execution creates a `plugin_job_runs` row:
  *    `queued` → `running` → `succeeded` | `failed`. Duration and error are
- *    captured.
+ *    captured. A job declared `scope: "company"` gets one row per configured
+ *    company (with that `company_id`), each with its own run id and dispatched
+ *    sequentially with that company's invocation scope. Instance-scoped jobs
+ *    (the default) keep one row per trigger.
  *
  * 5. **Lifecycle integration** — The scheduler exposes `registerPlugin()` and
  *    `unregisterPlugin()` so the host lifecycle manager can wire up job
@@ -37,6 +40,7 @@
 import { and, eq, lte, or } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { pluginJobs, pluginJobRuns } from "@paperclipai/db";
+import type { PluginJobRunTrigger } from "@paperclipai/shared";
 import type { PluginJobStore } from "./plugin-job-store.js";
 import type { PluginWorkerManager } from "./plugin-worker-manager.js";
 import { parseCron, nextCronTick, validateCron } from "./cron.js";
@@ -78,13 +82,36 @@ export interface PluginJobSchedulerOptions {
 }
 
 /**
+ * Options for a manual job trigger.
+ */
+export interface TriggerJobOptions {
+  /**
+   * Run a company-scoped job for this one configured company only (for a
+   * per-company manual run or retry). Rejected for instance-scoped jobs and
+   * for companies that have not configured the plugin.
+   */
+  companyId?: string | null;
+}
+
+/**
  * Result of a manual job trigger.
  */
 export interface TriggerJobResult {
-  /** The created run ID. */
+  /** The first created run ID (the only one for an instance-scoped job). */
   runId: string;
   /** The job ID that was triggered. */
   jobId: string;
+  /**
+   * Every created run, in execution order. A company-scoped job gets one run
+   * per configured company, each with its own run ID and company ID.
+   */
+  runs: Array<{ runId: string; companyId: string | null }>;
+}
+
+/** A run record created for one target of a job trigger. */
+interface PlannedRun {
+  runId: string;
+  companyId: string | null;
 }
 
 /**
@@ -157,7 +184,11 @@ export interface PluginJobScheduler {
    * @returns The created run info
    * @throws {Error} if the job is not found, not active, or already running
    */
-  triggerJob(jobId: string, trigger?: "manual" | "retry"): Promise<TriggerJobResult>;
+  triggerJob(
+    jobId: string,
+    trigger?: "manual" | "retry",
+    options?: TriggerJobOptions,
+  ): Promise<TriggerJobResult>;
 
   /**
    * Run a single scheduler tick immediately (for testing).
@@ -333,73 +364,111 @@ export function createPluginJobScheduler(
   }
 
   // -----------------------------------------------------------------------
-  // Core: dispatch a single job
+  // Core: run targets (instance run, or one run per company)
   // -----------------------------------------------------------------------
 
   /**
-   * Dispatch a single job run — create the run record, call the worker,
-   * record the result, and advance the schedule pointer.
+   * Resolve the run targets for one trigger of a job.
+   *
+   * - Instance-scoped jobs (the default, including jobs that declare no
+   *   scope) run once: `[null]`.
+   * - Company-scoped jobs (`scope: "company"` in the manifest) run once per
+   *   host-authorized configured company, in sorted order. With no configured
+   *   company they run once unscoped, as before.
+   * - `onlyCompanyId` restricts a company-scoped job to one configured
+   *   company (per-company manual trigger or retry).
    */
-  async function dispatchJob(
+  async function resolveRunTargets(
     job: typeof pluginJobs.$inferSelect,
-  ): Promise<void> {
-    const { id: jobId, pluginId, jobKey, schedule } = job;
-    const jobLog = log.child({ jobId, pluginId, jobKey });
+    onlyCompanyId?: string | null,
+  ): Promise<Array<string | null>> {
+    const scope = await jobStore.getJobDeclarationScope(job.pluginId, job.jobKey);
+    if (scope !== "company") {
+      if (onlyCompanyId) {
+        throw new Error(
+          `Job "${job.jobKey}" is instance-scoped and cannot be triggered for one company`,
+        );
+      }
+      return [null];
+    }
+    const companyIds = [...workerManager.getProactiveCompanyScopes(job.pluginId)].sort();
+    if (onlyCompanyId) {
+      if (!companyIds.includes(onlyCompanyId)) {
+        throw new Error(
+          `Company "${onlyCompanyId}" has not configured plugin "${job.pluginId}" (job "${job.jobKey}")`,
+        );
+      }
+      return [onlyCompanyId];
+    }
+    return companyIds.length > 0 ? companyIds : [null];
+  }
 
-    // Mark as active (overlap prevention)
-    activeJobs.add(jobId);
-
-    let runId: string | undefined;
-    const startedAt = Date.now();
-
-    try {
-      // 1. Create run record
+  /** Create one queued run record per target, each with its own run id. */
+  async function createRuns(
+    job: typeof pluginJobs.$inferSelect,
+    trigger: PluginJobRunTrigger,
+    targets: Array<string | null>,
+  ): Promise<PlannedRun[]> {
+    const planned: PlannedRun[] = [];
+    for (const companyId of targets) {
       const run = await jobStore.createRun({
-        jobId,
-        pluginId,
-        trigger: "schedule",
+        jobId: job.id,
+        pluginId: job.pluginId,
+        trigger,
+        companyId,
       });
-      runId = run.id;
+      planned.push({ runId: run.id, companyId });
+    }
+    return planned;
+  }
 
-      jobLog.info({ runId }, "dispatching scheduled job");
+  /**
+   * Execute planned runs sequentially. Each run is marked running, dispatched
+   * with its own run id (and, for a company run, its host-chosen company id),
+   * and completed. A failure in one company's run does not stop the others.
+   *
+   * @returns the number of runs that did not succeed
+   */
+  async function executeRuns(
+    job: typeof pluginJobs.$inferSelect,
+    trigger: PluginJobRunTrigger,
+    scheduledAt: string,
+    planned: PlannedRun[],
+  ): Promise<number> {
+    const { id: jobId, pluginId, jobKey } = job;
+    let failures = 0;
 
-      // 2. Mark run as running
-      await jobStore.markRunning(runId);
+    for (const { runId, companyId } of planned) {
+      const runLog = log.child({ jobId, pluginId, jobKey, runId, trigger, companyId });
+      const startedAt = Date.now();
+      try {
+        await jobStore.markRunning(runId);
+        runLog.info("dispatching job run");
 
-      // 3. Call worker via RPC
-      await workerManager.call(
-        pluginId,
-        "runJob",
-        {
-          job: {
-            jobKey,
-            runId,
-            trigger: "schedule" as const,
-            scheduledAt: (job.nextRunAt ?? new Date()).toISOString(),
+        await workerManager.call(
+          pluginId,
+          "runJob",
+          {
+            job: {
+              jobKey,
+              runId,
+              trigger,
+              scheduledAt,
+              ...(companyId ? { companyId } : {}),
+            },
+            ...(companyId ? { companyId } : {}),
           },
-        },
-        jobTimeoutMs,
-      );
+          jobTimeoutMs,
+        );
 
-      // 4. Mark run as succeeded
-      const durationMs = Date.now() - startedAt;
-      await jobStore.completeRun(runId, {
-        status: "succeeded",
-        durationMs,
-      });
-
-      jobLog.info({ runId, durationMs }, "job completed successfully");
-    } catch (err) {
-      const durationMs = Date.now() - startedAt;
-      const errorMessage = err instanceof Error ? err.message : String(err);
-
-      jobLog.error(
-        { runId, durationMs, err: errorMessage },
-        "job execution failed",
-      );
-
-      // Record the failure
-      if (runId) {
+        const durationMs = Date.now() - startedAt;
+        await jobStore.completeRun(runId, { status: "succeeded", durationMs });
+        runLog.info({ durationMs }, "job run completed successfully");
+      } catch (err) {
+        failures++;
+        const durationMs = Date.now() - startedAt;
+        const errorMessage = err instanceof Error ? err.message : String(err);
+        runLog.error({ durationMs, err: errorMessage }, "job run failed");
         try {
           await jobStore.completeRun(runId, {
             status: "failed",
@@ -407,20 +476,56 @@ export function createPluginJobScheduler(
             durationMs,
           });
         } catch (completeErr) {
-          jobLog.error(
+          runLog.error(
             {
-              runId,
               err: completeErr instanceof Error ? completeErr.message : String(completeErr),
             },
-            "failed to record job failure",
+            "failed to record job run failure",
           );
         }
       }
+    }
+
+    return failures;
+  }
+
+  // -----------------------------------------------------------------------
+  // Core: dispatch a scheduled job
+  // -----------------------------------------------------------------------
+
+  /**
+   * Dispatch one scheduled trigger of a job: create the run record(s), call
+   * the worker, record each result, and advance the schedule pointer.
+   */
+  async function dispatchJob(
+    job: typeof pluginJobs.$inferSelect,
+  ): Promise<void> {
+    const { id: jobId, pluginId, jobKey } = job;
+    const jobLog = log.child({ jobId, pluginId, jobKey });
+
+    // Mark as active (overlap prevention)
+    activeJobs.add(jobId);
+
+    try {
+      const targets = await resolveRunTargets(job);
+      const planned = await createRuns(job, "schedule", targets);
+      jobLog.info({ runCount: planned.length }, "dispatching scheduled job");
+      await executeRuns(
+        job,
+        "schedule",
+        (job.nextRunAt ?? new Date()).toISOString(),
+        planned,
+      );
+    } catch (err) {
+      jobLog.error(
+        { err: err instanceof Error ? err.message : String(err) },
+        "scheduled job dispatch failed",
+      );
     } finally {
       // Remove from active set
       activeJobs.delete(jobId);
 
-      // 5. Always advance the schedule pointer (even on failure)
+      // Always advance the schedule pointer (even on failure)
       try {
         await advanceSchedulePointer(job);
       } catch (err) {
@@ -439,6 +544,7 @@ export function createPluginJobScheduler(
   async function triggerJob(
     jobId: string,
     trigger: "manual" | "retry" = "manual",
+    options: TriggerJobOptions = {},
   ): Promise<TriggerJobResult> {
     const job = await jobStore.getJobById(jobId);
     if (!job) {
@@ -482,76 +588,43 @@ export function createPluginJobScheduler(
       );
     }
 
-    // Create the run and dispatch (non-blocking)
-    const run = await jobStore.createRun({
-      jobId,
-      pluginId: job.pluginId,
-      trigger,
-    });
+    // Create the run(s) and dispatch (non-blocking)
+    const targets = await resolveRunTargets(job, options.companyId ?? null);
+    const planned = await createRuns(job, trigger, targets);
 
     // Dispatch in background — don't block the caller
-    void dispatchManualRun(job, run.id, trigger);
+    void dispatchManualRun(job, planned, trigger);
 
-    return { runId: run.id, jobId };
+    return {
+      runId: planned[0]!.runId,
+      jobId,
+      runs: planned.map(({ runId, companyId }) => ({ runId, companyId })),
+    };
   }
 
   /**
-   * Dispatch a manually triggered job run.
+   * Dispatch a manually triggered job's planned run(s).
    */
   async function dispatchManualRun(
     job: typeof pluginJobs.$inferSelect,
-    runId: string,
+    planned: PlannedRun[],
     trigger: "manual" | "retry",
   ): Promise<void> {
     const { id: jobId, pluginId, jobKey } = job;
-    const jobLog = log.child({ jobId, pluginId, jobKey, runId, trigger });
+    const jobLog = log.child({ jobId, pluginId, jobKey, trigger });
 
     activeJobs.add(jobId);
-    const startedAt = Date.now();
-
     try {
-      await jobStore.markRunning(runId);
-
-      await workerManager.call(
-        pluginId,
-        "runJob",
-        {
-          job: {
-            jobKey,
-            runId,
-            trigger,
-            scheduledAt: new Date().toISOString(),
-          },
-        },
-        jobTimeoutMs,
+      const failures = await executeRuns(job, trigger, new Date().toISOString(), planned);
+      jobLog.info(
+        { runCount: planned.length, failedRunCount: failures },
+        "manual job finished",
       );
-
-      const durationMs = Date.now() - startedAt;
-      await jobStore.completeRun(runId, {
-        status: "succeeded",
-        durationMs,
-      });
-
-      jobLog.info({ durationMs }, "manual job completed successfully");
     } catch (err) {
-      const durationMs = Date.now() - startedAt;
-      const errorMessage = err instanceof Error ? err.message : String(err);
-      jobLog.error({ durationMs, err: errorMessage }, "manual job failed");
-
-      try {
-        await jobStore.completeRun(runId, {
-          status: "failed",
-          error: errorMessage,
-          durationMs,
-        });
-      } catch (completeErr) {
-        jobLog.error(
-          {
-            err: completeErr instanceof Error ? completeErr.message : String(completeErr),
-          },
-          "failed to record manual job failure",
-        );
-      }
+      jobLog.error(
+        { err: err instanceof Error ? err.message : String(err) },
+        "manual job dispatch failed",
+      );
     } finally {
       activeJobs.delete(jobId);
     }

@@ -535,68 +535,32 @@ describe("plugin job company context", () => {
   );
 
   it.each(["schedule", "manual", "retry"] as const)(
-    "runs a %s job once per configured company, each with that company's scope, when several companies are configured",
+    "runs an instance-scoped %s job once, unscoped, when several companies are configured",
     async (trigger) => {
-      const { handle, configGet } = makeJobHandle(["company-b", "company-a"]);
+      // Fan-out for company-scoped jobs belongs to the job scheduler, which
+      // creates a run record per company. The worker handle must not multiply
+      // an instance job: one call is one execution.
+      const { handle, configGet, configCall } = makeJobHandle(["company-b", "company-a"]);
       try {
         await handle.start();
-        await expect(handle.call("runJob", jobProbe(trigger))).resolves.toBeUndefined();
-        expect(configGet).toHaveBeenCalledTimes(2);
-        expect(configGet).toHaveBeenNthCalledWith(
-          1,
-          { companyId: "company-a" },
-          { invocationScope: { companyId: "company-a" } },
-        );
-        expect(configGet).toHaveBeenNthCalledWith(
-          2,
-          { companyId: "company-b" },
-          { invocationScope: { companyId: "company-b" } },
-        );
+        await expect(handle.call("runJob", jobProbe(trigger))).rejects.toMatchObject({
+          code: PLUGIN_RPC_ERROR_CODES.INVOCATION_SCOPE_DENIED,
+          message: expect.stringContaining("company context is required"),
+        });
+        expect(configCall).toHaveBeenCalledTimes(1);
+        expect(configGet).not.toHaveBeenCalled();
       } finally {
         await handle.stop().catch(() => undefined);
       }
     },
   );
 
-  it("still runs the other companies when one company's job run fails, then reports the failure", async () => {
-    const { handle, configGet } = makeJobHandle(["company-a", "company-b"]);
-    configGet.mockImplementation(async (params: { companyId?: string }) => {
-      if (params.companyId === "company-a") throw new Error("company-a config unavailable");
-      return { companyId: params.companyId };
-    });
-    try {
-      await handle.start();
-      await expect(handle.call("runJob", jobProbe("schedule"))).rejects.toThrow(
-        /failed for 1 of 2 companies: company "company-a"/,
-      );
-      expect(configGet).toHaveBeenCalledTimes(2);
-      expect(configGet).toHaveBeenLastCalledWith(
-        { companyId: "company-b" },
-        { invocationScope: { companyId: "company-b" } },
-      );
-    } finally {
-      await handle.stop().catch(() => undefined);
-    }
+  it("reports the configured company set sorted for the scheduler's per-company fan-out", () => {
+    const { handle } = makeJobHandle(["company-b", " company-a ", ""]);
+    expect(handle.getProactiveCompanyScopes()).toEqual(["company-a", "company-b"]);
   });
 
-  it("keeps a multi-company job's cross-company config read denied inside each company run", async () => {
-    const { handle, configGet } = makeJobHandle(["company-a", "company-b"]);
-    try {
-      await handle.start();
-      await expect(handle.call("runJob", jobProbe("schedule", {
-        omitCompanyId: false, requestedCompanyId: "company-b",
-      }))).rejects.toThrow(/failed for 1 of 2 companies: company "company-a".*requested company "company-b"/);
-      expect(configGet).toHaveBeenCalledTimes(1);
-      expect(configGet).toHaveBeenCalledWith(
-        { companyId: "company-b" },
-        { invocationScope: { companyId: "company-b" } },
-      );
-    } finally {
-      await handle.stop().catch(() => undefined);
-    }
-  });
-
-  it("does not fan out a job that already names its company", async () => {
+  it("scopes a job run to the company the scheduler names", async () => {
     const { handle, configGet } = makeJobHandle(["company-a", "company-b"]);
     try {
       await handle.start();

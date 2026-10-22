@@ -2647,8 +2647,10 @@ export function pluginRoutes(
    *
    * Creates a run with `trigger: "manual"` and dispatches immediately.
    * The response returns before the job completes (non-blocking).
+   * A job declared `scope: "company"` gets one run per configured company;
+   * an optional body `{ companyId }` runs it for that one configured company.
    *
-   * Response: `{ runId: string, jobId: string }`
+   * Response: `{ runId: string, jobId: string, runs: Array<{ runId, companyId }> }`
    * Errors:
    * - 404 if plugin not found
    * - 400 if job not found, not active, already running, or worker unavailable
@@ -2674,7 +2676,12 @@ export function pluginRoutes(
     }
 
     try {
-      const result = await jobDeps.scheduler.triggerJob(jobId, "manual");
+      const requestedCompanyId = typeof req.body?.companyId === "string" && req.body.companyId.trim()
+        ? req.body.companyId.trim()
+        : null;
+      const result = await jobDeps.scheduler.triggerJob(jobId, "manual", {
+        companyId: requestedCompanyId,
+      });
       res.json(result);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
