@@ -452,3 +452,11 @@ describe("scanWindowsPostgresRows", () => {
     expect(await scanWindowsPostgresRows([], [dir], dir)).toEqual([]);
   });
 });
+
+describe("scanPsOutputForDataDir with a full-path comm column", () => {
+  it("reads the executable name from the last path segment", async () => {
+    const dir = "/srv/paperclip/db";
+    const out = `  901 /opt/homebrew/bin/postgres /opt/homebrew/bin/postgres -D ${dir}\n`;
+    expect((await scanPsOutputForDataDir(out, [dir], dir, () => "/elsewhere"))?.map((p) => p.pid)).toEqual([901]);
+  });
+});

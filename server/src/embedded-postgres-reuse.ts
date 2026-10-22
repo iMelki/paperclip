@@ -154,8 +154,8 @@ export async function listPostgresProcessesForDataDir(dataDir: string): Promise<
       return null;
     }
   }
-  // `comm` is the executable name and does not include a path, so a path with
-  // spaces stays in `args` and is not mistaken for the process name.
+  // `comm` is the executable name (a full path on macOS, read by its last segment), so a
+  // path with spaces in `args` is not mistaken for the process name.
   const out = await run("ps", ["-eo", "pid=,comm=,args="]);
   if (out === null) return null;
   return scanPsOutputForDataDir(out, needles, dataDir, (pid) => readlinkSync(`/proc/${pid}/cwd`));
@@ -209,7 +209,7 @@ export async function scanPsOutputForDataDir(
     const pid = Number(match[1]);
     const comm = match[2] ?? "";
     const command = match[3] ?? "";
-    if (pid === process.pid || !POSTGRES_PROCESS_NAME_RE.test(comm)) continue;
+    if (pid === process.pid || !POSTGRES_PROCESS_NAME_RE.test(comm.replace(/\\/g, "/").split("/").pop() ?? "")) continue;
     const ownership = await commandOwnership(command, needles, dataDir);
     let owns = ownership === "owns";
     if (ownership === "unknown") {
