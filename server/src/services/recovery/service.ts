@@ -409,8 +409,9 @@ function readBareZone(match: RegExpMatchArray): string | undefined {
 }
 
 function parseProviderQuotaClockReset(error: string, now: Date, scope?: ProviderQuotaResetScope, failedAt?: Date | null) {
+  // A malformed spaced meridiem must not backtrack into a numeric clock followed by prose.
   const matches = error.matchAll(
-    /\b(?:try again at|resets(?: at)?)\s+(\d{1,2})(?::(\d{2}))?(?![\d:])(?:\s*([ap])\.?\s*m\.?)?(?![\w:])(?:\s*\(([^)]+)\)|\s+([A-Z]{2,5}))?/gi,
+    /\b(?:try again at|resets(?: at)?)\s+(\d{1,2})(?::(\d{2}))?(?![\d:])(?!\s*[ap]\.?\s*m\.?[\w:])(?:\s*([ap])\.?\s*m\.?)?(?![\w:])(?:\s*\(([^)]+)\)|\s+([A-Z]{2,5}))?/gi,
   );
   const inScope = (candidate: RegExpMatchArray) =>
     scope !== undefined && candidate.index! >= scope.start && candidate.index! <= scope.end;

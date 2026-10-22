@@ -603,6 +603,35 @@ describe("classifyAdapterFailureForRecovery", () => {
 
 
 describe("recovery reset complete-token boundary", () => {
+  it.each(["adapter_failed", "acpx_turn_failed", "provider_quota"])(
+    "does not reinterpret a malformed spaced meridiem as a numeric clock on %s",
+    (errorCode) => {
+      const now = new Date("2026-10-22T07:00:00Z");
+      for (const clock of ["9:00 amx", "9:00 pm123", "9:00 am:30", "9:00 a.m.x"]) {
+        for (const statement of ["resets", "try again at"]) {
+          expect(classifyAdapterFailureForRecovery({
+            errorCode,
+            error: `You've hit your session limit · ${statement} ${clock} (UTC)`,
+            resultJson: {},
+          }, now)).toEqual({
+            kind: "provider_quota",
+            retryAt: new Date(now.getTime() + PROVIDER_QUOTA_RECOVERY_DEFAULT_BACKOFF_MS),
+            parsedResetTime: false,
+          });
+        }
+      }
+      expect(classifyAdapterFailureForRecovery({
+        errorCode,
+        error: "You've hit your session limit · resets 9:00 pm123 (UTC) · or resets 10:00 pm (UTC)",
+        resultJson: {},
+      }, now)).toEqual({
+        kind: "provider_quota",
+        retryAt: new Date("2026-10-22T22:00:00Z"),
+        parsedResetTime: true,
+      });
+    },
+  );
+
   it.each(["9:00amx", "9:00am123", "9:00am:30", "9:00foo"])(
     "uses default backoff for malformed reset clock %s",
     (clock) => {
