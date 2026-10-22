@@ -4,7 +4,78 @@ import {
   classifyAdapterFailureForRecovery,
 } from "./service.js";
 
+const PROVIDER_QUOTA_WINDOW_FOR_TEST = 120;
+
 describe("classifyAdapterFailureForRecovery", () => {
+  it.each(["adapter_failed", "acpx_turn_failed"])(
+    "waits for the explicit Claude session reset on %s instead of retrying immediately",
+    (errorCode) => {
+      const now = new Date("2026-10-13T18:00:38.000Z");
+      expect(classifyAdapterFailureForRecovery({
+        errorCode,
+        error: "Internal error: You've hit your session limit · resets 10:40pm (Asia/Jerusalem)",
+        resultJson: { mode: "persistent", status: "failed", stopReason: "adapter_failed" },
+      }, now)).toEqual({
+        kind: "provider_quota",
+        retryAt: new Date("2026-10-13T19:40:00.000Z"),
+        parsedResetTime: true,
+      });
+    },
+  );
+
+  it("uses the explicit reset clock from the ACP stop reason", () => {
+    expect(classifyAdapterFailureForRecovery({
+      errorCode: "acpx_turn_failed",
+      error: "Provider turn failed",
+      resultJson: { stopReason: "You've hit your session limit - resets at 21:30 (UTC)" },
+    }, new Date("2026-10-13T18:00:00.000Z"))).toEqual({
+      kind: "provider_quota",
+      retryAt: new Date("2026-10-13T21:30:00.000Z"),
+      parsedResetTime: true,
+    });
+  });
+
+  it("does not classify an ordinary ACP turn error as a quota wait", () => {
+    expect(classifyAdapterFailureForRecovery({
+      errorCode: "acpx_turn_failed",
+      error: "The agent failed while reading a workspace file",
+      resultJson: { status: "failed" },
+    })).toBeNull();
+  });
+
+  it.each([
+    "Browser tool error: session limit reached (max 5 concurrent sessions)",
+    "MCP server rejected the request: session limit exceeded for this workspace",
+    "Terminal session limit is 4; close a terminal and try again",
+  ])("does not treat generic ACP session-limit wording as a provider quota: %s", (error) => {
+    expect(classifyAdapterFailureForRecovery({
+      errorCode: "acpx_turn_failed",
+      error,
+      resultJson: { status: "failed" },
+    })).toBeNull();
+  });
+
+  it("does not turn a non-adapter session-limit message into an automatic retry", () => {
+    expect(classifyAdapterFailureForRecovery({
+      errorCode: "issue_paused",
+      error: "You've hit your session limit - resets 10:40pm (Asia/Jerusalem)",
+      resultJson: null,
+    })).toBeNull();
+  });
+
+  it("keeps quota recovery bounded when the provider supplies no reset clock", () => {
+    const now = new Date("2026-10-13T18:00:00.000Z");
+    expect(classifyAdapterFailureForRecovery({
+      errorCode: "acpx_turn_failed",
+      error: "You've hit your session limit",
+      resultJson: null,
+    }, now)).toEqual({
+      kind: "provider_quota",
+      retryAt: new Date(now.getTime() + PROVIDER_QUOTA_RECOVERY_DEFAULT_BACKOFF_MS),
+      parsedResetTime: false,
+    });
+  });
+
   it("classifies usage-limit messages and parses the provider reset time", () => {
     const now = new Date("2026-07-15T20:00:00.000Z");
     const classification = classifyAdapterFailureForRecovery({
@@ -17,6 +88,181 @@ describe("classifyAdapterFailureForRecovery", () => {
       kind: "provider_quota",
       retryAt: new Date("2026-07-15T21:30:00.000Z"),
       parsedResetTime: true,
+    });
+  });
+
+  it("ignores quota and credential wording that only appears in an ACP transcript", () => {
+    const now = new Date("2026-10-13T18:00:38.000Z");
+    for (const text of [
+      "The docs say: usage limit exceeded means retry later.",
+      "Set the key: API key is not set in the sample config.",
+      "quota exceeded and missing credentials are listed in the test names.",
+    ]) {
+      expect(classifyAdapterFailureForRecovery({
+        errorCode: "acpx_turn_failed",
+        error: "Process exited with code 1",
+        resultJson: { stopReason: "error", summary: "done", transcript: [{ text }], output: text },
+      }, now)).toBeNull();
+    }
+  });
+
+  it("does not read quota evidence from the ACP summary, which can quote the statement", () => {
+    expect(classifyAdapterFailureForRecovery({
+      errorCode: "acpx_turn_failed",
+      error: "Process exited with code 1",
+      resultJson: { summary: "Added a test for \"You've hit your session limit · resets 10:40pm (Asia/Jerusalem)\"" },
+    }, new Date("2026-10-13T18:00:38.000Z"))).toBeNull();
+  });
+
+  it("takes the exact Claude statement from the ACP stop reason", () => {
+    const now = new Date("2026-10-13T18:00:38.000Z");
+    for (const resultJson of [
+      { stopReason: "You\u2019ve hit your session limit · resets 10:40pm (Asia/Jerusalem)" },
+    ]) {
+      expect(classifyAdapterFailureForRecovery({
+        errorCode: "acpx_turn_failed",
+        error: null,
+        resultJson,
+      }, now)).toEqual({
+        kind: "provider_quota",
+        retryAt: new Date("2026-10-13T19:40:00.000Z"),
+        parsedResetTime: true,
+      });
+    }
+  });
+
+  it("ignores ACP reset clocks that are far from the quota statement or lack a word boundary", () => {
+    const now = new Date("2026-10-13T18:00:38.000Z");
+    const far = `You've hit your session limit.${" x".repeat(100)} resets 10:40pm (Asia/Jerusalem)`;
+    const glued = "You've hit your session limit. See presets 10:40pm for options";
+    for (const error of [far, glued]) {
+      expect(classifyAdapterFailureForRecovery({
+        errorCode: "acpx_turn_failed",
+        error,
+        resultJson: {},
+      }, now)).toEqual({
+        kind: "provider_quota",
+        retryAt: new Date(now.getTime() + PROVIDER_QUOTA_RECOVERY_DEFAULT_BACKOFF_MS),
+        parsedResetTime: false,
+      });
+    }
+  });
+
+  it("keeps the whole timezone when the ACP clock ends at the window boundary", () => {
+    const now = new Date("2026-10-13T18:00:38.000Z");
+    const statement = "You've hit your session limit";
+    const lead = " ".repeat(PROVIDER_QUOTA_WINDOW_FOR_TEST - "resets ".length - 1);
+    expect(classifyAdapterFailureForRecovery({
+      errorCode: "acpx_turn_failed",
+      error: `${statement}${lead}resets 10:40pm (Asia/Jerusalem)`,
+      resultJson: {},
+    }, now)).toEqual({
+      kind: "provider_quota",
+      retryAt: new Date("2026-10-13T19:40:00.000Z"),
+      parsedResetTime: true,
+    });
+  });
+
+  it("ignores an unrelated 'resets' counter elsewhere in the ACP evidence", () => {
+    const now = new Date("2026-10-13T18:00:38.000Z");
+    const error = `Retry counter resets 8 times.${" x".repeat(100)} You've hit your session limit`;
+    expect(classifyAdapterFailureForRecovery({ errorCode: "acpx_turn_failed", error, resultJson: {} }, now)).toEqual({
+      kind: "provider_quota",
+      retryAt: new Date(now.getTime() + PROVIDER_QUOTA_RECOVERY_DEFAULT_BACKOFF_MS),
+      parsedResetTime: false,
+    });
+  });
+
+  it("does not read unrelated 'resets N' prose as a clock on either path", () => {
+    const now = new Date("2026-10-13T18:00:38.000Z");
+    const fallback = {
+      kind: "provider_quota",
+      retryAt: new Date(now.getTime() + PROVIDER_QUOTA_RECOVERY_DEFAULT_BACKOFF_MS),
+      parsedResetTime: false,
+    };
+    for (const errorCode of ["acpx_turn_failed", "adapter_failed"]) {
+      expect(classifyAdapterFailureForRecovery({
+        errorCode,
+        error: "You've hit your session limit; the cache resets 7 days ago and the counter resets 8 times",
+        resultJson: {},
+      }, now)).toEqual(fallback);
+    }
+  });
+
+  it("keeps 'try again at' winning over earlier unrelated 'resets N' prose on non-ACP adapters", () => {
+    const now = new Date("2026-10-13T12:00:00.000Z");
+    expect(classifyAdapterFailureForRecovery({
+      errorCode: "adapter_failed",
+      error: `The cache resets 7 days ago. ${"filler ".repeat(30)}You've hit your usage limit. Try again at 3:42 PM.`,
+      resultJson: {},
+    }, now)).toEqual({
+      kind: "provider_quota",
+      retryAt: new Date("2026-10-13T15:42:00.000Z"),
+      parsedResetTime: true,
+    });
+  });
+
+  it("retries now when the ACP reset clock elapsed moments ago instead of waiting a day", () => {
+    const now = new Date("2026-10-13T19:40:20.000Z");
+    for (const error of [
+      "You've hit your session limit · resets 10:40pm (Asia/Jerusalem)",
+      "You've hit your session limit · resets 19:40 (UTC)",
+    ]) {
+      expect(classifyAdapterFailureForRecovery({ errorCode: "acpx_turn_failed", error, resultJson: {} }, now)).toEqual({
+        kind: "provider_quota",
+        retryAt: now,
+        parsedResetTime: true,
+      });
+    }
+  });
+
+  it.each(["adapter_failed", "provider_quota"])(
+    "retries now when a %s reset clock elapsed moments ago",
+    (errorCode) => {
+      const now = new Date("2026-10-13T19:40:20.000Z");
+      for (const error of [
+        "You've hit your session limit · resets 10:40pm (Asia/Jerusalem)",
+        "You've hit your usage limit. Upgrade or try again at 19:40 (UTC).",
+      ]) {
+        expect(classifyAdapterFailureForRecovery({ errorCode, error, resultJson: {} }, now)).toEqual({
+          kind: "provider_quota",
+          retryAt: now,
+          parsedResetTime: true,
+        });
+      }
+    },
+  );
+
+  it("reads a reset clock that has a timezone but no minutes or meridiem", () => {
+    const now = new Date("2026-10-13T05:00:00.000Z");
+    expect(classifyAdapterFailureForRecovery({
+      errorCode: "acpx_turn_failed",
+      error: "You've hit your session limit · resets 8 UTC",
+      resultJson: {},
+    }, now)).toEqual({
+      kind: "provider_quota",
+      retryAt: new Date("2026-10-13T08:00:00.000Z"),
+      parsedResetTime: true,
+    });
+  });
+
+  it("still reads a reset clock that follows long upgrade text on non-ACP adapters", () => {
+    const now = new Date("2026-10-13T18:00:38.000Z");
+    const error = `You've hit your usage limit. Upgrade to Pro (https://example.test/upgrade), visit ${"settings ".repeat(30)}to purchase more credits or try again at 10:40pm (Asia/Jerusalem).`;
+    expect(classifyAdapterFailureForRecovery({
+      errorCode: "adapter_failed",
+      error,
+      resultJson: {},
+    }, now)).toEqual({
+      kind: "provider_quota",
+      retryAt: new Date("2026-10-13T19:40:00.000Z"),
+      parsedResetTime: true,
+    });
+    const glued = "You've hit your session limit. See presets 10:40pm for options";
+    expect(classifyAdapterFailureForRecovery({ errorCode: "adapter_failed", error: glued, resultJson: {} }, now)).toEqual({
+      kind: "provider_quota",
+      retryAt: new Date(now.getTime() + PROVIDER_QUOTA_RECOVERY_DEFAULT_BACKOFF_MS),
+      parsedResetTime: false,
     });
   });
 

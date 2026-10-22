@@ -9,6 +9,12 @@ All notable changes to this repository should be recorded here.
 - **Docs:** the fork getting-started guide uses placeholders for local
   workspace and notes-vault paths instead of one machine's paths.
 
+- **[Refs #162]** Recovery recognizes Claude ACP session-limit failures and
+  `resets` clock messages. These failures use the existing provider-quota wait
+  and monitor path instead of immediate continuation retries. Ordinary ACP
+  errors, generic `session limit` tool or MCP wording, and deliberately paused
+  issues retain their existing behavior.
+
 - **[#169]** Server startup reuses an embedded PostgreSQL only when a query on
   the `postmaster.pid` port reports the configured data directory, compared by
   physical path (case-insensitive on Windows) with the embedded login. If the
