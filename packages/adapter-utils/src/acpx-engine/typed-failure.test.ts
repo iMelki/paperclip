@@ -88,7 +88,18 @@ it("reports the typed failure category in the run result", async () => {
   const { result } = await runFixture("persistent", "error", { PAPERCLIP_ACPX_TYPED_FAILURE_CATEGORY: "limit" });
   expect(result.errorCode).toBe("acpx_turn_failed");
   expect(result.resultJson?.sessionFailureCategory).toBe("limit");
-  expect(result.errorMessage).not.toContain(providerTitle);
+  expect(result.errorMessage).toBe(providerTitle);
+}, 30_000);
+
+it("redacts secrets and bounds the typed failure message in the run result", async () => {
+  const secret = "sk-abcdefghijklmnopqrstuvwxyz0123456789";
+  const title = `Login failed for /home/someone/app, token=${secret}. ${"long ".repeat(200)}`;
+  const { result } = await runFixture("persistent", "error", { PAPERCLIP_ACPX_TYPED_FAILURE_CANARY: title });
+  expect(result.errorMessage).not.toContain(secret);
+  expect(result.errorMessage).not.toContain("/home/someone");
+  expect(result.errorMessage).toContain("Login failed");
+  expect(result.errorMessage?.length).toBeLessThanOrEqual(500);
+  expect(result.summary).toBe(result.errorMessage);
 }, 30_000);
 
 it("shows a warning that arrives on session_info_update instead of dropping it", async () => {
@@ -126,7 +137,8 @@ for (const mode of ["oneshot", "persistent"] as const) {
     expect(result.exitCode).toBe(1);
     expect(result.errorCode).toBe("acpx_turn_failed");
     expect(result.resultJson?.stopReason).toBe("ACP agent reported a terminal request failure.");
-    expect(result.errorMessage).not.toContain(providerTitle);
+    expect(result.errorMessage).toBe(providerTitle);
+    expect(result.summary).toBe(providerTitle);
   }, 30_000);
 
   it(`${mode}: advertises sessionFailure in initialize clientCapabilities._meta`, async () => {

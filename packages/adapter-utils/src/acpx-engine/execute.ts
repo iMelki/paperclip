@@ -61,6 +61,8 @@ import {
   type PaperclipSkillEntry,
 } from "@paperclipai/adapter-utils/server-utils";
 import { shellQuote } from "@paperclipai/adapter-utils/ssh";
+import { redactCommandText } from "../command-redaction.js";
+import { redactHomePathUserSegments } from "../log-redaction.js";
 import {
   createAcpRuntime,
   createAgentRegistry,
@@ -2475,6 +2477,22 @@ async function emitRuntimeEvent(
   }
 }
 
+const TYPED_FAILURE_MESSAGE_MAX_CHARS = 500;
+
+/**
+ * The user-facing text of a typed terminal session failure (login instructions, quota reset
+ * time), redacted for secrets and home paths and bounded. The runtime hands over the complete
+ * provider text, so redaction runs before truncation to keep a cut from splitting a credential.
+ */
+function typedSessionFailureMessage(failure: { title?: string; details?: string }): string | null {
+  const text = (failure.title?.trim() || failure.details?.trim() || "").replace(/\s+/g, " ");
+  if (!text) return null;
+  const safe = redactHomePathUserSegments(redactCommandText(text));
+  return safe.length > TYPED_FAILURE_MESSAGE_MAX_CHARS
+    ? `${safe.slice(0, TYPED_FAILURE_MESSAGE_MAX_CHARS - 1)}…`
+    : safe;
+}
+
 function resultErrorMessage(result: AcpRuntimeTurnResult): string | null {
   if (result.status !== "failed") return null;
   return result.error.message;
@@ -3606,6 +3624,7 @@ export function createAcpxEngineExecutor(deps: AcpxEngineExecutorOptions = {}) {
       let eventBreakdown: AcpRuntimeUsageBreakdown | null = null;
       let eventCostUsd: number | null = null;
       let terminalSessionFailureCategory: string | null = null;
+      let terminalSessionFailureMessage: string | null = null;
       // Open the agent turn span as a child of the run root span. It wraps the
       // whole turn: the executor holds `turnSpan.parentContext` for later exec
       // parenting, and the `finally` below ends the span once on every path. The
@@ -3631,6 +3650,7 @@ export function createAcpxEngineExecutor(deps: AcpxEngineExecutorOptions = {}) {
         const turn = runtime.startTurn({
           onTerminalSessionFailure: (failure) => {
             terminalSessionFailureCategory = failure.category;
+            terminalSessionFailureMessage = typedSessionFailureMessage(failure);
           },
           handle: sessionHandle,
           text: runPrompt,
@@ -3735,7 +3755,7 @@ export function createAcpxEngineExecutor(deps: AcpxEngineExecutorOptions = {}) {
 
         const errorMessage = timedOut
           ? formatAdapterExecutionTimeoutErrorMessage(prepared.timeoutResolution)
-          : resultErrorMessage(terminal);
+          : (terminalSessionFailureMessage ?? resultErrorMessage(terminal));
         const terminalStopReason = terminal.status === "failed" ? terminal.error.message : terminal.stopReason;
         await emitAcpxLog(ctx, {
           type: terminal.status === "completed" ? "acpx.result" : "acpx.error",
@@ -3776,7 +3796,7 @@ export function createAcpxEngineExecutor(deps: AcpxEngineExecutorOptions = {}) {
               ? { cumulativeCostUsd: turnUsage.cumulativeCostUsd }
               : {}),
           },
-          summary: textParts.join("").trim() || terminalStopReason || terminal.status,
+          summary: textParts.join("").trim() || terminalSessionFailureMessage || terminalStopReason || terminal.status,
           clearSession,
         };
       } catch (err) {
