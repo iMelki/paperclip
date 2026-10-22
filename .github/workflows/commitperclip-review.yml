@@ -4,7 +4,10 @@ on:
   pull_request:
     types: [opened, synchronize, reopened]
 
-# Runs on pull_request (not pull_request_target) on the rf-paperclip box runner.
+# Runs on pull_request (not pull_request_target) on a GitHub-hosted runner
+# (ubuntu-latest, free for this public repo). It reads COMMITPERCLIP_KEY, and no
+# secret may be used by a self-hosted PR job, so it must never run on the box.
+# The workflow stays disabled in the repo's Actions settings; CTO re-enables it.
 # Same-repo PRs only: fork PRs are skipped by the job guard and get no secrets or
 # write token. Both checkouts use the PR base commit, never the PR head or the
 # merge commit, so the scripts in .github/scripts come from trusted code. Note
@@ -19,9 +22,8 @@ permissions:
 jobs:
   review:
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: [rf-paperclip]
-    # Up to 30 min can go to the rf-slot hook waiting for a box-wide slot.
-    timeout-minutes: 35
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       # Dependabot PRs run under pull_request with a read-only GITHUB_TOKEN and no
       # Actions secrets, even though they come from a branch of this repository.
