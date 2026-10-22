@@ -567,6 +567,10 @@ jobs:
 
       - name: Run e2e tests
         env:
+          # Tools in the run put temp files and unix sockets under TMPDIR. On
+          # the box /tmp is a long-lived tmpfs, so point it at the per-job temp
+          # dir. (The runner context is not available in job-level env.)
+          TMPDIR: ${{ runner.temp }}
           PAPERCLIP_E2E_OWNER_SUFFIX: ${{ matrix.shard_index }}
           PAPERCLIP_E2E_SKIP_LLM: "true"
           PAPERCLIP_PLAYWRIGHT_CHANNEL: "chrome"
@@ -577,10 +581,10 @@ jobs:
           specs="$(node ./scripts/e2e-shard.mjs \
             --shard-index ${{ matrix.shard_index }} --shard-count ${{ matrix.shard_count }})"
           echo "shard ${{ matrix.shard_label }} specs: $specs"
-          # playwright.config.ts creates paperclip-e2e-home-* (embedded Postgres
-          # data) under os.tmpdir(). The wrapper sets TMPDIR to this job's owned
-          # dir (keeping it out of the box's long-lived /tmp) and records the
-          # session it starts so cleanup can tell this job's processes apart.
+          # The wrapper points playwright.config.ts's PAPERCLIP_HOME (embedded
+          # Postgres data) at this job's owned dir via PAPERCLIP_E2E_HOME and
+          # records the session it starts, so cleanup can tell this job's
+          # processes and home apart from any other job's.
           ./scripts/ci/e2e-owned-cleanup.sh run -- pnpm run test:e2e $specs
 
       - name: Upload Playwright report

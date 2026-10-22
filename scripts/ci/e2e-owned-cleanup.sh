@@ -8,9 +8,13 @@
 # This script only touches what this job created:
 #   prepare  Create the one canonical per-run home dir under RUNNER_TEMP and
 #            write an identity marker (run id, attempt, job, suffix, token).
-#   run      Run a command in a new session with TMPDIR pointed at that dir and
-#            PAPERCLIP_E2E_OWNER_TOKEN in its environment, recording the session
-#            leader PID and its start time (field 22 of /proc/<pid>/stat).
+#   run      Run a command in a new session with PAPERCLIP_E2E_HOME pointed at
+#            that dir (tests/e2e/playwright.config.ts uses it as PAPERCLIP_HOME)
+#            and PAPERCLIP_E2E_OWNER_TOKEN in its environment, recording the
+#            session leader PID and its start time (field 22 of
+#            /proc/<pid>/stat). TMPDIR is left alone: tools put unix sockets
+#            under it, and a longer TMPDIR overflows the 107-byte socket path
+#            limit (tsx's IPC pipe did).
 #   cleanup  Kill only processes this job started, then delete only that dir.
 #
 # A process counts as owned only if it runs as this user, started no earlier
@@ -127,7 +131,7 @@ cmd_session() {
   start="$(proc_start "$$")"
   if [ "$(proc_sid "$$")" != "$$" ]; then log "not a session leader"; exit 1; fi
   printf '%s %s\n' "$$" "$start" > "$dir/$SESSION_NAME"
-  export TMPDIR="$dir" PAPERCLIP_E2E_OWNER_TOKEN="$token"
+  export PAPERCLIP_E2E_HOME="$dir" PAPERCLIP_E2E_OWNER_TOKEN="$token"
   exec "$@"
 }
 

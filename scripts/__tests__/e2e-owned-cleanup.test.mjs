@@ -239,14 +239,16 @@ test("owned cleanup kills the processes this job started and deletes its dir", {
   const pidsFile = path.join(fixture.root, "owned-pids.json");
   // Like Playwright: the run spawns a detached server (its own session, still
   // carrying the run's environment) that ignores SIGTERM, plus a child in the
-  // run's session with a scrubbed environment, and writes a home via mkdtemp.
+  // run's session with a scrubbed environment, and writes into its e2e home
+  // the way playwright.config.ts does.
   const ownedCode = `
     const { spawn } = require('node:child_process');
     const fs = require('node:fs'); const os = require('node:os'); const path = require('node:path');
     const server = spawn(process.execPath, ['-e', "process.on('SIGTERM', () => {}); ${IDLE}", 'paperclipai', 'onboard', '--yes', '--run'], { detached: true, stdio: 'ignore' });
     const env = { PATH: process.env.PATH };
     const helper = spawn(process.execPath, ['-e', '${IDLE}'], { env, stdio: 'ignore' });
-    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'paperclip-e2e-home-'));
+    const home = process.env.PAPERCLIP_E2E_HOME || fs.mkdtempSync(path.join(os.tmpdir(), 'paperclip-e2e-home-'));
+    fs.mkdirSync(path.join(home, 'instances'));
     fs.writeFileSync(process.env.PIDS_FILE, JSON.stringify({ leader: process.pid, server: server.pid, helper: helper.pid, home }));
     ${IDLE}`;
   const command = [process.execPath, "-e", ownedCode];
@@ -259,7 +261,7 @@ test("owned cleanup kills the processes this job started and deletes its dir", {
   track(fixture, runner.pid);
   const pids = await waitFor(() => existsSync(pidsFile) && JSON.parse(readFileSync(pidsFile, "utf8")), "owned pids");
   const procs = { leader: track(fixture, pids.leader), server: track(fixture, pids.server), helper: track(fixture, pids.helper) };
-  assert.ok(pids.home.startsWith(owned + path.sep), `the run's TMPDIR is the owned dir (got ${pids.home})`);
+  assert.ok(pids.home === owned || pids.home.startsWith(owned + path.sep), `the run's e2e home is in the owned dir (got ${pids.home})`);
   const runnerExit = new Promise((resolve) => runner.on("exit", resolve));
   cleanup(fixture);
   await runnerExit;
