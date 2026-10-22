@@ -156,9 +156,13 @@ export async function listPostgresProcessesForDataDir(dataDir: string): Promise<
   }
   // `comm` is the executable name (a full path on macOS, read by its last segment), so a
   // path with spaces in `args` is not mistaken for the process name.
-  const out = await run("ps", ["-eo", "pid=,comm=,args="]);
-  if (out === null) return null;
-  return scanPsOutputForDataDir(out, needles, dataDir, (pid) => readlinkSync(`/proc/${pid}/cwd`));
+  // Two listings, joined by pid: `comm` can hold a path with spaces (macOS), so it cannot
+  // share a line with `args` and still be split reliably.
+  const commOut = await run("ps", ["-eo", "pid=,comm="]);
+  const argsOut = await run("ps", ["-eo", "pid=,args="]);
+  if (commOut === null || argsOut === null) return null;
+  return scanPsOutputForDataDir(joinPsColumns(commOut, argsOut), needles, dataDir, (pid) =>
+    readlinkSync(`/proc/${pid}/cwd`));
 }
 
 export type WindowsPostgresRow = { ProcessId?: number; CommandLine?: string | null };
@@ -187,8 +191,25 @@ export async function scanWindowsPostgresRows(
   return found;
 }
 
+const PS_LINE_RE = /^\s*(\d+)\s+(.*\S)\s*$/;
+
+/** Joins `ps -eo pid=,comm=` and `ps -eo pid=,args=` into `pid<TAB>comm<TAB>args` lines. */
+export function joinPsColumns(commOut: string, argsOut: string): string {
+  const args = new Map<string, string>();
+  for (const line of argsOut.split("\n")) {
+    const match = PS_LINE_RE.exec(line);
+    if (match) args.set(match[1], match[2]);
+  }
+  const rows: string[] = [];
+  for (const line of commOut.split("\n")) {
+    const match = PS_LINE_RE.exec(line);
+    if (match) rows.push(`${match[1]}\t${match[2]}\t${args.get(match[1]) ?? ""}`);
+  }
+  return rows.length ? `${rows.join("\n")}\n` : "";
+}
+
 /**
- * Picks the PostgreSQL servers in `ps -eo pid=,comm=,args=` output that use the data
+ * Picks the PostgreSQL servers in `pid<TAB>comm<TAB>args` rows (see joinPsColumns) that use the data
  * directory: by command line, else by working directory. `comm` is matched as the
  * process name so an executable path that contains spaces is still examined.
  * Returns `null` when a PostgreSQL server matched nothing but its working directory
@@ -204,11 +225,9 @@ export async function scanPsOutputForDataDir(
   const found: PostgresProcess[] = [];
   let cwdUnknown = false;
   for (const line of out.split("\n")) {
-    const match = line.trim().match(/^(\d+)\s+(\S+)(?:\s+(\S.*))?$/);
-    if (!match) continue;
-    const pid = Number(match[1]);
-    const comm = match[2] ?? "";
-    const command = match[3] ?? "";
+    const [pidText, comm = "", command = ""] = line.split("\t");
+    const pid = Number(pidText);
+    if (!Number.isInteger(pid) || pid <= 0) continue;
     if (pid === process.pid || !POSTGRES_PROCESS_NAME_RE.test(comm.replace(/\\/g, "/").split("/").pop() ?? "")) continue;
     const ownership = await commandOwnership(command, needles, dataDir);
     let owns = ownership === "owns";

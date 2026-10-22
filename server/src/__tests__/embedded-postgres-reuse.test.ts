@@ -10,6 +10,7 @@ import {
   listPostgresProcessesForDataDir,
   moveStaleLockAside,
   scanPsOutputForDataDir,
+  joinPsColumns,
   scanWindowsPostgresRows,
   readRunningEmbeddedPostgres as readRunning,
   type PostgresProcess,
@@ -388,13 +389,13 @@ describe("scanPsOutputForDataDir", () => {
 
   it("reports the scan as inconclusive when a PostgreSQL server's directory cannot be read", async () => {
     // Started through PGDATA, on a host without /proc/<pid>/cwd.
-    const out = "  901 postgres /usr/lib/postgresql/16/bin/postgres\n  902 sshd sshd: me\n";
+    const out = "901\tpostgres\t/usr/lib/postgresql/16/bin/postgres\n902\tsshd\tsshd: me\n";
     expect(await scanPsOutputForDataDir(out, [dir], dir, unreadable)).toBeNull();
   });
 
   it("is conclusive when the command names another existing data directory", async () => {
     const other = mkdtempSync(join(tmpdir(), "other-pg-"));
-    const out = `  901 postgres /usr/bin/postgres -D ${other} -c config_file=/etc/pg.conf\n`;
+    const out = `901\tpostgres\t/usr/bin/postgres -D ${other} -c config_file=/etc/pg.conf\n`;
     expect(await scanPsOutputForDataDir(out, [dir], dir, unreadable)).toEqual([]);
   });
 
@@ -402,23 +403,23 @@ describe("scanPsOutputForDataDir", () => {
     const real = mkdtempSync(join(tmpdir(), "alias-pg-"));
     const alias = join(mkdtempSync(join(tmpdir(), "alias-link-")), "pgdata");
     symlinkSync(real, alias);
-    const out = `  901 postgres /usr/bin/postgres -D ${alias}\n`;
+    const out = `901\tpostgres\t/usr/bin/postgres -D ${alias}\n`;
     expect((await scanPsOutputForDataDir(out, [real], real, unreadable))?.map((p) => p.pid)).toEqual([901]);
   });
 
   it("treats an unresolvable -D value as no evidence", async () => {
-    const out = "  901 postgres /usr/bin/postgres -D /does/not/exist/anywhere\n";
+    const out = "901\tpostgres\t/usr/bin/postgres -D /does/not/exist/anywhere\n";
     expect(await scanPsOutputForDataDir(out, [dir], dir, unreadable)).toBeNull();
   });
 
   it("finds a server by command line or by working directory", async () => {
-    const out = `  901 postgres postgres -D ${dir}\n  902 postgres /usr/bin/postgres\n  903 postgres /usr/bin/postgres\n`;
+    const out = `901\tpostgres\tpostgres -D ${dir}\n902\tpostgres\t/usr/bin/postgres\n903\tpostgres\t/usr/bin/postgres\n`;
     const cwd = (pid: number) => (pid === 902 ? dir : "/elsewhere");
     expect((await scanPsOutputForDataDir(out, [dir], dir, cwd))?.map((p) => p.pid)).toEqual([901, 902]);
   });
 
   it("still examines an executable path that contains spaces", async () => {
-    const out = "  4401 postgres /opt/My Postgres/bin/postgres\n";
+    const out = "4401\tpostgres\t/opt/My Postgres/bin/postgres\n";
     expect(await scanPsOutputForDataDir(out, [dir], dir, unreadable)).toBeNull();
     const cwd = () => dir;
     expect((await scanPsOutputForDataDir(out, [dir], dir, cwd))?.map((p) => p.pid)).toEqual([4401]);
@@ -454,9 +455,19 @@ describe("scanWindowsPostgresRows", () => {
 });
 
 describe("scanPsOutputForDataDir with a full-path comm column", () => {
-  it("reads the executable name from the last path segment", async () => {
+  it("reads a macOS comm path that contains spaces from its last segment", async () => {
     const dir = "/srv/paperclip/db";
-    const out = `  901 /opt/homebrew/bin/postgres /opt/homebrew/bin/postgres -D ${dir}\n`;
+    const out = `901\t/Applications/Postgres App/bin/postgres\t/Applications/Postgres App/bin/postgres -D ${dir}\n`;
     expect((await scanPsOutputForDataDir(out, [dir], dir, () => "/elsewhere"))?.map((p) => p.pid)).toEqual([901]);
+  });
+});
+
+describe("joinPsColumns", () => {
+  it("joins separate comm and args listings by pid so spaces in either stay intact", () => {
+    const comm = "  901 /Applications/Postgres App/bin/postgres\n  902 sshd: me\n";
+    const args = "  901 /Applications/Postgres App/bin/postgres -D /srv/db\n  903 vim notes\n";
+    expect(joinPsColumns(comm, args)).toBe(
+      "901\t/Applications/Postgres App/bin/postgres\t/Applications/Postgres App/bin/postgres -D /srv/db\n902\tsshd: me\t\n",
+    );
   });
 });
