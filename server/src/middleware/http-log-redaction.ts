@@ -57,4 +57,3 @@ export function redactHttpHeaders(headers: unknown): unknown {
   }
   return out;
 }
-
