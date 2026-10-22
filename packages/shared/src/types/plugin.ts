@@ -84,7 +84,20 @@ export interface PluginJobDeclaration {
   description?: string;
   /** Cron expression for the schedule (e.g. "star/15 star star star star" or "0 * * * *"). */
   schedule?: string;
+  /**
+   * Execution scope of the job. Defaults to `"instance"` when omitted.
+   *
+   * - `"instance"`: the job runs once per trigger. It gets a company scope
+   *   only when exactly one company has configured the plugin.
+   * - `"company"`: the host runs the job once per company that has configured
+   *   the plugin, sequentially, each run with its own run record (carrying
+   *   that company id), its own `runId`, and that company's invocation scope.
+   */
+  scope?: PluginJobScope;
 }
+
+/** Execution scope of a plugin job. See {@link PluginJobDeclaration.scope}. */
+export type PluginJobScope = "company" | "instance";
 
 /**
  * Declares a webhook endpoint the plugin can receive.
