@@ -407,6 +407,19 @@ describe("startServer embedded PostgreSQL identity", () => {
     expect(process.kill(process.pid, 0)).toBe(true);
   });
 
+  it("holds the start lock for this process while PostgreSQL starts, and releases it afterwards", async () => {
+    const startLock = `${dataDir}.paperclip-start.lock`;
+    let heldWhileStarting: string | null = null;
+    pgStartMock.mockImplementationOnce(async () => {
+      heldWhileStarting = existsSync(startLock) ? readFileSync(startLock, "utf8") : null;
+    });
+    await expect(startServer()).rejects.toThrow("database phase reached");
+    expect(pgStartMock).toHaveBeenCalledOnce();
+    expect(heldWhileStarting).not.toBeNull();
+    expect(JSON.parse(heldWhileStarting as unknown as string).pid).toBe(process.pid);
+    expect(existsSync(startLock)).toBe(false);
+  });
+
   describe("a second start writes the lock while this one initialises", () => {
     // No lock exists at the first check; it appears during port detection, before start().
     const lockAppearsDuringStart = (content: string) => {

@@ -780,6 +780,20 @@ describe("acquireEmbeddedStartLock", () => {
     release();
   });
 
+  it("never takes over a lock whose owner cannot be signalled (EPERM), it waits and then refuses", async () => {
+    const held = JSON.stringify({ pid: 424242, token: "other-user" });
+    writeFileSync(lockPath, held);
+    const kill = vi.spyOn(process, "kill").mockImplementation(() => {
+      throw Object.assign(new Error("operation not permitted"), { code: "EPERM" });
+    });
+    const error = await acquireEmbeddedStartLock(dataDir, { pollMs: 5, timeoutMs: 40 }).catch((e) => e);
+    expect(kill).toHaveBeenCalledWith(424242, 0);
+    expect(error).toBeInstanceOf(EmbeddedPostgresLockRefusal);
+    expect(error.message).toContain("process 424242");
+    expect(readFileSync(lockPath, "utf8")).toBe(held);
+    expect(readdirSync(dirname(dataDir)).filter((name) => name.includes(".stale-"))).toEqual([]);
+  });
+
   it("releases only its own lock", async () => {
     const release = await acquireEmbeddedStartLock(dataDir);
     rmSync(lockPath);
