@@ -13,6 +13,7 @@ import {
   appendStderrExcerpt,
   createPluginWorkerHandle,
   formatWorkerFailureMessage,
+  getTimedOutWorkerSettled,
   resolveRpcCallTimeoutMs,
 } from "../services/plugin-worker-manager.js";
 
@@ -558,6 +559,47 @@ describe("plugin job company context", () => {
   it("reports the configured company set sorted for the scheduler's per-company fan-out", () => {
     const { handle } = makeJobHandle(["company-b", " company-a ", ""]);
     expect(handle.getProactiveCompanyScopes()).toEqual(["company-a", "company-b"]);
+  });
+
+  it("lets a caller wait for a timed-out job handler to actually finish in the worker", async () => {
+    const { handle } = makeJobHandle(["company-a", "company-b"]);
+    try {
+      await handle.start();
+      const startedAt = Date.now();
+      const err = await handle
+        .call("runJob", { ...jobProbe("schedule", { mode: "slow", slowDelayMs: 400 }), companyId: "company-a" } as HostToWorkerMethods["runJob"][0], 50)
+        .catch((error: unknown) => error);
+      expect(err).toMatchObject({ code: PLUGIN_RPC_ERROR_CODES.TIMEOUT });
+      const workerSettled = getTimedOutWorkerSettled(err);
+      expect(workerSettled).toBeInstanceOf(Promise);
+      let finished = false;
+      void workerSettled!.then(() => {
+        finished = true;
+      });
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      expect(finished).toBe(false);
+      await workerSettled;
+      expect(Date.now() - startedAt).toBeGreaterThanOrEqual(380);
+    } finally {
+      await handle.stop().catch(() => undefined);
+    }
+  });
+
+  it("settles a timed-out job handler's wait when the worker stops", async () => {
+    const { handle } = makeJobHandle(["company-a"]);
+    await handle.start();
+    const err = await handle
+      .call("runJob", jobProbe("schedule", { mode: "slow", slowDelayMs: 60_000 }), 50)
+      .catch((error: unknown) => error);
+    const workerSettled = getTimedOutWorkerSettled(err);
+    expect(workerSettled).toBeInstanceOf(Promise);
+    await handle.stop().catch(() => undefined);
+    await expect(workerSettled).resolves.toBeUndefined();
+  });
+
+  it("returns no worker-settled wait for errors that are not timeouts", () => {
+    expect(getTimedOutWorkerSettled(new Error("boom"))).toBeNull();
+    expect(getTimedOutWorkerSettled(undefined)).toBeNull();
   });
 
   it("scopes a job run to the company the scheduler names", async () => {

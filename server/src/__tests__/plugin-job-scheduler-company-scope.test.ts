@@ -25,6 +25,7 @@ function setup(opts: {
   scope: "company" | "instance";
   companyIds: string[];
   runJob?: (params: { job: { runId: string; companyId?: string | null }; companyId?: string | null }) => Promise<void>;
+  timedOutRunGraceMs?: number;
 }) {
   const job = makeJob();
   let nextRun = 0;
@@ -60,7 +61,13 @@ function setup(opts: {
     select: () => ({ from: () => ({ where: async () => whereResult }) }),
   } as unknown as Db;
 
-  const scheduler = createPluginJobScheduler({ db, jobStore, workerManager, jobTimeoutMs: 1_000 });
+  const scheduler = createPluginJobScheduler({
+    db,
+    jobStore,
+    workerManager,
+    jobTimeoutMs: 1_000,
+    timedOutRunGraceMs: opts.timedOutRunGraceMs,
+  });
   return {
     scheduler,
     job,
@@ -179,5 +186,79 @@ describe("plugin job scheduler company scope", () => {
       .rejects.toThrow(/instance-scoped/);
     expect(company.createRun).not.toHaveBeenCalled();
     expect(instance.createRun).not.toHaveBeenCalled();
+  });
+
+  function timeoutError(workerSettled: Promise<void>) {
+    return Object.assign(new Error('RPC call "runJob" timed out after 1000ms'), {
+      code: -32002,
+      workerSettled,
+    });
+  }
+
+  it("waits for a timed-out company run's handler to finish before starting the next company", async () => {
+    const events: string[] = [];
+    let finishCompanyA!: () => void;
+    const companyAHandlerDone = new Promise<void>((resolve) => {
+      finishCompanyA = resolve;
+    });
+    const ctx = setup({
+      scope: "company",
+      companyIds: ["company-a", "company-b"],
+      timedOutRunGraceMs: 5_000,
+      runJob: async (params) => {
+        events.push(`start:${params.companyId}`);
+        if (params.companyId === "company-a") {
+          setTimeout(() => {
+            events.push("finish:company-a");
+            finishCompanyA();
+          }, 50);
+          throw timeoutError(companyAHandlerDone);
+        }
+      },
+    });
+    await ctx.scheduler.tick();
+
+    expect(events).toEqual(["start:company-a", "finish:company-a", "start:company-b"]);
+    expect(ctx.completeRun).toHaveBeenCalledWith("run-1", expect.objectContaining({ status: "failed" }));
+    expect(ctx.completeRun).toHaveBeenCalledWith("run-2", expect.objectContaining({ status: "succeeded" }));
+  });
+
+  it("cancels the remaining company runs when a timed-out handler is still running after the grace period", async () => {
+    const ctx = setup({
+      scope: "company",
+      companyIds: ["company-a", "company-b", "company-c"],
+      timedOutRunGraceMs: 30,
+      runJob: async (params) => {
+        if (params.companyId === "company-a") throw timeoutError(new Promise<void>(() => undefined));
+      },
+    });
+    await ctx.scheduler.tick();
+
+    expect(runJobParams(ctx.call).map((p) => p.companyId)).toEqual(["company-a"]);
+    expect(ctx.completeRun).toHaveBeenCalledWith("run-1", expect.objectContaining({ status: "failed" }));
+    for (const runId of ["run-2", "run-3"]) {
+      expect(ctx.completeRun).toHaveBeenCalledWith(
+        runId,
+        expect.objectContaining({
+          status: "cancelled",
+          error: expect.stringContaining('timed-out run run-1 for company "company-a" was still running'),
+        }),
+      );
+    }
+  });
+
+  it("does not wait after a timeout on the last (or only) run", async () => {
+    const ctx = setup({
+      scope: "instance",
+      companyIds: [],
+      timedOutRunGraceMs: 60_000,
+      runJob: async () => {
+        throw timeoutError(new Promise<void>(() => undefined));
+      },
+    });
+    const startedAt = Date.now();
+    await ctx.scheduler.tick();
+    expect(Date.now() - startedAt).toBeLessThan(5_000);
+    expect(ctx.completeRun).toHaveBeenCalledWith("run-1", expect.objectContaining({ status: "failed" }));
   });
 });

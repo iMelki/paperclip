@@ -42,7 +42,10 @@ import type { Db } from "@paperclipai/db";
 import { pluginJobs, pluginJobRuns } from "@paperclipai/db";
 import type { PluginJobRunTrigger } from "@paperclipai/shared";
 import type { PluginJobStore } from "./plugin-job-store.js";
-import type { PluginWorkerManager } from "./plugin-worker-manager.js";
+import {
+  getTimedOutWorkerSettled,
+  type PluginWorkerManager,
+} from "./plugin-worker-manager.js";
 import { parseCron, nextCronTick, validateCron } from "./cron.js";
 import { logger } from "../middleware/logger.js";
 
@@ -79,6 +82,12 @@ export interface PluginJobSchedulerOptions {
   jobTimeoutMs?: number;
   /** Maximum number of concurrent job executions (default: 10). */
   maxConcurrentJobs?: number;
+  /**
+   * After a company run of a company-scoped job times out, how long to wait
+   * for the worker's handler to actually finish before giving up on the
+   * remaining companies of that trigger (default: `jobTimeoutMs`).
+   */
+  timedOutRunGraceMs?: number;
 }
 
 /**
@@ -242,6 +251,7 @@ export function createPluginJobScheduler(
     jobTimeoutMs = DEFAULT_JOB_TIMEOUT_MS,
     maxConcurrentJobs = DEFAULT_MAX_CONCURRENT_JOBS,
   } = options;
+  const timedOutRunGraceMs = options.timedOutRunGraceMs ?? jobTimeoutMs;
 
   const log = logger.child({ service: "plugin-job-scheduler" });
 
@@ -403,6 +413,19 @@ export function createPluginJobScheduler(
     return companyIds.length > 0 ? companyIds : [null];
   }
 
+  /** True if `promise` settles within `ms`; false otherwise. */
+  async function settlesWithin(promise: Promise<void>, ms: number): Promise<boolean> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const expired = new Promise<false>((resolve) => {
+      timer = setTimeout(() => resolve(false), ms);
+    });
+    try {
+      return await Promise.race([promise.then(() => true as const), expired]);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
   /** Create one queued run record per target, each with its own run id. */
   async function createRuns(
     job: typeof pluginJobs.$inferSelect,
@@ -427,6 +450,12 @@ export function createPluginJobScheduler(
    * with its own run id (and, for a company run, its host-chosen company id),
    * and completed. A failure in one company's run does not stop the others.
    *
+   * Runs never overlap. When a run times out the worker handler may still be
+   * running, so the next run (if any) starts only after that handler has finished
+   * (bounded by `timedOutRunGraceMs`). If it has not finished by then, the
+   * remaining runs of this trigger are recorded as `cancelled` instead of
+   * being dispatched next to it.
+   *
    * @returns the number of runs that did not succeed
    */
   async function executeRuns(
@@ -437,9 +466,30 @@ export function createPluginJobScheduler(
   ): Promise<number> {
     const { id: jobId, pluginId, jobKey } = job;
     let failures = 0;
+    let blockedReason: string | null = null;
 
-    for (const { runId, companyId } of planned) {
+    for (const [index, { runId, companyId }] of planned.entries()) {
+      const isLastRun = index === planned.length - 1;
       const runLog = log.child({ jobId, pluginId, jobKey, runId, trigger, companyId });
+      if (blockedReason) {
+        failures++;
+        runLog.warn({ reason: blockedReason }, "job run cancelled");
+        try {
+          await jobStore.completeRun(runId, {
+            status: "cancelled",
+            error: blockedReason,
+            durationMs: 0,
+          });
+        } catch (completeErr) {
+          runLog.error(
+            {
+              err: completeErr instanceof Error ? completeErr.message : String(completeErr),
+            },
+            "failed to record cancelled job run",
+          );
+        }
+        continue;
+      }
       const startedAt = Date.now();
       try {
         await jobStore.markRunning(runId);
@@ -482,6 +532,19 @@ export function createPluginJobScheduler(
             },
             "failed to record job run failure",
           );
+        }
+
+        // Only a following run could overlap the timed-out handler; the last
+        // (or only) run returns as before.
+        const workerSettled = isLastRun ? null : getTimedOutWorkerSettled(err);
+        if (workerSettled) {
+          const finished = await settlesWithin(workerSettled, timedOutRunGraceMs);
+          if (!finished) {
+            blockedReason =
+              `Not started: the timed-out run ${runId}` +
+              (companyId ? ` for company "${companyId}"` : "") +
+              ` was still running in the worker ${timedOutRunGraceMs}ms after its timeout`;
+          }
         }
       }
     }
