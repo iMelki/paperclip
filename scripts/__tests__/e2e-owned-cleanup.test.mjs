@@ -81,7 +81,6 @@ function createFixture(t) {
   });
   const spawned = [];
   const children = [];
-  const extraPaths = [];
   t.after(() => {
     // Kill only the exact processes this test spawned, and only while the PID
     // still has the start time recorded at spawn.
@@ -93,10 +92,9 @@ function createFixture(t) {
       }
     }
     for (const child of children) child.unref();
-    for (const extra of extraPaths) rmSync(extra, { recursive: true, force: true });
     rmSync(root, { recursive: true, force: true });
   });
-  return { root, runnerTemp, systemTmp, env, spawned, children, extraPaths, ownedDir: path.join(runnerTemp, OWNED_NAME) };
+  return { root, runnerTemp, systemTmp, env, spawned, children, ownedDir: path.join(runnerTemp, OWNED_NAME) };
 }
 
 function track(fixture, pid) {
@@ -186,7 +184,7 @@ test("a foreign listener on the e2e port survives", { skip }, async (t) => {
   assert.ok(isAlive(proc), "foreign listener must not be killed");
 });
 
-test("foreign temp homes in RUNNER_TEMP and /tmp survive, only the owned dir is deleted", { skip }, async (t) => {
+test("foreign temp homes in RUNNER_TEMP and the /tmp stand-in survive, only the owned dir is deleted", { skip }, async (t) => {
   const fixture = createFixture(t);
   const owned = prepare(fixture);
   runOwnedQuick(fixture);
@@ -197,12 +195,10 @@ test("foreign temp homes in RUNNER_TEMP and /tmp survive, only the owned dir is 
     path.join(fixture.runnerTemp, `paperclip-e2e-home-${RUN.id}-2-${RUN.job}-${RUN.suffix}`),
     path.join(fixture.runnerTemp, `paperclip-e2e-home-${RUN.id}-${RUN.attempt}-${RUN.job}-1`),
     path.join(fixture.runnerTemp, "paperclip-e2e-home-AbC123"),
+    // Stands in for /tmp. The test never writes a real /tmp/paperclip-e2e-home-*,
+    // which a concurrent job still on the d07bd93d cleanup would delete.
     path.join(fixture.systemTmp, "paperclip-e2e-home-XyZ789"),
   ];
-  // A real /tmp entry too; the owned cleanup must never scan /tmp.
-  const realTmpHome = mkdtempSync(path.join("/tmp", "paperclip-e2e-home-cleanup-test-"));
-  fixture.extraPaths.push(realTmpHome);
-  foreign.push(realTmpHome);
   for (const dir of foreign) {
     mkdirSync(dir, { recursive: true });
     writeFileSync(path.join(dir, "data"), "foreign");
