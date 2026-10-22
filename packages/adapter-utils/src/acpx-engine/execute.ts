@@ -2450,7 +2450,9 @@ async function emitRuntimeEvent(
   if (event.type === "status") {
     await emitAcpxLog(ctx, {
       type: "acpx.status",
-      text: event.text,
+      // session_info_update carries provider-authored text (typed failure titles, summaries),
+      // which reaches the persisted run log, so it gets the same redaction and bound.
+      text: event.tag === "session_info_update" ? redactDiagnosticText(event.text) : event.text,
       tag: event.tag,
       used: event.used,
       size: event.size,
@@ -2484,13 +2486,17 @@ const TYPED_FAILURE_MESSAGE_MAX_CHARS = 500;
  * time), redacted for secrets and home paths and bounded. The runtime hands over the complete
  * provider text, so redaction runs before truncation to keep a cut from splitting a credential.
  */
-function typedSessionFailureMessage(failure: { title?: string; details?: string }): string | null {
-  const text = (failure.title?.trim() || failure.details?.trim() || "").replace(/\s+/g, " ");
-  if (!text) return null;
+function redactDiagnosticText(value: string | undefined): string {
+  const text = (value ?? "").trim().replace(/\s+/g, " ");
   const safe = redactHomePathUserSegments(redactCommandText(text));
   return safe.length > TYPED_FAILURE_MESSAGE_MAX_CHARS
     ? `${safe.slice(0, TYPED_FAILURE_MESSAGE_MAX_CHARS - 1)}…`
     : safe;
+}
+
+function typedSessionFailureMessage(failure: { title?: string; details?: string }): string | null {
+  const text = failure.title?.trim() || failure.details?.trim() || "";
+  return text ? redactDiagnosticText(text) : null;
 }
 
 function resultErrorMessage(result: AcpRuntimeTurnResult): string | null {
@@ -3796,7 +3802,7 @@ export function createAcpxEngineExecutor(deps: AcpxEngineExecutorOptions = {}) {
               ? { cumulativeCostUsd: turnUsage.cumulativeCostUsd }
               : {}),
           },
-          summary: textParts.join("").trim() || terminalSessionFailureMessage || terminalStopReason || terminal.status,
+          summary: terminalSessionFailureMessage || textParts.join("").trim() || terminalStopReason || terminal.status,
           clearSession,
         };
       } catch (err) {

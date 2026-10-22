@@ -15,6 +15,7 @@ async function runFixture(
   mode: "oneshot" | "persistent",
   severity: "error" | "warning",
   extraEnv: Record<string, string> = {},
+  logs: string[] = [],
 ) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-acpx-typed-failure-"));
   const initializePath = path.join(root, "initialize.jsonl");
@@ -37,7 +38,7 @@ async function runFixture(
       },
     },
     context: {},
-    onLog: async () => {},
+    onLog: async (_stream: string, chunk: string) => { logs.push(chunk); },
     onMeta: async () => {},
   } as never);
   const meta = (await fs.readFile(initializePath, "utf8")).trim().split("\n").map((line) => JSON.parse(line));
@@ -100,6 +101,28 @@ it("redacts secrets and bounds the typed failure message in the run result", asy
   expect(result.errorMessage).toContain("Login failed");
   expect(result.errorMessage?.length).toBeLessThanOrEqual(500);
   expect(result.summary).toBe(result.errorMessage);
+}, 30_000);
+
+it("prefers the typed failure message over streamed assistant text in the run summary", async () => {
+  const script = [{ severity: "error" }];
+  const { result } = await runFixture("persistent", "error", { PAPERCLIP_ACPX_TURN_SCRIPT: JSON.stringify(script) });
+  expect(result.errorCode).toBe("acpx_turn_failed");
+  expect(result.summary).toBe("scripted error 0");
+}, 30_000);
+
+it("redacts an update-carried failure title before it reaches the run log", async () => {
+  const secret = "sk-abcdefghijklmnopqrstuvwxyz0123456789";
+  const title = `Approaching the limit at /home/someone/app, token=${secret}. ${"long ".repeat(200)}`;
+  const logs: string[] = [];
+  await runFixture("persistent", "warning", {
+    PAPERCLIP_ACPX_TYPED_FAILURE_CANARY: title,
+    PAPERCLIP_ACPX_TYPED_FAILURE_CARRIER: "update",
+  }, logs);
+  const joined = logs.join("\n");
+  expect(joined).toContain("Approaching the limit");
+  expect(joined).not.toContain(secret);
+  expect(joined).not.toContain("/home/someone");
+  expect(joined).not.toContain("long ".repeat(150));
 }, 30_000);
 
 it("shows a warning that arrives on session_info_update instead of dropping it", async () => {
