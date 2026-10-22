@@ -54,6 +54,7 @@ import {
   isLocalServiceProcessInWorkspace,
   listLocalServiceRegistryRecords,
   normalizeLocalServicePid,
+  LOCAL_SERVICE_PORT_OWNER_TIMEOUT_MS,
   parseSsListenPortOwner,
   readLocalServiceRegistryRecord,
   readLocalServiceProcessGroupId,
@@ -4376,6 +4377,13 @@ describe("readLocalServicePortOwner", () => {
       // A valid port still reaches ss, so the marker check above is meaningful.
       await expect(readLocalServicePortOwner(22)).resolves.toBe(4242);
       expect(existsSync(marker)).toBe(true);
+    });
+
+    it("bounds a hung ss so the port owner lookup still returns", async () => {
+      await writeFakeTool("ss", "exec sleep 30");
+      const startedAt = Date.now();
+      await expect(readLocalServicePortOwner(43123)).resolves.toBeNull();
+      expect(Date.now() - startedAt).toBeLessThan(LOCAL_SERVICE_PORT_OWNER_TIMEOUT_MS + 2_000);
     });
 
     it("returns null when neither lsof nor ss is installed", async () => {
