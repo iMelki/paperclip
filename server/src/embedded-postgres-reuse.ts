@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { closeSync, existsSync, linkSync, lstatSync, openSync, readFileSync, readlinkSync, renameSync, unlinkSync, writeSync } from "node:fs";
+import { closeSync, existsSync, linkSync, lstatSync, mkdirSync, openSync, readFileSync, readlinkSync, realpathSync, renameSync, unlinkSync, writeSync } from "node:fs";
 import { realpath } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { getPostgresDataDirectory } from "@paperclipai/db";
@@ -152,28 +152,56 @@ export function readLockIdentity(pidFile: string): LockIdentity | null {
 const sameLockIdentity = (a: LockIdentity | null, b: LockIdentity) =>
   a !== null && a.dev === b.dev && a.ino === b.ino && a.size === b.size && a.mtimeMs === b.mtimeMs;
 
-export type EmbeddedStartLockOptions = { timeoutMs?: number; pollMs?: number };
+export type EmbeddedStartLockOptions = {
+  timeoutMs?: number;
+  pollMs?: number;
+  /** Test seam: writes the owner record into the freshly created lock file. */
+  writeOwner?: (fd: number, text: string) => void;
+};
 
 /**
  * Serialises embedded PostgreSQL starts on one data directory. The lock is a file beside the data
  * directory (never inside it), created exclusively and holding the owner's PID. A start that finds it
  * waits until the owner releases it or is gone, so a second Paperclip start can neither look at the
  * data directory's `postmaster.pid` while the first is still starting PostgreSQL, nor move it. Hold it
- * from the first lock check through `start()`. A lock whose owner is gone (`ESRCH`) is moved aside, not
- * deleted, and taken over; an owner that is alive, or a file that cannot be read, is waited for and
- * then refused after `timeoutMs`. Where the lock cannot be created (read-only parent directory) a
- * warning is logged and no serialisation is done; the identity checks above still apply.
+ * from the first lock check through `start()`. A lock is never moved or removed by a later start:
+ * an owner that is alive, or a file that cannot be read, is waited for and then refused after
+ * `timeoutMs`; an owner that is gone (`ESRCH`) is refused at once with a manual step, because no
+ * rename can test that the file is still the one that was read. Where the lock cannot be created
+ * or written (for example a read-only parent directory) the start refuses; it never continues
+ * unserialised.
  * Returns the function that releases the lock.
  */
 export async function acquireEmbeddedStartLock(
   dataDir: string,
   options: EmbeddedStartLockOptions = {},
 ): Promise<() => void> {
-  const lockPath = `${resolve(dataDir)}.paperclip-start.lock`;
   const timeoutMs = options.timeoutMs ?? 60_000;
   const pollMs = options.pollMs ?? 250;
   const token = randomUUID();
   const deadline = Date.now() + timeoutMs;
+  const refuse = (message: string) => new EmbeddedPostgresLockRefusal(`Refusing to start embedded PostgreSQL: ${message}`);
+  // The name is keyed on the physical path, so a symlink or junction to the data directory shares one lock.
+  const lockBase = (() => {
+    try {
+      return physicalPathBeside(dataDir);
+    } catch (error) {
+      throw refuse(
+        `the physical location of ${resolve(dataDir)} could not be established (${(error as NodeJS.ErrnoException).code ?? "unknown error"}), ` +
+          "so concurrent starts cannot be serialised. Fix the path or its permissions and start again.",
+      );
+    }
+  })();
+  const lockPath = `${lockBase}.paperclip-start.lock`;
+  try {
+    // On a first start the directory that will contain the data directory may not exist yet.
+    mkdirSync(dirname(lockPath), { recursive: true });
+  } catch (error) {
+    throw refuse(
+      `the directory ${dirname(lockPath)} could not be created (${(error as NodeJS.ErrnoException).code ?? "unknown error"}), ` +
+        "so concurrent starts cannot be serialised. Fix its permissions and start again.",
+    );
+  }
   const readOwner = (file: string): { text: string; pid: number | null } | null => {
     try {
       const text = readFileSync(file, "utf8");
@@ -183,14 +211,36 @@ export async function acquireEmbeddedStartLock(
       return (error as NodeJS.ErrnoException).code === "ENOENT" ? null : { text: "", pid: null };
     }
   };
+  const createExclusively = (file: string): void => {
+    const fd = openSync(file, "wx");
+    try {
+      (options.writeOwner ?? ((target, text) => void writeSync(target, text)))(fd, JSON.stringify({ pid: process.pid, token }));
+      closeSync(fd);
+    } catch (error) {
+      // The file was created by this call, so it may be removed: an empty or partial lock would
+      // otherwise block every later start. Any write or close error refuses the start.
+      try {
+        closeSync(fd);
+      } catch {
+        // Already closed.
+      }
+      try {
+        unlinkSync(file);
+      } catch {
+        // Gone already.
+      }
+      throw error;
+    }
+  };
+  const timeoutRefusal = (owner: { pid: number | null } | null) =>
+    refuse(
+      `another start holds ${lockPath}` +
+        (owner?.pid != null ? ` (process ${owner.pid})` : " (its owner could not be read)") +
+        ` and did not finish in ${Math.round(timeoutMs / 1000)} seconds. If no Paperclip server is starting, move that file aside by hand and start again. Do not delete any data.`,
+    );
   for (;;) {
     try {
-      const fd = openSync(lockPath, "wx");
-      try {
-        writeSync(fd, JSON.stringify({ pid: process.pid, token }));
-      } finally {
-        closeSync(fd);
-      }
+      createExclusively(lockPath);
       return () => {
         try {
           if (readOwner(lockPath)?.text.includes(token)) unlinkSync(lockPath);
@@ -199,50 +249,61 @@ export async function acquireEmbeddedStartLock(
         }
       };
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "EEXIST") {
-        logger.warn(
-          { lockPath, code: (error as NodeJS.ErrnoException).code },
-          "could not create the embedded PostgreSQL start lock; starting without serialising concurrent starts",
+      const code = (error as NodeJS.ErrnoException).code;
+      // Anything but "already exists" is a permanent problem: starting without the lock would leave
+      // concurrent starts unserialised, so the start refuses and says what to fix.
+      if (code !== "EEXIST") {
+        throw refuse(
+          `the start lock ${lockPath} could not be created (${code ?? "unknown error"}), so concurrent starts cannot be serialised. ` +
+            `The directory that contains the data directory must be writable. Fix its permissions and start again.`,
         );
-        return () => {};
       }
     }
     const owner = readOwner(lockPath);
-    if (owner === null) continue; // released between the two calls
     let dead = false;
-    if (owner.pid !== null) {
+    if (owner !== null && owner.pid !== null) {
       try {
         process.kill(owner.pid, 0);
       } catch (error) {
         dead = (error as NodeJS.ErrnoException).code === "ESRCH";
       }
     }
-    if (dead) {
-      // Take the dead owner's lock over without deleting it. Only the file that was read may be moved.
-      const stale = `${lockPath}.stale-${Date.now()}-${process.pid}`;
-      try {
-        renameSync(lockPath, stale);
-        if (readOwner(stale)?.text !== owner.text) {
-          try {
-            linkSync(stale, lockPath);
-            unlinkSync(stale);
-          } catch {
-            // The newer lock stays at `stale`; its owner releases nothing, and the next start refuses on timeout.
-          }
-        }
-      } catch {
-        // Another start took it over first.
-      }
-      continue;
-    }
-    if (Date.now() >= deadline) {
-      throw new EmbeddedPostgresLockRefusal(
-        `Refusing to start embedded PostgreSQL: another start holds ${lockPath}` +
-          (owner.pid !== null ? ` (process ${owner.pid})` : " (its owner could not be read)") +
-          ` and did not finish in ${Math.round(timeoutMs / 1000)} seconds. If no Paperclip server is starting, move that file aside by hand and start again. Do not delete any data.`,
+    if (owner !== null && dead) {
+      // ESRCH shows that the recorded process is gone, not that the file at this name is still the
+      // lock that was read, and a rename cannot test that. The file is left for an operator.
+      throw refuse(
+        `the start lock ${lockPath} names process ${owner.pid}, which is gone (a start that did not finish). ` +
+          "It is not removed automatically. Confirm that no Paperclip server is starting, move that file aside by hand (keep it), and start again. Do not delete any data.",
       );
     }
-    await new Promise((done) => setTimeout(done, pollMs));
+    if (Date.now() >= deadline) throw timeoutRefusal(owner);
+    await new Promise((done) => setTimeout(done, owner === null ? Math.min(pollMs, 10) : pollMs));
+  }
+}
+
+/**
+ * `dataDir` resolved through every symlink and junction of the part that exists, with the part that
+ * does not exist yet appended. Throws when no ancestor can be resolved.
+ */
+function physicalPathBeside(dataDir: string): string {
+  const absolute = resolve(dataDir);
+  const missing: string[] = [];
+  let probe = absolute;
+  for (;;) {
+    try {
+      const real = realpathSync(probe);
+      const physical = missing.length > 0 ? join(real, ...missing.reverse()) : real;
+      return process.platform === "win32" ? physical.toLowerCase() : physical;
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      const parent = dirname(probe);
+      if ((code === "ENOENT" || code === "ENOTDIR") && parent !== probe) {
+        missing.push(basename(probe));
+        probe = parent;
+        continue;
+      }
+      throw error;
+    }
   }
 }
 
@@ -499,7 +560,22 @@ export type EmbeddedPostgresReuseOptions = {
   listPostgresProcesses?: (dataDir: string, undecided?: PostgresProcess[]) => Promise<PostgresProcess[] | null>;
   /** Test seam: runs where another process could replace the lock while it is moved. */
   lockMoveHooks?: LockMoveHooks;
+  /** True only while the caller holds the start lock (`acquireEmbeddedStartLock`). A lock is moved aside only then. */
+  startLockHeld?: boolean;
 };
+
+/**
+ * A lock is only moved aside while this start holds the start lock for the data directory. Without
+ * it nothing keeps another Paperclip start out of the short step in which a lock is moved, so the
+ * lock stays where it is and an operator decides.
+ */
+function requireStartLock(pidFile: string, options: EmbeddedPostgresReuseOptions): void {
+  if (options.startLockHeld === true) return;
+  throw new EmbeddedPostgresLockRefusal(
+    `Refusing to start embedded PostgreSQL: ${pidFile} may be stale, but it is only moved aside while this start holds the start lock, ` +
+      "which it does not. The lock was not archived. Start again through the server, or move the file aside by hand after confirming no PostgreSQL uses this data directory. Do not delete any data.",
+  );
+}
 
 const describeProcesses = (processes: PostgresProcess[]) =>
   processes.map((entry) => `PostgreSQL process ${entry.pid} (${entry.command || "command line not available"})`).join("; ");
@@ -558,6 +634,7 @@ async function recoverLockWithUnknownOwner(
   }
   let aside: string | null;
   try {
+    requireStartLock(pidFile, options);
     aside = renameLockAside(pidFile, lockIdentity, options.lockMoveHooks);
   } catch (error) {
     if (error instanceof EmbeddedPostgresLockRefusal) throw error;
@@ -582,10 +659,11 @@ function moveAsideBeforeInitialisation(
   pidFile: string,
   dataDir: string,
   lockIdentity: LockIdentity | null,
-  hooks?: LockMoveHooks,
+  options: EmbeddedPostgresReuseOptions,
 ): void {
   if (existsSync(join(dataDir, "PG_VERSION"))) return;
-  const aside = moveStaleLockAside(pidFile, lockIdentity, hooks);
+  requireStartLock(pidFile, options);
+  const aside = moveStaleLockAside(pidFile, lockIdentity, options.lockMoveHooks);
   logger.warn({ pidFile, aside }, "moved a stale postmaster.pid out of an uninitialised data directory");
 }
 
@@ -645,7 +723,7 @@ export async function readRunningEmbeddedPostgres(
     // Only ESRCH proves the process is gone. EPERM and any other error leave
     // liveness unknown, so identity must still be established.
     if ((error as NodeJS.ErrnoException).code === "ESRCH") {
-      moveAsideBeforeInitialisation(pidFile, dataDir, lockIdentity, options.lockMoveHooks);
+      moveAsideBeforeInitialisation(pidFile, dataDir, lockIdentity, options);
       return null;
     }
   }
@@ -664,7 +742,7 @@ export async function readRunningEmbeddedPostgres(
         { pid, port },
         "Embedded PostgreSQL identity could not be verified and postmaster.pid names the current process; treating postmaster.pid as stale and trying normal startup",
       );
-      moveAsideBeforeInitialisation(pidFile, dataDir, lockIdentity, options.lockMoveHooks);
+      moveAsideBeforeInitialisation(pidFile, dataDir, lockIdentity, options);
       return null;
     }
     // A live PID that is affirmatively not PostgreSQL (the OS recycled it), with
@@ -683,7 +761,8 @@ export async function readRunningEmbeddedPostgres(
       if (!configuredAnswers) {
         let aside: string | null;
         try {
-          aside = renameLockAside(pidFile, lockIdentity, options.lockMoveHooks);
+          requireStartLock(pidFile, options);
+    aside = renameLockAside(pidFile, lockIdentity, options.lockMoveHooks);
         } catch (error) {
           if (error instanceof EmbeddedPostgresLockRefusal) throw error;
           throw new EmbeddedPostgresLockRefusal(

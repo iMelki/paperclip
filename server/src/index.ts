@@ -424,7 +424,7 @@ export async function startServer(): Promise<StartedServer> {
     // below must not interleave with another Paperclip start on the same directory.
     const releaseStartLock = await acquireEmbeddedStartLock(dataDir);
     try {
-      const runningPostgres = await readRunningEmbeddedPostgres(dataDir, configuredPort, embeddedAdminUrl);
+      const runningPostgres = await readRunningEmbeddedPostgres(dataDir, configuredPort, embeddedAdminUrl, { startLockHeld: true });
       if (runningPostgres) {
         port = runningPostgres.port;
         logger.warn(`Embedded PostgreSQL already running; reusing existing process (pid=${runningPostgres.pid}, port=${port})`);
@@ -482,7 +482,7 @@ export async function startServer(): Promise<StartedServer> {
             // The lock that is examined is the lock that may be moved: a file that replaces it in
             // between is put back and startup refuses.
             const examinedLock = readLockIdentity(postmasterPidFile);
-            racingPostgres = await readRunningEmbeddedPostgres(dataDir, configuredPort, embeddedAdminUrl);
+            racingPostgres = await readRunningEmbeddedPostgres(dataDir, configuredPort, embeddedAdminUrl, { startLockHeld: true });
             if (!racingPostgres && existsSync(postmasterPidFile)) {
               const aside = moveStaleLockAside(postmasterPidFile, examinedLock);
               logger.warn({ aside }, "Moved stale embedded PostgreSQL lock file aside");

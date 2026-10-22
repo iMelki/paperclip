@@ -72,9 +72,17 @@ is moved aside, startup takes hold of the file with a hard link and compares it 
 the file it examined. If another file replaced it (for example a live server wrote a
 new lock), nothing is moved and startup refuses. A start lock file beside the data
 directory, `<dir>.paperclip-start.lock`, keeps two Paperclip starts on the same
-directory apart: the second waits (up to 60 seconds) for the first to finish. A start
-lock whose owner is gone is renamed to `<dir>.paperclip-start.lock.stale-<timestamp>`
-and never deleted. If the wait ends, startup refuses and names the file; move it aside
+directory apart: the second waits (up to 60 seconds) for the first to finish. `<dir>`
+is the physical path, so a symlink or junction to the data directory shares the same
+lock. A `postmaster.pid` is moved aside only while a start holds this lock; without
+it the lock stays where it is and startup refuses. A start lock is never moved or removed
+automatically, not even when its owner process is gone: a rename cannot test that the
+file is still the one that was read. Startup refuses at once, names the file and the
+process, and asks the operator to confirm that no Paperclip server is starting and to
+move the file aside by hand (keep it; never delete data). If the start lock cannot be
+created or written (for example the directory that contains the data directory is
+read-only), startup refuses and says what to fix. It does not start without the lock.
+If the wait for a live owner ends, startup refuses and names the file; move it aside
 by hand only when no Paperclip server is starting.
 
 **Known Windows limitation.** Windows offers no working directory to read, so a

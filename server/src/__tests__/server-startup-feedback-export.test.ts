@@ -420,6 +420,28 @@ describe("startServer embedded PostgreSQL identity", () => {
     expect(existsSync(startLock)).toBe(false);
   });
 
+  it("refuses with exit 75 and leaves the start lock of a process that is gone untouched", async () => {
+    const startLock = `${dataDir}.paperclip-start.lock`;
+    const dead = JSON.stringify({ pid: 424242, token: "dead" });
+    writeFileSync(startLock, dead);
+    const kill = vi.spyOn(process, "kill").mockImplementation((pid) => {
+      if (pid === 424242) throw Object.assign(new Error("no such process"), { code: "ESRCH" });
+      return true;
+    });
+    try {
+      const rejection = await startServer().catch((error) => error);
+      expect(rejection).toMatchObject({ name: "EmbeddedPostgresLockRefusal", exitCode: 75 });
+    } finally {
+      kill.mockRestore();
+    }
+    expect(readFileSync(startLock, "utf8")).toBe(dead);
+    expect(pgCtorMock).not.toHaveBeenCalled();
+    expect(pgStartMock).not.toHaveBeenCalled();
+    expect(readdirSync(path.dirname(dataDir)).filter((name) => name.startsWith(`${path.basename(startLock)}.`))).toEqual([]);
+    // The server's own lock file is not touched either.
+    expect(existsSync(pidFile)).toBe(true);
+  });
+
   describe("a second start writes the lock while this one initialises", () => {
     // No lock exists at the first check; it appears during port detection, before start().
     const lockAppearsDuringStart = (content: string) => {

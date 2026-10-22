@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -22,13 +22,17 @@ import {
   scanPsOutputForDataDir,
   joinPsColumns,
   scanWindowsPostgresRows,
-  readRunningEmbeddedPostgres as readRunning,
+  readRunningEmbeddedPostgres as readRunningReal,
   type PostgresProcess,
 } from "../embedded-postgres-reuse.js";
 
 const { probe, warn } = vi.hoisted(() => ({ probe: vi.fn(), warn: vi.fn() }));
 vi.mock("@paperclipai/db", () => ({ getPostgresDataDirectory: probe }));
 vi.mock("../middleware/logger.js", () => ({ logger: { warn } }));
+
+// A lock is moved aside only while the start lock is held, so tests act as a caller that holds it.
+const readRunning: typeof readRunningReal = (dataDir, port, adminUrlFor, options = {}) =>
+  readRunningReal(dataDir, port, adminUrlFor, { startLockHeld: true, ...options });
 
 // The caller owns the embedded login; the helper must not hard-code one.
 const adminUrl = (port: number) => `postgres://configured-user:configured-secret@127.0.0.1:${port}/postgres`;
@@ -765,19 +769,111 @@ describe("acquireEmbeddedStartLock", () => {
     expect(readFileSync(lockPath, "utf8")).toBe("not json");
   });
 
-  it("takes over a lock whose owner is gone without deleting it", async () => {
-    writeFileSync(lockPath, JSON.stringify({ pid: 424242, token: "dead" }));
-    const kill = vi.spyOn(process, "kill").mockImplementation((pid) => {
+  const deadOwnerKill = () =>
+    vi.spyOn(process, "kill").mockImplementation((pid) => {
       if (pid === 424242) throw Object.assign(new Error("no such process"), { code: "ESRCH" });
       return true;
     });
-    const release = await acquireEmbeddedStartLock(dataDir, { pollMs: 5, timeoutMs: 1000 });
+
+  it("never moves or removes a lock whose owner is gone: it refuses with a manual step", async () => {
+    const dead = JSON.stringify({ pid: 424242, token: "dead" });
+    writeFileSync(lockPath, dead);
+    const kill = deadOwnerKill();
+    const error = await acquireEmbeddedStartLock(dataDir, { pollMs: 5, timeoutMs: 1000 }).catch((e) => e);
     expect(kill).toHaveBeenCalledWith(424242, 0);
-    const archived = readdirSync(dirname(dataDir)).filter((name) => name.includes(".paperclip-start.lock.stale-"));
-    expect(archived).toHaveLength(1);
-    expect(readFileSync(join(dirname(dataDir), archived[0]), "utf8")).toContain("\"dead\"");
-    expect(JSON.parse(readFileSync(lockPath, "utf8")).pid).toBe(process.pid);
+    expect(error).toBeInstanceOf(EmbeddedPostgresLockRefusal);
+    expect(error.exitCode).toBe(EMBEDDED_POSTGRES_LOCK_REFUSAL_EXIT_CODE);
+    expect(error.message).toContain(lockPath);
+    expect(error.message).toContain("process 424242, which is gone");
+    expect(error.message).toContain("by hand");
+    expect(error.message).toContain("Do not delete any data");
+    expect(readFileSync(lockPath, "utf8")).toBe(dead);
+    expect(readdirSync(dirname(dataDir)).filter((name) => name.includes(".stale-") || name.endsWith(".takeover"))).toEqual([]);
+  });
+
+  it("two observers of a dead lock and a third starter all leave it untouched", async () => {
+    const dead = JSON.stringify({ pid: 424242, token: "dead" });
+    writeFileSync(lockPath, dead);
+    deadOwnerKill();
+    const results = await Promise.all([1, 2, 3].map(() => acquireEmbeddedStartLock(dataDir, { pollMs: 5, timeoutMs: 100 }).catch((e) => e)));
+    for (const result of results) expect(result).toBeInstanceOf(EmbeddedPostgresLockRefusal);
+    expect(readFileSync(lockPath, "utf8")).toBe(dead);
+    expect(readdirSync(dirname(dataDir)).filter((name) => name.includes(".stale-"))).toEqual([]);
+  });
+
+  it("an operator who moved the dead lock aside lets exactly one of several waiting starters in at a time", async () => {
+    const live = await acquireEmbeddedStartLock(dataDir);
+    let holders = 0;
+    let maxHolders = 0;
+    const order: number[] = [];
+    const starters = [1, 2, 3].map((id) =>
+      acquireEmbeddedStartLock(dataDir, { pollMs: 5, timeoutMs: 5000 }).then(async (release) => {
+        holders += 1;
+        maxHolders = Math.max(maxHolders, holders);
+        order.push(id);
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        holders -= 1;
+        release();
+      }),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    expect(order).toEqual([]);
+    live();
+    await Promise.all(starters);
+    expect(order).toHaveLength(3);
+    expect(maxHolders).toBe(1);
+    expect(existsSync(lockPath)).toBe(false);
+  });
+
+  it("is keyed on the physical path, so a symlink to the data directory shares the lock", async () => {
+    const alias = join(dirname(dataDir), "alias-of-db");
+    symlinkSync(dataDir, alias, "dir");
+    const release = await acquireEmbeddedStartLock(dataDir);
+    const error = await acquireEmbeddedStartLock(alias, { pollMs: 5, timeoutMs: 40 }).catch((e) => e);
+    expect(error).toBeInstanceOf(EmbeddedPostgresLockRefusal);
+    expect(error.message).toContain(lockPath);
+    expect(readdirSync(dirname(dataDir)).filter((name) => name.endsWith(".paperclip-start.lock"))).toEqual([basename(lockPath)]);
     release();
+  });
+
+  it("refuses, instead of starting unserialised, when the lock cannot be created", async () => {
+    const longName = join(dirname(dataDir), "d".repeat(250));
+    const error = await acquireEmbeddedStartLock(longName, { pollMs: 5, timeoutMs: 40 }).catch((e) => e);
+    expect(error).toBeInstanceOf(EmbeddedPostgresLockRefusal);
+    expect(error.exitCode).toBe(EMBEDDED_POSTGRES_LOCK_REFUSAL_EXIT_CODE);
+    expect(error.message).toContain("could not be created");
+  });
+
+  it.each(["EIO", "ENOSPC", "EACCES"])("refuses, removes the empty lock it created and never returns a no-op unlock when writing fails (%s)", async (code) => {
+    const error = await acquireEmbeddedStartLock(dataDir, {
+      pollMs: 5,
+      timeoutMs: 40,
+      writeOwner: () => {
+        throw Object.assign(new Error("write failed"), { code });
+      },
+    }).catch((e) => e);
+    expect(error).toBeInstanceOf(EmbeddedPostgresLockRefusal);
+    expect(error.exitCode).toBe(EMBEDDED_POSTGRES_LOCK_REFUSAL_EXIT_CODE);
+    expect(error.message).toContain(code);
+    expect(existsSync(lockPath)).toBe(false);
+    // A later start is not blocked by a leftover file.
+    const release = await acquireEmbeddedStartLock(dataDir);
+    release();
+  });
+
+  it("refuses when the physical location of the data directory cannot be established", async () => {
+    const file = join(dirname(dataDir), "not-a-directory");
+    writeFileSync(file, "x");
+    const error = await acquireEmbeddedStartLock(join(file, "db"), { pollMs: 5, timeoutMs: 40 }).catch((e) => e);
+    expect(error).toBeInstanceOf(EmbeddedPostgresLockRefusal);
+  });
+
+  it("creates the directory that will contain a data directory on a first start", async () => {
+    const fresh = join(dirname(dataDir), "fresh-parent", "db");
+    const release = await acquireEmbeddedStartLock(fresh);
+    expect(existsSync(`${fresh}.paperclip-start.lock`)).toBe(true);
+    release();
+    expect(existsSync(`${fresh}.paperclip-start.lock`)).toBe(false);
   });
 
   it("never takes over a lock whose owner cannot be signalled (EPERM), it waits and then refuses", async () => {
@@ -1074,5 +1170,27 @@ describe("joinPsColumns", () => {
     expect(joinPsColumns(comm, args)).toBe(
       "901\t/Applications/Postgres App/bin/postgres\t/Applications/Postgres App/bin/postgres -D /srv/db\n902\tsshd: me\t\n",
     );
+  });
+});
+
+describe("a stale lock is moved aside only while the start lock is held", () => {
+  it("leaves a recycled-PID lock in place and refuses when the caller does not hold the start lock", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "embedded-pg-nostartlock-"));
+    writeFileSync(join(dir, "PG_VERSION"), "16\n");
+    const lock = join(dir, "postmaster.pid");
+    const text = `${process.pid + 1}\n${dir}\n1700000000\n55432\n`;
+    writeFileSync(lock, text);
+    vi.spyOn(process, "kill").mockReturnValue(true);
+    probe.mockReset().mockRejectedValue(new Error("nothing answers"));
+    const error = await readRunningReal(dir, 55432, adminUrl, {
+      readProcessName: async () => "node",
+      listPostgresProcesses: async () => [],
+    }).catch((e) => e);
+    expect(error).toBeInstanceOf(EmbeddedPostgresLockRefusal);
+    expect(error.exitCode).toBe(EMBEDDED_POSTGRES_LOCK_REFUSAL_EXIT_CODE);
+    expect(error.message).toContain("start lock");
+    expect(readFileSync(lock, "utf8")).toBe(text);
+    expect(readdirSync(dir).filter((name) => name.includes(".stale-"))).toEqual([]);
+    vi.restoreAllMocks();
   });
 });
