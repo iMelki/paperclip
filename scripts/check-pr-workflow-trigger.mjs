@@ -29,6 +29,7 @@ const REQUIRED_POLICY_TEST_PATHS = [
   "./scripts/pre-push-test-selection.test.mjs",
   "./scripts/run-vitest-direct.test.mjs",
   "./scripts/__tests__/run-vitest-stable-shard.test.mjs",
+  "./scripts/__tests__/review-token-workflow.test.mjs",
   "./scripts/scan-pre-push-secrets.test.mjs",
   "./scripts/run-pre-push-tests.test.mjs",
   "./scripts/verify-gitleaks.test.mjs",

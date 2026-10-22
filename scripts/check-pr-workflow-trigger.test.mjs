@@ -51,6 +51,13 @@ test("removing dev fails for the exact missing-branch reason", () => {
   assert.deepEqual(validatePrWorkflowTrigger(broken), ["pull_request.branches is missing dev"]);
 });
 
+test("the policy job must run the review-token workflow regression suite", () => {
+  const testPath = "./scripts/__tests__/review-token-workflow.test.mjs";
+  const broken = realWorkflow.replace(testPath, "./scripts/__tests__/removed-review-token.test.mjs");
+  assert.notEqual(broken, realWorkflow);
+  assert.ok(validatePrWorkflowTrigger(broken).includes(`workflow policy tests are missing ${testPath}`));
+});
+
 test("adding a push event fails even when pull-request coverage remains", () => {
   const broken = realWorkflow.replace(/^on:\s*$/m, "on:\n  push:\n    branches:\n      - dev");
   assert.notEqual(broken, realWorkflow, "negative fixture must add push:dev");
