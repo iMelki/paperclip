@@ -143,4 +143,80 @@ describe("production httpLogger wiring", () => {
       },
     });
   });
+
+
+  async function driveApp(
+    register: (app: express.Express) => void,
+    requests: Array<[path: string, method: string]>,
+  ): Promise<string> {
+    chunks.length = 0;
+    const { httpLogger } = await import("../middleware/logger.js");
+    const { errorHandler } = await import("../middleware/error-handler.js");
+    const app = express();
+    app.use(express.json());
+    app.use(httpLogger);
+    register(app);
+    app.use(errorHandler);
+    const server = createServer(app);
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(0, "127.0.0.1", () => resolve());
+    });
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("Expected an ephemeral TCP port");
+    try {
+      for (const [path, method] of requests) {
+        await new Promise<void>((resolve, reject) => {
+          const client = request({ hostname: "127.0.0.1", port: address.port, path, method }, (res) => {
+            res.resume();
+            res.on("end", resolve);
+          });
+          client.on("error", reject);
+          client.end();
+        });
+      }
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    } finally {
+      await new Promise<void>((resolve, reject) => {
+        server.close((err) => (err ? reject(err) : resolve()));
+      });
+    }
+    return chunks.join("");
+  }
+
+  const leakedCanaries = (output: string, canaries: Record<string, string>) =>
+    Object.entries(canaries)
+      .filter(([, canary]) => output.includes(canary))
+      .map(([name]) => name);
+
+  it("keeps the raw res.err message and stack from the real error handler out of the log", async () => {
+    const canaries = {
+      thrownMessage: "thrown-error-message-canary-must-not-reach-pino",
+      httpErrorMessage: "http-error-message-canary-must-not-reach-pino",
+    };
+    const { HttpError } = await import("../errors.js");
+    const output = await driveApp(
+      (app) => {
+        app.get("/boom", () => {
+          throw new Error(`connect failed postgres://paperclip:${canaries.thrownMessage}@db/paperclip`);
+        });
+        app.get("/boom-http", () => {
+          throw new HttpError(502, `upstream rejected ${canaries.httpErrorMessage}`);
+        });
+      },
+      [["/boom", "GET"], ["/boom-http", "GET"]],
+    );
+
+    expect(leakedCanaries(output, canaries)).toEqual([]);
+    const logs = output.trim().split("\n").map((line) => JSON.parse(line)) as Array<{
+      msg: string;
+      err?: Record<string, unknown>;
+    }>;
+    const boom = logs.find((log) => log.msg.startsWith("GET /boom 500"));
+    expect(boom?.err).toMatchObject({ type: "Error" });
+    expect(boom?.err?.message).toBeUndefined();
+    expect(String(boom?.err?.stack ?? "")).toMatch(/^\s+at\s/);
+    const boomHttp = logs.find((log) => log.msg.startsWith("GET /boom-http 502"));
+    expect(boomHttp?.err).toMatchObject({ type: "HttpError", status: 502 });
+  });
 });
