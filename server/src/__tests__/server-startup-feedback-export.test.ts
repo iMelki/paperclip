@@ -1,4 +1,4 @@
-import { spawn, type ChildProcess } from "node:child_process";
+import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -609,7 +609,15 @@ describe("startServer embedded PostgreSQL identity", () => {
       const bin = path.join(mkdtempSync(path.join(tmpdir(), "pg-bin-")), "postgres");
       symlinkSync(process.execPath, bin);
       child = spawn(bin, ["-e", "setInterval(() => {}, 1000)", "--", ...commandLine], { cwd: dataDir, stdio: "ignore" });
-      await new Promise((resolve) => setTimeout(resolve, 400));
+      // Wait until `ps` lists it as `postgres` with its arguments; a loaded CI runner needs longer than a fixed delay.
+      const listed = () => {
+        const row = spawnSync("ps", ["-p", String(child?.pid), "-o", "comm=,args="], { encoding: "utf8" }).stdout;
+        return /(?:^|\/)postgres\s/.test(row) && row.includes("setInterval");
+      };
+      for (let waited = 0; !listed(); waited += 50) {
+        if (waited > 15_000) throw new Error("the stand-in postgres process was never listed by ps");
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
     };
     const clusterWithVersion = (prefix: string) => {
       const dir = mkdtempSync(path.join(tmpdir(), prefix));
