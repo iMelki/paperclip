@@ -12,9 +12,12 @@ const REQUIRED_POLICY_VALIDATION_COMMANDS = [
 ];
 
 const REQUIRED_JOB_KEYS = {
-  "secret-scan": new Set(["name", "runs-on", "timeout-minutes", "permissions", "steps"]),
-  policy: new Set(["name", "needs", "runs-on", "timeout-minutes", "outputs", "permissions", "steps"]),
+  "secret-scan": new Set(["name", "if", "runs-on", "timeout-minutes", "permissions", "steps"]),
+  policy: new Set(["name", "needs", "if", "runs-on", "timeout-minutes", "outputs", "permissions", "steps"]),
 };
+
+const REQUIRED_JOB_GUARD =
+  "    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository";
 
 const REQUIRED_POLICY_TEST_PATHS = [
   "./scripts/check-no-git-push-source.test.mjs",
@@ -306,15 +309,18 @@ function readRequiredJob(jobsBlock, jobName, failures) {
   if (jobKeys.keys.filter((key) => key === "steps").length !== 1) {
     failures.push(`${jobName} job must define exactly one plain steps block`);
   }
-  if (jobKeys.keys.some((key) => ["if", "continue-on-error", "defaults"].includes(key))) {
-    failures.push(`${jobName} job must run unconditionally without custom defaults`);
+  if (jobKeys.keys.some((key) => ["continue-on-error", "defaults"].includes(key))) {
+    failures.push(`${jobName} job must not mask failures or set custom defaults`);
+  }
+  if (job.split("\n").filter((line) => line === REQUIRED_JOB_GUARD).length !== 1) {
+    failures.push(`${jobName} job must use the exact same-repository pull-request guard`);
   }
   const unsupportedKeys = jobKeys.keys.filter((key) => !REQUIRED_JOB_KEYS[jobName].has(key));
   if (unsupportedKeys.length > 0) {
     failures.push(`${jobName} job contains unsupported execution keys: ${unsupportedKeys.join(", ")}`);
   }
-  if ((job.match(/^    runs-on: ubuntu-latest$/gm) ?? []).length !== 1) {
-    failures.push(`${jobName} job must run exactly once on ubuntu-latest`);
+  if ((job.match(/^    runs-on: \[rf-paperclip\]$/gm) ?? []).length !== 1) {
+    failures.push(`${jobName} job must run exactly once on rf-paperclip`);
   }
   return { job, steps: extractStepRuns(job) };
 }
