@@ -101,3 +101,21 @@ describe("HTTP sensitive request logging policy", () => {
       .toBe("/API/Board-Claim/[REDACTED]/claim");
   });
 });
+
+describe("requestPathForHttpLog invite tokens", () => {
+  it("redacts the invite token path segment for /api/invites/<token> and its subroutes", () => {
+    expect(requestPathForHttpLog("/api/invites/invite-token-secret")).toBe("/api/invites/[REDACTED]");
+    expect(requestPathForHttpLog("/api/invites/invite-token-secret/onboarding.txt?x=1"))
+      .toBe("/api/invites/[REDACTED]/onboarding.txt");
+    expect(requestPathForHttpLog("/api/invites/invite-token-secret/skills/paperclip"))
+      .toBe("/api/invites/[REDACTED]/skills/paperclip");
+    expect(requestPathForHttpLog("/api/invites/invite-token-secret/test-resolution"))
+      .toBe("/api/invites/[REDACTED]/test-resolution");
+    expect(requestPathForHttpLog("/API/Invites/invite-token-secret/accept"))
+      .toBe("/API/Invites/[REDACTED]/accept");
+  });
+
+  it("leaves company-scoped invite list paths alone", () => {
+    expect(requestPathForHttpLog("/api/companies/company-1/invites")).toBe("/api/companies/company-1/invites");
+  });
+});
