@@ -34,7 +34,11 @@ All notable changes to this repository should be recorded here.
   the adapter's own fallback message. Raw stdout and the result of a result
   event that is not an error are ignored. The run result records where the
   verdict and the retry time came from as `providerQuotaEvidenceSource` and
-  `retryNotBeforeSource`.
+  `retryNotBeforeSource`. The failure message that recovery reads as the run's
+  own error no longer carries the text of a result event that is not an error,
+  every reset statement in a source is tried in turn, and a reset clock that
+  names an unknown timezone is skipped instead of being read in the server's
+  timezone.
 
 - Embedded PostgreSQL process discovery reads only an uppercase `-D` as the
   data directory option. PostgreSQL's lowercase `-d <debug level>` no longer

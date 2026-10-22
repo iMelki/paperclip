@@ -18,6 +18,8 @@ const CLAUDE_MODEL_NOT_FOUND_RE =
 const CLAUDE_EXTRA_USAGE_RESET_RE =
   /(?:you(?:'|’)ve\s+hit\s+your\s+session\s+limit|session\s+limit\s+(?:reached|exceeded)|out\s+of\s+extra\s+usage|extra\s+usage|usage\s+limit\s+reached|usage\s+cap\s+reached|5[-\s]?hour\s+limit\s+reached|weekly\s+limit\s+reached|claude\s+usage\s+limit\s+reached)[\s\S]{0,120}?\bresets?\s+(?:at\s+)?([^\n()]+?)(?:\s*\(([^)]+)\))?(?:[.!]|\n|$)/i;
 
+const CLAUDE_EXTRA_USAGE_RESET_ALL_RE = new RegExp(CLAUDE_EXTRA_USAGE_RESET_RE.source, "gi");
+
 /**
  * Sum the per-model usage ledger from a Claude CLI result event. The result
  * event's top-level `usage` reflects only the main-loop message chain, so it
@@ -182,9 +184,14 @@ export function detectClaudeLoginRequired(input: {
   };
 }
 
-export function describeClaudeFailure(parsed: Record<string, unknown>): string | null {
+export function describeClaudeFailure(
+  parsed: Record<string, unknown>,
+  options: { trustedOnly?: boolean } = {},
+): string | null {
   const subtype = asString(parsed.subtype, "");
-  const resultText = asString(parsed.result, "").trim();
+  // `trustedOnly` is for text that recovery re-reads as the run's own error: the `result` of a
+  // result event that is not an error is the agent's output, which can quote anything.
+  const resultText = options.trustedOnly && parsed.is_error !== true ? "" : asString(parsed.result, "").trim();
   const errors = extractClaudeErrorMessages(parsed);
 
   let detail = resultText;
@@ -465,7 +472,9 @@ function parseClaudeResetClockTime(clockText: string, now: Date, timeZoneHint?: 
       minute,
       timeZoneHint,
     });
-    if (explicitRetryAt) return explicitRetryAt;
+    // A named timezone that cannot be resolved makes the clock unusable; reading it in the server's
+    // own timezone would invent a retry time.
+    return explicitRetryAt;
   }
 
   const retryAt = new Date(now);
@@ -480,11 +489,13 @@ export function extractClaudeRetryNotBeforeWithSource(
   input: ClaudeProviderErrorInput,
   now = new Date(),
 ): { retryAt: Date; source: ClaudeProviderErrorEvidenceSource } | null {
+  // Every statement in every source is tried: an impossible clock or an unknown timezone is skipped
+  // and must not hide a later valid one, in the same source or the next.
   for (const entry of collectClaudeProviderErrorEvidence(input)) {
-    const match = entry.text.match(CLAUDE_EXTRA_USAGE_RESET_RE);
-    if (!match) continue;
-    const retryAt = parseClaudeResetClockTime(match[1] ?? "", now, match[2]);
-    if (retryAt) return { retryAt, source: entry.source };
+    for (const match of entry.text.matchAll(CLAUDE_EXTRA_USAGE_RESET_ALL_RE)) {
+      const retryAt = parseClaudeResetClockTime(match[1] ?? "", now, match[2]);
+      if (retryAt) return { retryAt, source: entry.source };
+    }
   }
   return null;
 }

@@ -4,6 +4,7 @@ import {
   parseClaudeStreamJson,
   detectClaudeLoginRequired,
   extractClaudeRetryNotBefore,
+  describeClaudeFailure,
   extractClaudeRetryNotBeforeWithSource,
   findClaudeProviderQuotaEvidenceSource,
   isClaudeProviderQuotaError,
@@ -110,6 +111,32 @@ describe("isClaudeTransientUpstreamError", () => {
       const input = { parsed: null, stdout: quoted, stderr: "segmentation fault", errorMessage: "Claude exited with code 1: segmentation fault" };
       expect(isClaudeProviderQuotaError(input)).toBe(false);
       expect(extractClaudeRetryNotBefore(input, now)).toBeNull();
+    });
+
+    it("skips an invalid statement and uses a later valid one in the same source", () => {
+      const stderr = "You've hit your session limit · resets 13pm (UTC)\nYou've hit your session limit · resets 9am (UTC)";
+      expect(extractClaudeRetryNotBeforeWithSource({ stderr }, now)).toEqual({
+        retryAt: new Date("2026-04-22T09:00:00.000Z"),
+        source: "stderr",
+      });
+      expect(extractClaudeRetryNotBefore({ stderr: "You've hit your session limit · resets 9:000am (UTC)" }, now)).toBeNull();
+    });
+
+    it("does not read a clock in the server's timezone when the named timezone is unknown", () => {
+      expect(extractClaudeRetryNotBefore({ stderr: "You've hit your session limit · resets 9am (Foo/Bar)" }, now)).toBeNull();
+      expect(
+        extractClaudeRetryNotBefore(
+          { stderr: "You've hit your session limit · resets 9am (Foo/Bar)\nYou've hit your session limit · resets 9am (UTC)" },
+          now,
+        )?.toISOString(),
+      ).toBe("2026-04-22T09:00:00.000Z");
+    });
+
+    it("keeps the text of a result that is not an error out of a trusted failure message", () => {
+      const parsed = { subtype: "error_during_execution", is_error: false, result: `Quoted: ${quoted}`, errors: [] };
+      expect(describeClaudeFailure(parsed, { trustedOnly: true })).toBe("Claude run failed: subtype=error_during_execution");
+      expect(describeClaudeFailure(parsed)).toContain(quoted);
+      expect(describeClaudeFailure({ ...parsed, is_error: true }, { trustedOnly: true })).toContain(quoted);
     });
 
     it("reads an error result, its errors list and stderr, and names the source", () => {

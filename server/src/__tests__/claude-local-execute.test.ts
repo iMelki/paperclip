@@ -1460,8 +1460,10 @@ describe("claude execute", () => {
           authToken: "run-jwt-token",
           onLog: async () => {},
         });
+        // The heartbeat stores a failed run with no adapter code as `adapter_failed`; a null code would
+        // make recovery return at once and turn every `toBeNull()` below into a vacuous check.
         const recovery = classifyAdapterFailureForRecovery(
-          { errorCode: result.errorCode ?? null, error: result.errorMessage ?? null, resultJson: result.resultJson ?? null },
+          { errorCode: result.errorCode ?? "adapter_failed", error: result.errorMessage ?? null, resultJson: result.resultJson ?? null },
           FAILED_AT,
         );
         return { result, recovery };
@@ -1495,6 +1497,8 @@ describe("claude execute", () => {
       });
       expect(result.errorCode).not.toBe("provider_quota");
       expect(result.retryNotBefore).toBeNull();
+      // The agent's quoted text is not copied into the error that recovery reads.
+      expect(result.errorMessage ?? "").not.toContain("session limit");
       expect(recovery).toBeNull();
     });
 

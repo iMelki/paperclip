@@ -1107,7 +1107,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       } as Record<string, unknown>)
       : null;
     const errorMessage = failed
-      ? describeClaudeFailure(parsed) ?? `Claude exited with code ${proc.exitCode ?? -1}`
+      ? describeClaudeFailure(parsed, { trustedOnly: true }) ?? `Claude exited with code ${proc.exitCode ?? -1}`
       : null;
     const providerQuota =
       failed &&
