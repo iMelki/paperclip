@@ -219,4 +219,26 @@ describe("production httpLogger wiring", () => {
     const boomHttp = logs.find((log) => log.msg.startsWith("GET /boom-http 502"));
     expect(boomHttp?.err).toMatchObject({ type: "HttpError", status: 502 });
   });
+
+  it("redacts /api/invites/<token> path tokens from logged url and msg", async () => {
+    const canaries = {
+      inviteToken: "invite-token-canary-must-not-reach-pino",
+      inviteAcceptToken: "invite-accept-token-canary-must-not-reach-pino",
+    };
+    const output = await driveApp(
+      (app) => {
+        app.get("/api/invites/:token", (_req, res) => {
+          res.status(200).json({ ok: true });
+        });
+        app.post("/api/invites/:token/accept", (_req, res) => {
+          res.status(422).send("rejected");
+        });
+      },
+      [[`/api/invites/${canaries.inviteToken}`, "GET"], [`/api/invites/${canaries.inviteAcceptToken}/accept`, "POST"]],
+    );
+
+    expect(leakedCanaries(output, canaries)).toEqual([]);
+    const logs = output.trim().split("\n").map((line) => JSON.parse(line)) as Array<{ msg: string }>;
+    expect(logs.map((log) => log.msg)).toContain("GET /api/invites/[REDACTED] 200");
+  });
 });
