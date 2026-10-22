@@ -55,6 +55,7 @@ jobs:
 
       - name: Generate commitperclip token
         id: token
+        if: ${{ !github.event.repository.fork }}
         run: |
           TOKEN=$(node .github/scripts/get-bot-token.mjs)
           echo "::add-mask::$TOKEN"
@@ -68,7 +69,8 @@ jobs:
         run: node .github/scripts/run-quality-gates.mjs
         continue-on-error: true
         env:
-          GH_TOKEN: ${{ steps.token.outputs.value }}
+          # Fork repositories do not inherit the upstream App private key.
+          GH_TOKEN: ${{ github.event.repository.fork && github.token || steps.token.outputs.value }}
           GH_REPO: ${{ github.repository }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           PR_AUTHOR: ${{ github.event.pull_request.user.login }}
@@ -79,7 +81,7 @@ jobs:
         continue-on-error: true
         timeout-minutes: 3
         env:
-          GH_TOKEN: ${{ steps.token.outputs.value }}
+          GH_TOKEN: ${{ github.event.repository.fork && github.token || steps.token.outputs.value }}
           GH_REPO: ${{ github.repository }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           PR_AUTHOR: ${{ github.event.pull_request.user.login }}
