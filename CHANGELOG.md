@@ -15,6 +15,15 @@ All notable changes to this repository should be recorded here.
   errors, generic `session limit` tool or MCP wording, and deliberately paused
   issues retain their existing behavior.
 
+- **[#20]** Limited DB Vitest discovery to authored `src` and `scripts`
+  suites. Compiled and stale `dist` tests no longer run a second time.
+  A CLI-backed regression runs through the root workspace and checks source
+  extensions, default exclusions, stale-file filters, and maintenance suites.
+  It reuses the pinned canonical scratch helper and confines child temp output.
+  This does not repair embedded PostgreSQL startup or process cleanup.
+  The scratch helper now rejects unsafe file extensions and unique suffixes,
+  keeps every created path inside its root, and creates owner-only scratch.
+
 - **[#164]** Refresh Lockfile accepts manual `ref` and `base` inputs that default
   to `dev`. Each base has its own refresh branch and matching PR lookup. Master
   pushes still refresh their triggering commit and retain auto-merge; other bases
