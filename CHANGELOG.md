@@ -32,9 +32,12 @@ All notable changes to this repository should be recorded here.
   that names another cluster no longer proves that the server stores a
   different one, because a configuration file or an include can replace it; such
   a server is "unknown", and startup refuses instead of moving the lock aside.
-  A lock that is replaced after it was examined (a live server wrote it after
-  the stale verdict) is put back and startup refuses; only the file that was
-  examined is ever moved aside.
+  A lock is moved aside only if it is the file that was examined: the file is
+  verified through a hard link before anything is moved, an unknown identity
+  fails closed, and a file that replaces it in the last instant is put back
+  without overwriting a newer file. A start lock beside the data directory keeps
+  two Paperclip starts apart. A refusal names every server whose ownership could
+  not be proven and the safe manual step.
 
 - Embedded PostgreSQL process discovery reads only an uppercase `-D` as the
   data directory option. PostgreSQL's lowercase `-d <debug level>` no longer

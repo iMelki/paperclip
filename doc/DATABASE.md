@@ -59,6 +59,36 @@ a reachable server reports another data directory. These refusals exit with code
 tell them apart. This check applies to server startup; the CLI lifecycle checks
 remain separate.
 
+**Which server owns the directory.** A PostgreSQL process is matched to the data
+directory by its working directory when that can be read (a postmaster works in its
+data directory), and otherwise by a command line that names the directory
+(`-D`, `--data-directory`, `-c data_directory=...`, `--data_directory=...`; the last
+option wins). A `-D` that names a different directory does not rule a server out,
+because `postgresql.conf`, an include, or an external `config_file` can move the data
+elsewhere. Such a server counts as "ownership not proven".
+
+**A lock is moved only if it is the one that was examined.** Before `postmaster.pid`
+is moved aside, startup takes hold of the file with a hard link and compares it with
+the file it examined. If another file replaced it (for example a live server wrote a
+new lock), nothing is moved and startup refuses. A start lock file beside the data
+directory, `<dir>.paperclip-start.lock`, keeps two Paperclip starts on the same
+directory apart: the second waits (up to 60 seconds) for the first to finish. A start
+lock whose owner is gone is renamed to `<dir>.paperclip-start.lock.stale-<timestamp>`
+and never deleted. If the wait ends, startup refuses and names the file; move it aside
+by hand only when no Paperclip server is starting.
+
+**Known Windows limitation.** Windows offers no working directory to read, so a
+`postgres.exe` whose command line does not name this data directory cannot be ruled
+out. This matters only when `postmaster.pid` exists and its owner cannot be decided: an
+unreadable or malformed lock, or a live recorded PID that the identity query cannot
+identify. With no lock, a dead recorded PID, or a successful identity query, no process
+scan happens and startup is not affected. When it does refuse, the message names each
+blocking PID and command line and says that ownership could not be proven. Stop that
+server, or, if it is unrelated, move `<dataDir>/postmaster.pid` aside by hand after
+confirming that no Paperclip instance is running. Do not delete any data. The start
+lock keeps Paperclip starts apart, but it does not tell a Windows server's directory,
+so this limit stays until ownership can be read another way.
+
 If you need to apply pending migrations manually, run:
 
 ```sh

@@ -13,6 +13,7 @@ function clusterDir(prefix: string): string {
 
 import {
   EMBEDDED_POSTGRES_LOCK_REFUSAL_EXIT_CODE,
+  acquireEmbeddedStartLock,
   EmbeddedPostgresLockRefusal,
   commandReferencesPath,
   listPostgresProcessesForDataDir,
@@ -130,12 +131,14 @@ describe("embedded PostgreSQL reuse identity", () => {
       },
     );
 
-    it("moves an unreadable lock aside when nothing owns the directory", async () => {
-      mkdirSync(pidFile); // exists but cannot be read as a file
+    it("refuses and keeps an unreadable lock that cannot be taken hold of", async () => {
+      mkdirSync(pidFile); // exists but is not a file: it cannot be verified or linked
       probe.mockRejectedValue(new Error("connection refused"));
-      expect(await readRunningEmbeddedPostgres(dataDir, 55432)).toBeNull();
-      expect(existsSync(pidFile)).toBe(false);
-      expect(asideFiles()).toHaveLength(1);
+      const error = await readRunningEmbeddedPostgres(dataDir, 55432).catch((e) => e);
+      expect(error).toBeInstanceOf(EmbeddedPostgresLockRefusal);
+      expect(error.exitCode).toBe(EMBEDDED_POSTGRES_LOCK_REFUSAL_EXIT_CODE);
+      expect(existsSync(pidFile)).toBe(true);
+      expect(asideFiles()).toHaveLength(0);
     });
 
       it("keeps the archive out of a cluster directory that was never initialised", async () => {
@@ -184,6 +187,97 @@ describe("embedded PostgreSQL reuse identity", () => {
       expect(error).toBeInstanceOf(EmbeddedPostgresLockRefusal);
       expect(error.message).toContain("process list could not be read");
       expect(existsSync(pidFile)).toBe(true);
+    });
+
+    describe("when ownership cannot be proven", () => {
+      const withPlatform = async (platform: string, run: () => Promise<void>) => {
+        const original = Object.getOwnPropertyDescriptor(process, "platform") as PropertyDescriptor;
+        Object.defineProperty(process, "platform", { value: platform });
+        try {
+          await run();
+        } finally {
+          Object.defineProperty(process, "platform", original);
+        }
+      };
+      const unrelatedRows = () => [
+        { ProcessId: 5150, CommandLine: '"C:\\Program Files\\PostgreSQL\\16\\bin\\postgres.exe"' },
+        { ProcessId: 5151, CommandLine: `postgres.exe -D ${clusterDir("Other-PG-")}` },
+      ];
+      const scanRows = (rows: ReturnType<typeof unrelatedRows>) => (dir: string, undecided?: PostgresProcess[]) =>
+        scanWindowsPostgresRows(rows, [dir], dir, undecided);
+
+      it("names every blocking process and its command line, and the safe manual step, on win32", async () => {
+        await withPlatform("win32", async () => {
+          garbled();
+          probe.mockRejectedValue(new Error("connection refused"));
+          const before = readFileSync(pidFile, "utf8");
+          const rows = unrelatedRows();
+          const error = await readRunning(dataDir, 55432, adminUrl, {
+            readProcessName: async () => null,
+            listPostgresProcesses: scanRows(rows),
+          }).catch((e) => e);
+          expect(error).toBeInstanceOf(EmbeddedPostgresLockRefusal);
+          expect(error.exitCode).toBe(EMBEDDED_POSTGRES_LOCK_REFUSAL_EXIT_CODE);
+          expect(error.message).toContain("could not be proven");
+          for (const row of rows) {
+            expect(error.message).toContain(`process ${row.ProcessId}`);
+            expect(error.message).toContain(row.CommandLine);
+          }
+          expect(error.message).toContain("those servers");
+          expect(error.message).toContain(`move ${pidFile} aside by hand after confirming no Paperclip instance is running`);
+          expect(error.message).toContain("Do not delete any data");
+          expect(error.message).not.toMatch(/\b(rm|del|delete the)\b/i);
+          expect(readFileSync(pidFile, "utf8")).toBe(before);
+          expect(asideFiles()).toHaveLength(0);
+        });
+      });
+
+      it("names the one blocking process with its stop command on Unix", async () => {
+        garbled();
+        probe.mockRejectedValue(new Error("connection refused"));
+        const out = "901\tpostgres\t/usr/bin/postgres -D /elsewhere -c config_file=/etc/pg.conf\n";
+        const error = await readRunning(dataDir, 55432, adminUrl, {
+          readProcessName: async () => null,
+          listPostgresProcesses: (dir, undecided) =>
+            scanPsOutputForDataDir(out, [dir], dir, () => { throw new Error("EACCES"); }, undecided),
+        }).catch((e) => e);
+        expect(error.message).toContain("could not be proven for PostgreSQL process 901 (/usr/bin/postgres -D /elsewhere");
+        expect(error.message).toContain("that server");
+        expect(error.message).toMatch(/`(kill|taskkill \/PID) 901`/);
+        expect(error.message).toContain(`move ${pidFile} aside by hand`);
+      });
+
+      it("never scans processes, and starts normally, on win32 when there is no lock", async () => {
+        await withPlatform("win32", async () => {
+          rmSync(pidFile, { force: true });
+          const listPostgresProcesses = vi.fn(scanRows(unrelatedRows()));
+          expect(await readRunning(dataDir, 55432, adminUrl, { listPostgresProcesses })).toBeNull();
+          expect(listPostgresProcesses).not.toHaveBeenCalled();
+          expect(probe).not.toHaveBeenCalled();
+        });
+      });
+
+      it("never scans processes, and starts normally, on win32 for a dead-PID lock", async () => {
+        await withPlatform("win32", async () => {
+          writePid("424242");
+          vi.mocked(process.kill).mockImplementation(() => {
+            throw Object.assign(new Error("no such process"), { code: "ESRCH" });
+          });
+          const listPostgresProcesses = vi.fn(scanRows(unrelatedRows()));
+          expect(await readRunning(dataDir, 55432, adminUrl, { listPostgresProcesses })).toBeNull();
+          expect(listPostgresProcesses).not.toHaveBeenCalled();
+        });
+      });
+
+      it("never scans processes on win32 when the identity probe proves the owner", async () => {
+        await withPlatform("win32", async () => {
+          writePid(String(process.pid));
+          probe.mockResolvedValue(dataDir);
+          const listPostgresProcesses = vi.fn(scanRows(unrelatedRows()));
+          expect(await readRunning(dataDir, 55432, adminUrl, { listPostgresProcesses })).toEqual({ pid: process.pid, port: 55432 });
+          expect(listPostgresProcesses).not.toHaveBeenCalled();
+        });
+      });
     });
 
     describe("a PostgreSQL whose -D names another cluster", () => {
@@ -415,10 +509,21 @@ describe("a lock replaced after it was examined", () => {
   let pidFile: string;
   const stale = (dir: string) => `424242\n${dir}\n1700000000\n55432\n`;
   const live = (dir: string) => `434343\n${dir}\n1700000001\n55432\nstarted-later\n`;
-  const asides = () => readdirSync(dataDir).filter((name) => name.startsWith("postmaster.pid.stale-"));
+  const names = () => readdirSync(dataDir).filter((name) => name.startsWith("postmaster.pid."));
+  const contentsOf = (list: string[]) => list.map((name) => readFileSync(join(dataDir, name), "utf8"));
   const replaceLock = () => {
     rmSync(pidFile);
     writeFileSync(pidFile, live(dataDir));
+  };
+  const thirdFile = () => {
+    rmSync(pidFile, { force: true });
+    writeFileSync(pidFile, "third-file\n");
+  };
+  // Nothing but the examined stale lock may ever be archived: a live lock is never archived.
+  const expectOnlyStaleArchived = (examined: string = stale(dataDir)) => {
+    for (const text of contentsOf(names().filter((name) => name.includes(".stale-") && !name.endsWith(".moving")))) {
+      expect(text).toBe(examined);
+    }
   };
 
   beforeEach(() => {
@@ -434,15 +539,42 @@ describe("a lock replaced after it was examined", () => {
   it("moves the examined lock aside when nothing changed", () => {
     const aside = moveStaleLockAside(pidFile, readLockIdentity(pidFile));
     expect(existsSync(pidFile)).toBe(false);
-    expect(readFileSync(aside, "utf8")).toBe(stale(dataDir));
+    expect(aside && readFileSync(aside, "utf8")).toBe(stale(dataDir));
+    expect(names()).toEqual([basename(aside as string)]);
   });
 
-  it("puts a replacement back and refuses when the caller renames the lock", () => {
+  it("fails closed when the identity of the examined lock is unknown", () => {
+    for (const unknown of [null, undefined]) {
+      const error = (() => {
+        try {
+          moveStaleLockAside(pidFile, unknown);
+        } catch (e) {
+          return e as EmbeddedPostgresLockRefusal;
+        }
+        return null;
+      })();
+      expect(error).toBeInstanceOf(EmbeddedPostgresLockRefusal);
+      expect(error?.exitCode).toBe(EMBEDDED_POSTGRES_LOCK_REFUSAL_EXIT_CODE);
+      expect(readFileSync(pidFile, "utf8")).toBe(stale(dataDir));
+      expect(names()).toEqual([]);
+    }
+  });
+
+  it("returns null when the lock is already gone", () => {
+    const examined = readLockIdentity(pidFile);
+    rmSync(pidFile);
+    expect(moveStaleLockAside(pidFile, examined)).toBeNull();
+  });
+
+  it("never takes a replacement out of its path when it differs before the move", () => {
     const examined = readLockIdentity(pidFile);
     replaceLock();
-    expect(() => moveStaleLockAside(pidFile, examined)).toThrow(EmbeddedPostgresLockRefusal);
+    const inode = readLockIdentity(pidFile)?.ino;
+    expect(() => moveStaleLockAside(pidFile, examined)).toThrow("was replaced while it was being checked");
+    // The replacement stayed in place the whole time: same file, no archive, no leftover name.
     expect(readFileSync(pidFile, "utf8")).toBe(live(dataDir));
-    expect(asides()).toHaveLength(0);
+    expect(readLockIdentity(pidFile)?.ino).toBe(inode);
+    expect(names()).toEqual([]);
   });
 
   it("detects a lock that was rewritten in place", () => {
@@ -450,53 +582,92 @@ describe("a lock replaced after it was examined", () => {
     writeFileSync(pidFile, live(dataDir));
     expect(() => moveStaleLockAside(pidFile, examined)).toThrow("was replaced while it was being checked");
     expect(readFileSync(pidFile, "utf8")).toBe(live(dataDir));
-    expect(asides()).toHaveLength(0);
+    expect(names()).toEqual([]);
   });
 
-  it("keeps the replacement, and says where, when the name has been taken again", () => {
+  it("puts back a replacement that appears in the instant the lock is moved", () => {
     const examined = readLockIdentity(pidFile);
-    replaceLock();
-    // Cannot be put back over a newer file: the helper must not overwrite it.
-    const real = realpathSync;
-    expect(real(dataDir)).toBeTruthy();
-    const original = readFileSync(pidFile, "utf8");
-    // A third file appears while the replacement is moved: simulate by moving first, then retaking the name.
-    const aside = moveStaleLockAside(pidFile, readLockIdentity(pidFile));
-    writeFileSync(pidFile, "third\n");
-    expect(readFileSync(aside, "utf8")).toBe(original);
-    expect(readFileSync(pidFile, "utf8")).toBe("third\n");
-    expect(examined).not.toBeNull();
+    expect(() => moveStaleLockAside(pidFile, examined, { afterVerify: replaceLock })).toThrow(
+      "was replaced in the instant it was moved. The replacement was put back.",
+    );
+    expect(readFileSync(pidFile, "utf8")).toBe(live(dataDir));
+    expect(names().some((name) => name.endsWith(".moving"))).toBe(false);
+    expectOnlyStaleArchived();
   });
 
-  it("keeps a lock that replaces a recycled non-PostgreSQL PID's lock before the helper renames it", async () => {
-    const kill = vi.spyOn(process, "kill").mockReturnValue(true);
-    const result = await readRunning(dataDir, 55432, adminUrl, {
-      // The process name is read after the verdict inputs and before the rename.
-      readProcessName: async () => {
-        replaceLock();
-        return "node";
-      },
-      listPostgresProcesses: async () => [],
-    }).catch((error) => error);
-    expect(kill).toHaveBeenCalled();
-    expect(result).toBeInstanceOf(EmbeddedPostgresLockRefusal);
-    expect(result.message).toContain("was replaced while it was being checked");
-    expect(readFileSync(pidFile, "utf8")).toBe(live(dataDir));
-    expect(asides()).toHaveLength(0);
+  it("keeps a third file that takes the name while a replacement is being put back", () => {
+    const examined = readLockIdentity(pidFile);
+    let thrown: Error | null = null;
+    try {
+      moveStaleLockAside(pidFile, examined, { afterVerify: replaceLock, beforeRestore: thirdFile });
+    } catch (error) {
+      thrown = error as Error;
+    }
+    expect(thrown).toBeInstanceOf(EmbeddedPostgresLockRefusal);
+    expect(thrown?.message).toContain("the name was taken again before it could be put back");
+    // The third file is untouched, and the replacement is preserved, named in the refusal, not archived as stale.
+    expect(readFileSync(pidFile, "utf8")).toBe("third-file\n");
+    const kept = names().filter((name) => name.endsWith(".moving"));
+    expect(kept).toHaveLength(1);
+    expect(thrown?.message).toContain(kept[0]);
+    expect(readFileSync(join(dataDir, kept[0]), "utf8")).toBe(live(dataDir));
+    expectOnlyStaleArchived();
   });
 
-  it("keeps a lock that replaces an unreadable-owner lock before the helper renames it", async () => {
-    writeFileSync(pidFile, "1oops");
-    const result = await readRunning(dataDir, 55432, adminUrl, {
-      readProcessName: async () => null,
-      listPostgresProcesses: async () => {
-        replaceLock();
-        return [];
-      },
-    }).catch((error) => error);
-    expect(result).toBeInstanceOf(EmbeddedPostgresLockRefusal);
-    expect(readFileSync(pidFile, "utf8")).toBe(live(dataDir));
-    expect(asides()).toHaveLength(0);
+  it("cannot move a lock it cannot take hold of, so a directory in its place is refused", () => {
+    rmSync(pidFile);
+    mkdirSync(pidFile);
+    const examined = readLockIdentity(pidFile);
+    expect(() => moveStaleLockAside(pidFile, examined)).toThrow(EmbeddedPostgresLockRefusal);
+    expect(existsSync(pidFile)).toBe(true);
+    expect(names()).toEqual([]);
+  });
+
+  describe.each([
+    [
+      "a recycled non-PostgreSQL PID",
+      () => vi.spyOn(process, "kill").mockReturnValue(true),
+      (hooks: { afterVerify?: () => void; beforeRestore?: () => void }) => ({
+        readProcessName: async () => "node",
+        listPostgresProcesses: async () => [],
+        lockMoveHooks: hooks,
+      }),
+    ],
+    [
+      "an unreadable-owner lock",
+      () => writeFileSync(pidFile, "1oops"),
+      (hooks: { afterVerify?: () => void; beforeRestore?: () => void }) => ({
+        readProcessName: async () => null,
+        listPostgresProcesses: async () => [],
+        lockMoveHooks: hooks,
+      }),
+    ],
+  ])("the helper rename for %s", (_name, arrange, optionsFor) => {
+    it("keeps a lock that replaces the examined one before the move, with no gap", async () => {
+      arrange();
+      const examined = readFileSync(pidFile, "utf8");
+      const hooks = { afterVerify: replaceLock };
+      const result = await readRunning(dataDir, 55432, adminUrl, optionsFor(hooks)).catch((error) => error);
+      expect(result).toBeInstanceOf(EmbeddedPostgresLockRefusal);
+      expect(result.message).toContain("was replaced in the instant it was moved");
+      expect(readFileSync(pidFile, "utf8")).toBe(live(dataDir));
+      expect(names().some((name) => name.endsWith(".moving"))).toBe(false);
+      expectOnlyStaleArchived(examined);
+    });
+
+    it("keeps a third file that takes the name during the restore", async () => {
+      arrange();
+      const examined = readFileSync(pidFile, "utf8");
+      const hooks = { afterVerify: replaceLock, beforeRestore: thirdFile };
+      const result = await readRunning(dataDir, 55432, adminUrl, optionsFor(hooks)).catch((error) => error);
+      expect(result).toBeInstanceOf(EmbeddedPostgresLockRefusal);
+      expect(result.exitCode).toBe(EMBEDDED_POSTGRES_LOCK_REFUSAL_EXIT_CODE);
+      expect(readFileSync(pidFile, "utf8")).toBe("third-file\n");
+      const kept = names().filter((name) => name.endsWith(".moving"));
+      expect(kept).toHaveLength(1);
+      expect(readFileSync(join(dataDir, kept[0]), "utf8")).toBe(live(dataDir));
+      expectOnlyStaleArchived(examined);
+    });
   });
 });
 
@@ -506,10 +677,10 @@ describe("moveStaleLockAside", () => {
     writeFileSync(join(dir, "PG_VERSION"), "16\n");
     const lock = join(dir, "postmaster.pid");
     writeFileSync(lock, "4242\n");
-    const aside = moveStaleLockAside(lock);
+    const aside = moveStaleLockAside(lock, readLockIdentity(lock));
     expect(existsSync(lock)).toBe(false);
-    expect(aside.startsWith(`${lock}.stale-`)).toBe(true);
-    expect(readFileSync(aside, "utf8")).toBe("4242\n");
+    expect(aside?.startsWith(`${lock}.stale-`)).toBe(true);
+    expect(readFileSync(aside as string, "utf8")).toBe("4242\n");
   });
 
   it("never replaces an earlier archive that has the same timestamp", () => {
@@ -520,9 +691,9 @@ describe("moveStaleLockAside", () => {
       writeFileSync(join(dir, "PG_VERSION"), "16\n");
       const lock = join(dir, "postmaster.pid");
       writeFileSync(lock, "first\n");
-      const first = moveStaleLockAside(lock);
+      const first = moveStaleLockAside(lock, readLockIdentity(lock)) as string;
       writeFileSync(lock, "second\n");
-      const second = moveStaleLockAside(lock);
+      const second = moveStaleLockAside(lock, readLockIdentity(lock)) as string;
       expect(second).not.toBe(first);
       expect(readFileSync(first, "utf8")).toBe("first\n");
       expect(readFileSync(second, "utf8")).toBe("second\n");
@@ -533,16 +704,88 @@ describe("moveStaleLockAside", () => {
 
   it("refuses with the lock exit code when the lock cannot be moved", () => {
     const dir = mkdtempSync(join(tmpdir(), "embedded-pg-aside-"));
-    const missing = join(dir, "no-such-dir", "postmaster.pid");
+    const notADirectory = join(dir, "a-file");
+    writeFileSync(notADirectory, "x");
+    const unreachable = join(notADirectory, "postmaster.pid"); // ENOTDIR when the lock is looked up
     let thrown: unknown;
     try {
-      moveStaleLockAside(missing);
+      moveStaleLockAside(unreachable, { dev: 1, ino: 1, size: 1, mtimeMs: 1 });
     } catch (error) {
       thrown = error;
     }
     expect(thrown).toBeInstanceOf(EmbeddedPostgresLockRefusal);
     expect((thrown as EmbeddedPostgresLockRefusal).exitCode).toBe(EMBEDDED_POSTGRES_LOCK_REFUSAL_EXIT_CODE);
-    expect((thrown as Error).message).toContain("could not be moved aside");
+  });
+});
+
+describe("acquireEmbeddedStartLock", () => {
+  let dataDir: string;
+  let lockPath: string;
+  beforeEach(() => {
+    vi.resetAllMocks();
+    dataDir = join(mkdtempSync(join(tmpdir(), "start-lock-")), "db");
+    mkdirSync(dataDir);
+    lockPath = `${dataDir}.paperclip-start.lock`;
+  });
+  afterEach(() => vi.restoreAllMocks());
+
+  it("is exclusive: a second start waits for the release and then proceeds", async () => {
+    const release = await acquireEmbeddedStartLock(dataDir);
+    expect(existsSync(lockPath)).toBe(true);
+    expect(existsSync(join(dataDir, `${basename(lockPath)}`))).toBe(false); // outside the data directory
+    let second = false;
+    const waiting = acquireEmbeddedStartLock(dataDir, { pollMs: 10, timeoutMs: 5000 }).then((r) => {
+      second = true;
+      return r;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    expect(second).toBe(false);
+    release();
+    const releaseSecond = await waiting;
+    expect(second).toBe(true);
+    releaseSecond();
+    expect(existsSync(lockPath)).toBe(false);
+  });
+
+  it("refuses after the timeout while a live owner holds it, and keeps the lock", async () => {
+    const release = await acquireEmbeddedStartLock(dataDir);
+    const held = readFileSync(lockPath, "utf8");
+    const error = await acquireEmbeddedStartLock(dataDir, { pollMs: 5, timeoutMs: 40 }).catch((e) => e);
+    expect(error).toBeInstanceOf(EmbeddedPostgresLockRefusal);
+    expect(error.message).toContain(lockPath);
+    expect(error.message).toContain("Do not delete any data");
+    expect(readFileSync(lockPath, "utf8")).toBe(held);
+    release();
+  });
+
+  it("refuses when the owner cannot be read", async () => {
+    writeFileSync(lockPath, "not json");
+    const error = await acquireEmbeddedStartLock(dataDir, { pollMs: 5, timeoutMs: 30 }).catch((e) => e);
+    expect(error).toBeInstanceOf(EmbeddedPostgresLockRefusal);
+    expect(readFileSync(lockPath, "utf8")).toBe("not json");
+  });
+
+  it("takes over a lock whose owner is gone without deleting it", async () => {
+    writeFileSync(lockPath, JSON.stringify({ pid: 424242, token: "dead" }));
+    const kill = vi.spyOn(process, "kill").mockImplementation((pid) => {
+      if (pid === 424242) throw Object.assign(new Error("no such process"), { code: "ESRCH" });
+      return true;
+    });
+    const release = await acquireEmbeddedStartLock(dataDir, { pollMs: 5, timeoutMs: 1000 });
+    expect(kill).toHaveBeenCalledWith(424242, 0);
+    const archived = readdirSync(dirname(dataDir)).filter((name) => name.includes(".paperclip-start.lock.stale-"));
+    expect(archived).toHaveLength(1);
+    expect(readFileSync(join(dirname(dataDir), archived[0]), "utf8")).toContain("\"dead\"");
+    expect(JSON.parse(readFileSync(lockPath, "utf8")).pid).toBe(process.pid);
+    release();
+  });
+
+  it("releases only its own lock", async () => {
+    const release = await acquireEmbeddedStartLock(dataDir);
+    rmSync(lockPath);
+    writeFileSync(lockPath, JSON.stringify({ pid: process.pid, token: "someone-else" }));
+    release();
+    expect(existsSync(lockPath)).toBe(true);
   });
 });
 

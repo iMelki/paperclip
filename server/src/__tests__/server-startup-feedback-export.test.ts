@@ -635,6 +635,8 @@ describe("startServer embedded PostgreSQL identity", () => {
       expect(pgCtorMock).not.toHaveBeenCalled();
       expect(pgStartMock).not.toHaveBeenCalled();
       expect(ensurePostgresDatabase).not.toHaveBeenCalled();
+      // The start lock is released even though startup refused.
+      expect(existsSync(`${dataDir}.paperclip-start.lock`)).toBe(false);
     });
   });
 
