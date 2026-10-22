@@ -144,6 +144,100 @@ describe("classifyAdapterFailureForRecovery", () => {
     });
   });
 
+  describe("a reset clock comes only from the run's own error or ACP evidence", () => {
+    const now = new Date("2026-10-13T18:00:38.000Z");
+    const defaultBackoff = {
+      kind: "provider_quota",
+      retryAt: new Date(now.getTime() + PROVIDER_QUOTA_RECOVERY_DEFAULT_BACKOFF_MS),
+      parsedResetTime: false,
+    };
+
+    it("ignores a reset clock or 'try again at' that a result summary quotes when the own error has no clock", () => {
+      for (const summary of [
+        "Quoted: You've hit your session limit · resets 9:00am (UTC)",
+        "Quoted: you've hit your session limit. Try again at 9:00 AM (UTC).",
+        "Added a test for resets 21:30 (UTC)",
+      ]) {
+        expect(classifyAdapterFailureForRecovery({
+          errorCode: "adapter_failed",
+          error: "You've hit your session limit",
+          resultJson: { summary },
+        }, now)).toEqual(defaultBackoff);
+      }
+    });
+
+    it("ignores a quoted clock in the result when only the generic quota text is in the own error", () => {
+      expect(classifyAdapterFailureForRecovery({
+        errorCode: "adapter_failed",
+        error: "Usage limit reached",
+        resultJson: { stdout: "docs say: try again at 9:00 AM (UTC)" },
+      }, now)).toEqual(defaultBackoff);
+    });
+
+    it("still uses the own error's clock when the result quotes a different one", () => {
+      expect(classifyAdapterFailureForRecovery({
+        errorCode: "adapter_failed",
+        error: "You've hit your session limit · resets 10:40pm (Asia/Jerusalem)",
+        resultJson: { summary: "Quoted: resets 9:00am (UTC) and try again at 4 AM (UTC)" },
+      }, now)).toEqual({
+        kind: "provider_quota",
+        retryAt: new Date("2026-10-13T19:40:00.000Z"),
+        parsedResetTime: true,
+      });
+    });
+
+    it("keeps the ACP error and stop reason as trusted clock sources and ignores the rest of the result", () => {
+      expect(classifyAdapterFailureForRecovery({
+        errorCode: "acpx_turn_failed",
+        error: "You've hit your session limit",
+        resultJson: { summary: "Quoted: resets 9:00am (UTC)", stopReason: "end_turn" },
+      }, now)).toEqual(defaultBackoff);
+      expect(classifyAdapterFailureForRecovery({
+        errorCode: "acpx_turn_failed",
+        error: "Provider turn failed",
+        resultJson: { stopReason: "You've hit your session limit - resets at 21:30 (UTC)" },
+      }, now)).toEqual({
+        kind: "provider_quota",
+        retryAt: new Date("2026-10-13T21:30:00.000Z"),
+        parsedResetTime: true,
+      });
+    });
+
+    it("validates each candidate before choosing, so an invalid earlier clock does not hide a valid later one", () => {
+      for (const errorCode of ["adapter_failed", "acpx_turn_failed"]) {
+        const error = (invalid: string) =>
+          `You've hit your session limit · resets ${invalid} · or resets 10:40pm (Asia/Jerusalem)`;
+        for (const invalid of ["25:99 (UTC)", "13pm (UTC)", "9:75 UTC", "8:00 (Not/AZone)"]) {
+          expect(classifyAdapterFailureForRecovery({ errorCode, error: error(invalid), resultJson: {} }, now)).toEqual({
+            kind: "provider_quota",
+            retryAt: new Date("2026-10-13T19:40:00.000Z"),
+            parsedResetTime: true,
+          });
+        }
+      }
+    });
+
+    it("falls back to the default backoff when every candidate is invalid", () => {
+      expect(classifyAdapterFailureForRecovery({
+        errorCode: "adapter_failed",
+        error: "You've hit your session limit · resets 25:99 (UTC) · try again at 8:00 (Not/AZone)",
+        resultJson: {},
+      }, now)).toEqual(defaultBackoff);
+    });
+
+    it("keeps a later try-again clock for a generic usage limit when an earlier reset text is invalid", () => {
+      expect(classifyAdapterFailureForRecovery({
+        errorCode: "adapter_failed",
+        error: "You've hit your usage limit; resets 8 pigs. Try again at 10:40pm (Asia/Jerusalem).",
+        resultJson: {},
+      }, now)).toEqual({
+        kind: "provider_quota",
+        retryAt: new Date("2026-10-13T19:40:00.000Z"),
+        parsedResetTime: true,
+      });
+    });
+  });
+
   it("takes the exact Claude statement from the ACP stop reason", () => {
     const now = new Date("2026-10-13T18:00:38.000Z");
     for (const resultJson of [

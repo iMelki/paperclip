@@ -412,8 +412,17 @@ function parseProviderQuotaClockReset(error: string, now: Date, scope?: Provider
     if (/^try again at/i.test(candidate[0])) return true;
     return inScope(candidate) && clockLike(candidate);
   };
-  const match = [...matches].find(accepts);
-  if (!match) return null;
+  // Every accepted candidate is validated before one is chosen: an impossible clock ("resets 25:99")
+  // or an unknown timezone must not hide a later, valid reset in the same text.
+  for (const match of matches) {
+    if (!accepts(match)) continue;
+    const resolved = resolveProviderQuotaClock(match, now, failedAt);
+    if (resolved) return resolved;
+  }
+  return null;
+}
+
+function resolveProviderQuotaClock(match: RegExpMatchArray, now: Date, failedAt?: Date | null): Date | null {
   // The clock is read relative to when the run failed (never later than now), so a failure
   // examined hours after its reset sees that reset as already due instead of tomorrow's.
   // A clock within the grace window before that moment still counts as that moment's reset.
@@ -530,7 +539,11 @@ export function classifyAdapterFailureForRecovery(
     return null;
   }
 
-  return buildProviderQuotaClassification(resultJson, error, now, {
+  // The reset clock is read only from the run's own error text. `error` above also holds the whole
+  // result JSON, where a summary or output can quote someone else's "resets 10:40pm" or "try again
+  // at"; that text may help decide that this is a quota failure, but it never sets when to retry.
+  const ownErrorText = [latestRun.errorCode ?? "", latestRun.error ?? ""].join("\n");
+  return buildProviderQuotaClassification(resultJson, ownErrorText, now, {
     failedAt,
     acceptSessionLimit: sessionLimitInOwnError,
   });
@@ -538,6 +551,7 @@ export function classifyAdapterFailureForRecovery(
 
 function buildProviderQuotaClassification(
   resultJson: Record<string, unknown>,
+  // Trusted evidence only: the run's own error (and stop reason on the ACP path).
   error: string,
   now: Date,
   options: { boundResetWindow?: boolean; failedAt?: Date | null; acceptSessionLimit?: boolean } = {},

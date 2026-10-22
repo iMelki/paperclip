@@ -23,7 +23,11 @@ All notable changes to this repository should be recorded here.
 - **[Refs #173]** Recovery reads the Claude session-limit statement only from
   the ACP error and stop reason, or from a non-ACP run's own error field. A run
   whose summary, output or transcript only quotes the phrase is no longer parked
-  as a provider quota wait.
+  as a provider quota wait. The reset clock is read only from the run's own
+  error (and the ACP error and stop reason), never from quoted result text.
+  Each `resets` or `try again at` candidate is validated before one is chosen,
+  so an impossible clock or an unknown timezone no longer hides a later valid
+  reset.
 
 - Embedded PostgreSQL process discovery reads only an uppercase `-D` as the
   data directory option. PostgreSQL's lowercase `-d <debug level>` no longer
