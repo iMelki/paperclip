@@ -148,6 +148,7 @@ describe("production httpLogger wiring", () => {
   async function driveApp(
     register: (app: express.Express) => void,
     requests: Array<[path: string, method: string]>,
+    headers: Record<string, string> = {},
   ): Promise<string> {
     chunks.length = 0;
     const { httpLogger } = await import("../middleware/logger.js");
@@ -167,7 +168,7 @@ describe("production httpLogger wiring", () => {
     try {
       for (const [path, method] of requests) {
         await new Promise<void>((resolve, reject) => {
-          const client = request({ hostname: "127.0.0.1", port: address.port, path, method }, (res) => {
+          const client = request({ hostname: "127.0.0.1", port: address.port, path, method, headers }, (res) => {
             res.resume();
             res.on("end", resolve);
           });
@@ -241,4 +242,40 @@ describe("production httpLogger wiring", () => {
     const logs = output.trim().split("\n").map((line) => JSON.parse(line)) as Array<{ msg: string }>;
     expect(logs.map((log) => log.msg)).toContain("GET /api/invites/[REDACTED] 200");
   });
+
+  it("redacts board-claim and invite tokens from msg when routes live on a router mounted at /api", async () => {
+    const canaries = {
+      claimToken: "mounted-claim-token-canary-must-not-reach-pino",
+      inviteToken: "mounted-invite-token-canary-must-not-reach-pino",
+      inviteOnboardingToken: "mounted-invite-onboarding-canary-must-not-reach-pino",
+    };
+    const output = await driveApp(
+      (app) => {
+        const api = express.Router();
+        api.get("/board-claim/:token", (_req, res) => {
+          res.status(200).json({ ok: true });
+        });
+        api.get("/invites/:token", (_req, res) => {
+          res.status(200).json({ ok: true });
+        });
+        api.get("/invites/:token/onboarding", () => {
+          throw new Error("onboarding failed");
+        });
+        app.use("/api", api);
+      },
+      [
+        [`/api/board-claim/${canaries.claimToken}`, "GET"],
+        [`/api/invites/${canaries.inviteToken}`, "GET"],
+        [`/api/invites/${canaries.inviteOnboardingToken}/onboarding`, "GET"],
+      ],
+    );
+
+    expect(leakedCanaries(output, canaries)).toEqual([]);
+    const msgs = (output.trim().split("\n").map((line) => JSON.parse(line)) as Array<{ msg: string }>)
+      .map((log) => log.msg);
+    expect(msgs).toContain("GET /api/board-claim/[REDACTED] 200");
+    expect(msgs).toContain("GET /api/invites/[REDACTED] 200");
+    expect(msgs.some((msg) => msg.startsWith("GET /api/invites/[REDACTED]/onboarding 500"))).toBe(true);
+  });
+
 });
