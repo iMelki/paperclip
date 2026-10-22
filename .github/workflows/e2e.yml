@@ -22,11 +22,11 @@ jobs:
 
       - uses: pnpm/action-setup@v6
         with:
-          version: 9
+          version: 9.15.4
 
       - uses: actions/setup-node@v7
         with:
-          node-version: 20
+          node-version: 24
           cache: pnpm
 
       - run: pnpm install --frozen-lockfile
@@ -35,6 +35,8 @@ jobs:
 
       - name: Run e2e tests
         env:
+          # Keep paperclip-e2e-home-* out of the box's long-lived /tmp.
+          TMPDIR: ${{ runner.temp }}
           PAPERCLIP_PLAYWRIGHT_CHANNEL: "chrome"
         run: pnpm run test:e2e
 

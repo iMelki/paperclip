@@ -32,6 +32,10 @@ jobs:
       (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: [rf-paperclip]
     timeout-minutes: 35
+    env:
+      # Same as the e2e lane: use the box's system Google Chrome. The runner
+      # user has no sudo, so `playwright install --with-deps` cannot run here.
+      PAPERCLIP_PLAYWRIGHT_CHANNEL: chrome
 
     steps:
       - name: Checkout repository
@@ -51,8 +55,8 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Install Playwright Chromium
-        run: npx playwright install --with-deps chromium
+      - name: Verify runner Chrome
+        run: google-chrome --version
 
       - name: Cache Storybook visual baseline archive
         uses: actions/cache@v6

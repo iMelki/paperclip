@@ -18,7 +18,8 @@ jobs:
   review:
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: [rf-paperclip]
-    timeout-minutes: 5
+    # Up to 30 min can go to the rf-slot hook waiting for a box-wide slot.
+    timeout-minutes: 35
     steps:
       - name: Checkout trusted workflow revision (never PR code)
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
