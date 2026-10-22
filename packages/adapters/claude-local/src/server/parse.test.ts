@@ -4,6 +4,9 @@ import {
   parseClaudeStreamJson,
   detectClaudeLoginRequired,
   extractClaudeRetryNotBefore,
+  describeClaudeFailure,
+  extractClaudeRetryNotBeforeWithSource,
+  findClaudeProviderQuotaEvidenceSource,
   isClaudeProviderQuotaError,
   isClaudeTransientUpstreamError,
   isClaudePoisonedPreviousMessageIdError,
@@ -85,6 +88,67 @@ describe("isClaudeTransientUpstreamError", () => {
     expect(extractClaudeRetryNotBefore({ errorMessage }, now)?.toISOString()).toBe(
       "2026-04-22T21:00:00.000Z",
     );
+  });
+
+  describe("only provider error evidence counts", () => {
+    const quoted = "You've hit your session limit · resets 9am (UTC)";
+    const now = new Date("2026-04-22T06:00:00.000Z");
+
+    it("ignores raw stdout and the result of a result event that is not an error", () => {
+      const input = {
+        parsed: { type: "result", subtype: "success", is_error: false, result: `Summary: ${quoted}` },
+        stdout: `{"type":"assistant","text":"${quoted}"}\n`,
+        stderr: "",
+        errorMessage: `Claude run failed: ${quoted}`,
+      };
+      expect(isClaudeProviderQuotaError(input)).toBe(false);
+      expect(isClaudeTransientUpstreamError({ ...input, stdout: "HTTP 429 Too Many Requests" })).toBe(false);
+      expect(extractClaudeRetryNotBefore(input, now)).toBeNull();
+      expect(findClaudeProviderQuotaEvidenceSource(input)).toBeNull();
+    });
+
+    it("ignores stdout when no result event was parsed", () => {
+      const input = { parsed: null, stdout: quoted, stderr: "segmentation fault", errorMessage: "Claude exited with code 1: segmentation fault" };
+      expect(isClaudeProviderQuotaError(input)).toBe(false);
+      expect(extractClaudeRetryNotBefore(input, now)).toBeNull();
+    });
+
+    it("skips an invalid statement and uses a later valid one in the same source", () => {
+      const stderr = "You've hit your session limit · resets 13pm (UTC)\nYou've hit your session limit · resets 9am (UTC)";
+      expect(extractClaudeRetryNotBeforeWithSource({ stderr }, now)).toEqual({
+        retryAt: new Date("2026-04-22T09:00:00.000Z"),
+        source: "stderr",
+      });
+      expect(extractClaudeRetryNotBefore({ stderr: "You've hit your session limit · resets 9:000am (UTC)" }, now)).toBeNull();
+    });
+
+    it("does not read a clock in the server's timezone when the named timezone is unknown", () => {
+      expect(extractClaudeRetryNotBefore({ stderr: "You've hit your session limit · resets 9am (Foo/Bar)" }, now)).toBeNull();
+      expect(
+        extractClaudeRetryNotBefore(
+          { stderr: "You've hit your session limit · resets 9am (Foo/Bar)\nYou've hit your session limit · resets 9am (UTC)" },
+          now,
+        )?.toISOString(),
+      ).toBe("2026-04-22T09:00:00.000Z");
+    });
+
+    it("keeps the text of a result that is not an error out of a trusted failure message", () => {
+      const parsed = { subtype: "error_during_execution", is_error: false, result: `Quoted: ${quoted}`, errors: [] };
+      expect(describeClaudeFailure(parsed, { trustedOnly: true })).toBe("Claude run failed: subtype=error_during_execution");
+      expect(describeClaudeFailure(parsed)).toContain(quoted);
+      expect(describeClaudeFailure({ ...parsed, is_error: true }, { trustedOnly: true })).toContain(quoted);
+    });
+
+    it("reads an error result, its errors list and stderr, and names the source", () => {
+      expect(
+        extractClaudeRetryNotBeforeWithSource({ parsed: { is_error: true, result: quoted } }, now),
+      ).toEqual({ retryAt: new Date("2026-04-22T09:00:00.000Z"), source: "result_error" });
+      expect(
+        findClaudeProviderQuotaEvidenceSource({ parsed: { is_error: true, result: "", errors: [{ message: quoted }] } }),
+      ).toBe("errors");
+      expect(findClaudeProviderQuotaEvidenceSource({ stderr: quoted })).toBe("stderr");
+      expect(findClaudeProviderQuotaEvidenceSource({ parsed: null, errorMessage: quoted })).toBe("error_message");
+    });
   });
 
   it("classifies Anthropic API rate_limit_error and overloaded_error as transient", () => {
@@ -442,4 +506,17 @@ describe("parseClaudeStreamJson usage extraction", () => {
     });
     expect(parsed.usageBasis).toBe("per_run");
   });
+});
+
+
+
+describe("Claude reset complete-token boundary", () => {
+  it.each(["9:00amx", "9:00am123", "9:00am:30", "9:00foo"])(
+    "ignores malformed reset clock %s",
+    (clock) => {
+      expect(extractClaudeRetryNotBeforeWithSource({
+        parsed: { is_error: true, result: `You've hit your session limit · resets ${clock} (UTC)` },
+      }, new Date("2026-10-22T07:00:00Z"))).toBeNull();
+    },
+  );
 });
