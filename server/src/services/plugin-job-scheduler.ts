@@ -426,21 +426,60 @@ export function createPluginJobScheduler(
     }
   }
 
-  /** Create one queued run record per target, each with its own run id. */
+  /**
+   * Record a terminal status on runs that will never be dispatched, so no
+   * run row is left `queued` forever. Errors are logged, not thrown.
+   */
+  async function closeUndispatchedRuns(
+    runs: PlannedRun[],
+    status: "failed" | "cancelled",
+    error: string,
+  ): Promise<void> {
+    for (const { runId, companyId } of runs) {
+      try {
+        await jobStore.completeRun(runId, { status, error, durationMs: 0 });
+      } catch (completeErr) {
+        log.error(
+          {
+            runId,
+            companyId,
+            err: completeErr instanceof Error ? completeErr.message : String(completeErr),
+          },
+          "failed to close an undispatched job run",
+        );
+      }
+    }
+  }
+
+  /**
+   * Create one queued run record per target, each with its own run id. If a
+   * later insert fails, the runs already created are closed as `failed`
+   * before the error is rethrown, so none stays `queued`.
+   */
   async function createRuns(
     job: typeof pluginJobs.$inferSelect,
     trigger: PluginJobRunTrigger,
     targets: Array<string | null>,
   ): Promise<PlannedRun[]> {
     const planned: PlannedRun[] = [];
-    for (const companyId of targets) {
-      const run = await jobStore.createRun({
-        jobId: job.id,
-        pluginId: job.pluginId,
-        trigger,
-        companyId,
-      });
-      planned.push({ runId: run.id, companyId });
+    try {
+      for (const companyId of targets) {
+        const run = await jobStore.createRun({
+          jobId: job.id,
+          pluginId: job.pluginId,
+          trigger,
+          companyId,
+        });
+        planned.push({ runId: run.id, companyId });
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      await closeUndispatchedRuns(
+        planned,
+        "failed",
+        `Not started: creating the run records for this trigger failed: ${message}`,
+      );
+      throw err;
     }
     return planned;
   }
@@ -467,86 +506,98 @@ export function createPluginJobScheduler(
     const { id: jobId, pluginId, jobKey } = job;
     let failures = 0;
     let blockedReason: string | null = null;
+    let nextIndex = 0;
 
-    for (const [index, { runId, companyId }] of planned.entries()) {
-      const isLastRun = index === planned.length - 1;
-      const runLog = log.child({ jobId, pluginId, jobKey, runId, trigger, companyId });
-      if (blockedReason) {
-        failures++;
-        runLog.warn({ reason: blockedReason }, "job run cancelled");
-        try {
-          await jobStore.completeRun(runId, {
-            status: "cancelled",
-            error: blockedReason,
-            durationMs: 0,
-          });
-        } catch (completeErr) {
-          runLog.error(
-            {
-              err: completeErr instanceof Error ? completeErr.message : String(completeErr),
-            },
-            "failed to record cancelled job run",
-          );
+    try {
+      for (const [index, { runId, companyId }] of planned.entries()) {
+        nextIndex = index + 1;
+        const isLastRun = index === planned.length - 1;
+        const runLog = log.child({ jobId, pluginId, jobKey, runId, trigger, companyId });
+        if (blockedReason) {
+          failures++;
+          runLog.warn({ reason: blockedReason }, "job run cancelled");
+          try {
+            await jobStore.completeRun(runId, {
+              status: "cancelled",
+              error: blockedReason,
+              durationMs: 0,
+            });
+          } catch (completeErr) {
+            runLog.error(
+              {
+                err: completeErr instanceof Error ? completeErr.message : String(completeErr),
+              },
+              "failed to record cancelled job run",
+            );
+          }
+          continue;
         }
-        continue;
-      }
-      const startedAt = Date.now();
-      try {
-        await jobStore.markRunning(runId);
-        runLog.info("dispatching job run");
+        const startedAt = Date.now();
+        try {
+          await jobStore.markRunning(runId);
+          runLog.info("dispatching job run");
 
-        await workerManager.call(
-          pluginId,
-          "runJob",
-          {
-            job: {
-              jobKey,
-              runId,
-              trigger,
-              scheduledAt,
+          await workerManager.call(
+            pluginId,
+            "runJob",
+            {
+              job: {
+                jobKey,
+                runId,
+                trigger,
+                scheduledAt,
+                ...(companyId ? { companyId } : {}),
+              },
               ...(companyId ? { companyId } : {}),
             },
-            ...(companyId ? { companyId } : {}),
-          },
-          jobTimeoutMs,
-        );
-
-        const durationMs = Date.now() - startedAt;
-        await jobStore.completeRun(runId, { status: "succeeded", durationMs });
-        runLog.info({ durationMs }, "job run completed successfully");
-      } catch (err) {
-        failures++;
-        const durationMs = Date.now() - startedAt;
-        const errorMessage = err instanceof Error ? err.message : String(err);
-        runLog.error({ durationMs, err: errorMessage }, "job run failed");
-        try {
-          await jobStore.completeRun(runId, {
-            status: "failed",
-            error: errorMessage,
-            durationMs,
-          });
-        } catch (completeErr) {
-          runLog.error(
-            {
-              err: completeErr instanceof Error ? completeErr.message : String(completeErr),
-            },
-            "failed to record job run failure",
+            jobTimeoutMs,
           );
-        }
 
-        // Only a following run could overlap the timed-out handler; the last
-        // (or only) run returns as before.
-        const workerSettled = isLastRun ? null : getTimedOutWorkerSettled(err);
-        if (workerSettled) {
-          const finished = await settlesWithin(workerSettled, timedOutRunGraceMs);
-          if (!finished) {
-            blockedReason =
-              `Not started: the timed-out run ${runId}` +
-              (companyId ? ` for company "${companyId}"` : "") +
-              ` was still running in the worker ${timedOutRunGraceMs}ms after its timeout`;
+          const durationMs = Date.now() - startedAt;
+          await jobStore.completeRun(runId, { status: "succeeded", durationMs });
+          runLog.info({ durationMs }, "job run completed successfully");
+        } catch (err) {
+          failures++;
+          const durationMs = Date.now() - startedAt;
+          const errorMessage = err instanceof Error ? err.message : String(err);
+          runLog.error({ durationMs, err: errorMessage }, "job run failed");
+          try {
+            await jobStore.completeRun(runId, {
+              status: "failed",
+              error: errorMessage,
+              durationMs,
+            });
+          } catch (completeErr) {
+            runLog.error(
+              {
+                err: completeErr instanceof Error ? completeErr.message : String(completeErr),
+              },
+              "failed to record job run failure",
+            );
+          }
+
+          // Only a following run could overlap the timed-out handler; the last
+          // (or only) run returns as before.
+          const workerSettled = isLastRun ? null : getTimedOutWorkerSettled(err);
+          if (workerSettled) {
+            const finished = await settlesWithin(workerSettled, timedOutRunGraceMs);
+            if (!finished) {
+              blockedReason =
+                `Not started: the timed-out run ${runId}` +
+                (companyId ? ` for company "${companyId}"` : "") +
+                ` was still running in the worker ${timedOutRunGraceMs}ms after its timeout`;
+            }
           }
         }
       }
+    } catch (err) {
+      // Unexpected: per-run errors are handled above. Close the runs that
+      // were never reached so they do not stay queued, then rethrow.
+      const message = err instanceof Error ? err.message : String(err);
+      const unreached = planned.slice(nextIndex);
+      failures += unreached.length;
+      await closeUndispatchedRuns(unreached, "failed", `Not started: job dispatch failed: ${message}`);
+      throw err;
     }
 
     return failures;

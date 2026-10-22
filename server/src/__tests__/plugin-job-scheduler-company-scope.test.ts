@@ -261,4 +261,32 @@ describe("plugin job scheduler company scope", () => {
     expect(Date.now() - startedAt).toBeLessThan(5_000);
     expect(ctx.completeRun).toHaveBeenCalledWith("run-1", expect.objectContaining({ status: "failed" }));
   });
+
+  it("closes already-created company runs as failed when a later run record cannot be created", async () => {
+    const ctx = setup({ scope: "company", companyIds: ["company-a", "company-b", "company-c"] });
+    let created = 0;
+    ctx.createRun.mockImplementation(async (input: { companyId?: string | null }) => {
+      created++;
+      if (created === 2) throw new Error("insert failed");
+      return { id: `run-${created}`, companyId: input.companyId ?? null };
+    });
+    await ctx.scheduler.tick();
+
+    expect(ctx.call).not.toHaveBeenCalled();
+    expect(ctx.completeRun).toHaveBeenCalledTimes(1);
+    expect(ctx.completeRun).toHaveBeenCalledWith(
+      "run-1",
+      expect.objectContaining({
+        status: "failed",
+        error: expect.stringContaining("creating the run records for this trigger failed: insert failed"),
+      }),
+    );
+
+    ctx.completeRun.mockClear();
+    created = 0;
+    ctx.setWhereResult([]);
+    await expect(ctx.scheduler.triggerJob(JOB_ID, "manual")).rejects.toThrow("insert failed");
+    expect(ctx.completeRun).toHaveBeenCalledTimes(1);
+    expect(ctx.completeRun).toHaveBeenCalledWith("run-1", expect.objectContaining({ status: "failed" }));
+  });
 });
