@@ -38,6 +38,27 @@ export async function readProcessName(pid: number): Promise<string | null> {
 }
 
 const POSTGRES_PROCESS_NAME_RE = /^(?:postgres|postmaster)(?:\.exe)?$/i;
+const DATA_DIRECTORY_ARGUMENT =
+  /(?:^|\s)(?:-D\s*|--data-directory[=\s])(?:"([^"]+)"|'([^']+)'|(\S+))/i;
+
+type DataDirectoryOwnership = "owns" | "other" | "unknown";
+
+/**
+ * Whether `command` names this data directory. An explicit absolute `-D` or
+ * `--data-directory` that exists settles the question either way. Anything else
+ * (PGDATA, a relative path, a value cut at a space) is not evidence.
+ */
+async function commandOwnership(
+  command: string,
+  needles: string[],
+  dataDir: string,
+): Promise<DataDirectoryOwnership> {
+  if (needles.some((needle) => commandReferencesPath(command, needle))) return "owns";
+  const named = DATA_DIRECTORY_ARGUMENT.exec(command);
+  const value = named?.[1] ?? named?.[2] ?? named?.[3];
+  if (!value || !isAbsolute(value) || !existsSync(value)) return "unknown";
+  return (await isSameDataDirectory(value, dataDir)) ? "owns" : "other";
+}
 
 /**
  * Process exit code for a startup refused because a PostgreSQL that may own the
@@ -116,11 +137,7 @@ export async function listPostgresProcessesForDataDir(dataDir: string): Promise<
         done(error ? null : stdout),
       );
     });
-  const wanted = await canonicalDataDirectory(dataDir);
-  const norm = (value: string) =>
-    process.platform === "win32" ? value.replace(/\\/g, "/").toLowerCase() : value;
-  const needles = [...new Set([wanted, resolve(dataDir)])].map(norm);
-  const found: PostgresProcess[] = [];
+  const needles = await dataDirectoryNeedles(dataDir);
   if (process.platform === "win32") {
     const out = await run("powershell", [
       "-NoProfile",
@@ -129,32 +146,54 @@ export async function listPostgresProcessesForDataDir(dataDir: string): Promise<
     ]);
     if (out === null) return null;
     const trimmed = out.trim();
-    if (!trimmed) return found;
-    let rows: Array<{ ProcessId?: number; CommandLine?: string | null }>;
+    if (!trimmed) return [];
     try {
-      const parsed = JSON.parse(trimmed);
-      rows = Array.isArray(parsed) ? parsed : [parsed];
+      const parsed = JSON.parse(trimmed) as WindowsPostgresRow | WindowsPostgresRow[];
+      return scanWindowsPostgresRows(Array.isArray(parsed) ? parsed : [parsed], needles, dataDir);
     } catch {
       return null;
     }
-    for (const row of rows) {
-      const command = row.CommandLine ?? "";
-      if (typeof row.ProcessId === "number" && needles.some((n) => commandReferencesPath(norm(command), n))) {
-        found.push({ pid: row.ProcessId, command });
-      }
-    }
-    return found;
   }
-  const out = await run("ps", ["-eo", "pid=,args="]);
+  // `comm` is the executable name and does not include a path, so a path with
+  // spaces stays in `args` and is not mistaken for the process name.
+  const out = await run("ps", ["-eo", "pid=,comm=,args="]);
   if (out === null) return null;
   return scanPsOutputForDataDir(out, needles, dataDir, (pid) => readlinkSync(`/proc/${pid}/cwd`));
 }
 
+export type WindowsPostgresRow = { ProcessId?: number; CommandLine?: string | null };
+
 /**
- * Picks the PostgreSQL servers in `ps -eo pid=,args=` output that use the data directory:
- * by command line, else by working directory. Returns `null` when a PostgreSQL server
- * matched nothing but its working directory could not be read (no /proc on macOS or BSD,
- * or no permission), because that server may still own the directory.
+ * Classifies Windows `postgres.exe` rows. A server whose command line does not
+ * name a data directory (it was started through PGDATA, or WMI omitted the
+ * command line) is inconclusive: returning an empty list there would let
+ * startup move a live postmaster's lock aside.
+ */
+export async function scanWindowsPostgresRows(
+  rows: WindowsPostgresRow[],
+  needles: string[],
+  dataDir: string,
+): Promise<PostgresProcess[] | null> {
+  const found: PostgresProcess[] = [];
+  let unknown = false;
+  for (const row of rows) {
+    if (typeof row.ProcessId !== "number") continue;
+    const command = row.CommandLine ?? "";
+    const ownership = await commandOwnership(normalizeCommand(command), needles, dataDir);
+    if (ownership === "owns") found.push({ pid: row.ProcessId, command });
+    else if (ownership === "unknown") unknown = true;
+  }
+  if (found.length === 0 && unknown) return null;
+  return found;
+}
+
+/**
+ * Picks the PostgreSQL servers in `ps -eo pid=,comm=,args=` output that use the data
+ * directory: by command line, else by working directory. `comm` is matched as the
+ * process name so an executable path that contains spaces is still examined.
+ * Returns `null` when a PostgreSQL server matched nothing but its working directory
+ * could not be read (no /proc on macOS or BSD, or no permission), because that
+ * server may still own the directory.
  */
 export async function scanPsOutputForDataDir(
   out: string,
@@ -165,25 +204,15 @@ export async function scanPsOutputForDataDir(
   const found: PostgresProcess[] = [];
   let cwdUnknown = false;
   for (const line of out.split("\n")) {
-    const match = line.trim().match(/^(\d+)\s+(\S.*)$/);
+    const match = line.trim().match(/^(\d+)\s+(\S+)(?:\s+(\S.*))?$/);
     if (!match) continue;
     const pid = Number(match[1]);
-    const command = match[2];
-    if (pid === process.pid || !POSTGRES_PROCESS_NAME_RE.test((command.split(/\s+/)[0] ?? "").split("/").pop() ?? "")) continue;
-    let owns = needles.some((n) => commandReferencesPath(command, n));
-    // An explicit absolute -D / --data-directory settles it: the same directory through an
-    // alias (symlink, case, short name) is ours, an existing other directory is not. A value
-    // that cannot be resolved (relative, missing, cut at a space by `ps`) is no evidence.
-    let settled = owns;
-    if (!owns) {
-      const named = /(?:^|\s)(?:-D\s*|--data-directory[=\s])(?:"([^"]+)"|'([^']+)'|(\S+))/.exec(command);
-      const value = named?.[1] ?? named?.[2] ?? named?.[3];
-      if (value && isAbsolute(value) && existsSync(value)) {
-        owns = await isSameDataDirectory(value, dataDir);
-        settled = true;
-      }
-    }
-    if (!settled) {
+    const comm = match[2] ?? "";
+    const command = match[3] ?? "";
+    if (pid === process.pid || !POSTGRES_PROCESS_NAME_RE.test(comm)) continue;
+    const ownership = await commandOwnership(command, needles, dataDir);
+    let owns = ownership === "owns";
+    if (ownership === "unknown") {
       // A postmaster's working directory is its data directory (also when it was
       // started through PGDATA instead of -D).
       const cwd = (() => {
@@ -203,6 +232,15 @@ export async function scanPsOutputForDataDir(
   // still own this one, so report "could not look" and let the caller refuse.
   if (found.length === 0 && cwdUnknown) return null;
   return found;
+}
+
+async function dataDirectoryNeedles(dataDir: string): Promise<string[]> {
+  const wanted = await canonicalDataDirectory(dataDir);
+  return [...new Set([wanted, resolve(dataDir)])].map(normalizeCommand);
+}
+
+function normalizeCommand(value: string): string {
+  return process.platform === "win32" ? value.replace(/\\/g, "/").toLowerCase() : value;
 }
 
 export type EmbeddedPostgresReuseOptions = {

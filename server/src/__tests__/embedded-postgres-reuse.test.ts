@@ -10,6 +10,7 @@ import {
   listPostgresProcessesForDataDir,
   moveStaleLockAside,
   scanPsOutputForDataDir,
+  scanWindowsPostgresRows,
   readRunningEmbeddedPostgres as readRunning,
   type PostgresProcess,
 } from "../embedded-postgres-reuse.js";
@@ -158,12 +159,18 @@ describe("embedded PostgreSQL reuse identity", () => {
   });
 
   it.skipIf(process.platform === "win32")("finds a real process named postgres that references the data directory", async () => {
-    // argv[0] is what `ps` reports as the command, as for a real postmaster.
-    const child = spawn("sleep", ["30"], { argv0: `postgres -D ${dataDir}`, stdio: "ignore" });
+    // The executable path contains a space. `comm` is still `postgres`; identifying
+    // the process from the first space-separated token of `args` would skip it.
+    const sleepBin = existsSync("/bin/sleep") ? "/bin/sleep" : "/usr/bin/sleep";
+    const binDir = join(mkdtempSync(join(tmpdir(), "pg-bin-")), "My Postgres", "bin");
+    mkdirSync(binDir, { recursive: true });
+    const bin = join(binDir, "postgres");
+    symlinkSync(sleepBin, bin);
+    const child = spawn(bin, ["30"], { cwd: dataDir, stdio: "ignore" });
     try {
       await new Promise((r) => setTimeout(r, 300));
       const owners = await listPostgresProcessesForDataDir(dataDir);
-      expect(owners?.some((o) => o.pid === child.pid && o.command.includes(dataDir))).toBe(true);
+      expect(owners?.some((owner) => owner.pid === child.pid && owner.command.includes("My Postgres"))).toBe(true);
       expect((await listPostgresProcessesForDataDir(mkdtempSync(join(tmpdir(), "other-pg-"))))?.length ?? 0).toBe(0);
     } finally {
       child.kill();
@@ -381,13 +388,13 @@ describe("scanPsOutputForDataDir", () => {
 
   it("reports the scan as inconclusive when a PostgreSQL server's directory cannot be read", async () => {
     // Started through PGDATA, on a host without /proc/<pid>/cwd.
-    const out = "  901 /usr/lib/postgresql/16/bin/postgres\n  902 sshd: me\n";
+    const out = "  901 postgres /usr/lib/postgresql/16/bin/postgres\n  902 sshd sshd: me\n";
     expect(await scanPsOutputForDataDir(out, [dir], dir, unreadable)).toBeNull();
   });
 
   it("is conclusive when the command names another existing data directory", async () => {
     const other = mkdtempSync(join(tmpdir(), "other-pg-"));
-    const out = `  901 /usr/bin/postgres -D ${other} -c config_file=/etc/pg.conf\n`;
+    const out = `  901 postgres /usr/bin/postgres -D ${other} -c config_file=/etc/pg.conf\n`;
     expect(await scanPsOutputForDataDir(out, [dir], dir, unreadable)).toEqual([]);
   });
 
@@ -395,18 +402,53 @@ describe("scanPsOutputForDataDir", () => {
     const real = mkdtempSync(join(tmpdir(), "alias-pg-"));
     const alias = join(mkdtempSync(join(tmpdir(), "alias-link-")), "pgdata");
     symlinkSync(real, alias);
-    const out = `  901 /usr/bin/postgres -D ${alias}\n`;
+    const out = `  901 postgres /usr/bin/postgres -D ${alias}\n`;
     expect((await scanPsOutputForDataDir(out, [real], real, unreadable))?.map((p) => p.pid)).toEqual([901]);
   });
 
   it("treats an unresolvable -D value as no evidence", async () => {
-    const out = "  901 /usr/bin/postgres -D /does/not/exist/anywhere\n";
+    const out = "  901 postgres /usr/bin/postgres -D /does/not/exist/anywhere\n";
     expect(await scanPsOutputForDataDir(out, [dir], dir, unreadable)).toBeNull();
   });
 
   it("finds a server by command line or by working directory", async () => {
-    const out = `  901 postgres -D ${dir}\n  902 /usr/bin/postgres\n  903 /usr/bin/postgres\n`;
+    const out = `  901 postgres postgres -D ${dir}\n  902 postgres /usr/bin/postgres\n  903 postgres /usr/bin/postgres\n`;
     const cwd = (pid: number) => (pid === 902 ? dir : "/elsewhere");
     expect((await scanPsOutputForDataDir(out, [dir], dir, cwd))?.map((p) => p.pid)).toEqual([901, 902]);
+  });
+
+  it("still examines an executable path that contains spaces", async () => {
+    const out = "  4401 postgres /opt/My Postgres/bin/postgres\n";
+    expect(await scanPsOutputForDataDir(out, [dir], dir, unreadable)).toBeNull();
+    const cwd = () => dir;
+    expect((await scanPsOutputForDataDir(out, [dir], dir, cwd))?.map((p) => p.pid)).toEqual([4401]);
+  });
+});
+
+describe("scanWindowsPostgresRows", () => {
+  const dir = "/srv/paperclip/db";
+
+  it("is inconclusive when postgres.exe does not name a data directory", async () => {
+    const rows = [{ ProcessId: 10, CommandLine: "C:\\Program Files\\PostgreSQL\\16\\bin\\postgres.exe" }];
+    expect(await scanWindowsPostgresRows(rows, [dir], dir)).toBeNull();
+  });
+
+  it("is inconclusive when WMI omits the command line", async () => {
+    expect(await scanWindowsPostgresRows([{ ProcessId: 10, CommandLine: null }], [dir], dir)).toBeNull();
+  });
+
+  it("is conclusive when -D names another existing directory", async () => {
+    const other = mkdtempSync(join(tmpdir(), "other-pg-"));
+    const rows = [{ ProcessId: 10, CommandLine: `postgres.exe -D ${other}` }];
+    expect(await scanWindowsPostgresRows(rows, [dir], dir)).toEqual([]);
+  });
+
+  it("finds a server whose command line names the data directory", async () => {
+    const rows = [{ ProcessId: 10, CommandLine: `postgres.exe -D ${dir}` }];
+    expect((await scanWindowsPostgresRows(rows, [dir], dir))?.map((row) => row.pid)).toEqual([10]);
+  });
+
+  it("finds nothing when no postgres.exe is running", async () => {
+    expect(await scanWindowsPostgresRows([], [dir], dir)).toEqual([]);
   });
 });
