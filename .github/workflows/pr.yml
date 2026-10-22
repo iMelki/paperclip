@@ -281,11 +281,14 @@ jobs:
   verify:
     # Preserve the legacy required-check name while the underlying work runs in parallel.
     name: verify
-    # No job guard here: a skipped aggregate would count as a passing required check.
-    # The first step fails fork PRs instead. No checkout, so no PR code runs.
+    # A skip-style job guard would make a fork PR's required check count as
+    # passing, so the same-repo guard picks the runner instead: same-repo runs
+    # use the box, and a fork run (even an approved one) is never scheduled on
+    # the box. It runs on ubuntu-latest, where the first step fails it. No
+    # checkout and no secrets, so no PR code runs on either runner.
     if: ${{ always() }}
     needs: [typecheck_release_registry, general_tests, build]
-    runs-on: [rf-paperclip]
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && 'rf-paperclip' || 'ubuntu-latest' }}
     # The rf-slot job-started hook runs inside this job and its wait counts toward
     # timeout-minutes: up to 15 min (RF_MEM_WAIT 900s) for free memory plus up to
     # 30 min (RF_SLOT_TIMEOUT 1800s) for one of the 2 box-wide slots, so 45 min
@@ -603,11 +606,14 @@ jobs:
     # Preserve the legacy required-check name while the specs run sharded
     # across the matrix above (same pattern as the `verify` aggregate).
     name: e2e
-    # No job guard here: a skipped aggregate would count as a passing required check.
-    # The first step fails fork PRs instead. No checkout, so no PR code runs.
+    # A skip-style job guard would make a fork PR's required check count as
+    # passing, so the same-repo guard picks the runner instead: same-repo runs
+    # use the box, and a fork run (even an approved one) is never scheduled on
+    # the box. It runs on ubuntu-latest, where the first step fails it. No
+    # checkout and no secrets, so no PR code runs on either runner.
     if: ${{ always() }}
     needs: [e2e_shards]
-    runs-on: [rf-paperclip]
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && 'rf-paperclip' || 'ubuntu-latest' }}
     # The rf-slot job-started hook runs inside this job and its wait counts toward
     # timeout-minutes: up to 15 min (RF_MEM_WAIT 900s) for free memory plus up to
     # 30 min (RF_SLOT_TIMEOUT 1800s) for one of the 2 box-wide slots, so 45 min
