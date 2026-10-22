@@ -8,7 +8,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { parse as parseEnvContents } from "dotenv";
-import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   activityLog,
   agents,
@@ -54,6 +54,7 @@ import {
   isLocalServiceProcessInWorkspace,
   listLocalServiceRegistryRecords,
   normalizeLocalServicePid,
+  parseSsListenPortOwner,
   readLocalServiceRegistryRecord,
   readLocalServiceProcessGroupId,
   readLocalServicePortOwner,
@@ -4291,6 +4292,86 @@ describe("readLocalServicePortOwner", () => {
     ]) {
       expect(normalizeLocalServicePid(invalid)).toBeNull();
     }
+  });
+
+  it("parses the listening pid for a port from ss -ltnp output", () => {
+    const stdout = [
+      "State  Recv-Q Send-Q Local Address:Port  Peer Address:PortProcess",
+      'LISTEN 0      511        127.0.0.1:41000      0.0.0.0:*    users:(("node",pid=111,fd=20))',
+      'LISTEN 0      511        127.0.0.1:4242       0.0.0.0:*    users:(("node",pid=222,fd=21))',
+      'LISTEN 0      511             [::]:4243          [::]:*    users:(("node",pid=333,fd=22))',
+      "LISTEN 0      511          0.0.0.0:4244       0.0.0.0:*",
+      "",
+    ].join("\n");
+    expect(parseSsListenPortOwner(stdout, 4242)).toBe(222);
+    expect(parseSsListenPortOwner(stdout, 4243)).toBe(333);
+    expect(parseSsListenPortOwner(stdout, 4244)).toBeNull();
+    expect(parseSsListenPortOwner(stdout, 242)).toBeNull();
+    expect(parseSsListenPortOwner("", 4242)).toBeNull();
+  });
+
+  describe.skipIf(process.platform === "win32")("POSIX port owner lookup without lsof", () => {
+    let fakeBin: string;
+    let previousPath: string | undefined;
+
+    async function writeFakeTool(name: string, body: string) {
+      const toolPath = path.join(fakeBin, name);
+      await fs.writeFile(toolPath, `#!/bin/sh\n${body}\n`, "utf8");
+      await fs.chmod(toolPath, 0o755);
+    }
+
+    beforeEach(async () => {
+      fakeBin = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-runtime-port-owner-"));
+      previousPath = process.env.PATH;
+      // Only the fake tools are on PATH, so a missing tool is a real ENOENT.
+      process.env.PATH = fakeBin;
+    });
+
+    afterEach(async () => {
+      if (previousPath === undefined) delete process.env.PATH;
+      else process.env.PATH = previousPath;
+      await fs.rm(fakeBin, { recursive: true, force: true });
+    });
+
+    it("falls back to ss when lsof is not installed", async () => {
+      await writeFakeTool(
+        "ss",
+        `printf '%s\\n' 'State Recv-Q Send-Q Local Address:Port Peer Address:Port Process' 'LISTEN 0 511 127.0.0.1:43123 0.0.0.0:* users:(("node",pid=4242,fd=3))'`,
+      );
+      await expect(readLocalServicePortOwner(43123)).resolves.toBe(4242);
+    });
+
+    it("returns null when neither lsof nor ss is installed", async () => {
+      await expect(readLocalServicePortOwner(43123)).resolves.toBeNull();
+    });
+
+    it("keeps the lsof answer and never consults ss when lsof is installed", async () => {
+      await writeFakeTool(
+        "ss",
+        `printf '%s\\n' 'LISTEN 0 511 127.0.0.1:43123 0.0.0.0:* users:(("node",pid=4242,fd=3))'`,
+      );
+      await writeFakeTool("lsof", "printf '777\\n'");
+      await expect(readLocalServicePortOwner(43123)).resolves.toBe(777);
+      // lsof exits 1 when nothing listens; that must stay "no owner", not an ss fallback.
+      await writeFakeTool("lsof", "exit 1");
+      await expect(readLocalServicePortOwner(43123)).resolves.toBeNull();
+    });
+
+    it.skipIf(process.platform !== "linux" || !existsSync("/usr/bin/ss"))(
+      "finds a real listener through ss when lsof is not installed",
+      async () => {
+        await fs.symlink("/usr/bin/ss", path.join(fakeBin, "ss"));
+        const server = net.createServer();
+        await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+        try {
+          const address = server.address();
+          const port = typeof address === "object" && address ? address.port : 0;
+          await expect(readLocalServicePortOwner(port)).resolves.toBe(process.pid);
+        } finally {
+          await new Promise<void>((resolve) => server.close(() => resolve()));
+        }
+      },
+    );
   });
 
   it.skipIf(process.platform === "win32")(

@@ -970,6 +970,31 @@ export async function readLocalServicePortOwner(port: number) {
       .map((line) => Number.parseInt(line.trim(), 10))
       .find((value) => Number.isInteger(value) && value > 0);
     return firstPid ?? null;
+  } catch (error) {
+    // Only fall back when lsof itself is not installed. Any other lsof result
+    // (including its exit 1 for "no listener") keeps the original behavior.
+    if ((error as NodeJS.ErrnoException | null)?.code !== "ENOENT") return null;
+    return readLocalServicePortOwnerFromSs(port);
+  }
+}
+
+export function parseSsListenPortOwner(stdout: string, port: number) {
+  for (const rawLine of stdout.split(/\r?\n/)) {
+    const columns = rawLine.trim().split(/\s+/);
+    if (columns.length < 5 || columns[0]?.toUpperCase() !== "LISTEN") continue;
+    const localAddress = columns[3] ?? "";
+    if (!localAddress.endsWith(`:${port}`)) continue;
+    const match = /pid=(\d+)/.exec(rawLine);
+    const pid = match ? Number.parseInt(match[1]!, 10) : Number.NaN;
+    if (Number.isInteger(pid) && pid > 0) return pid;
+  }
+  return null;
+}
+
+async function readLocalServicePortOwnerFromSs(port: number) {
+  try {
+    const { stdout } = await execFileAsync("ss", ["-ltnp", "sport", "=", `:${port}`]);
+    return parseSsListenPortOwner(stdout, port);
   } catch {
     return null;
   }
