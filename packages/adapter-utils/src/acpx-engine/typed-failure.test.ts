@@ -151,6 +151,46 @@ it("shows a warning that arrives on session_info_update instead of dropping it",
   }
 }, 30_000);
 
+it("applies failure id and revision rules to update-carried records", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-acpx-typed-revisions-"));
+  const runtime = createAcpRuntime({
+    cwd: root,
+    sessionStore: createRuntimeStore({ stateDir: root }),
+    agentRegistry: createAgentRegistry({ overrides: { custom: agentCommand } }),
+    permissionMode: "approve-all",
+    onAgentStderr: () => {},
+  });
+  const records = [
+    { id: "quota", revision: 2, title: "Usage at 80 percent" },
+    { id: "quota", revision: 2, title: "Usage at 80 percent replayed" },
+    { id: "quota", revision: 1, title: "Usage at 50 percent older" },
+    { id: "quota", revision: 3, title: "Usage at 95 percent" },
+    { id: "other", revision: 1, title: "Separate incident" },
+    { title: "Record without an identity" },
+  ];
+  const handle = await runtime.ensureSession({
+    sessionKey: "update-revisions", agent: "custom", mode: "persistent", cwd: root,
+    sessionOptions: { env: {
+      PAPERCLIP_ACPX_TYPED_FAILURE_CANARY: "unused",
+      PAPERCLIP_ACPX_TYPED_FAILURE_CARRIER: "update",
+      PAPERCLIP_ACPX_TYPED_FAILURE_RECORDS: JSON.stringify(records),
+    } },
+  });
+  try {
+    const events: Array<{ type: string; text?: string }> = [];
+    for await (const event of runtime.runTurn({ handle, text: "typed warning", mode: "prompt", requestId: "revisions-0" })) events.push(event);
+    const texts = events.filter((event) => event.type === "status").map((event) => event.text ?? "");
+    expect(texts.filter((text) => text.startsWith("Usage at") || text === "Separate incident" || text.startsWith("Record without"))).toEqual([
+      "Usage at 80 percent",
+      "Usage at 95 percent",
+      "Separate incident",
+      "Record without an identity",
+    ]);
+  } finally {
+    await runtime.close({ handle, reason: "typed-failure revision test complete" });
+  }
+}, 30_000);
+
 for (const mode of ["oneshot", "persistent"] as const) {
   it(`${mode}: fails a negotiated typed terminal error despite end_turn`, async () => {
     const { result } = await runFixture(mode, "error");

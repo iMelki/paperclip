@@ -69,22 +69,29 @@ async function handleRequest(request) {
     if (process.env.PAPERCLIP_ACPX_TURN_SCRIPT) return scriptedPromptTurn(request);
     if (process.env.PAPERCLIP_ACPX_TYPED_FAILURE_CANARY && process.env.PAPERCLIP_ACPX_TYPED_FAILURE_CARRIER === "update" && typedSessionFailureSupported) {
       // Warnings and session-scoped incidents travel on session_info_update, not the prompt response.
-      writeMessage({
-        jsonrpc: "2.0",
-        method: "session/update",
-        params: {
-          sessionId: request.params.sessionId,
-          update: {
-            sessionUpdate: "session_info_update",
-            _meta: { jetbrains: { air: { version: 1, sessionFailure: {
-              version: 1,
-              severity: process.env.PAPERCLIP_ACPX_TYPED_FAILURE_SEVERITY ?? "warning",
-              category: process.env.PAPERCLIP_ACPX_TYPED_FAILURE_CATEGORY ?? "limit",
-              title: process.env.PAPERCLIP_ACPX_TYPED_FAILURE_CANARY,
-            } } } },
+      // PAPERCLIP_ACPX_TYPED_FAILURE_RECORDS replays several records (id, revision, title) in order.
+      const records = process.env.PAPERCLIP_ACPX_TYPED_FAILURE_RECORDS
+        ? JSON.parse(process.env.PAPERCLIP_ACPX_TYPED_FAILURE_RECORDS)
+        : [{ title: process.env.PAPERCLIP_ACPX_TYPED_FAILURE_CANARY }];
+      for (const record of records) {
+        writeMessage({
+          jsonrpc: "2.0",
+          method: "session/update",
+          params: {
+            sessionId: request.params.sessionId,
+            update: {
+              sessionUpdate: "session_info_update",
+              _meta: { jetbrains: { air: { version: 1, sessionFailure: {
+                version: 1,
+                ...(record.id === undefined ? {} : { id: record.id, revision: record.revision }),
+                severity: process.env.PAPERCLIP_ACPX_TYPED_FAILURE_SEVERITY ?? "warning",
+                category: process.env.PAPERCLIP_ACPX_TYPED_FAILURE_CATEGORY ?? "limit",
+                title: record.title,
+              } } } },
+            },
           },
-        },
-      });
+        });
+      }
       return { stopReason: "end_turn" };
     }
     if (process.env.PAPERCLIP_ACPX_TYPED_FAILURE_CANARY && typedSessionFailureSupported) {
