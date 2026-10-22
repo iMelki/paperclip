@@ -38,7 +38,12 @@ All notable changes to this repository should be recorded here.
   own error no longer carries the text of a result event that is not an error,
   every reset statement in a source is tried in turn, and a reset clock that
   names an unknown timezone is skipped instead of being read in the server's
-  timezone.
+  timezone. Recovery decides the quota verdict from the run's own error only,
+  never from the result JSON: a non-error result that quotes "usage limit
+  reached", "you've hit your usage limit" or "provider quota exceeded" no longer
+  parks the run. Prose after a clock ("try again at 10:40pm or upgrade your
+  plan") is no longer read as a timezone; only a word written in capitals is a
+  timezone candidate, and an unknown one still makes the candidate unusable.
 
 - Embedded PostgreSQL process discovery reads only an uppercase `-D` as the
   data directory option. PostgreSQL's lowercase `-d <debug level>` no longer

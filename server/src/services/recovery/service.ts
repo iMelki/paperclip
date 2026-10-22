@@ -397,6 +397,17 @@ export type AdapterFailureRecoveryClassification =
   | { kind: "configuration_incomplete" }
   | null;
 
+/**
+ * A timezone written after the clock without parentheses ("resets 21:30 UTC"). The pattern is
+ * case-insensitive, so ordinary prose after a clock ("try again at 10:40pm or upgrade your plan")
+ * is captured too; only a token written entirely in capitals is a timezone candidate. Whether it
+ * is a real zone is decided later, and an unknown one makes the candidate unusable.
+ */
+function readBareZone(match: RegExpMatchArray): string | undefined {
+  const token = match[5];
+  return token !== undefined && /^[A-Z]{2,5}$/.test(token) ? token : undefined;
+}
+
 function parseProviderQuotaClockReset(error: string, now: Date, scope?: ProviderQuotaResetScope, failedAt?: Date | null) {
   const matches = error.matchAll(
     /\b(?:try again at|resets(?: at)?)\s+(\d{1,2})(?::(\d{2}))?(?![\d:])(?:\s*([ap])\.?\s*m\.?)?(?:\s*\(([^)]+)\)|\s+([A-Z]{2,5}))?/gi,
@@ -406,7 +417,7 @@ function parseProviderQuotaClockReset(error: string, now: Date, scope?: Provider
   // A bare `resets N` is ordinary prose ("cache resets 7 days ago"); as a quota clock it needs
   // minutes, a meridiem or a timezone.
   const clockLike = (candidate: RegExpMatchArray) =>
-    candidate[2] !== undefined || candidate[3] !== undefined || candidate[4] !== undefined || candidate[5] !== undefined;
+    candidate[2] !== undefined || candidate[3] !== undefined || candidate[4] !== undefined || readBareZone(candidate) !== undefined;
   const accepts = (candidate: RegExpMatchArray) => {
     if (scope?.acp) return inScope(candidate) && (/^try again at/i.test(candidate[0]) || clockLike(candidate));
     if (/^try again at/i.test(candidate[0])) return true;
@@ -442,7 +453,7 @@ function resolveProviderQuotaClock(match: RegExpMatchArray, now: Date, failedAt?
 
   let hour = meridiem ? hourValue % 12 : hourValue;
   if (meridiem === "p") hour += 12;
-  const timeZone = (match[4] ?? match[5])?.trim();
+  const timeZone = (match[4] ?? readBareZone(match))?.trim();
   if (!timeZone) {
     const retryAt = new Date(base);
     retryAt.setUTCHours(hour, minute, 0, 0);
@@ -526,23 +537,26 @@ export function classifyAdapterFailureForRecovery(
       acceptSessionLimit: true,
     });
   }
-  const error = [latestRun.errorCode ?? "", latestRun.error ?? "", JSON.stringify(resultJson)].join("\n");
+  // Only the run's own error counts, for the quota verdict and for the reset clock alike. The
+  // result JSON holds summaries, output and transcripts, where an agent can quote any wording
+  // ("usage limit reached", "resets 10:40pm", "try again at"); that text neither parks the run
+  // as a quota wait nor sets when it retries. The marker an adapter records after it judged
+  // provider error evidence itself (`errorFamily`) is trusted.
+  const ownErrorText = [latestRun.errorCode ?? "", latestRun.error ?? ""].join("\n");
+  const error = [ownErrorText, JSON.stringify(resultJson)].join("\n");
   if (latestRun.errorCode === "configuration_incomplete" || CONFIGURATION_INCOMPLETE_ERROR_RE.test(error)) {
     return { kind: "configuration_incomplete" };
   }
   const sessionLimitInOwnError = typeof latestRun.error === "string" && CLAUDE_SESSION_LIMIT_RE.test(latestRun.error);
   if (
     latestRun.errorCode !== "provider_quota" &&
-    !PROVIDER_QUOTA_ERROR_RE.test(error) &&
+    resultJson.errorFamily !== "provider_quota" &&
+    !PROVIDER_QUOTA_ERROR_RE.test(ownErrorText) &&
     !sessionLimitInOwnError
   ) {
     return null;
   }
 
-  // The reset clock is read only from the run's own error text. `error` above also holds the whole
-  // result JSON, where a summary or output can quote someone else's "resets 10:40pm" or "try again
-  // at"; that text may help decide that this is a quota failure, but it never sets when to retry.
-  const ownErrorText = [latestRun.errorCode ?? "", latestRun.error ?? ""].join("\n");
   return buildProviderQuotaClassification(resultJson, ownErrorText, now, {
     failedAt,
     acceptSessionLimit: sessionLimitInOwnError,
