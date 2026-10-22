@@ -23,6 +23,18 @@ jobs:
     # Up to 30 min can go to the rf-slot hook waiting for a box-wide slot.
     timeout-minutes: 35
     steps:
+      # Dependabot PRs run under pull_request with a read-only GITHUB_TOKEN and no
+      # Actions secrets, even though they come from a branch of this repository.
+      # The security gate below would then fail to create its check run or
+      # advisory, and continue-on-error would leave this job green with no
+      # security signal. Fail them explicitly instead (Codex P1 4349718684), so a
+      # maintainer reviews dependency PRs by hand.
+      - name: Refuse Dependabot PRs (read-only token, no gate signal)
+        if: ${{ github.event.pull_request.user.login == 'dependabot[bot]' || github.actor == 'dependabot[bot]' }}
+        run: |
+          echo "::error::Dependabot PR: this run has a read-only GITHUB_TOKEN and no secrets, so the commitperclip security gate cannot record a result. Failing instead of passing silently. A maintainer must review this dependency PR by hand."
+          exit 1
+
       # Under pull_request, github.workflow_sha is the PR merge commit, so a
       # checkout of it would let the token scripts below run PR code. Check out
       # the PR base commit instead: it is already on master, so the scripts that
