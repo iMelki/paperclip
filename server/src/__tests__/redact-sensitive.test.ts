@@ -134,6 +134,32 @@ describe("redactSensitive", () => {
     });
   });
 
+  it("redacts the value of {name, value} header records whose name is a sensitive header", () => {
+    const out = redactSensitive({
+      transportConfig: {
+        headerPolicy: {
+          staticHeaders: [
+            { name: "Authorization", value: "Bearer static-header-secret" },
+            { name: "x-api-key", value: "api-key-header-secret" },
+            { name: "Proxy-Authorization", value: "Basic proxy-header-secret" },
+            { name: "COOKIE", value: "sid=cookie-header-secret" },
+            { name: "X-Auth-Token", value: "auth-token-header-secret" },
+            { name: "Accept", value: "application/json" },
+          ],
+        },
+      },
+    }) as { transportConfig: { headerPolicy: { staticHeaders: Array<Record<string, unknown>> } } };
+
+    expect(out.transportConfig.headerPolicy.staticHeaders).toEqual([
+      { name: "Authorization", value: "[REDACTED]" },
+      { name: "x-api-key", value: "[REDACTED]" },
+      { name: "Proxy-Authorization", value: "[REDACTED]" },
+      { name: "COOKIE", value: "[REDACTED]" },
+      { name: "X-Auth-Token", value: "[REDACTED]" },
+      { name: "Accept", value: "application/json" },
+    ]);
+  });
+
   it("recurses into nested objects and arrays", () => {
     const out = redactSensitive({
       user: { email: "user@example.com", password: "secret-pass" },
