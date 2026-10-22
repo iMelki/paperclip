@@ -37,6 +37,8 @@ function makeFakeCtor(failFirst: number) {
     async initialise(): Promise<void> {}
     async start(): Promise<void> {
       started += 1;
+      // The patched Windows start writes its log beside the data directory when no logFile is given.
+      fs.writeFileSync(`${this.options.databaseDir}-postgres.log`, "log\n");
       if (started <= failFirst) {
         // Mirror the real failure: Postgres logs the reason, then `start()`
         // rejects with an Error whose message is empty.
@@ -70,6 +72,9 @@ describe("startEmbeddedPostgresWithRetry", () => {
     expect(new Set(dataDirs).size).toBe(3);
     expect(fs.existsSync(dataDirs[0])).toBe(false);
     expect(fs.existsSync(dataDirs[1])).toBe(false);
+    // The sibling server logs of the failed attempts are removed with them.
+    expect(fs.existsSync(`${dataDirs[0]}-postgres.log`)).toBe(false);
+    expect(fs.existsSync(`${dataDirs[1]}-postgres.log`)).toBe(false);
     expect(started.dataDir).toBe(dataDirs[2]);
     expect(fs.existsSync(started.dataDir)).toBe(true);
 
@@ -82,6 +87,7 @@ describe("startEmbeddedPostgresWithRetry", () => {
     // Clean up the returned attempt.
     await started.instance.stop();
     fs.rmSync(started.dataDir, { recursive: true, force: true });
+    fs.rmSync(`${started.dataDir}-postgres.log`, { force: true });
   });
 
   it("throws with the real Postgres output after the attempt bound", async () => {
@@ -96,6 +102,7 @@ describe("startEmbeddedPostgresWithRetry", () => {
     // Every failed attempt removes its data directory.
     for (const options of constructed) {
       expect(fs.existsSync(options.databaseDir)).toBe(false);
+      expect(fs.existsSync(`${options.databaseDir}-postgres.log`)).toBe(false);
     }
   });
 

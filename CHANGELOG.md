@@ -20,6 +20,17 @@ All notable changes to this repository should be recorded here.
 
 ## Unreleased
 
+- Windows embedded PostgreSQL now writes its server log outside the data
+  directory, in the same log directory as the server log (`<instance>/logs/postgres.log`
+  by default, or the configured `logging.logDir` / `PAPERCLIP_LOG_DIR`). When the
+  data directory contains that directory, including through a symlink or
+  junction, the log goes to a sibling of the data directory. Server startup also
+  allows up to 600 seconds to start when the last shutdown was unclean (a
+  `postmaster.pid` was left behind); the CLI, worktree and migration paths that
+  start the database still wait 60 seconds. An open log inside the data
+  directory made crash recovery fail with a sharing violation and outlast
+  pg_ctl's 60-second wait.
+
 - **Fix:** a second embedded PostgreSQL start on the same data directory no
   longer moves the first start's live `postmaster.pid` aside. The lock is
   verified again just before `start()`. A live owner is reused, an owner that

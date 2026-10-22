@@ -237,6 +237,7 @@ vi.mock("../config.js", () => ({
 }));
 
 vi.mock("../middleware/logger.js", () => ({
+  resolveServerLogDir: () => "/configured/log/dir",
   logger: {
     child: vi.fn(function child() {
       return this;
@@ -407,6 +408,15 @@ describe("startServer embedded PostgreSQL identity", () => {
     expect(process.kill(process.pid, 0)).toBe(true);
   });
 
+  it("writes the PostgreSQL log into the configured server log directory", async () => {
+    await expect(startServer()).rejects.toThrow("database phase reached");
+    expect(pgCtorMock).toHaveBeenCalledWith(expect.objectContaining({
+      logFile: path.resolve("/configured/log/dir", "postgres.log"),
+      // The leftover lock means crash recovery, which gets the longer wait.
+      startTimeoutSeconds: 600,
+    }));
+  });
+
   it("holds the start lock for this process while PostgreSQL starts, and releases it afterwards", async () => {
     const startLock = `${dataDir}.paperclip-start.lock`;
     let heldWhileStarting: string | null = null;
@@ -488,7 +498,7 @@ describe("startServer embedded PostgreSQL identity", () => {
       expect(pgStartMock).not.toHaveBeenCalled();
     });
 
-    it("still moves a lock aside that is dead at the second check", async () => {
+    it("keeps the recovery timeout when a lock appears during port detection and is dead at the second check", async () => {
       const content = `424242\n${dataDir}\n1700000000\n55432\n`;
       lockAppearsDuringStart(content);
       const kill = vi.spyOn(process, "kill").mockImplementation(() => {
@@ -502,6 +512,7 @@ describe("startServer embedded PostgreSQL identity", () => {
       expect(pgStartMock).toHaveBeenCalledOnce();
       expect(staleLocks()).toHaveLength(1);
       expect(readFileSync(path.join(dataDir, staleLocks()[0]), "utf8")).toBe(content);
+      expect(pgCtorMock).toHaveBeenCalledWith(expect.objectContaining({ startTimeoutSeconds: 600 }));
     });
 
     it("keeps a live lock that replaces the examined stale one before the lock is moved", async () => {
