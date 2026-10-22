@@ -265,12 +265,25 @@ jobs:
   verify:
     # Preserve the legacy required-check name while the underlying work runs in parallel.
     name: verify
-    if: ${{ (always()) && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+    # No job guard here: a skipped aggregate would count as a passing required check.
+    # The first step fails fork PRs instead. No checkout, so no PR code runs.
+    if: ${{ always() }}
     needs: [typecheck_release_registry, general_tests, build]
     runs-on: [rf-paperclip]
     timeout-minutes: 5
 
     steps:
+      - name: Fail fork PRs (CI runs only on same-repo branches)
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          BASE_REPO: ${{ github.repository }}
+        run: |
+          if [ "$EVENT_NAME" = "pull_request" ] && [ "$HEAD_REPO" != "$BASE_REPO" ]; then
+            echo "::error::fork PR: CI runs only on same-repo branches, maintainer re-run needed"
+            exit 1
+          fi
+          echo "same-repo or non-PR event: gate passed"
       - name: Fail if any split verify lane failed
         env:
           TYPECHECK_RELEASE_REGISTRY_RESULT: ${{ needs.typecheck_release_registry.result }}
@@ -530,12 +543,25 @@ jobs:
     # Preserve the legacy required-check name while the specs run sharded
     # across the matrix above (same pattern as the `verify` aggregate).
     name: e2e
-    if: ${{ (always()) && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+    # No job guard here: a skipped aggregate would count as a passing required check.
+    # The first step fails fork PRs instead. No checkout, so no PR code runs.
+    if: ${{ always() }}
     needs: [e2e_shards]
     runs-on: [rf-paperclip]
     timeout-minutes: 5
 
     steps:
+      - name: Fail fork PRs (CI runs only on same-repo branches)
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          BASE_REPO: ${{ github.repository }}
+        run: |
+          if [ "$EVENT_NAME" = "pull_request" ] && [ "$HEAD_REPO" != "$BASE_REPO" ]; then
+            echo "::error::fork PR: CI runs only on same-repo branches, maintainer re-run needed"
+            exit 1
+          fi
+          echo "same-repo or non-PR event: gate passed"
       - name: Fail if any e2e shard failed
         env:
           E2E_SHARDS_RESULT: ${{ needs.e2e_shards.result }}
