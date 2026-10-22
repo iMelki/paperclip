@@ -42,6 +42,13 @@ const POSTGRES_PROCESS_NAME_RE = /^(?:postgres|postmaster)(?:\.exe)?$/i;
 const DATA_DIRECTORY_ARGUMENT =
   /(?:^|\s)(?:-D\s*|--data-directory[=\s])(?:"([^"]+)"|'([^']+)'|(\S+))/g;
 
+// `-c data_directory=<path>` and `--data_directory=<path>` set the effective data directory and take
+// precedence over `-D`, which then names only the configuration directory.
+const DATA_DIRECTORY_SETTING =
+  /(?:^|\s)(?:-c\s*|--)data_directory=(?:"([^"]+)"|'([^']+)'|(\S+))/g;
+// An uncommented `data_directory` line in a cluster's configuration file.
+const CONFIG_DATA_DIRECTORY_LINE = /^[ \t]*data_directory[ \t]*=/m;
+
 const POSTGRES_CHILD_TITLE_RE = /^postgres:\s/i;
 const POSTGRES_FORK_CHILD_RE = /(?:^|\s)--fork/i;
 
@@ -62,6 +69,12 @@ async function commandOwnership(
   // otherwise pass the broader path-reference test below.
   // `-D` is read from the command as given: Windows normalization lowercases the whole line, which
   // would turn `-D` into the debug-level option `-d`. Only the path comparison below uses it.
+  // A data_directory setting on the command line is the effective directory whatever `-D` says.
+  let override: string | undefined;
+  for (const named of command.matchAll(DATA_DIRECTORY_SETTING)) override = named[1] ?? named[2] ?? named[3];
+  if (override && isAbsolute(override)) {
+    return (await isSameDataDirectory(override, dataDir)) ? "owns" : "other";
+  }
   let value: string | undefined;
   for (const named of command.matchAll(DATA_DIRECTORY_ARGUMENT)) value = named[1] ?? named[2] ?? named[3];
   const normalized = normalizeCommand(command);
@@ -69,12 +82,28 @@ async function commandOwnership(
     if (await isSameDataDirectory(value, dataDir)) return "owns";
     // `data_directory` in postgresql.conf overrides `-D`, so `-D` may only name the configuration
     // directory of a server that still stores this cluster. A directory that is itself a cluster
-    // (it has PG_VERSION) is the data directory; anything else proves nothing.
-    if (existsSync(join(value, "PG_VERSION"))) return "other";
+    // (it has PG_VERSION) is the data directory, unless its own configuration sets data_directory:
+    // then the server's working directory decides. Anything else proves nothing.
+    if (existsSync(join(value, "PG_VERSION"))) return clusterConfigSetsDataDirectory(value) ? "unknown" : "other";
     return needles.some((needle) => commandReferencesPath(normalized, needle)) ? "owns" : "unknown";
   }
   if (needles.some((needle) => commandReferencesPath(normalized, needle))) return "owns";
   return "unknown";
+}
+
+/**
+ * Whether the configuration files in `clusterDir` set `data_directory`. A file that exists but cannot
+ * be read counts as setting it, because the server may store its cluster elsewhere.
+ */
+function clusterConfigSetsDataDirectory(clusterDir: string): boolean {
+  for (const name of ["postgresql.conf", "postgresql.auto.conf"]) {
+    try {
+      if (CONFIG_DATA_DIRECTORY_LINE.test(readFileSync(join(clusterDir, name), "utf8"))) return true;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") return true;
+    }
+  }
+  return false;
 }
 
 /**

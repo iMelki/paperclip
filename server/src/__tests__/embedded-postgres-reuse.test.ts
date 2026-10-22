@@ -499,6 +499,61 @@ describe("scanPsOutputForDataDir", () => {
     expect(await scanPsOutputForDataDir(descendant, [base], base, unreadable)).toEqual([]);
   });
 
+  describe("a data_directory setting overrides -D", () => {
+    // `-D` may name only the configuration directory of a server that stores this cluster elsewhere.
+    const settingForms = (target: string) =>
+      [
+        ["-c data_directory", `-c data_directory=${target}`],
+        ["--data_directory", `--data_directory=${target}`],
+      ] as const;
+
+    for (const debugLevel of ["", " -d 5"]) {
+      for (const [name] of settingForms("x")) {
+        it(`finds the owner when ${name} names the target and -D names another cluster${debugLevel ? " with a trailing -d 5" : ""}`, async () => {
+          const target = clusterDir("pg-target-");
+          const other = clusterDir("pg-config-dir-");
+          const setting = settingForms(target).find(([form]) => form === name)?.[1];
+          const out = `901\tpostgres\t/usr/bin/postgres -D ${other} ${setting}${debugLevel}\n`;
+          expect((await scanPsOutputForDataDir(out, [target], target, unreadable))?.map((p) => p.pid)).toEqual([901]);
+        });
+      }
+    }
+
+    it("lets the last data_directory setting win", async () => {
+      const target = clusterDir("pg-target-");
+      const other = clusterDir("pg-other-");
+      const toTarget = `901\tpostgres\tpostgres -D ${other} -c data_directory=${other} --data_directory=${target}\n`;
+      expect((await scanPsOutputForDataDir(toTarget, [target], target, unreadable))?.map((p) => p.pid)).toEqual([901]);
+      const toOther = `902\tpostgres\tpostgres -D ${target} --data_directory=${target} -c data_directory=${other}\n`;
+      expect(await scanPsOutputForDataDir(toOther, [target], target, unreadable)).toEqual([]);
+    });
+
+    it("is conclusive when the setting names another directory", async () => {
+      const target = clusterDir("pg-target-");
+      const other = clusterDir("pg-other-");
+      const out = `901\tpostgres\tpostgres -D ${target} -c data_directory=${other}\n`;
+      expect(await scanPsOutputForDataDir(out, [target], target, unreadable)).toEqual([]);
+    });
+
+    it("finds the owner through the working directory when only the configuration file sets data_directory", async () => {
+      const target = clusterDir("pg-target-");
+      const configDir = clusterDir("pg-config-dir-");
+      writeFileSync(join(configDir, "postgresql.conf"), `# cluster elsewhere\ndata_directory = '${target}'\n`);
+      const out = `901\tpostgres\t/usr/bin/postgres -D ${configDir}\n`;
+      expect(await scanPsOutputForDataDir(out, [target], target, unreadable)).toBeNull();
+      expect((await scanPsOutputForDataDir(out, [target], target, () => target))?.map((p) => p.pid)).toEqual([901]);
+      expect(await scanPsOutputForDataDir(out, [target], target, () => "/elsewhere")).toEqual([]);
+    });
+
+    it("still excludes another cluster whose configuration does not set data_directory", async () => {
+      const target = clusterDir("pg-target-");
+      const other = clusterDir("pg-other-");
+      writeFileSync(join(other, "postgresql.conf"), "# data_directory = 'commented out'\nport = 5433\n");
+      const out = `901\tpostgres\tpostgres -D ${other}\n`;
+      expect(await scanPsOutputForDataDir(out, [target], target, unreadable)).toEqual([]);
+    });
+  });
+
   it("finds a server by command line or by working directory", async () => {
     const out = `901\tpostgres\tpostgres -D ${dir}\n902\tpostgres\t/usr/bin/postgres\n903\tpostgres\t/usr/bin/postgres\n`;
     const cwd = (pid: number) => (pid === 902 ? dir : "/elsewhere");
@@ -549,6 +604,26 @@ describe("scanWindowsPostgresRows", () => {
       // The last -D still wins, and a trailing -d <debug level> does not replace it.
       const last = [{ ProcessId: 11, CommandLine: `postgres.exe -D ${other} -D ${real} -d 5` }];
       expect((await scanWindowsPostgresRows(last, [real], real))?.map((row) => row.pid)).toEqual([11]);
+    } finally {
+      Object.defineProperty(process, "platform", platform);
+    }
+  });
+
+  it("finds the owner when data_directory names the target and -D names another cluster", async () => {
+    const platform = Object.getOwnPropertyDescriptor(process, "platform") as PropertyDescriptor;
+    Object.defineProperty(process, "platform", { value: "win32" });
+    try {
+      const target = clusterDir("Target-PG-Mixed-");
+      const other = clusterDir("Config-PG-Mixed-");
+      const lines = [
+        `postgres.exe -D ${other} -c data_directory=${target}`,
+        `postgres.exe -D ${other} -c data_directory=${target} -d 5`,
+        `postgres.exe -D ${other} --data_directory=${target} -d 5`,
+      ];
+      for (const [index, CommandLine] of lines.entries()) {
+        const rows = [{ ProcessId: 20 + index, CommandLine }];
+        expect((await scanWindowsPostgresRows(rows, [target], target))?.map((row) => row.pid)).toEqual([20 + index]);
+      }
     } finally {
       Object.defineProperty(process, "platform", platform);
     }

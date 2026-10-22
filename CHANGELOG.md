@@ -20,6 +20,12 @@ All notable changes to this repository should be recorded here.
 
 ## Unreleased
 
+- Embedded PostgreSQL process discovery reads `-c data_directory=<path>` and
+  `--data_directory=<path>` as the effective data directory, ahead of `-D`. A
+  server that is started with `-D <config dir> -c data_directory=<dir>` is now
+  identified by `<dir>`, also with a trailing `-d 5`. A `-D` cluster whose own
+  configuration file sets `data_directory` is left to the working-directory check.
+
 - Embedded PostgreSQL process discovery reads only an uppercase `-D` as the
   data directory option. PostgreSQL's lowercase `-d <debug level>` no longer
   replaces it, so a server that is started with `-D <dir> -d 5` is identified
