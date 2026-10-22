@@ -4916,11 +4916,16 @@ describeEmbeddedPostgres("tool access service", () => {
       credentialRefs: [],
     }).returning();
 
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockRejectedValue(
+      new Error("Smoke Lab sign-in must not discover remote OAuth metadata"),
+    );
+
     const result = await service.startOAuth(company.id, connection!.id, {
       redirectUri: "http://paperclip.test/api/tools/oauth/callback",
       actor: { actorType: "user", actorId: "board" },
     });
 
+    expect(fetchMock).not.toHaveBeenCalled();
     const authorizationUrl = new URL(result.authorizationUrl);
     expect(`${authorizationUrl.origin}${authorizationUrl.pathname}`).toBe(
       `http://paperclip.test/api/companies/${company.id}/smoke-lab/oauth/authorize`,
@@ -4931,7 +4936,7 @@ describeEmbeddedPostgres("tool access service", () => {
 
     const state = authorizationUrl.searchParams.get("state");
     expect(state).toBeTruthy();
-    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (url) => {
+    fetchMock.mockImplementation(async (url) => {
       if (String(url).endsWith("/smoke-lab/oauth/token")) {
         return {
           ok: true,

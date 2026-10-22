@@ -4389,7 +4389,7 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
     const hasCompleteGalleryEndpointHints = Boolean(
       galleryMethod?.defaults?.authorizationEndpoint && galleryMethod.defaults.tokenEndpoint,
     );
-    const discovered = connection.transport === "mcp_remote" && !hasCompleteGalleryEndpointHints
+    const discovered = !smokeLabEndpoints && connection.transport === "mcp_remote" && !hasCompleteGalleryEndpointHints
       ? await discoverOAuthEndpoints(connection, challenge)
       : null;
     const endpoints = smokeLabEndpoints
