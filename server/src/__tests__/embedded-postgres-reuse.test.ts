@@ -487,6 +487,18 @@ describe("scanPsOutputForDataDir", () => {
     expect(await scanPsOutputForDataDir(reversed, [real], real, unreadable)).toEqual([]);
   });
 
+  it("does not read the lowercase -d debug level as a data directory", async () => {
+    const other = clusterDir("pg-debug-");
+    const out = `901\tpostgres\t/usr/bin/postgres -D ${other} -d 5\n`;
+    expect(await scanPsOutputForDataDir(out, [dir], dir, unreadable)).toEqual([]);
+    const base = clusterDir("pg-debug-parent-");
+    const child = join(base, "backup");
+    mkdirSync(child);
+    writeFileSync(join(child, "PG_VERSION"), "16\n");
+    const descendant = `902\tpostgres\t/usr/bin/postgres -D ${child} -d 5\n`;
+    expect(await scanPsOutputForDataDir(descendant, [base], base, unreadable)).toEqual([]);
+  });
+
   it("finds a server by command line or by working directory", async () => {
     const out = `901\tpostgres\tpostgres -D ${dir}\n902\tpostgres\t/usr/bin/postgres\n903\tpostgres\t/usr/bin/postgres\n`;
     const cwd = (pid: number) => (pid === 902 ? dir : "/elsewhere");
@@ -525,6 +537,21 @@ describe("scanWindowsPostgresRows", () => {
     const other = clusterDir("other-pg-");
     const rows = [{ ProcessId: 10, CommandLine: `postgres.exe -D ${other}` }];
     expect(await scanWindowsPostgresRows(rows, [dir], dir)).toEqual([]);
+  });
+
+  it("reads -D from the original command line, which win32 normalization lowercases", async () => {
+    const platform = Object.getOwnPropertyDescriptor(process, "platform") as PropertyDescriptor;
+    Object.defineProperty(process, "platform", { value: "win32" });
+    try {
+      const other = clusterDir("Other-PG-Mixed-");
+      const real = clusterDir("Real-PG-Mixed-");
+      expect(await scanWindowsPostgresRows([{ ProcessId: 10, CommandLine: `postgres.exe -D ${other}` }], [dir], dir)).toEqual([]);
+      // The last -D still wins, and a trailing -d <debug level> does not replace it.
+      const last = [{ ProcessId: 11, CommandLine: `postgres.exe -D ${other} -D ${real} -d 5` }];
+      expect((await scanWindowsPostgresRows(last, [real], real))?.map((row) => row.pid)).toEqual([11]);
+    } finally {
+      Object.defineProperty(process, "platform", platform);
+    }
   });
 
   it("finds a server whose command line names the data directory", async () => {
