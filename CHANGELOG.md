@@ -6,6 +6,9 @@ All notable changes to this repository should be recorded here.
 
 ## Unreleased
 
+- **Docs:** the fork getting-started guide uses placeholders for local
+  workspace and notes-vault paths instead of one machine's paths.
+
 - **[Refs #162]** Recovery recognizes Claude ACP session-limit failures and
   `resets` clock messages. These failures use the existing provider-quota wait
   and monitor path instead of immediate continuation retries. Ordinary ACP
