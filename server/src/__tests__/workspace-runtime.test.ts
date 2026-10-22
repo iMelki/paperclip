@@ -5935,6 +5935,21 @@ describeEmbeddedPostgres("workspace runtime startup reconciliation", () => {
       "require('node:http').createServer((_req,res)=>res.end('ok')).listen(Number(process.env.PORT), '127.0.0.1');",
       "utf8",
     );
+    // Stand-in for the pnpm wrapper: a parent process that runs the dev script as a
+    // child, so the port owner is not the spawned pid. Real pnpm is resolved through
+    // the login shell's PATH, which on CI drops setup-node's Node and lands on a
+    // system corepack pnpm with an unwritable cache, so invoke node explicitly.
+    await fs.writeFile(
+      path.join(workspaceRoot, "pnpm-wrapper.cjs"),
+      [
+        "const { spawn } = require('node:child_process');",
+        "const child = spawn(process.execPath, ['runtime-service.cjs'], { stdio: 'inherit', env: process.env });",
+        "for (const signal of ['SIGINT', 'SIGTERM']) process.on(signal, () => child.kill(signal));",
+        "child.on('exit', (code, signal) => process.exit(code ?? (signal ? 1 : 0)));",
+      ].join("\n"),
+      "utf8",
+    );
+    const wrapperCommand = `${shellQuotePath(process.execPath)} pnpm-wrapper.cjs dev`;
 
     const companyId = randomUUID();
     const agentId = randomUUID();
@@ -5990,7 +6005,7 @@ describeEmbeddedPostgres("workspace runtime startup reconciliation", () => {
           services: [
             {
               name: "web",
-              command: "pnpm dev",
+              command: wrapperCommand,
               port: { type: "auto" },
               readiness: {
                 type: "http",
