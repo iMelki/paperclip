@@ -184,6 +184,43 @@ describe("embedded PostgreSQL reuse identity", () => {
       expect(error.message).toContain("process list could not be read");
       expect(existsSync(pidFile)).toBe(true);
     });
+
+    describe("a PostgreSQL whose -D names another cluster", () => {
+      const other = () => clusterDir("other-pg-");
+      const unreadableCwd = () => {
+        throw new Error("EACCES");
+      };
+
+      it("refuses and preserves the lock when its working directory cannot be read", async () => {
+        // An include, include_dir or `-c config_file=` can set the real data directory to this one.
+        garbled();
+        probe.mockRejectedValue(new Error("connection refused"));
+        const before = readFileSync(pidFile, "utf8");
+        const out = `901\tpostgres\t/usr/bin/postgres -D ${other()} -c config_file=/etc/external/pg.conf\n`;
+        const owners = await scanPsOutputForDataDir(out, [dataDir], dataDir, unreadableCwd);
+        expect(owners).toBeNull();
+        const error = await readRunningEmbeddedPostgres(dataDir, 55432, null, owners).catch((e) => e);
+        expect(error).toBeInstanceOf(EmbeddedPostgresLockRefusal);
+        expect(error.exitCode).toBe(EMBEDDED_POSTGRES_LOCK_REFUSAL_EXIT_CODE);
+        expect(readFileSync(pidFile, "utf8")).toBe(before);
+        expect(asideFiles()).toHaveLength(0);
+        expect(readdirSync(dirname(dataDir)).filter((n) => n.startsWith(`${basename(dataDir)}.postmaster.pid`))).toEqual([]);
+      });
+
+      it("refuses and names the process when its working directory is this data directory", async () => {
+        garbled();
+        probe.mockRejectedValue(new Error("connection refused"));
+        const before = readFileSync(pidFile, "utf8");
+        const out = `901\tpostgres\t/usr/bin/postgres -D ${other()} -c config_file=/etc/external/pg.conf\n`;
+        const owners = await scanPsOutputForDataDir(out, [dataDir], dataDir, () => dataDir);
+        expect(owners?.map((owner) => owner.pid)).toEqual([901]);
+        const error = await readRunningEmbeddedPostgres(dataDir, 55432, null, owners).catch((e) => e);
+        expect(error).toBeInstanceOf(EmbeddedPostgresLockRefusal);
+        expect(error.message).toContain("process 901");
+        expect(readFileSync(pidFile, "utf8")).toBe(before);
+        expect(asideFiles()).toHaveLength(0);
+      });
+    });
   });
 
   it.skipIf(process.platform === "win32")("finds a real process named postgres that references the data directory", async () => {
@@ -443,10 +480,33 @@ describe("scanPsOutputForDataDir", () => {
     expect(await scanPsOutputForDataDir(out, [dir], dir, unreadable)).toBeNull();
   });
 
-  it("is conclusive when the command names another existing data directory", async () => {
+  it("is inconclusive when only the command names another existing data directory", async () => {
+    // `data_directory` in a configuration file, or one it includes, can replace `-D`, so another
+    // cluster is never proof that this server stores a different one.
     const other = clusterDir("other-pg-");
     const out = `901\tpostgres\t/usr/bin/postgres -D ${other} -c config_file=/etc/pg.conf\n`;
-    expect(await scanPsOutputForDataDir(out, [dir], dir, unreadable)).toEqual([]);
+    expect(await scanPsOutputForDataDir(out, [dir], dir, unreadable)).toBeNull();
+  });
+
+  it("treats a readable working directory as authoritative over the command line", async () => {
+    const other = clusterDir("other-pg-");
+    const out = `901\tpostgres\t/usr/bin/postgres -D ${other}\n`;
+    expect(await scanPsOutputForDataDir(out, [dir], dir, () => other)).toEqual([]);
+    expect((await scanPsOutputForDataDir(out, [dir], dir, () => dir))?.map((p) => p.pid)).toEqual([901]);
+    // The server stores its cluster elsewhere although -D names this one.
+    const named = `902\tpostgres\t/usr/bin/postgres -D ${dir}\n`;
+    expect(await scanPsOutputForDataDir(named, [dir], dir, () => other)).toEqual([]);
+  });
+
+  it("finds the owner when -D is a real cluster, an include hides the data_directory override, and the working directory is the target", async () => {
+    const target = clusterDir("pg-target-");
+    const configCluster = clusterDir("pg-config-cluster-");
+    writeFileSync(join(configCluster, "postgresql.conf"), "include 'hidden.conf'\n");
+    writeFileSync(join(configCluster, "hidden.conf"), `data_directory = '${target}'\n`);
+    const out = `901\tpostgres\t/usr/bin/postgres -D ${configCluster}\n`;
+    expect((await scanPsOutputForDataDir(out, [target], target, () => target))?.map((p) => p.pid)).toEqual([901]);
+    // Without a readable working directory the command line cannot rule the server out.
+    expect(await scanPsOutputForDataDir(out, [target], target, unreadable)).toBeNull();
   });
 
   it("recognizes our data directory named through a symlink alias", async () => {
@@ -468,7 +528,8 @@ describe("scanPsOutputForDataDir", () => {
     mkdirSync(child);
     writeFileSync(join(child, "PG_VERSION"), "16\n");
     const out = `901\tpostgres\t/usr/bin/postgres -D ${child}\n`;
-    expect(await scanPsOutputForDataDir(out, [base], base, unreadable)).toEqual([]);
+    expect(await scanPsOutputForDataDir(out, [base], base, () => child)).toEqual([]);
+    expect(await scanPsOutputForDataDir(out, [base], base, unreadable)).toBeNull();
   });
 
   it("does not let a configuration-only -D settle ownership (data_directory overrides it)", async () => {
@@ -484,33 +545,86 @@ describe("scanPsOutputForDataDir", () => {
     const out = `901\tpostgres\t/usr/bin/postgres -D ${unrelated} -D ${real}\n`;
     expect((await scanPsOutputForDataDir(out, [real], real, unreadable))?.map((p) => p.pid)).toEqual([901]);
     const reversed = `902\tpostgres\t/usr/bin/postgres -D ${real} -D ${unrelated}\n`;
-    expect(await scanPsOutputForDataDir(reversed, [real], real, unreadable)).toEqual([]);
+    expect(await scanPsOutputForDataDir(reversed, [real], real, unreadable)).toBeNull();
   });
 
   it("does not read the lowercase -d debug level as a data directory", async () => {
     const other = clusterDir("pg-debug-");
     const out = `901\tpostgres\t/usr/bin/postgres -D ${other} -d 5\n`;
-    expect(await scanPsOutputForDataDir(out, [dir], dir, unreadable)).toEqual([]);
+    expect(await scanPsOutputForDataDir(out, [dir], dir, unreadable)).toBeNull();
     const base = clusterDir("pg-debug-parent-");
     const child = join(base, "backup");
     mkdirSync(child);
     writeFileSync(join(child, "PG_VERSION"), "16\n");
     const descendant = `902\tpostgres\t/usr/bin/postgres -D ${child} -d 5\n`;
-    expect(await scanPsOutputForDataDir(descendant, [base], base, unreadable)).toEqual([]);
+    expect(await scanPsOutputForDataDir(descendant, [base], base, unreadable)).toBeNull();
+  });
+
+  describe("a data_directory setting overrides -D", () => {
+    // `-D` may name only the configuration directory of a server that stores this cluster elsewhere.
+    const settingForms = (target: string) =>
+      [
+        ["-c data_directory", `-c data_directory=${target}`],
+        ["--data_directory", `--data_directory=${target}`],
+      ] as const;
+
+    for (const debugLevel of ["", " -d 5"]) {
+      for (const [name] of settingForms("x")) {
+        it(`finds the owner when ${name} names the target and -D names another cluster${debugLevel ? " with a trailing -d 5" : ""}`, async () => {
+          const target = clusterDir("pg-target-");
+          const other = clusterDir("pg-config-dir-");
+          const setting = settingForms(target).find(([form]) => form === name)?.[1];
+          const out = `901\tpostgres\t/usr/bin/postgres -D ${other} ${setting}${debugLevel}\n`;
+          expect((await scanPsOutputForDataDir(out, [target], target, unreadable))?.map((p) => p.pid)).toEqual([901]);
+        });
+      }
+    }
+
+    it("lets the last data_directory setting win", async () => {
+      const target = clusterDir("pg-target-");
+      const other = clusterDir("pg-other-");
+      const toTarget = `901\tpostgres\tpostgres -D ${other} -c data_directory=${other} --data_directory=${target}\n`;
+      expect((await scanPsOutputForDataDir(toTarget, [target], target, unreadable))?.map((p) => p.pid)).toEqual([901]);
+      // The last setting names another directory: the command cannot show ownership.
+      const toOther = `902\tpostgres\tpostgres -D ${target} --data_directory=${target} -c data_directory=${other}\n`;
+      expect(await scanPsOutputForDataDir(toOther, [target], target, unreadable)).toBeNull();
+      expect(await scanPsOutputForDataDir(toOther, [target], target, () => other)).toEqual([]);
+    });
+
+    it("is not ownership when the setting names another directory", async () => {
+      const target = clusterDir("pg-target-");
+      const other = clusterDir("pg-other-");
+      const out = `901\tpostgres\tpostgres -D ${target} -c data_directory=${other}\n`;
+      expect(await scanPsOutputForDataDir(out, [target], target, unreadable)).toBeNull();
+      expect(await scanPsOutputForDataDir(out, [target], target, () => other)).toEqual([]);
+    });
+
+    it("finds the owner through the working directory when only the configuration file sets data_directory", async () => {
+      const target = clusterDir("pg-target-");
+      const configDir = clusterDir("pg-config-dir-");
+      writeFileSync(join(configDir, "postgresql.conf"), `# cluster elsewhere\ndata_directory = '${target}'\n`);
+      const out = `901\tpostgres\t/usr/bin/postgres -D ${configDir}\n`;
+      expect(await scanPsOutputForDataDir(out, [target], target, unreadable)).toBeNull();
+      expect((await scanPsOutputForDataDir(out, [target], target, () => target))?.map((p) => p.pid)).toEqual([901]);
+      expect(await scanPsOutputForDataDir(out, [target], target, () => "/elsewhere")).toEqual([]);
+    });
   });
 
   it("finds a server by command line or by working directory", async () => {
     const out = `901\tpostgres\tpostgres -D ${dir}\n902\tpostgres\t/usr/bin/postgres\n903\tpostgres\t/usr/bin/postgres\n`;
-    const cwd = (pid: number) => (pid === 902 ? dir : "/elsewhere");
+    const cwd = (pid: number) => {
+      if (pid === 901) throw new Error("ENOENT");
+      return pid === 902 ? dir : "/elsewhere";
+    };
     expect((await scanPsOutputForDataDir(out, [dir], dir, cwd))?.map((p) => p.pid)).toEqual([901, 902]);
   });
 
-  it("ignores the children of an unrelated PostgreSQL whose directory is conclusive", async () => {
+  it("ignores the children of an unrelated PostgreSQL whose directory is known", async () => {
     const other = clusterDir("other-pg-");
     const out =
       `901\tpostgres\t/usr/bin/postgres -D ${other}\n` +
       "902\tpostgres\tpostgres: checkpointer \n903\tpostgres\tpostgres: walwriter\n";
-    expect(await scanPsOutputForDataDir(out, [dir], dir, unreadable)).toEqual([]);
+    expect(await scanPsOutputForDataDir(out, [dir], dir, () => other)).toEqual([]);
   });
 
   it("still examines an executable path that contains spaces", async () => {
@@ -533,10 +647,11 @@ describe("scanWindowsPostgresRows", () => {
     expect(await scanWindowsPostgresRows([{ ProcessId: 10, CommandLine: null }], [dir], dir)).toBeNull();
   });
 
-  it("is conclusive when -D names another existing directory", async () => {
+  it("is inconclusive when -D names another existing directory", async () => {
+    // A configuration file can replace `-D`, and Windows offers no working directory to check.
     const other = clusterDir("other-pg-");
     const rows = [{ ProcessId: 10, CommandLine: `postgres.exe -D ${other}` }];
-    expect(await scanWindowsPostgresRows(rows, [dir], dir)).toEqual([]);
+    expect(await scanWindowsPostgresRows(rows, [dir], dir)).toBeNull();
   });
 
   it("reads -D from the original command line, which win32 normalization lowercases", async () => {
@@ -545,10 +660,30 @@ describe("scanWindowsPostgresRows", () => {
     try {
       const other = clusterDir("Other-PG-Mixed-");
       const real = clusterDir("Real-PG-Mixed-");
-      expect(await scanWindowsPostgresRows([{ ProcessId: 10, CommandLine: `postgres.exe -D ${other}` }], [dir], dir)).toEqual([]);
+      expect(await scanWindowsPostgresRows([{ ProcessId: 10, CommandLine: `postgres.exe -D ${other}` }], [dir], dir)).toBeNull();
       // The last -D still wins, and a trailing -d <debug level> does not replace it.
       const last = [{ ProcessId: 11, CommandLine: `postgres.exe -D ${other} -D ${real} -d 5` }];
       expect((await scanWindowsPostgresRows(last, [real], real))?.map((row) => row.pid)).toEqual([11]);
+    } finally {
+      Object.defineProperty(process, "platform", platform);
+    }
+  });
+
+  it("finds the owner when data_directory names the target and -D names another cluster", async () => {
+    const platform = Object.getOwnPropertyDescriptor(process, "platform") as PropertyDescriptor;
+    Object.defineProperty(process, "platform", { value: "win32" });
+    try {
+      const target = clusterDir("Target-PG-Mixed-");
+      const other = clusterDir("Config-PG-Mixed-");
+      const lines = [
+        `postgres.exe -D ${other} -c data_directory=${target}`,
+        `postgres.exe -D ${other} -c data_directory=${target} -d 5`,
+        `postgres.exe -D ${other} --data_directory=${target} -d 5`,
+      ];
+      for (const [index, CommandLine] of lines.entries()) {
+        const rows = [{ ProcessId: 20 + index, CommandLine }];
+        expect((await scanWindowsPostgresRows(rows, [target], target))?.map((row) => row.pid)).toEqual([20 + index]);
+      }
     } finally {
       Object.defineProperty(process, "platform", platform);
     }
@@ -559,13 +694,13 @@ describe("scanWindowsPostgresRows", () => {
     expect((await scanWindowsPostgresRows(rows, [dir], dir))?.map((row) => row.pid)).toEqual([10]);
   });
 
-  it("ignores forked children of an unrelated postmaster", async () => {
-    const other = clusterDir("other-pg-");
+  it("ignores forked children of a postmaster", async () => {
     const rows = [
-      { ProcessId: 10, CommandLine: `postgres.exe -D ${other}` },
+      { ProcessId: 10, CommandLine: `postgres.exe -D ${dir}` },
       { ProcessId: 11, CommandLine: '"C:\\pg\\bin\\postgres.exe" --forkchild=checkpointer 1234' },
     ];
-    expect(await scanWindowsPostgresRows(rows, [dir], dir)).toEqual([]);
+    expect((await scanWindowsPostgresRows(rows, [dir], dir))?.map((row) => row.pid)).toEqual([10]);
+    expect(await scanWindowsPostgresRows(rows.slice(1), [dir], dir)).toEqual([]);
   });
 
   it("finds nothing when no postgres.exe is running", async () => {
@@ -577,7 +712,10 @@ describe("scanPsOutputForDataDir with a full-path comm column", () => {
   it("reads a macOS comm path that contains spaces from its last segment", async () => {
     const dir = "/srv/paperclip/db";
     const out = `901\t/Applications/Postgres App/bin/postgres\t/Applications/Postgres App/bin/postgres -D ${dir}\n`;
-    expect((await scanPsOutputForDataDir(out, [dir], dir, () => "/elsewhere"))?.map((p) => p.pid)).toEqual([901]);
+    const unreadable = () => {
+      throw new Error("ENOENT");
+    };
+    expect((await scanPsOutputForDataDir(out, [dir], dir, unreadable))?.map((p) => p.pid)).toEqual([901]);
   });
 });
 

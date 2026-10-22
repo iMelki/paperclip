@@ -26,6 +26,13 @@ All notable changes to this repository should be recorded here.
   cannot be verified makes startup refuse, and only a lock that is still stale
   is moved aside.
 
+- Embedded PostgreSQL process discovery reads `-c data_directory=<path>` and
+  `--data_directory=<path>` as the effective data directory, ahead of `-D`. A
+  readable working directory of a server now decides ownership first. A `-D`
+  that names another cluster no longer proves that the server stores a
+  different one, because a configuration file or an include can replace it; such
+  a server is "unknown", and startup refuses instead of moving the lock aside.
+
 - Embedded PostgreSQL process discovery reads only an uppercase `-D` as the
   data directory option. PostgreSQL's lowercase `-d <debug level>` no longer
   replaces it, so a server that is started with `-D <dir> -d 5` is identified
