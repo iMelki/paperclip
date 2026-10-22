@@ -33,7 +33,9 @@ answers on the recorded or configured port, the lock is stale too. A stale lock 
 never deleted: startup renames it to `postmaster.pid.stale-<timestamp>`, then
 starts normally. If the rename fails, startup refuses (exit code 75). Moved-aside
 locks are never pruned automatically; delete old `postmaster.pid.stale-*` files by hand
-once you no longer need them.
+once you no longer need them. For a data directory that was never initialised (no
+`PG_VERSION`), the archive is written beside it as `<dir>.postmaster.pid.stale-<timestamp>`
+so the first-time `initdb` still finds an empty directory.
 
 If `postmaster.pid` cannot be read or holds no valid process id, the owner is
 looked up without it. A server answering on the configured port, or any

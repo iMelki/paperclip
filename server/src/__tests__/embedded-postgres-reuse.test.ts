@@ -3,6 +3,14 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpath
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+/** A directory that looks like a PostgreSQL cluster (it has PG_VERSION). */
+function clusterDir(prefix: string): string {
+  const dir = mkdtempSync(join(tmpdir(), prefix));
+  writeFileSync(join(dir, "PG_VERSION"), "16\n");
+  return dir;
+}
+
 import {
   EMBEDDED_POSTGRES_LOCK_REFUSAL_EXIT_CODE,
   EmbeddedPostgresLockRefusal,
@@ -142,7 +150,7 @@ describe("embedded PostgreSQL reuse identity", () => {
 
     it("ignores a server on the configured port that serves another data directory", async () => {
       garbled();
-      probe.mockResolvedValue(mkdtempSync(join(tmpdir(), "other-pg-")));
+      probe.mockResolvedValue(clusterDir("other-pg-"));
       expect(await readRunningEmbeddedPostgres(dataDir, 55432)).toBeNull();
       expect(existsSync(pidFile)).toBe(false);
     });
@@ -191,7 +199,7 @@ describe("embedded PostgreSQL reuse identity", () => {
       await new Promise((r) => setTimeout(r, 300));
       const owners = await listPostgresProcessesForDataDir(dataDir);
       expect(owners?.some((owner) => owner.pid === child.pid && owner.command.includes("My Postgres"))).toBe(true);
-      expect((await listPostgresProcessesForDataDir(mkdtempSync(join(tmpdir(), "other-pg-"))))?.length ?? 0).toBe(0);
+      expect((await listPostgresProcessesForDataDir(clusterDir("other-pg-")))?.length ?? 0).toBe(0);
     } finally {
       child.kill();
     }
@@ -215,6 +223,27 @@ describe("embedded PostgreSQL reuse identity", () => {
     await expect(readRunningEmbeddedPostgres(dataDir, 55432)).rejects.toThrow("invalid port");
     expect(existsSync(pidFile)).toBe(true);
     expect(probe).not.toHaveBeenCalled();
+  });
+
+  it("moves a dead-PID lock out of an uninitialised cluster directory before initdb runs", async () => {
+    rmSync(join(dataDir, "PG_VERSION"));
+    writePid("4242");
+    vi.mocked(process.kill).mockImplementation(() => { throw Object.assign(new Error("no such process"), { code: "ESRCH" }); });
+    expect(await readRunningEmbeddedPostgres(dataDir, 55432)).toBeNull();
+    expect(readdirSync(dataDir)).toEqual([]);
+    const beside = readdirSync(dirname(dataDir)).filter((n) => n.startsWith(`${basename(dataDir)}.postmaster.pid.stale-`));
+    expect(beside).toHaveLength(1);
+    rmSync(join(dirname(dataDir), beside[0]));
+  });
+
+  it("moves a recycled-PID lock aside when the configured port serves another data directory", async () => {
+    writePid(String(FOREIGN_PID));
+    probe.mockImplementation(async (url: string) => {
+      if (url.includes("55432")) throw new Error("connection refused");
+      return clusterDir("other-pg-");
+    });
+    expect(await readRunningEmbeddedPostgres(dataDir, 55433, "node")).toBeNull();
+    expect(existsSync(pidFile)).toBe(false);
   });
 
   it("treats a failed PostgreSQL query for this process's own PID as a stale lock", async () => {
@@ -415,7 +444,7 @@ describe("scanPsOutputForDataDir", () => {
   });
 
   it("is conclusive when the command names another existing data directory", async () => {
-    const other = mkdtempSync(join(tmpdir(), "other-pg-"));
+    const other = clusterDir("other-pg-");
     const out = `901\tpostgres\t/usr/bin/postgres -D ${other} -c config_file=/etc/pg.conf\n`;
     expect(await scanPsOutputForDataDir(out, [dir], dir, unreadable)).toEqual([]);
   });
@@ -434,11 +463,28 @@ describe("scanPsOutputForDataDir", () => {
   });
 
   it("does not treat a descendant -D directory as the data directory", async () => {
-    const base = mkdtempSync(join(tmpdir(), "pg-parent-"));
+    const base = clusterDir("pg-parent-");
     const child = join(base, "backup");
     mkdirSync(child);
+    writeFileSync(join(child, "PG_VERSION"), "16\n");
     const out = `901\tpostgres\t/usr/bin/postgres -D ${child}\n`;
     expect(await scanPsOutputForDataDir(out, [base], base, unreadable)).toEqual([]);
+  });
+
+  it("does not let a configuration-only -D settle ownership (data_directory overrides it)", async () => {
+    const configDir = mkdtempSync(join(tmpdir(), "pg-conf-")); // no PG_VERSION: not a cluster
+    const out = `901\tpostgres\t/usr/bin/postgres -D ${configDir}\n`;
+    expect(await scanPsOutputForDataDir(out, [dir], dir, unreadable)).toBeNull();
+    expect((await scanPsOutputForDataDir(out, [dir], dir, () => dir))?.map((p) => p.pid)).toEqual([901]);
+  });
+
+  it("evaluates the last data-directory option, which PostgreSQL applies", async () => {
+    const real = clusterDir("pg-last-");
+    const unrelated = clusterDir("pg-first-");
+    const out = `901\tpostgres\t/usr/bin/postgres -D ${unrelated} -D ${real}\n`;
+    expect((await scanPsOutputForDataDir(out, [real], real, unreadable))?.map((p) => p.pid)).toEqual([901]);
+    const reversed = `902\tpostgres\t/usr/bin/postgres -D ${real} -D ${unrelated}\n`;
+    expect(await scanPsOutputForDataDir(reversed, [real], real, unreadable)).toEqual([]);
   });
 
   it("finds a server by command line or by working directory", async () => {
@@ -448,7 +494,7 @@ describe("scanPsOutputForDataDir", () => {
   });
 
   it("ignores the children of an unrelated PostgreSQL whose directory is conclusive", async () => {
-    const other = mkdtempSync(join(tmpdir(), "other-pg-"));
+    const other = clusterDir("other-pg-");
     const out =
       `901\tpostgres\t/usr/bin/postgres -D ${other}\n` +
       "902\tpostgres\tpostgres: checkpointer \n903\tpostgres\tpostgres: walwriter\n";
@@ -476,7 +522,7 @@ describe("scanWindowsPostgresRows", () => {
   });
 
   it("is conclusive when -D names another existing directory", async () => {
-    const other = mkdtempSync(join(tmpdir(), "other-pg-"));
+    const other = clusterDir("other-pg-");
     const rows = [{ ProcessId: 10, CommandLine: `postgres.exe -D ${other}` }];
     expect(await scanWindowsPostgresRows(rows, [dir], dir)).toEqual([]);
   });
@@ -487,7 +533,7 @@ describe("scanWindowsPostgresRows", () => {
   });
 
   it("ignores forked children of an unrelated postmaster", async () => {
-    const other = mkdtempSync(join(tmpdir(), "other-pg-"));
+    const other = clusterDir("other-pg-");
     const rows = [
       { ProcessId: 10, CommandLine: `postgres.exe -D ${other}` },
       { ProcessId: 11, CommandLine: '"C:\\pg\\bin\\postgres.exe" --forkchild=checkpointer 1234' },

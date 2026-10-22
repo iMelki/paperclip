@@ -39,7 +39,7 @@ export async function readProcessName(pid: number): Promise<string | null> {
 
 const POSTGRES_PROCESS_NAME_RE = /^(?:postgres|postmaster)(?:\.exe)?$/i;
 const DATA_DIRECTORY_ARGUMENT =
-  /(?:^|\s)(?:-D\s*|--data-directory[=\s])(?:"([^"]+)"|'([^']+)'|(\S+))/i;
+  /(?:^|\s)(?:-D\s*|--data-directory[=\s])(?:"([^"]+)"|'([^']+)'|(\S+))/gi;
 
 const POSTGRES_CHILD_TITLE_RE = /^postgres:\s/i;
 const POSTGRES_FORK_CHILD_RE = /(?:^|\s)--fork/i;
@@ -56,12 +56,18 @@ async function commandOwnership(
   needles: string[],
   dataDir: string,
 ): Promise<DataDirectoryOwnership> {
-  // An explicit existing -D value is compared first: a descendant such as `<dataDir>/backup`
-  // would otherwise pass the broader path-reference test below.
-  const named = DATA_DIRECTORY_ARGUMENT.exec(command);
-  const value = named?.[1] ?? named?.[2] ?? named?.[3];
+  // PostgreSQL applies the last data-directory option, so that one is the effective value. An
+  // explicit existing value is compared first: a descendant such as `<dataDir>/backup` would
+  // otherwise pass the broader path-reference test below.
+  let value: string | undefined;
+  for (const named of command.matchAll(DATA_DIRECTORY_ARGUMENT)) value = named[1] ?? named[2] ?? named[3];
   if (value && isAbsolute(value) && existsSync(value)) {
-    return (await isSameDataDirectory(value, dataDir)) ? "owns" : "other";
+    if (await isSameDataDirectory(value, dataDir)) return "owns";
+    // `data_directory` in postgresql.conf overrides `-D`, so `-D` may only name the configuration
+    // directory of a server that still stores this cluster. A directory that is itself a cluster
+    // (it has PG_VERSION) is the data directory; anything else proves nothing.
+    if (existsSync(join(value, "PG_VERSION"))) return "other";
+    return needles.some((needle) => commandReferencesPath(command, needle)) ? "owns" : "unknown";
   }
   if (needles.some((needle) => commandReferencesPath(command, needle))) return "owns";
   return "unknown";
@@ -343,6 +349,18 @@ async function recoverLockWithUnknownOwner(
   return null;
 }
 
+/**
+ * A stale lock inside a cluster directory that has no PG_VERSION would make the first-time
+ * `initdb` fail (it needs an empty directory), and initialisation runs before any later
+ * lock handling, so the lock is archived beside the directory here. An initialised cluster
+ * keeps its lock for the caller's existing handling.
+ */
+function moveAsideBeforeInitialisation(pidFile: string, dataDir: string): void {
+  if (existsSync(join(dataDir, "PG_VERSION"))) return;
+  const aside = moveStaleLockAside(pidFile);
+  logger.warn({ pidFile, aside }, "moved a stale postmaster.pid out of an uninitialised data directory");
+}
+
 export async function isSameDataDirectory(a: string, b: string): Promise<boolean> {
   const [left, right] = await Promise.all([canonicalDataDirectory(a), canonicalDataDirectory(b)]);
   return left === right;
@@ -394,7 +412,10 @@ export async function readRunningEmbeddedPostgres(
   } catch (error) {
     // Only ESRCH proves the process is gone. EPERM and any other error leave
     // liveness unknown, so identity must still be established.
-    if ((error as NodeJS.ErrnoException).code === "ESRCH") return null;
+    if ((error as NodeJS.ErrnoException).code === "ESRCH") {
+      moveAsideBeforeInitialisation(pidFile, dataDir);
+      return null;
+    }
   }
 
   const port = Number(lines[3]?.trim() || configuredPort);
@@ -411,6 +432,7 @@ export async function readRunningEmbeddedPostgres(
         { pid, port },
         "Embedded PostgreSQL identity could not be verified and postmaster.pid names the current process; treating postmaster.pid as stale and trying normal startup",
       );
+      moveAsideBeforeInitialisation(pidFile, dataDir);
       return null;
     }
     // A live PID that is affirmatively not PostgreSQL (the OS recycled it), with
@@ -420,9 +442,12 @@ export async function readRunningEmbeddedPostgres(
     const processName = await (options.readProcessName ?? readProcessName)(pid);
     if (processName !== null && !POSTGRES_PROCESS_NAME_RE.test(processName)) {
       // The recorded port was already probed above; probe the configured one too.
-      const configuredAnswers =
-        port !== configuredPort &&
-        (await getPostgresDataDirectory(adminUrl(configuredPort)).catch(() => null)) !== null;
+      const configuredDir =
+        port !== configuredPort
+          ? await getPostgresDataDirectory(adminUrl(configuredPort)).catch(() => null)
+          : null;
+      // A server on the configured port that serves another data directory does not own this lock.
+      const configuredAnswers = configuredDir !== null && (await isSameDataDirectory(configuredDir, dataDir));
       if (!configuredAnswers) {
         const aside = uniqueAsidePath(pidFile);
         try {
