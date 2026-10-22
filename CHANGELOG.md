@@ -20,6 +20,29 @@ All notable changes to this repository should be recorded here.
 
 ## Unreleased
 
+- **Fix:** a second embedded PostgreSQL start on the same data directory no
+  longer moves the first start's live `postmaster.pid` aside. The lock is
+  verified again just before `start()`. A live owner is reused, an owner that
+  cannot be verified makes startup refuse, and only a lock that is still stale
+  is moved aside.
+
+- Embedded PostgreSQL process discovery reads `-c data_directory=<path>` and
+  `--data_directory=<path>` as the effective data directory, ahead of `-D`. A
+  readable working directory of a server now decides ownership first. A `-D`
+  that names another cluster no longer proves that the server stores a
+  different one, because a configuration file or an include can replace it; such
+  a server is "unknown", and startup refuses instead of moving the lock aside.
+  A lock is moved aside only if it is the file that was examined: the file is
+  verified through a hard link before anything is moved, an unknown identity
+  fails closed, and a file that replaces it in the last instant is put back
+  without overwriting a newer file. A start lock beside the data directory keeps
+  two Paperclip starts apart. It is keyed on the physical path, it is never moved
+  or removed automatically (a dead owner is refused with a manual step), a
+  `postmaster.pid` is moved aside only while that start lock is held, and a start
+  refuses (instead of continuing unserialised) when the lock cannot be created or
+  written. A refusal names every server whose ownership could
+  not be proven and the safe manual step.
+
 - Embedded PostgreSQL process discovery reads only an uppercase `-D` as the
   data directory option. PostgreSQL's lowercase `-d <debug level>` no longer
   replaces it, so a server that is started with `-D <dir> -d 5` is identified
