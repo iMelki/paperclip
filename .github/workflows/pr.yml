@@ -114,6 +114,9 @@ jobs:
       - name: Test e2e shard partition
         run: node --test ./scripts/__tests__/e2e-shard.test.mjs
 
+      - name: Test e2e owned cleanup
+        run: node --test ./scripts/__tests__/e2e-owned-cleanup.test.mjs
+
       - name: Test release verify workflow wiring
         run: node --test ./scripts/__tests__/release-verify-workflow.test.mjs
 
@@ -555,13 +558,16 @@ jobs:
         # playwright.config.ts boots onboard in its own temp PAPERCLIP_HOME.
         run: google-chrome --version
 
+      - name: Prepare this job's e2e home
+        # One canonical dir per run, attempt, job and shard under RUNNER_TEMP,
+        # with an identity marker. The cleanup step deletes only this dir.
+        env:
+          PAPERCLIP_E2E_OWNER_SUFFIX: ${{ matrix.shard_index }}
+        run: ./scripts/ci/e2e-owned-cleanup.sh prepare
+
       - name: Run e2e tests
         env:
-          # playwright.config.ts creates paperclip-e2e-home-* (embedded Postgres
-          # data) under os.tmpdir(). On the box /tmp is a long-lived tmpfs, so
-          # point it at the per-job temp dir, which the runner wipes after each
-          # job. (The runner context is not available in job-level env.)
-          TMPDIR: ${{ runner.temp }}
+          PAPERCLIP_E2E_OWNER_SUFFIX: ${{ matrix.shard_index }}
           PAPERCLIP_E2E_SKIP_LLM: "true"
           PAPERCLIP_PLAYWRIGHT_CHANNEL: "chrome"
         run: |
@@ -571,7 +577,11 @@ jobs:
           specs="$(node ./scripts/e2e-shard.mjs \
             --shard-index ${{ matrix.shard_index }} --shard-count ${{ matrix.shard_count }})"
           echo "shard ${{ matrix.shard_label }} specs: $specs"
-          pnpm run test:e2e $specs
+          # playwright.config.ts creates paperclip-e2e-home-* (embedded Postgres
+          # data) under os.tmpdir(). The wrapper sets TMPDIR to this job's owned
+          # dir (keeping it out of the box's long-lived /tmp) and records the
+          # session it starts so cleanup can tell this job's processes apart.
+          ./scripts/ci/e2e-owned-cleanup.sh run -- pnpm run test:e2e $specs
 
       - name: Upload Playwright report
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -583,37 +593,17 @@ jobs:
             tests/e2e/test-results/
           retention-days: 14
 
-      - name: Clean up leftover e2e server and temp home
-        # The runner's orphan cleanup only catches processes that keep
-        # RUNNER_TRACKING_ID. Collect the exact PIDs of this user's leftover
-        # onboard/Postgres processes and of the listener on port 3199, then kill
-        # each PID after checking it still belongs to this user. No pkill -f and
-        # no fuser -k, so nothing is killed by pattern or port alone. Best effort:
-        # this step never fails the job, and it skips its own shell PID.
+      - name: Clean up this job's e2e server and temp home
+        env:
+          PAPERCLIP_E2E_OWNER_SUFFIX: ${{ matrix.shard_index }}
+        # Kills only processes this job started (recorded session leader PID
+        # plus start time, and the run's owner token in each process
+        # environment) and deletes only this job's canonical home dir under
+        # RUNNER_TEMP after checking its identity marker. No pattern, port or
+        # /tmp matching, so a concurrent job on the same box is never touched.
+        # Best effort: never fails the job.
         if: always()
-        run: |
-          uid="$(id -u)"
-          pids=""
-          for pattern in '[p]aperclipai onboard' '[p]aperclip-e2e-home-'; do
-            pids="$pids $(pgrep -u "$uid" -f "$pattern" || true)"
-          done
-          if command -v lsof >/dev/null 2>&1; then
-            pids="$pids $(lsof -t -a -u "$uid" -iTCP:3199 -sTCP:LISTEN 2>/dev/null || true)"
-          elif command -v ss >/dev/null 2>&1; then
-            pids="$pids $(ss -Htlnp 'sport = :3199' 2>/dev/null | grep -oE ',pid=[0-9]+,fd=' | grep -oE '[0-9]+' || true)"
-          fi
-          for pid in $(printf '%s\n' $pids | sort -un); do
-            [ "$pid" = "$$" ] && continue
-            [ "$(stat -c %u "/proc/$pid" 2>/dev/null)" = "$uid" ] || continue
-            echo "killing leftover e2e pid $pid"
-            kill "$pid" 2>/dev/null || true
-          done
-          for dir in "${RUNNER_TEMP:-}" /tmp; do
-            [ -n "$dir" ] && [ -d "$dir" ] || continue
-            find "$dir" -maxdepth 1 -user "$uid" -name 'paperclip-e2e-home-*' \
-              -exec rm -rf {} + 2>/dev/null || true
-          done
-          echo "e2e cleanup done"
+        run: ./scripts/ci/e2e-owned-cleanup.sh cleanup
 
   e2e:
     # Preserve the legacy required-check name while the specs run sharded
