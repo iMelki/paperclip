@@ -1,12 +1,11 @@
 name: Agent runtime images
 
+# Dispatch only. The push trigger was removed: this job publishes to the
+# upstream ghcr.io/paperclipai registry and signs with cosign keyless OIDC,
+# neither of which this fork can do from a box runner (box-img's guard also
+# refuses anything but default-branch builds of this repo's own images), and
+# its only push run (August) failed on a GitHub-hosted runner.
 on:
-  push:
-    branches: [master]
-    paths:
-      - "docker/agent-runtime/**"
-      - "tools/agent-shim/**"
-      - ".github/workflows/agent-runtime-images.yml"
   workflow_dispatch:
     inputs:
       version:
