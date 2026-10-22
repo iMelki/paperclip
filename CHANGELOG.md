@@ -1,5 +1,19 @@
 # Changelog
 
+- **[#162]** The patched acpx 0.12.0 client now advertises AIR `sessionFailure`
+  support and fails error-severity typed terminal turns even when the agent
+  returns `end_turn`. A record with no severity counts as an error, as the AIR
+  contract defines. Only an explicit warning stays successful. Per-turn callbacks receive the
+  complete title and details for later diagnostic handling. The current
+  codex-acp 1.1.14 ignores this capability; its existing behavior is unchanged.
+  A warning or incident that an agent sends on `session_info_update` is shown as
+  status text (its title, else the category) instead of the generic "session
+  updated". The failed run result records the typed category as
+  `resultJson.sessionFailureCategory`; mapping it to quota or retry handling is
+  left to the recovery changes.
+  Prompt-response usage is recorded once per turn, including failed turns.
+  Refresh the lockfile patch hash in a separate dependency pull request.
+
 - Preserve historical browser proof variants in a verified private archive and dated index without replacing current gauntlet images or receipts.
 
 All notable changes to this repository should be recorded here.
@@ -10,6 +24,11 @@ All notable changes to this repository should be recorded here.
   the ACP error and stop reason, or from a non-ACP run's own error field. A run
   whose summary, output or transcript only quotes the phrase is no longer parked
   as a provider quota wait.
+
+- Embedded PostgreSQL process discovery reads only an uppercase `-D` as the
+  data directory option. PostgreSQL's lowercase `-d <debug level>` no longer
+  replaces it, so a server that is started with `-D <dir> -d 5` is identified
+  by its `-D` value.
 
 - **Docs:** the fork getting-started guide uses placeholders for local
   workspace and notes-vault paths instead of one machine's paths.

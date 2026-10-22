@@ -43,6 +43,263 @@
   },
   "gates": [
     {
+      "path": "patches/acpx@0.12.0.patch",
+      "negativeFixture": "packages/adapter-utils/src/acpx-engine/typed-failure.test.ts",
+      "candidate": {
+        "baseHead": "42ef1700fb6f2da96a1bf04ba9d900c1f26e58cd",
+        "basePatchGitBlob": "8d5500a7058a4b2baadbf208e69958d7b69bc866",
+        "patchSha256": "0016168dabdce86a1d9a1b6b447a2d5ddd1df6f7527c45f496497e04b94b2d3b",
+        "installedRuntimeSha256": "4d0e95923c6ba6b20fe32390be9a63cf3acbcfb47ddcb561ebc3fa689b6758dc",
+        "acpxVersion": "0.12.0",
+        "restoredAtUtc": "2026-10-07T20:36:39.5586014Z"
+      },
+      "id": "acpx-air-session-failure-negotiation",
+      "description": "Advertise AIR sessionFailure so a supporting ACP agent can report terminal failures.",
+      "observedFailure": {
+        "date": "2026-10-07",
+        "command": "corepack pnpm@9.15.4 exec vitest run packages/adapter-utils/src/acpx-engine/typed-failure.test.ts --project @paperclipai/adapter-utils --maxWorkers=1 --no-file-parallelism -t fails a negotiated|advertises|warning --reporter=verbose",
+        "exitCode": 1,
+        "breakApplied": "Frozen base installation used the original 99-line patch. The fixture only emits typed metadata after negotiation.",
+        "reason": "4 failed, 2 passed, 2 excluded callback tests. In both modes initializeMeta was [null]; expected undefined to be 1. The failure runs returned exitCode 0 and end_turn; expected +0 to be 1.",
+        "output": [
+          {
+            "mode": "oneshot",
+            "exitCode": 0,
+            "errorCode": null,
+            "stopReason": "end_turn"
+          },
+          {
+            "mode": "oneshot",
+            "initializeMeta": [
+              null,
+              null
+            ]
+          },
+          {
+            "mode": "persistent",
+            "exitCode": 0,
+            "errorCode": null,
+            "stopReason": "end_turn"
+          },
+          {
+            "mode": "persistent",
+            "initializeMeta": [
+              null
+            ]
+          }
+        ],
+        "restoredPass": "Candidate overlay restored and hash read back. Same full focused file: 8 passed, 0 failed, 0 skipped, exit 0. Both initialize records advertise version 1 and capabilities [sessionFailure]; warnings stay successful.",
+        "restoredCommand": "corepack pnpm@9.15.4 exec vitest run packages/adapter-utils/src/acpx-engine/typed-failure.test.ts --project @paperclipai/adapter-utils --maxWorkers=1 --no-file-parallelism --reporter=verbose",
+        "restoredExitCode": 0,
+        "restoredOutput": [
+          {
+            "mode": "oneshot",
+            "exitCode": 1,
+            "errorCode": "acpx_turn_failed",
+            "stopReason": "ACP agent reported a terminal request failure."
+          },
+          {
+            "mode": "oneshot",
+            "initializeMeta": [
+              {
+                "jetbrains": {
+                  "air": {
+                    "version": 1,
+                    "capabilities": [
+                      "sessionFailure"
+                    ]
+                  }
+                }
+              },
+              {
+                "jetbrains": {
+                  "air": {
+                    "version": 1,
+                    "capabilities": [
+                      "sessionFailure"
+                    ]
+                  }
+                }
+              }
+            ]
+          },
+          {
+            "mode": "persistent",
+            "exitCode": 1,
+            "errorCode": "acpx_turn_failed",
+            "stopReason": "ACP agent reported a terminal request failure."
+          },
+          {
+            "mode": "persistent",
+            "initializeMeta": [
+              {
+                "jetbrains": {
+                  "air": {
+                    "version": 1,
+                    "capabilities": [
+                      "sessionFailure"
+                    ]
+                  }
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "currentHeadRerun": {
+        "head": "3fdd6b8dc49e18e5f537283ea0d31fdfada39ce4",
+        "baseHead": "95956f99516afaf23bccff2b34005c30c97a2c1a",
+        "patchGitBlob": "1a6b4816aadaa293cb6abe7e9072449253582139",
+        "patchSha256": "01dddc6f0fb228cb181a8987eb5ac68c50aae9027b2dce6ba13395014f47f3fa",
+        "date": "2026-10-20",
+        "command": "pnpm exec vitest run packages/adapter-utils/src/acpx-engine/typed-failure.test.ts --project @paperclipai/adapter-utils --maxWorkers=1 --no-file-parallelism",
+        "result": "15 passed, 0 failed, 0 skipped, exit 0; the test resolved the runtime built from this patch (verified byte-identical to the patch applied to the pristine package).",
+        "note": "The observedFailure and 'restoredPass' entries above (8 tests, base 42ef1700, patch 0016168d) record the earlier candidate and were not re-run against this head; the focused file now holds 15 tests."
+      }
+    },
+    {
+      "path": "patches/acpx@0.12.0.patch",
+      "negativeFixture": "packages/adapter-utils/src/acpx-engine/typed-failure.test.ts",
+      "candidate": {
+        "baseHead": "42ef1700fb6f2da96a1bf04ba9d900c1f26e58cd",
+        "basePatchGitBlob": "8d5500a7058a4b2baadbf208e69958d7b69bc866",
+        "patchSha256": "0016168dabdce86a1d9a1b6b447a2d5ddd1df6f7527c45f496497e04b94b2d3b",
+        "installedRuntimeSha256": "4d0e95923c6ba6b20fe32390be9a63cf3acbcfb47ddcb561ebc3fa689b6758dc",
+        "acpxVersion": "0.12.0",
+        "restoredAtUtc": "2026-10-07T20:36:39.5586014Z"
+      },
+      "id": "acpx-typed-terminal-session-failure",
+      "description": "Fail error-severity typed terminal turns despite end_turn; preserve warnings and full per-turn diagnostics.",
+      "observedFailure": {
+        "date": "2026-10-07",
+        "command": "corepack pnpm@9.15.4 exec vitest run packages/adapter-utils/src/acpx-engine/typed-failure.test.ts --project @paperclipai/adapter-utils --maxWorkers=1 --no-file-parallelism -t fails a negotiated|advertises --reporter=verbose",
+        "exitCode": 1,
+        "breakApplied": "Removed only the terminalFailureCategory guard from the owned installed runPromptTurn. Capability advertisement and callback plumbing remained. Asserted the exact guard span and throw before removal.",
+        "reason": "2 failed, 2 passed, 4 excluded tests. Both advertisement checks passed, but the actual negotiated typed errors returned exitCode 0 and end_turn; expected +0 to be 1. This isolates the terminal detector from negotiation.",
+        "output": [
+          {
+            "mode": "oneshot",
+            "exitCode": 0,
+            "errorCode": null,
+            "stopReason": "end_turn"
+          },
+          {
+            "mode": "oneshot",
+            "initializeMeta": [
+              {
+                "jetbrains": {
+                  "air": {
+                    "version": 1,
+                    "capabilities": [
+                      "sessionFailure"
+                    ]
+                  }
+                }
+              },
+              {
+                "jetbrains": {
+                  "air": {
+                    "version": 1,
+                    "capabilities": [
+                      "sessionFailure"
+                    ]
+                  }
+                }
+              }
+            ]
+          },
+          {
+            "mode": "persistent",
+            "exitCode": 0,
+            "errorCode": null,
+            "stopReason": "end_turn"
+          },
+          {
+            "mode": "persistent",
+            "initializeMeta": [
+              {
+                "jetbrains": {
+                  "air": {
+                    "version": 1,
+                    "capabilities": [
+                      "sessionFailure"
+                    ]
+                  }
+                }
+              }
+            ]
+          }
+        ],
+        "restoredPass": "Replaced the four owned package files with the candidate using atomic file replacement; store hardlinks were not edited. Runtime SHA-256 matches the candidate. Full focused file: 8 passed, 0 failed, 0 skipped, exit 0. Both startTurn and runTurn bind callbacks on consecutive persistent turns and preserve a title beyond 4096 characters.",
+        "restoredCommand": "corepack pnpm@9.15.4 exec vitest run packages/adapter-utils/src/acpx-engine/typed-failure.test.ts --project @paperclipai/adapter-utils --maxWorkers=1 --no-file-parallelism --reporter=verbose",
+        "restoredExitCode": 0,
+        "restoredOutput": [
+          {
+            "mode": "oneshot",
+            "exitCode": 1,
+            "errorCode": "acpx_turn_failed",
+            "stopReason": "ACP agent reported a terminal request failure."
+          },
+          {
+            "mode": "oneshot",
+            "initializeMeta": [
+              {
+                "jetbrains": {
+                  "air": {
+                    "version": 1,
+                    "capabilities": [
+                      "sessionFailure"
+                    ]
+                  }
+                }
+              },
+              {
+                "jetbrains": {
+                  "air": {
+                    "version": 1,
+                    "capabilities": [
+                      "sessionFailure"
+                    ]
+                  }
+                }
+              }
+            ]
+          },
+          {
+            "mode": "persistent",
+            "exitCode": 1,
+            "errorCode": "acpx_turn_failed",
+            "stopReason": "ACP agent reported a terminal request failure."
+          },
+          {
+            "mode": "persistent",
+            "initializeMeta": [
+              {
+                "jetbrains": {
+                  "air": {
+                    "version": 1,
+                    "capabilities": [
+                      "sessionFailure"
+                    ]
+                  }
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "currentHeadRerun": {
+        "head": "3fdd6b8dc49e18e5f537283ea0d31fdfada39ce4",
+        "baseHead": "95956f99516afaf23bccff2b34005c30c97a2c1a",
+        "patchGitBlob": "1a6b4816aadaa293cb6abe7e9072449253582139",
+        "patchSha256": "01dddc6f0fb228cb181a8987eb5ac68c50aae9027b2dce6ba13395014f47f3fa",
+        "date": "2026-10-20",
+        "command": "pnpm exec vitest run packages/adapter-utils/src/acpx-engine/typed-failure.test.ts --project @paperclipai/adapter-utils --maxWorkers=1 --no-file-parallelism",
+        "result": "15 passed, 0 failed, 0 skipped, exit 0; the test resolved the runtime built from this patch (verified byte-identical to the patch applied to the pristine package).",
+        "note": "The observedFailure and 'restoredPass' entries above (8 tests, base 42ef1700, patch 0016168d) record the earlier candidate and were not re-run against this head; the focused file now holds 15 tests."
+      }
+    },
+    {
       "id": "server-startup-pre-push-contract-selection",
       "path": "scripts/pre-push-test-selection.mjs",
       "description": "Declares the existing real startServer contract suite for server/src/index.ts while retaining failure when that suite is missing.",
