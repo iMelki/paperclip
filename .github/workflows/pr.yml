@@ -13,7 +13,11 @@ jobs:
   secret-scan:
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: [rf-paperclip]
-    timeout-minutes: 10
+    # The rf-slot job-started hook runs inside this job and its wait counts toward
+    # timeout-minutes: up to 15 min (RF_MEM_WAIT 900s) for free memory plus up to
+    # 30 min (RF_SLOT_TIMEOUT 1800s) for one of the 2 box-wide slots, so 45 min
+    # of hook budget plus 10 min of work.
+    timeout-minutes: 55
     permissions:
       contents: read
 
@@ -56,9 +60,11 @@ jobs:
     needs: [secret-scan]
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: [rf-paperclip]
-    # Up to 30 min of this budget can go to the rf-slot job-started hook
-    # waiting for one of the 2 box-wide slots, so allow 30 + 5 min of work.
-    timeout-minutes: 35
+    # The rf-slot job-started hook runs inside this job and its wait counts toward
+    # timeout-minutes: up to 15 min (RF_MEM_WAIT 900s) for free memory plus up to
+    # 30 min (RF_SLOT_TIMEOUT 1800s) for one of the 2 box-wide slots, so 45 min
+    # of hook budget plus 5 min of work.
+    timeout-minutes: 50
     outputs:
       lockfile_regenerated: ${{ steps.regen_lockfile.outputs.regenerated }}
 
@@ -155,7 +161,11 @@ jobs:
     needs: [policy]
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: [rf-paperclip]
-    timeout-minutes: 20
+    # The rf-slot job-started hook runs inside this job and its wait counts toward
+    # timeout-minutes: up to 15 min (RF_MEM_WAIT 900s) for free memory plus up to
+    # 30 min (RF_SLOT_TIMEOUT 1800s) for one of the 2 box-wide slots, so 45 min
+    # of hook budget plus 20 min of work.
+    timeout-minutes: 65
 
     steps:
       - name: Checkout repository
@@ -193,7 +203,11 @@ jobs:
     needs: [policy]
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: [rf-paperclip]
-    timeout-minutes: 20
+    # The rf-slot job-started hook runs inside this job and its wait counts toward
+    # timeout-minutes: up to 15 min (RF_MEM_WAIT 900s) for free memory plus up to
+    # 30 min (RF_SLOT_TIMEOUT 1800s) for one of the 2 box-wide slots, so 45 min
+    # of hook budget plus 20 min of work.
+    timeout-minutes: 65
     strategy:
       fail-fast: false
       matrix:
@@ -272,9 +286,11 @@ jobs:
     if: ${{ always() }}
     needs: [typecheck_release_registry, general_tests, build]
     runs-on: [rf-paperclip]
-    # Up to 30 min of this budget can go to the rf-slot job-started hook
-    # waiting for one of the 2 box-wide slots, so allow 30 + 5 min of work.
-    timeout-minutes: 35
+    # The rf-slot job-started hook runs inside this job and its wait counts toward
+    # timeout-minutes: up to 15 min (RF_MEM_WAIT 900s) for free memory plus up to
+    # 30 min (RF_SLOT_TIMEOUT 1800s) for one of the 2 box-wide slots, so 45 min
+    # of hook budget plus 5 min of work.
+    timeout-minutes: 50
 
     steps:
       - name: Fail fork PRs (CI runs only on same-repo branches)
@@ -303,7 +319,11 @@ jobs:
     needs: [policy]
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: [rf-paperclip]
-    timeout-minutes: 20
+    # The rf-slot job-started hook runs inside this job and its wait counts toward
+    # timeout-minutes: up to 15 min (RF_MEM_WAIT 900s) for free memory plus up to
+    # 30 min (RF_SLOT_TIMEOUT 1800s) for one of the 2 box-wide slots, so 45 min
+    # of hook budget plus 20 min of work.
+    timeout-minutes: 65
 
     steps:
       - name: Checkout repository
@@ -338,7 +358,11 @@ jobs:
     needs: [policy]
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: [rf-paperclip]
-    timeout-minutes: 20
+    # The rf-slot job-started hook runs inside this job and its wait counts toward
+    # timeout-minutes: up to 15 min (RF_MEM_WAIT 900s) for free memory plus up to
+    # 30 min (RF_SLOT_TIMEOUT 1800s) for one of the 2 box-wide slots, so 45 min
+    # of hook budget plus 20 min of work.
+    timeout-minutes: 65
     strategy:
       fail-fast: false
       matrix:
@@ -396,7 +420,11 @@ jobs:
     needs: [policy]
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: [rf-paperclip]
-    timeout-minutes: 20
+    # The rf-slot job-started hook runs inside this job and its wait counts toward
+    # timeout-minutes: up to 15 min (RF_MEM_WAIT 900s) for free memory plus up to
+    # 30 min (RF_SLOT_TIMEOUT 1800s) for one of the 2 box-wide slots, so 45 min
+    # of hook budget plus 20 min of work.
+    timeout-minutes: 65
 
     steps:
       - name: Checkout repository
@@ -452,7 +480,11 @@ jobs:
     needs: [policy]
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: [rf-paperclip]
-    timeout-minutes: 30
+    # The rf-slot job-started hook runs inside this job and its wait counts toward
+    # timeout-minutes: up to 15 min (RF_MEM_WAIT 900s) for free memory plus up to
+    # 30 min (RF_SLOT_TIMEOUT 1800s) for one of the 2 box-wide slots, so 45 min
+    # of hook budget plus 30 min of work.
+    timeout-minutes: 75
     strategy:
       fail-fast: false
       matrix:
@@ -571,9 +603,11 @@ jobs:
     if: ${{ always() }}
     needs: [e2e_shards]
     runs-on: [rf-paperclip]
-    # Up to 30 min of this budget can go to the rf-slot job-started hook
-    # waiting for one of the 2 box-wide slots, so allow 30 + 5 min of work.
-    timeout-minutes: 35
+    # The rf-slot job-started hook runs inside this job and its wait counts toward
+    # timeout-minutes: up to 15 min (RF_MEM_WAIT 900s) for free memory plus up to
+    # 30 min (RF_SLOT_TIMEOUT 1800s) for one of the 2 box-wide slots, so 45 min
+    # of hook budget plus 5 min of work.
+    timeout-minutes: 50
 
     steps:
       - name: Fail fork PRs (CI runs only on same-repo branches)

@@ -15,7 +15,11 @@ jobs:
     name: Typecheck
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: [rf-paperclip]
-    timeout-minutes: 20
+    # The rf-slot job-started hook runs inside this job and its wait counts toward
+    # timeout-minutes: up to 15 min (RF_MEM_WAIT 900s) for free memory plus up to
+    # 30 min (RF_SLOT_TIMEOUT 1800s) for one of the 2 box-wide slots, so 45 min
+    # of hook budget plus 20 min of work.
+    timeout-minutes: 65
     permissions:
       contents: read
 
@@ -49,7 +53,11 @@ jobs:
     name: General tests (${{ matrix.group_label }})
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: [rf-paperclip]
-    timeout-minutes: 20
+    # The rf-slot job-started hook runs inside this job and its wait counts toward
+    # timeout-minutes: up to 15 min (RF_MEM_WAIT 900s) for free memory plus up to
+    # 30 min (RF_SLOT_TIMEOUT 1800s) for one of the 2 box-wide slots, so 45 min
+    # of hook budget plus 20 min of work.
+    timeout-minutes: 65
     permissions:
       contents: read
     strategy:
@@ -106,7 +114,11 @@ jobs:
     name: Serialized tests (${{ matrix.shard_label }})
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: [rf-paperclip]
-    timeout-minutes: 20
+    # The rf-slot job-started hook runs inside this job and its wait counts toward
+    # timeout-minutes: up to 15 min (RF_MEM_WAIT 900s) for free memory plus up to
+    # 30 min (RF_SLOT_TIMEOUT 1800s) for one of the 2 box-wide slots, so 45 min
+    # of hook budget plus 20 min of work.
+    timeout-minutes: 65
     permissions:
       contents: read
     strategy:
@@ -156,7 +168,11 @@ jobs:
     name: Build
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: [rf-paperclip]
-    timeout-minutes: 20
+    # The rf-slot job-started hook runs inside this job and its wait counts toward
+    # timeout-minutes: up to 15 min (RF_MEM_WAIT 900s) for free memory plus up to
+    # 30 min (RF_SLOT_TIMEOUT 1800s) for one of the 2 box-wide slots, so 45 min
+    # of hook budget plus 20 min of work.
+    timeout-minutes: 65
     permissions:
       contents: read
 

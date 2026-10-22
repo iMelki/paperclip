@@ -123,7 +123,11 @@ jobs:
     if: github.event_name == 'workflow_dispatch' && inputs.channel != 'canary' && inputs.dry_run
     needs: verify_stable
     runs-on: [rf-paperclip]
-    timeout-minutes: 45
+    # The rf-slot job-started hook runs inside this job and its wait counts toward
+    # timeout-minutes: up to 15 min (RF_MEM_WAIT 900s) for free memory plus up to
+    # 30 min (RF_SLOT_TIMEOUT 1800s) for one of the 2 box-wide slots, so 45 min
+    # of hook budget plus 45 min of work.
+    timeout-minutes: 90
     permissions:
       contents: read
 
