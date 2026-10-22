@@ -1,0 +1,146 @@
+import { createServer, request } from "node:http";
+import express from "express";
+import { describe, expect, it, vi } from "vitest";
+
+// Drives the production `httpLogger` exported by middleware/logger.ts (the one
+// app.ts mounts), not the factory on its own, so a logger.ts that builds its own
+// pinoHttp again cannot pass. pino is wrapped to write JSON into memory.
+const chunks = vi.hoisted(() => [] as string[]);
+vi.mock("pino", async (importOriginal) => {
+  const real = (await importOriginal<{ default: typeof import("pino").pino }>()).default;
+  const { Writable } = await import("node:stream");
+  const sink = new Writable({
+    write(chunk, _encoding, callback) {
+      chunks.push(chunk.toString());
+      callback();
+    },
+  });
+  const wrapped = Object.assign(
+    (opts: Record<string, unknown>) => real({ ...opts, level: "debug" }, sink),
+    { transport: () => ({}) },
+  );
+  return { default: wrapped };
+});
+// logger.ts resolves and creates a log directory at import time.
+vi.mock("node:fs", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("node:fs")>()),
+  mkdirSync: vi.fn(),
+}));
+vi.mock("../config-file.js", () => ({ readConfigFile: vi.fn(() => null) }));
+vi.mock("../home-paths.js", () => ({
+  resolveHomeAwarePath: vi.fn((p: string) => p),
+  resolveDefaultLogsDir: vi.fn(() => "/tmp/paperclip-http-logger-wiring-test"),
+}));
+
+const CANARIES = {
+  authorizationHeader: "authorization-header-canary-must-not-reach-pino",
+  successQuery: "success-query-canary-must-not-reach-pino",
+  failureQuery: "failure-query-canary-must-not-reach-pino",
+  handoffTicket: "handoff-ticket-canary-must-not-reach-pino",
+  signInPassword: "sign-in-password-canary-must-not-reach-pino",
+  githubToken: "github-token-canary-must-not-reach-pino",
+  clientSecret: "client-secret-canary-must-not-reach-pino",
+  plainBinding: "plain-binding-canary-must-not-reach-pino",
+  claimPath: "claim-path-canary-must-not-reach-pino",
+  secretValue: "secret-value-canary-must-not-reach-pino",
+  errorContextMessage: "error-context-message-canary-must-not-reach-pino",
+};
+
+describe("production httpLogger wiring", () => {
+  it("routes app request logs through the hardened factory so no credential reaches the log", async () => {
+    const { httpLogger } = await import("../middleware/logger.js");
+    const app = express();
+    app.use(express.json());
+    app.use(httpLogger);
+    app.get("/ok", (_req, res) => {
+      res.status(200).send("ok");
+    });
+    app.get("/fail", (_req, res) => {
+      (res as typeof res & { __errorContext?: unknown }).__errorContext = {
+        error: { code: "x", message: CANARIES.errorContextMessage },
+      };
+      res.status(500).send("failed");
+    });
+    app.post("/api/auth/sign-in/email", (_req, res) => {
+      res.status(401).send("rejected");
+    });
+    app.post("/api/companies/:companyId/agent-hires", (_req, res) => {
+      res.status(422).send("rejected");
+    });
+    app.post("/api/board-claim/:token/claim", (_req, res) => {
+      res.status(422).send("rejected");
+    });
+    app.post("/api/companies/:companyId/secrets", (_req, res) => {
+      res.status(422).send("rejected");
+    });
+    const server = createServer(app);
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(0, "127.0.0.1", () => resolve());
+    });
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("Expected an ephemeral TCP port");
+
+    const send = (path: string, method = "GET", body?: unknown, headers: Record<string, string> = {}) =>
+      new Promise<void>((resolve, reject) => {
+        const client = request(
+          {
+            hostname: "127.0.0.1",
+            port: address.port,
+            path,
+            method,
+            headers: { ...(body ? { "content-type": "application/json" } : {}), ...headers },
+          },
+          (res) => {
+            res.resume();
+            res.on("end", resolve);
+          },
+        );
+        client.on("error", reject);
+        client.end(body ? JSON.stringify(body) : undefined);
+      });
+
+    try {
+      await send(`/ok?access_token=${CANARIES.successQuery}`, "GET", undefined, {
+        authorization: `Bearer ${CANARIES.authorizationHeader}`,
+      });
+      await send(`/ok?ticket=${CANARIES.handoffTicket}`);
+      await send(`/fail?code=${CANARIES.failureQuery}`);
+      await send("/api/auth/sign-in/email", "POST", { email: "a@example.test", password: CANARIES.signInPassword });
+      await send("/api/companies/company-1/agent-hires", "POST", {
+        adapterConfig: {
+          githubToken: CANARIES.githubToken,
+          clientSecret: CANARIES.clientSecret,
+          env: { DISPLAY_NAME: { type: "plain", value: CANARIES.plainBinding } },
+        },
+      });
+      await send(`/api/board-claim/${CANARIES.claimPath}/claim`, "POST", { label: "claim" });
+      await send("/api/companies/company-1/secrets", "POST", { value: CANARIES.secretValue });
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    } finally {
+      await new Promise<void>((resolve, reject) => {
+        server.close((err) => (err ? reject(err) : resolve()));
+      });
+    }
+
+    const output = chunks.join("");
+    const leaked = Object.entries(CANARIES)
+      .filter(([, canary]) => output.includes(canary))
+      .map(([name]) => name);
+    expect(leaked).toEqual([]);
+
+    const logs = output.trim().split("\n").map((line) => JSON.parse(line)) as Array<{
+      msg: string;
+      reqBody?: Record<string, unknown>;
+    }>;
+    expect(logs.map((log) => log.msg)).toContain("GET /ok 200");
+    const hire = logs.find((log) => log.msg.startsWith("POST /api/companies/company-1/agent-hires"));
+    expect(hire?.reqBody).toEqual({
+      adapterConfig: {
+        githubToken: "[REDACTED]",
+        clientSecret: "[REDACTED]",
+        env: { DISPLAY_NAME: { type: "plain", value: "[REDACTED]" } },
+      },
+    });
+  });
+});
