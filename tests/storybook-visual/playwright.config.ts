@@ -8,6 +8,10 @@ const snapshotDir = process.env.STORYBOOK_VISUAL_SNAPSHOT_DIR
     ? process.env.STORYBOOK_VISUAL_SNAPSHOT_DIR
     : resolve(testDir, "..", "..", process.env.STORYBOOK_VISUAL_SNAPSHOT_DIR)
   : join(testDir, ".snapshots");
+// Optional Playwright channel (CI sets "chrome" to use the runner's system
+// Chrome, as the e2e lane does). Baselines must be captured with the same
+// browser the comparison run uses.
+const playwrightChannel = process.env.PAPERCLIP_PLAYWRIGHT_CHANNEL;
 
 // Visual snapshot suite for the design-token extraction run: screenshots every
 // built Storybook story in both themes and compares against the external Phase
@@ -31,6 +35,7 @@ export default defineConfig({
   snapshotPathTemplate: `${snapshotDir}/{arg}{ext}`,
   use: {
     browserName: "chromium",
+    ...(playwrightChannel ? { channel: playwrightChannel } : {}),
     viewport: { width: 1200, height: 800 },
     deviceScaleFactor: 1,
     // JS-driven tickers/timers key off prefers-reduced-motion for

@@ -28,22 +28,27 @@ jobs:
   visual:
     name: Storybook visual regression
     if: >-
-      github.event_name == 'workflow_dispatch' ||
-      (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'storybook-visual'))
-    runs-on: ubuntu-latest
-    timeout-minutes: 35
+      (github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'storybook-visual'))) &&
+      (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: [rf-paperclip]
+    # Budget includes up to 30 minutes in the rf-slot job-started hook.
+    timeout-minutes: 65
+    env:
+      # Same as the e2e lane: use the box's system Google Chrome. The runner
+      # user has no sudo, so `playwright install --with-deps` cannot run here.
+      PAPERCLIP_PLAYWRIGHT_CHANNEL: chrome
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Setup pnpm
-        uses: pnpm/action-setup@v6
+        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
         with:
           version: 9.15.4
 
       - name: Setup Node.js
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24
           cache: pnpm
@@ -51,11 +56,11 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Install Playwright Chromium
-        run: npx playwright install --with-deps chromium
+      - name: Verify runner Chrome
+        run: google-chrome --version
 
       - name: Cache Storybook visual baseline archive
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: tests/storybook-visual/.cache
           key: storybook-visual-baseline-${{ runner.os }}-${{ hashFiles('tests/storybook-visual/baseline-manifest.json') }}
@@ -82,7 +87,7 @@ jobs:
         run: pnpm storybook-visual:baseline pack
 
       - name: Upload Storybook visual report
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
           name: storybook-visual-report-${{ github.run_id }}
@@ -93,7 +98,7 @@ jobs:
           if-no-files-found: warn
 
       - name: Upload updated baseline review bundle
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: ${{ github.event.inputs.update_snapshots == 'true' }}
         with:
           name: storybook-visual-baseline-review-${{ github.run_id }}

@@ -1,21 +1,24 @@
 name: Sync from Upstream
 
+# Dispatch only. The weekly schedule was removed: it ran on a GitHub-hosted
+# runner, and the rf-paperclip box runner refuses schedule events (pc-guard).
+# All 25 runs on record (since May) failed; the latest on an upstream merge conflict.
 on:
-  schedule:
-    # Every Monday at 04:00 UTC
-    - cron: '0 4 * * 1'
   workflow_dispatch:
 
 jobs:
   sync:
     name: Sync fork master with paperclipai/paperclip
-    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [rf-paperclip]
+    # Budget includes up to 30 minutes in the rf-slot job-started hook.
+    timeout-minutes: 40
     permissions:
       contents: write
 
     steps:
       - name: Merge upstream into fork master
-        uses: actions/github-script@v7
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.1.0
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
