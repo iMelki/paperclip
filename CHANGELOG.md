@@ -13,6 +13,36 @@ All notable changes to this repository should be recorded here.
   worktree and migration paths that start the database still wait 60 seconds. An open log inside the data directory made crash recovery
   fail with a sharing violation and outlast pg_ctl's 60-second wait.
 
+- **Docs:** the fork getting-started guide uses placeholders for local
+  workspace and notes-vault paths instead of one machine's paths.
+
+- **[Refs #162]** Recovery recognizes Claude ACP session-limit failures and
+  `resets` clock messages. These failures use the existing provider-quota wait
+  and monitor path instead of immediate continuation retries. Ordinary ACP
+  errors, generic `session limit` tool or MCP wording, and deliberately paused
+  issues retain their existing behavior.
+
+- **[#20]** Limited DB Vitest discovery to authored `src` and `scripts`
+  suites. Compiled and stale `dist` tests no longer run a second time.
+  A CLI-backed regression runs through the root workspace and checks source
+  extensions, default exclusions, stale-file filters, and maintenance suites.
+  It reuses the pinned canonical scratch helper and confines child temp output.
+  This does not repair embedded PostgreSQL startup or process cleanup.
+  The scratch helper now rejects unsafe file extensions and unique suffixes,
+  keeps every created path inside its root, and creates owner-only scratch.
+
+- **[#169]** Server startup reuses an embedded PostgreSQL only when a query on
+  the `postmaster.pid` port reports the configured data directory, compared by
+  physical path (case-insensitive on Windows) with the embedded login. If the
+  PID may still be alive but identity cannot be verified, startup stops (exit
+  code 75) and leaves the lock file unchanged. A lock is treated as stale and
+  moved aside to `postmaster.pid.stale-<timestamp>` (never deleted) when its PID
+  is dead, is the server's own, belongs to a live process that is not PostgreSQL
+  while nothing answers on the recorded or configured port, or when the lock is
+  unreadable or garbled and no PostgreSQL answers or references this data
+  directory. Any lock still present just before start is moved aside the same
+  way; if it cannot be moved, startup refuses (exit code 75).
+
 - **[#164]** Refresh Lockfile accepts manual `ref` and `base` inputs that default
   to `dev`. Each base has its own refresh branch and matching PR lookup. Master
   pushes still refresh their triggering commit and retain auto-merge; other bases

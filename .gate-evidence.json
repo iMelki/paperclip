@@ -33,7 +33,7 @@
   "finalRepairedSnapshot": {
     "_status": "Intentional frozen historical snapshot of the 2026-08-17 gate-bootstrap repair bundle. PR #66 merged into dev as 90bd179dd and PR #69 as 987700f91 without re-recording this baseline; the PR #69 delivery evidence lives in doc/evidence/*/2026-08-18-pr69-receipt.json.",
     "date": "2026-08-17",
-    "recordedAtUtc": "2026-08-16T22:02:24.9919430Z",
+    "recordedAtUtc": "2026-08-16T22:02:24.991943Z",
     "baseHead": "b6e8ae0794bd8ca2f1e2625daadfd095f461955c",
     "codeCommit": "a3dba3f74681fcfa9a3c49ce613e78def67507d2",
     "implementationFileCount": 19,
@@ -42,6 +42,88 @@
     "focusedTests": "121/121 passed with no skip"
   },
   "gates": [
+    {
+      "id": "server-startup-pre-push-contract-selection",
+      "path": "scripts/pre-push-test-selection.mjs",
+      "description": "Declares the existing real startServer contract suite for server/src/index.ts while retaining failure when that suite is missing.",
+      "negativeFixture": "scripts/pre-push-test-selection.test.mjs",
+      "observedFailure": {
+        "date": "2026-10-07",
+        "command": "node --test --test-name-pattern='selects the server startup contract for the server entry point' scripts/pre-push-test-selection.test.mjs",
+        "breakApplied": "Ran the new exact entry-point selection fixture before adding its declaration. The fixture contained the production source path, its real startup contract path, and an unrelated suite.",
+        "reason": "Exit 1, one failing selected test: actual selected files [] instead of [server/src/__tests__/server-startup-feedback-export.test.ts]. The real pre-push gate independently rejected the same source path as lacking a deterministic sibling or declared test after the full typecheck passed.",
+        "exitCode": 1,
+        "restoredPass": "Added only the exact source-to-contract declaration. node --test scripts/pre-push-test-selection.test.mjs passed 22/22, zero skipped, exit 0. The missing-contract case still rejects coverage and identifies the exact missing startup suite; unrelated tests stay unselected."
+      }
+    },
+    {
+      "id": "embedded-postgres-reuse-identity",
+      "path": "server/src/embedded-postgres-reuse.ts",
+      "description": "Server startup reuses PostgreSQL only after a query on the recorded port confirms the configured data directory (physical path, case-insensitive on Windows). Only a dead PID (ESRCH) or the current process PID enters normal startup; a possibly-live PID with a failed identity query keeps its lock and refuses startup.",
+      "negativeFixture": "server/src/__tests__/embedded-postgres-reuse-native.test.ts",
+      "observedFailure": {
+        "date": "2026-10-07",
+        "baseHead": "3f3f583d8bb1c2152fc7832d5e3c00f380e17349",
+        "command": "pnpm --filter @paperclipai/server exec vitest run src/__tests__/embedded-postgres-reuse-native.test.ts",
+        "breakApplied": "Extracted the exact isPidRunning/getRunningPid block from base server/src/index.ts into the helper's interface. The native fixture wrote its actual live Node PID into a temporary initialized cluster's PID file while the recorded port was closed. Readback proved different broken/fixed source hashes.",
+        "reason": "One test failed, zero skipped, exit 1: expected { pid: <live-node-pid>, port: <closed-test-port> } to be null. PID occupancy incorrectly accepted Node as PostgreSQL; there was no import, syntax, or startup-harness failure.",
+        "exitCode": 1,
+        "restoredPass": "The helper was restored byte-for-byte. The identical native command passed 1/1 with zero skips, exit 0, in 11.41 seconds. It rejected the live Node PID, retained the stale file for the normal start path, started actual PostgreSQL after stale-lock removal, reused the actual PostgreSQL PID and recorded port even with a different configured port, and confirmed no reuse after clean stop. The 16-case unit suite passed separately, exit 0.",
+        "restoredSourceSha256": "1bec93d49040c6195c30832bbf0e6cef5aa919474ec83543f8f3655264344d36"
+      },
+      "consumerProof": {
+        "negativeFixture": "server/src/__tests__/server-startup-feedback-export.test.ts",
+        "command": "pnpm --filter @paperclipai/server exec vitest run src/__tests__/server-startup-feedback-export.test.ts -t 'starts PostgreSQL and removes the recycled-PID lock'",
+        "breakApplied": "Restored the whole original server/src/index.ts from the base commit while keeping the new caller regression. No production process or data directory was used.",
+        "reason": "One failed, 21 deliberately unselected, exit 1: expected vi.fn() to be called once, but got 0 times. The real startServer entry point skipped embedded PostgreSQL startup for a live Node PID.",
+        "exitCode": 1,
+        "restoredPass": "Restored exact candidate index bytes and ran the complete focused startup file: 22/22 passed, zero skips, exit 0, 6.68 seconds. Four new cases verify stale-lock removal/start for recycled and dead PIDs, reuse of a verified server's recorded port, and refusal of another instance with its lock intact.",
+        "restoredIndexSha256": "b652a4044f249950b7f5828dcb11d424ba8e5d1b9a0f078adb5d8faa1ad30ead"
+      },
+      "limits": "Windows native fixture and mocked startup proof only. Production deployment, macOS/Linux native proof, longer crash-recovery readiness waits, and CLI lifecycle consumers remain separate."
+    },
+    {
+      "id": "db-discovery-canonical-scratch-provenance",
+      "path": "scripts/lib/ephemeral-scratch.mjs",
+      "description": "Keep the standalone scratch helper byte-equivalent to its pinned source after line-ending normalization. The pin moved from the canonical copy (a296c167...) to 4c29cea62dbba24e737f3e8776b504bd7c710c3fbc6dc3ad1c980243cef11af2 for the extension/unique/mode containment fix, the extension-aware name grammar, file-collision retry and private child roots; the canonical upstream copy still needs the same fix.",
+      "negativeFixture": "packages/db/src/test-discovery.test.ts",
+      "observedFailure": {
+        "date": "2026-10-01",
+        "command": "node scripts/run-vitest-stable.mjs --files packages/db/src/test-discovery.test.ts",
+        "breakApplied": "Added one inert comment to the isolated vendored helper; the module remained valid and its consumer still launched.",
+        "reason": "Exit 1 at the canonical SHA-256 assertion; the three CLI-backed discovery tests passed. The failure was source drift, not syntax, import, launch, or timeout.",
+        "restoredPass": "Restored the canonical helper text. The identical caller exited 0, 4/4 tests passed; normalized SHA-256 a296c167b1d77fcb4b665152917f38f02d9b7c8c9458601d96bb678eeb38a6be.",
+        "artifactPath": "doc/evidence/db-test-discovery-2026-10-01.md"
+      }
+    },
+    {
+      "id": "ephemeral-scratch-extension-containment",
+      "path": "scripts/lib/ephemeral-scratch.mjs",
+      "description": "createEphemeralFile accepts only a single safe extension suffix, ephemeralName accepts only a governed unique suffix, every created path is a direct child of the requested root, and scratch is created owner-only (0700 dirs, 0600 files).",
+      "negativeFixture": "packages/db/src/test-discovery.test.ts",
+      "observedFailure": {
+        "date": "2026-10-19",
+        "command": "node scripts/run-vitest-stable.mjs --files packages/db/src/test-discovery.test.ts",
+        "breakApplied": "Ran the new containment tests against the unfixed helper. An extension of '/../../escape' wrote a file one directory above the requested root.",
+        "reason": "Exit 1: 3 failed / 5 passed. Missing TypeError for traversal extensions and for an unsafe unique suffix; directory mode was not 0700.",
+        "restoredPass": "With the fix and the updated pin, the same command exited 0 with 8/8 tests passing.",
+        "artifactPath": "doc/evidence/db-test-discovery-2026-10-01.md"
+      }
+    },
+    {
+      "id": "db-authored-test-discovery",
+      "path": "packages/db/vitest.config.ts",
+      "description": "Select authored src and maintenance scripts tests while rejecting compiled, stale, and nested dist copies.",
+      "negativeFixture": "packages/db/src/test-discovery.test.ts",
+      "observedFailure": {
+        "date": "2026-10-01",
+        "command": "node scripts/run-vitest-stable.mjs --files packages/db/src/test-discovery.test.ts",
+        "breakApplied": "The isolated worktree restored the base config with unrestricted default discovery. Readback showed only environment: node; the same CLI-backed fixture and stable runner were retained.",
+        "reason": "Exit 1, two of three tests failed: discovery returned dist/basic.test.js, dist/stale-only.spec.js and other non-authored paths, and a CLI stale-dist filter returned a generated suite instead of an empty list. No syntax/import/launch error caused the failure.",
+        "restoredPass": "Restoring authored src/scripts inclusion and default-preserving dist exclusions gave exit 0, 3/3 tests. The separate real maintenance suite passed 15/15. The repaired config SHA-256 is 18c0d1d32d4d55f3017864881466c597fc7232ccb6ef82e9f85adf17288c1e2f.",
+        "artifactPath": "doc/evidence/db-test-discovery-2026-10-01.md"
+      }
+    },
     {
       "id": "hermes-local-strict-isolation-launch",
       "path": "packages/adapters/hermes/src/server/strict-isolation.ts",
@@ -808,6 +890,24 @@
         "scope": "Serialized native Windows integration tests in an independent clone against disposable databases and Git fixtures. No live instance or hosted CI proof."
       },
       "maintainabilityReceipt": "doc/evidence/issue-154/verification.md"
+    },
+    {
+      "id": "acp-session-quota-recovery",
+      "path": "server/src/services/recovery/service.ts",
+      "description": "Recognize session quota failures from ACP and use the existing reset-time wait path.",
+      "negativeFixture": "server/src/services/recovery/provider-failure-classification.test.ts",
+      "observedFailure": {
+        "date": "2026-10-13",
+        "command": "(from server) node ../node_modules/vitest/vitest.mjs run src/services/recovery/provider-failure-classification.test.ts --maxWorkers=1",
+        "breakApplied": "Added the new production-shaped session-limit fixtures before changing the classifier.",
+        "reason": "The old classifier returned null for four quota cases; 4 failed, 11 passed.",
+        "exitCode": 1,
+        "artifactPath": "doc/evidence/acp-session-quota/verification.md",
+        "restoredPass": "15 passed, 0 failed after applying the classifier change; the final suite after review rounds is 28 passed, 0 failed.",
+        "restoredExitCode": 0,
+        "scope": "Isolated local source tests; no installed runtime or native recovery proof.",
+        "restoredArtifactPath": "doc/evidence/acp-session-quota/verification.md"
+      }
     }
   ]
 }
