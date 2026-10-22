@@ -113,6 +113,20 @@ test("selects the DB coordination contract for the shared issues schema", () => 
   });
 });
 
+test("selects the DB discovery contract when its vendored scratch helper changes", () => {
+  withFixture(({ repoRoot, trackedFiles, write }) => {
+    write("scripts/lib/ephemeral-scratch.mjs", "export const scratch = true;\n");
+    write("packages/db/src/test-discovery.test.ts", "test('discovery', () => {});\n");
+    const result = selectPrePushTests({
+      repoRoot,
+      changedFiles: ["scripts/lib/ephemeral-scratch.mjs"],
+      trackedFiles,
+    });
+    assert.deepEqual(result.vitestFiles, ["packages/db/src/test-discovery.test.ts"]);
+    assert.deepEqual(result.selectionErrors, []);
+  });
+});
+
 test("selects the registered Playwright contract for the onboarding hire route helper", () => {
   withFixture(({ repoRoot, trackedFiles, write }) => {
     write(

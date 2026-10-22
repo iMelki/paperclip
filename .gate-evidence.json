@@ -33,7 +33,7 @@
   "finalRepairedSnapshot": {
     "_status": "Intentional frozen historical snapshot of the 2026-08-17 gate-bootstrap repair bundle. PR #66 merged into dev as 90bd179dd and PR #69 as 987700f91 without re-recording this baseline; the PR #69 delivery evidence lives in doc/evidence/*/2026-08-18-pr69-receipt.json.",
     "date": "2026-08-17",
-    "recordedAtUtc": "2026-08-16T22:02:24.9919430Z",
+    "recordedAtUtc": "2026-08-16T22:02:24.991943Z",
     "baseHead": "b6e8ae0794bd8ca2f1e2625daadfd095f461955c",
     "codeCommit": "a3dba3f74681fcfa9a3c49ce613e78def67507d2",
     "implementationFileCount": 19,
@@ -297,6 +297,48 @@
         "command": "pnpm exec vitest run packages/adapter-utils/src/acpx-engine/typed-failure.test.ts --project @paperclipai/adapter-utils --maxWorkers=1 --no-file-parallelism",
         "result": "15 passed, 0 failed, 0 skipped, exit 0; the test resolved the runtime built from this patch (verified byte-identical to the patch applied to the pristine package).",
         "note": "The observedFailure and 'restoredPass' entries above (8 tests, base 42ef1700, patch 0016168d) record the earlier candidate and were not re-run against this head; the focused file now holds 15 tests."
+      }
+    },
+    {
+      "id": "db-discovery-canonical-scratch-provenance",
+      "path": "scripts/lib/ephemeral-scratch.mjs",
+      "description": "Keep the standalone scratch helper byte-equivalent to its pinned source after line-ending normalization. The pin moved from the canonical copy (a296c167...) to 4c29cea62dbba24e737f3e8776b504bd7c710c3fbc6dc3ad1c980243cef11af2 for the extension/unique/mode containment fix, the extension-aware name grammar, file-collision retry and private child roots; the canonical upstream copy still needs the same fix.",
+      "negativeFixture": "packages/db/src/test-discovery.test.ts",
+      "observedFailure": {
+        "date": "2026-10-01",
+        "command": "node scripts/run-vitest-stable.mjs --files packages/db/src/test-discovery.test.ts",
+        "breakApplied": "Added one inert comment to the isolated vendored helper; the module remained valid and its consumer still launched.",
+        "reason": "Exit 1 at the canonical SHA-256 assertion; the three CLI-backed discovery tests passed. The failure was source drift, not syntax, import, launch, or timeout.",
+        "restoredPass": "Restored the canonical helper text. The identical caller exited 0, 4/4 tests passed; normalized SHA-256 a296c167b1d77fcb4b665152917f38f02d9b7c8c9458601d96bb678eeb38a6be.",
+        "artifactPath": "doc/evidence/db-test-discovery-2026-10-01.md"
+      }
+    },
+    {
+      "id": "ephemeral-scratch-extension-containment",
+      "path": "scripts/lib/ephemeral-scratch.mjs",
+      "description": "createEphemeralFile accepts only a single safe extension suffix, ephemeralName accepts only a governed unique suffix, every created path is a direct child of the requested root, and scratch is created owner-only (0700 dirs, 0600 files).",
+      "negativeFixture": "packages/db/src/test-discovery.test.ts",
+      "observedFailure": {
+        "date": "2026-10-19",
+        "command": "node scripts/run-vitest-stable.mjs --files packages/db/src/test-discovery.test.ts",
+        "breakApplied": "Ran the new containment tests against the unfixed helper. An extension of '/../../escape' wrote a file one directory above the requested root.",
+        "reason": "Exit 1: 3 failed / 5 passed. Missing TypeError for traversal extensions and for an unsafe unique suffix; directory mode was not 0700.",
+        "restoredPass": "With the fix and the updated pin, the same command exited 0 with 8/8 tests passing.",
+        "artifactPath": "doc/evidence/db-test-discovery-2026-10-01.md"
+      }
+    },
+    {
+      "id": "db-authored-test-discovery",
+      "path": "packages/db/vitest.config.ts",
+      "description": "Select authored src and maintenance scripts tests while rejecting compiled, stale, and nested dist copies.",
+      "negativeFixture": "packages/db/src/test-discovery.test.ts",
+      "observedFailure": {
+        "date": "2026-10-01",
+        "command": "node scripts/run-vitest-stable.mjs --files packages/db/src/test-discovery.test.ts",
+        "breakApplied": "The isolated worktree restored the base config with unrestricted default discovery. Readback showed only environment: node; the same CLI-backed fixture and stable runner were retained.",
+        "reason": "Exit 1, two of three tests failed: discovery returned dist/basic.test.js, dist/stale-only.spec.js and other non-authored paths, and a CLI stale-dist filter returned a generated suite instead of an empty list. No syntax/import/launch error caused the failure.",
+        "restoredPass": "Restoring authored src/scripts inclusion and default-preserving dist exclusions gave exit 0, 3/3 tests. The separate real maintenance suite passed 15/15. The repaired config SHA-256 is 18c0d1d32d4d55f3017864881466c597fc7232ccb6ef82e9f85adf17288c1e2f.",
+        "artifactPath": "doc/evidence/db-test-discovery-2026-10-01.md"
       }
     },
     {
@@ -904,7 +946,7 @@
       "negativeFixture": "doctor.genome.json",
       "observedFailure": {
         "date": "2026-08-25",
-        "command": "pwsh -NoLogo -NoProfile -File <git-toolkit>/hooks/Resolve-RepoDoctorGenome.ps1 -RepoPath <repo-checkout> -Gate on_demand -Json after adding missing-source-set to the gate",
+        "command": "pwsh -NoLogo -NoProfile -File S:/source/CCAI/Assistants/tools/git-toolkit/hooks/Resolve-RepoDoctorGenome.ps1 -RepoPath S:/source/CCAI/Assistants/tools/paperclip-factory-dev -Gate on_demand -Json after adding missing-source-set to the gate",
         "breakApplied": "Readback confirmed the on_demand sourceSets array contained missing-source-set while no source-set declaration used that ID.",
         "reason": "The exact resolver exited 2 with status=invalid, plan=null, and named only that gate on_demand selected missing-source-set without an exact declaration.",
         "restoredPass": "After removing the undeclared ID, the exact resolver exited 0 with status=resolved and the shared adapter exited 0 with diagnosticCode=plan-resolved. Both selected 3,246 authored files, excluded the two declared generated files, retained profile=observe and mutationIntent=none, and ran no analyzer."
@@ -1065,6 +1107,24 @@
         "scope": "Serialized native Windows integration tests in an independent clone against disposable databases and Git fixtures. No live instance or hosted CI proof."
       },
       "maintainabilityReceipt": "doc/evidence/issue-154/verification.md"
+    },
+    {
+      "id": "acp-session-quota-recovery",
+      "path": "server/src/services/recovery/service.ts",
+      "description": "Recognize session quota failures from ACP and use the existing reset-time wait path.",
+      "negativeFixture": "server/src/services/recovery/provider-failure-classification.test.ts",
+      "observedFailure": {
+        "date": "2026-10-13",
+        "command": "(from server) node ../node_modules/vitest/vitest.mjs run src/services/recovery/provider-failure-classification.test.ts --maxWorkers=1",
+        "breakApplied": "Added the new production-shaped session-limit fixtures before changing the classifier.",
+        "reason": "The old classifier returned null for four quota cases; 4 failed, 11 passed.",
+        "exitCode": 1,
+        "artifactPath": "doc/evidence/acp-session-quota/verification.md",
+        "restoredPass": "15 passed, 0 failed after applying the classifier change; the final suite after review rounds is 28 passed, 0 failed.",
+        "restoredExitCode": 0,
+        "scope": "Isolated local source tests; no installed runtime or native recovery proof.",
+        "restoredArtifactPath": "doc/evidence/acp-session-quota/verification.md"
+      }
     }
   ]
 }

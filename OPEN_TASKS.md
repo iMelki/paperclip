@@ -25,6 +25,15 @@ integration outcome; later rows remain queued and do not imply concurrent execut
 
 ## Current work
 
+- [#162 — Recognize Claude ACP session quota waits](https://github.com/iMelki/paperclip/issues/162):
+  The local candidate recognizes Claude's session-limit statement with
+  `acpx_turn_failed` and parses its reset clock through the existing quota
+  recovery path. Generic `session limit` wording stays out of quota recovery.
+  The ACP statement is read only from the error and stop reason, its reset clock must sit within 120 characters of it, and a clock that elapsed moments ago retries now on every adapter path. The focused suite passes 34 cases.
+  Independent review, publication, installed adoption, and a native recovery
+  observation remain open. See
+  [verification and rollout conditions](doc/evidence/acp-session-quota/verification.md).
+
 - [#154 — Stabilize workspace containment test completion](https://github.com/iMelki/paperclip/issues/154):
   Await tracked heartbeat executions before reading final state. The isolated
   database fixture delays agent finalization to expose the old one-second wait.
@@ -150,6 +159,12 @@ Last updated: 2026-09-28
   generation exposes unrelated existing-schema drift; 0214 is scoped to cost
   identities. Snapshot reconciliation needs isolated upgrade proof.
 - [#20 — Windows test process ownership](https://github.com/iMelki/paperclip/issues/20):
+  The 2026-10-01 isolated DB discovery repair excludes compiled `dist` copies
+  while retaining authored `src` and maintenance `scripts` tests. The exact
+  CLI regression fails against the old config and passes after repair.
+  See [discovery receipt](doc/evidence/db-test-discovery-2026-10-01.md).
+  Topic PR review and hosted checks remain required; this is not native DB
+  startup, process cleanup, Factory recovery, or live import acceptance.
   embedded-Postgres vendor spawns omit windowless flags. Cost import tests use a
   private canonical process host; upstream harness repair remains open.
   The access-route test's one-time import is now bounded suite setup (focused
