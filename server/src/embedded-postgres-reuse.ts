@@ -41,6 +41,9 @@ const POSTGRES_PROCESS_NAME_RE = /^(?:postgres|postmaster)(?:\.exe)?$/i;
 const DATA_DIRECTORY_ARGUMENT =
   /(?:^|\s)(?:-D\s*|--data-directory[=\s])(?:"([^"]+)"|'([^']+)'|(\S+))/i;
 
+const POSTGRES_CHILD_TITLE_RE = /^postgres:\s/i;
+const POSTGRES_FORK_CHILD_RE = /(?:^|\s)--fork/i;
+
 type DataDirectoryOwnership = "owns" | "other" | "unknown";
 
 /**
@@ -183,6 +186,9 @@ export async function scanWindowsPostgresRows(
   for (const row of rows) {
     if (typeof row.ProcessId !== "number") continue;
     const command = row.CommandLine ?? "";
+    // Windows postmaster children (`postgres.exe --forkbackend` etc.) carry no data directory and
+    // are not servers; counting them would make any unrelated PostgreSQL look inconclusive.
+    if (POSTGRES_FORK_CHILD_RE.test(command)) continue;
     const ownership = await commandOwnership(normalizeCommand(command), needles, dataDir);
     if (ownership === "owns") found.push({ pid: row.ProcessId, command });
     else if (ownership === "unknown") unknown = true;
@@ -229,6 +235,8 @@ export async function scanPsOutputForDataDir(
     const pid = Number(pidText);
     if (!Number.isInteger(pid) || pid <= 0) continue;
     if (pid === process.pid || !POSTGRES_PROCESS_NAME_RE.test(comm.replace(/\\/g, "/").split("/").pop() ?? "")) continue;
+    // Backends and workers rename themselves `postgres: checkpointer ...`; they are not servers.
+    if (POSTGRES_CHILD_TITLE_RE.test(command)) continue;
     const ownership = await commandOwnership(command, needles, dataDir);
     let owns = ownership === "owns";
     if (ownership === "unknown") {

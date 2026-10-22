@@ -418,6 +418,14 @@ describe("scanPsOutputForDataDir", () => {
     expect((await scanPsOutputForDataDir(out, [dir], dir, cwd))?.map((p) => p.pid)).toEqual([901, 902]);
   });
 
+  it("ignores the children of an unrelated PostgreSQL whose directory is conclusive", async () => {
+    const other = mkdtempSync(join(tmpdir(), "other-pg-"));
+    const out =
+      `901\tpostgres\t/usr/bin/postgres -D ${other}\n` +
+      "902\tpostgres\tpostgres: checkpointer \n903\tpostgres\tpostgres: walwriter\n";
+    expect(await scanPsOutputForDataDir(out, [dir], dir, unreadable)).toEqual([]);
+  });
+
   it("still examines an executable path that contains spaces", async () => {
     const out = "4401\tpostgres\t/opt/My Postgres/bin/postgres\n";
     expect(await scanPsOutputForDataDir(out, [dir], dir, unreadable)).toBeNull();
@@ -447,6 +455,15 @@ describe("scanWindowsPostgresRows", () => {
   it("finds a server whose command line names the data directory", async () => {
     const rows = [{ ProcessId: 10, CommandLine: `postgres.exe -D ${dir}` }];
     expect((await scanWindowsPostgresRows(rows, [dir], dir))?.map((row) => row.pid)).toEqual([10]);
+  });
+
+  it("ignores forked children of an unrelated postmaster", async () => {
+    const other = mkdtempSync(join(tmpdir(), "other-pg-"));
+    const rows = [
+      { ProcessId: 10, CommandLine: `postgres.exe -D ${other}` },
+      { ProcessId: 11, CommandLine: '"C:\\pg\\bin\\postgres.exe" --forkchild=checkpointer 1234' },
+    ];
+    expect(await scanWindowsPostgresRows(rows, [dir], dir)).toEqual([]);
   });
 
   it("finds nothing when no postgres.exe is running", async () => {
