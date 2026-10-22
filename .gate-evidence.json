@@ -33,7 +33,7 @@
   "finalRepairedSnapshot": {
     "_status": "Intentional frozen historical snapshot of the 2026-08-17 gate-bootstrap repair bundle. PR #66 merged into dev as 90bd179dd and PR #69 as 987700f91 without re-recording this baseline; the PR #69 delivery evidence lives in doc/evidence/*/2026-08-18-pr69-receipt.json.",
     "date": "2026-08-17",
-    "recordedAtUtc": "2026-08-16T22:02:24.9919430Z",
+    "recordedAtUtc": "2026-08-16T22:02:24.991943Z",
     "baseHead": "b6e8ae0794bd8ca2f1e2625daadfd095f461955c",
     "codeCommit": "a3dba3f74681fcfa9a3c49ce613e78def67507d2",
     "implementationFileCount": 19,
@@ -850,6 +850,24 @@
         "scope": "Serialized native Windows integration tests in an independent clone against disposable databases and Git fixtures. No live instance or hosted CI proof."
       },
       "maintainabilityReceipt": "doc/evidence/issue-154/verification.md"
+    },
+    {
+      "id": "acp-session-quota-recovery",
+      "path": "server/src/services/recovery/service.ts",
+      "description": "Recognize session quota failures from ACP and use the existing reset-time wait path.",
+      "negativeFixture": "server/src/services/recovery/provider-failure-classification.test.ts",
+      "observedFailure": {
+        "date": "2026-10-13",
+        "command": "(from server) node ../node_modules/vitest/vitest.mjs run src/services/recovery/provider-failure-classification.test.ts --maxWorkers=1",
+        "breakApplied": "Added the new production-shaped session-limit fixtures before changing the classifier.",
+        "reason": "The old classifier returned null for four quota cases; 4 failed, 11 passed.",
+        "exitCode": 1,
+        "artifactPath": "doc/evidence/acp-session-quota/verification.md",
+        "restoredPass": "15 passed, 0 failed after applying the classifier change; the final suite after review rounds is 28 passed, 0 failed.",
+        "restoredExitCode": 0,
+        "scope": "Isolated local source tests; no installed runtime or native recovery proof.",
+        "restoredArtifactPath": "doc/evidence/acp-session-quota/verification.md"
+      }
     }
   ]
 }

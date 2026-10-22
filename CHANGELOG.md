@@ -6,6 +6,15 @@ All notable changes to this repository should be recorded here.
 
 ## Unreleased
 
+- **Docs:** the fork getting-started guide uses placeholders for local
+  workspace and notes-vault paths instead of one machine's paths.
+
+- **[Refs #162]** Recovery recognizes Claude ACP session-limit failures and
+  `resets` clock messages. These failures use the existing provider-quota wait
+  and monitor path instead of immediate continuation retries. Ordinary ACP
+  errors, generic `session limit` tool or MCP wording, and deliberately paused
+  issues retain their existing behavior.
+
 - **[#20]** Limited DB Vitest discovery to authored `src` and `scripts`
   suites. Compiled and stale `dist` tests no longer run a second time.
   A CLI-backed regression runs through the root workspace and checks source
