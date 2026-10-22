@@ -293,6 +293,21 @@ export interface WorkerStartOptions {
 }
 
 /**
+ * For an RPC timeout error from a worker handle, a promise that resolves when
+ * the worker's handler has actually finished (its late response arrived, or
+ * the worker exited or stopped). Returns `null` for any other error.
+ *
+ * The host stops waiting at the timeout but cannot interrupt the handler, so
+ * callers that must not overlap work with it (for example, sequential
+ * per-company job runs) wait on this before dispatching more.
+ */
+export function getTimedOutWorkerSettled(err: unknown): Promise<void> | null {
+  if (typeof err !== "object" || err === null) return null;
+  const workerSettled = (err as { workerSettled?: unknown }).workerSettled;
+  return workerSettled instanceof Promise ? (workerSettled as Promise<void>) : null;
+}
+
+/**
  * A pending RPC call waiting for a response from the worker.
  */
 interface PendingRequest {
@@ -424,6 +439,13 @@ export interface PluginWorkerHandle {
    */
   setProactiveCompanyScopes(companyIds: readonly string[]): void;
 
+  /**
+   * The host-authorized companies this worker may act on (the configured
+   * company set), sorted. The job scheduler uses it to fan out company-scoped
+   * jobs, one run per company.
+   */
+  getProactiveCompanyScopes(): string[];
+
   /** Subscribe to worker events. */
   on<K extends WorkerHandleEventName>(
     event: K,
@@ -499,6 +521,12 @@ export interface PluginWorkerManager {
   setProactiveCompanyScopes(pluginId: string, companyIds: readonly string[]): void;
 
   /**
+   * The host-authorized configured companies for a plugin's worker, sorted.
+   * Empty if the worker is not registered.
+   */
+  getProactiveCompanyScopes(pluginId: string): string[];
+
+  /**
    * Stop all managed workers. Called during server shutdown.
    */
   stopAll(): Promise<void>;
@@ -553,6 +581,12 @@ export function createPluginWorkerHandle(
 
   // Pending RPC requests awaiting a response
   const pendingRequests = new Map<string | number, PendingRequest>();
+  /**
+   * Requests the host stopped waiting for (RPC timeout) whose worker handler
+   * may still be running, keyed by request id. Resolved when the worker
+   * finally answers, or when the worker exits or stops.
+   */
+  const abandonedRequests = new Map<string | number, () => void>();
   let nextRequestId = 1;
   const activeInvocations = new Map<string, ActiveInvocation>();
   const retiredActionInvocations = new Map<string, RetiredActionInvocation>();
@@ -708,6 +742,13 @@ export function createPluginWorkerHandle(
 
     const pending = pendingRequests.get(id);
     if (!pending) {
+      const markWorkerSettled = abandonedRequests.get(id);
+      if (markWorkerSettled) {
+        abandonedRequests.delete(id);
+        log.debug({ id }, "worker finished a request after the host timed out");
+        markWorkerSettled();
+        return;
+      }
       log.warn({ id }, "received response for unknown request id");
       return;
     }
@@ -738,8 +779,11 @@ export function createPluginWorkerHandle(
     // configuration set only when it identifies exactly one company, matching
     // webhook tenant resolution. A real invocation keeps nested config/secret
     // calls bound to that company even while another invocation is active.
-    // Instance-only and multi-company jobs keep their existing unscoped path;
-    // never select a tenant from worker-controlled settings or company lists.
+    // Instance-scoped jobs with zero or several configured companies keep the
+    // unscoped path and run once. Jobs declared `scope: "company"` are fanned
+    // out by the job scheduler, which passes an explicit host-chosen
+    // `companyId` per run (handled above). Never select a tenant from
+    // worker-controlled settings or company lists.
     if (method === "runJob" && proactiveCompanyScopes.size === 1) {
       return { companyId: proactiveCompanyScopes.values().next().value! };
     }
@@ -1335,6 +1379,9 @@ export function createPluginWorkerHandle(
   }
 
   function rejectAllPending(error: Error): void {
+    // The worker is gone, so no timed-out handler can still be running.
+    for (const markWorkerSettled of abandonedRequests.values()) markWorkerSettled();
+    abandonedRequests.clear();
     for (const [id, pending] of pendingRequests) {
       clearTimeout(pending.timer);
       pending.resolve(
@@ -1650,12 +1697,24 @@ export function createPluginWorkerHandle(
       };
 
       const timer = setTimeout(() => {
+        // The host stops waiting, but the worker handler may still be
+        // running. Track the request so a caller that must not overlap work
+        // (the job scheduler's per-company runs) can wait for the worker's
+        // terminal response before dispatching more.
+        let markWorkerSettled!: () => void;
+        const workerSettled = new Promise<void>((resolveSettled) => {
+          markWorkerSettled = resolveSettled;
+        });
+        abandonedRequests.set(id, markWorkerSettled);
         settle(
           reject,
-          new JsonRpcCallError({
-            code: PLUGIN_RPC_ERROR_CODES.TIMEOUT,
-            message: `RPC call "${method}" timed out after ${timeout}ms`,
-          }),
+          Object.assign(
+            new JsonRpcCallError({
+              code: PLUGIN_RPC_ERROR_CODES.TIMEOUT,
+              message: `RPC call "${method}" timed out after ${timeout}ms`,
+            }),
+            { workerSettled },
+          ),
         );
       }, timeout);
 
@@ -1798,6 +1857,10 @@ export function createPluginWorkerHandle(
         const trimmed = readNonEmptyString(id);
         if (trimmed) proactiveCompanyScopes.add(trimmed);
       }
+    },
+
+    getProactiveCompanyScopes(): string[] {
+      return Array.from(proactiveCompanyScopes).sort();
     },
 
     diagnostics(): WorkerDiagnostics {
@@ -1956,6 +2019,10 @@ export function createPluginWorkerManager(
 
     setProactiveCompanyScopes(pluginId: string, companyIds: readonly string[]): void {
       workers.get(pluginId)?.setProactiveCompanyScopes(companyIds);
+    },
+
+    getProactiveCompanyScopes(pluginId: string): string[] {
+      return workers.get(pluginId)?.getProactiveCompanyScopes() ?? [];
     },
 
     async stopAll(): Promise<void> {

@@ -119,6 +119,9 @@ const agentA = "44444444-4444-4444-8444-444444444444";
 const runA = "55555555-5555-4555-8555-555555555555";
 const projectA = "66666666-6666-4666-8666-666666666666";
 const pluginId = "11111111-1111-4111-8111-111111111111";
+// Bridge action routes pass a 5-minute RPC timeout (routes/plugins.ts
+// PLUGIN_ACTION_RPC_TIMEOUT_MS) instead of the 30s worker default.
+const PLUGIN_ACTION_TIMEOUT_MS = 5 * 60 * 1000;
 const secretId = "77777777-7777-4777-8777-777777777777";
 
 function boardActor(overrides: Record<string, unknown> = {}) {
@@ -1014,7 +1017,7 @@ describe.sequential("plugin tool and bridge authz", () => {
         companyId: null,
       },
       renderEnvironment: null,
-    });
+    }, PLUGIN_ACTION_TIMEOUT_MS);
   });
 
   it("passes authenticated actor context and overrides spoofed company scope for plugin actions", async () => {
@@ -1051,7 +1054,7 @@ describe.sequential("plugin tool and bridge authz", () => {
         companyId: companyA,
       },
       renderEnvironment: null,
-    });
+    }, PLUGIN_ACTION_TIMEOUT_MS);
   });
 
   it("uses null for board actor userId when no authenticated user id is present", async () => {
@@ -1074,7 +1077,7 @@ describe.sequential("plugin tool and bridge authz", () => {
         userId: null,
         companyId: companyA,
       }),
-    }));
+    }), PLUGIN_ACTION_TIMEOUT_MS);
   });
 
   it("allows agent-scoped plugin actions with authenticated actor context", async () => {
@@ -1111,7 +1114,7 @@ describe.sequential("plugin tool and bridge authz", () => {
         companyId: companyA,
       },
       renderEnvironment: null,
-    });
+    }, PLUGIN_ACTION_TIMEOUT_MS);
 
     call.mockClear();
     const legacyRes = await request(app)
@@ -1140,7 +1143,45 @@ describe.sequential("plugin tool and bridge authz", () => {
         companyId: companyA,
       },
       renderEnvironment: null,
+    }, PLUGIN_ACTION_TIMEOUT_MS);
+  });
+
+  it.each([
+    ["legacy action", `/api/plugins/${pluginId}/bridge/action`, { key: "sync.runNow", companyId: companyA }],
+    ["url action", `/api/plugins/${pluginId}/actions/sync.runNow`, { companyId: companyA }],
+  ] as const)("gives %s bridge calls a 5-minute RPC timeout instead of the 30s default", async (_name, path, body) => {
+    readyPlugin();
+    const call = vi.fn().mockResolvedValue({ ok: true });
+    const { app } = await createApp(boardActor(), {}, {
+      bridgeDeps: {
+        workerManager: { call },
+      },
     });
+
+    const res = await request(app).post(path).send(body);
+
+    expect(res.status).toBe(200);
+    expect(call).toHaveBeenCalledTimes(1);
+    expect(call.mock.calls[0]?.[1]).toBe("performAction");
+    expect(call.mock.calls[0]?.[3]).toBe(300_000);
+  });
+
+  it("keeps getData bridge calls on the default RPC timeout", async () => {
+    readyPlugin();
+    const call = vi.fn().mockResolvedValue({ ok: true });
+    const { app } = await createApp(boardActor(), {}, {
+      bridgeDeps: {
+        workerManager: { call },
+      },
+    });
+
+    const res = await request(app)
+      .post(`/api/plugins/${pluginId}/data/health`)
+      .send({ companyId: companyA });
+
+    expect(res.status).toBe(200);
+    expect(call).toHaveBeenCalledTimes(1);
+    expect(call.mock.calls[0]?.[3]).toBeUndefined();
   });
 
   it("rejects agent plugin actions outside the authenticated company scope", async () => {
@@ -1228,7 +1269,29 @@ describe.sequential("plugin tool and bridge authz", () => {
 
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ runId: "run-1", jobId: "job-1" });
-    expect(scheduler.triggerJob).toHaveBeenCalledWith("job-1", "manual");
+    expect(scheduler.triggerJob).toHaveBeenCalledWith("job-1", "manual", { companyId: null });
+  });
+
+  it("passes a manual trigger's named company to the scheduler for a per-company run", async () => {
+    readyPlugin();
+    const runs = [{ runId: "run-2", companyId: "company-b" }];
+    const scheduler = { triggerJob: vi.fn().mockResolvedValue({ runId: "run-2", jobId: "job-1", runs }) };
+    const jobStore = { getJobByIdForPlugin: vi.fn().mockResolvedValue({ id: "job-1" }) };
+    const { app } = await createApp(boardActor({
+      userId: "admin-1",
+      isInstanceAdmin: true,
+      companyIds: [],
+    }), {}, {
+      jobDeps: { scheduler, jobStore },
+    });
+
+    const res = await request(app)
+      .post(`/api/plugins/${pluginId}/jobs/job-1/trigger`)
+      .send({ companyId: " company-b " });
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ runId: "run-2", jobId: "job-1", runs });
+    expect(scheduler.triggerJob).toHaveBeenCalledWith("job-1", "manual", { companyId: "company-b" });
   });
 
   // ─── Agent JWT tool execution (cherry-picked from #5549) ─────────────────────
