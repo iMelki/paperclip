@@ -259,6 +259,17 @@ describe("classifyAdapterFailureForRecovery", () => {
     }
   });
 
+  it("counts a reset exactly at the grace boundary before the failure as due now", () => {
+    const failedAt = new Date("2026-10-13T19:00:00.000Z");
+    const now = new Date("2026-10-13T19:10:00.000Z");
+    expect(classifyAdapterFailureForRecovery({
+      errorCode: "acpx_turn_failed",
+      error: "You've hit your session limit · resets 18:30 (UTC)",
+      resultJson: {},
+      finishedAt: failedAt,
+    }, now)).toEqual({ kind: "provider_quota", retryAt: now, parsedResetTime: true });
+  });
+
   it("still waits for a reset that is after the failure and not yet reached", () => {
     const failedAt = new Date("2026-10-13T19:00:00.000Z");
     const now = new Date("2026-10-13T19:05:00.000Z");

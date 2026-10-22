@@ -418,7 +418,7 @@ function parseProviderQuotaClockReset(error: string, now: Date, scope?: Provider
   const anchorMs = failedAt && !Number.isNaN(failedAt.getTime()) ? Math.min(failedAt.getTime(), now.getTime()) : now.getTime();
   const base = new Date(anchorMs - PROVIDER_QUOTA_RESET_ELAPSED_GRACE_MS);
   const settle = (candidate: Date, next: () => Date) => {
-    const occurrence = candidate.getTime() > base.getTime() ? candidate : next();
+    const occurrence = candidate.getTime() >= base.getTime() ? candidate : next();
     return occurrence.getTime() > now.getTime() ? occurrence : new Date(now);
   };
 
