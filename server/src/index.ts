@@ -33,7 +33,7 @@ import detectPort from "detect-port";
 import { createApp } from "./app.js";
 import { loadConfig } from "./config.js";
 import { resolveListenPort } from "./listen-port.js";
-import { EmbeddedPostgresLockRefusal, isSameDataDirectory, moveStaleLockAside, readRunningEmbeddedPostgres } from "./embedded-postgres-reuse.js";
+import { EmbeddedPostgresLockRefusal, isSameDataDirectory, moveStaleLockAside, readLockIdentity, readRunningEmbeddedPostgres } from "./embedded-postgres-reuse.js";
 import { logger } from "./middleware/logger.js";
 import {
   getManagedInstanceConfig,
@@ -475,9 +475,12 @@ export async function startServer(): Promise<StartedServer> {
         // still affirmatively stale is moved aside, and a live owner is reused or refused instead.
         let racingPostgres: { pid: number; port: number } | null = null;
         if (existsSync(postmasterPidFile)) {
+          // The lock that is examined is the lock that may be moved: a file that replaces it in
+          // between is put back and startup refuses.
+          const examinedLock = readLockIdentity(postmasterPidFile);
           racingPostgres = await readRunningEmbeddedPostgres(dataDir, configuredPort, embeddedAdminUrl);
           if (!racingPostgres && existsSync(postmasterPidFile)) {
-            const aside = moveStaleLockAside(postmasterPidFile);
+            const aside = moveStaleLockAside(postmasterPidFile, examinedLock);
             logger.warn({ aside }, "Moved stale embedded PostgreSQL lock file aside");
           }
         }

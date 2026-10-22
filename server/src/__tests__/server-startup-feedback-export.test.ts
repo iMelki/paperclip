@@ -1,3 +1,4 @@
+import { spawn, type ChildProcess } from "node:child_process";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -410,9 +411,10 @@ describe("startServer embedded PostgreSQL identity", () => {
     // No lock exists at the first check; it appears during port detection, before start().
     const lockAppearsDuringStart = (content: string) => {
       rmSync(pidFile);
-      detectPortMock.mockImplementation(async ({ port }: { port: number; hostname: string }) => {
+      // The embedded path calls detectPort(configuredPort) with a number; the HTTP path passes options.
+      detectPortMock.mockImplementation(async (requested: number | { port: number; hostname: string }) => {
         writeFileSync(pidFile, content);
-        return port;
+        return typeof requested === "number" ? requested : requested.port;
       });
     };
 
@@ -465,6 +467,30 @@ describe("startServer embedded PostgreSQL identity", () => {
       expect(pgStartMock).toHaveBeenCalledOnce();
       expect(staleLocks()).toHaveLength(1);
       expect(readFileSync(path.join(dataDir, staleLocks()[0]), "utf8")).toBe(content);
+    });
+
+    it("keeps a live lock that replaces the examined stale one before the lock is moved", async () => {
+      // Dead at the second check (verdict: stale) ...
+      const staleContent = `424242\n${dataDir}\n1700000000\n55432\n`;
+      const liveContent = `434343\n${dataDir}\n1700000001\n55432\npostmaster-started-later\n`;
+      lockAppearsDuringStart(staleContent);
+      // ... and replaced by another server's lock after the verdict, before the rename.
+      const kill = vi.spyOn(process, "kill").mockImplementation((pid) => {
+        if (pid === 424242) {
+          rmSync(pidFile);
+          writeFileSync(pidFile, liveContent);
+          throw Object.assign(new Error("no such process"), { code: "ESRCH" });
+        }
+        return true;
+      });
+      try {
+        await expect(startServer()).rejects.toThrow("was replaced while it was being checked");
+      } finally {
+        kill.mockRestore();
+      }
+      expect(pgStartMock).not.toHaveBeenCalled();
+      expect(readFileSync(pidFile, "utf8")).toBe(liveContent);
+      expect(staleLocks()).toHaveLength(0);
     });
   });
 
@@ -568,6 +594,48 @@ describe("startServer embedded PostgreSQL identity", () => {
     await expect(startServer()).rejects.toThrow("database phase reached");
     expect(pgCtorMock).not.toHaveBeenCalled();
     expect(pgStartMock).not.toHaveBeenCalled();
+  });
+
+  describe.skipIf(process.platform === "win32")("a postmaster whose -D names another cluster", () => {
+    // A real process named `postgres` whose working directory is the target, like a postmaster that
+    // chdirs into its data directory. Its command line names a different, initialised cluster.
+    let child: ChildProcess | null = null;
+    afterEach(() => {
+      child?.kill();
+      child = null;
+    });
+
+    const startPostmaster = async (commandLine: string[]) => {
+      const bin = path.join(mkdtempSync(path.join(tmpdir(), "pg-bin-")), "postgres");
+      symlinkSync(process.execPath, bin);
+      child = spawn(bin, ["-e", "setInterval(() => {}, 1000)", "--", ...commandLine], { cwd: dataDir, stdio: "ignore" });
+      await new Promise((resolve) => setTimeout(resolve, 400));
+    };
+    const clusterWithVersion = (prefix: string) => {
+      const dir = mkdtempSync(path.join(tmpdir(), prefix));
+      writeFileSync(path.join(dir, "PG_VERSION"), "18\n");
+      return dir;
+    };
+
+    it.each([
+      ["-c data_directory", (target: string, other: string) => ["-D", other, "-c", `data_directory=${target}`]],
+      ["a configuration include", (_target: string, other: string) => ["-D", other]],
+      ["an external config_file", (_target: string, other: string) => ["-D", other, "-c", "config_file=/etc/external/pg.conf"]],
+    ])("refuses with exit 75 and keeps the lock byte for byte (%s)", async (_name, argsFor) => {
+      const other = clusterWithVersion("pg-config-cluster-");
+      writeFileSync(path.join(other, "postgresql.conf"), "include 'hidden.conf'\n");
+      await startPostmaster(argsFor(dataDir, other));
+      writeFileSync(pidFile, "1oops"); // a lock that cannot name its owner
+      const before = readFileSync(pidFile);
+      const rejection = await startServer().catch((error) => error);
+      expect(rejection).toMatchObject({ name: "EmbeddedPostgresLockRefusal", exitCode: 75 });
+      expect(readFileSync(pidFile).equals(before)).toBe(true);
+      expect(staleLocks()).toHaveLength(0);
+      expect(readdirSync(path.dirname(dataDir)).filter((name) => name.startsWith(`${path.basename(dataDir)}.postmaster.pid`))).toEqual([]);
+      expect(pgCtorMock).not.toHaveBeenCalled();
+      expect(pgStartMock).not.toHaveBeenCalled();
+      expect(ensurePostgresDatabase).not.toHaveBeenCalled();
+    });
   });
 
   it("probes identity with the same login it uses to open the database", async () => {

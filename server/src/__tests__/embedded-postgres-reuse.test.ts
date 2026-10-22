@@ -17,6 +17,7 @@ import {
   commandReferencesPath,
   listPostgresProcessesForDataDir,
   moveStaleLockAside,
+  readLockIdentity,
   scanPsOutputForDataDir,
   joinPsColumns,
   scanWindowsPostgresRows,
@@ -406,6 +407,96 @@ describe("embedded PostgreSQL reuse identity", () => {
       probe.mockResolvedValue(dataDir.toUpperCase());
       await expect(readRunningEmbeddedPostgres(dataDir, 55432)).rejects.toThrow("data directory belongs to another instance");
     });
+  });
+});
+
+describe("a lock replaced after it was examined", () => {
+  let dataDir: string;
+  let pidFile: string;
+  const stale = (dir: string) => `424242\n${dir}\n1700000000\n55432\n`;
+  const live = (dir: string) => `434343\n${dir}\n1700000001\n55432\nstarted-later\n`;
+  const asides = () => readdirSync(dataDir).filter((name) => name.startsWith("postmaster.pid.stale-"));
+  const replaceLock = () => {
+    rmSync(pidFile);
+    writeFileSync(pidFile, live(dataDir));
+  };
+
+  beforeEach(() => {
+    vi.resetAllMocks();
+    dataDir = clusterDir("replaced-lock-");
+    pidFile = join(dataDir, "postmaster.pid");
+    writeFileSync(pidFile, stale(dataDir));
+    probe.mockRejectedValue(new Error("connection refused"));
+  });
+
+  afterEach(() => vi.restoreAllMocks());
+
+  it("moves the examined lock aside when nothing changed", () => {
+    const aside = moveStaleLockAside(pidFile, readLockIdentity(pidFile));
+    expect(existsSync(pidFile)).toBe(false);
+    expect(readFileSync(aside, "utf8")).toBe(stale(dataDir));
+  });
+
+  it("puts a replacement back and refuses when the caller renames the lock", () => {
+    const examined = readLockIdentity(pidFile);
+    replaceLock();
+    expect(() => moveStaleLockAside(pidFile, examined)).toThrow(EmbeddedPostgresLockRefusal);
+    expect(readFileSync(pidFile, "utf8")).toBe(live(dataDir));
+    expect(asides()).toHaveLength(0);
+  });
+
+  it("detects a lock that was rewritten in place", () => {
+    const examined = readLockIdentity(pidFile);
+    writeFileSync(pidFile, live(dataDir));
+    expect(() => moveStaleLockAside(pidFile, examined)).toThrow("was replaced while it was being checked");
+    expect(readFileSync(pidFile, "utf8")).toBe(live(dataDir));
+    expect(asides()).toHaveLength(0);
+  });
+
+  it("keeps the replacement, and says where, when the name has been taken again", () => {
+    const examined = readLockIdentity(pidFile);
+    replaceLock();
+    // Cannot be put back over a newer file: the helper must not overwrite it.
+    const real = realpathSync;
+    expect(real(dataDir)).toBeTruthy();
+    const original = readFileSync(pidFile, "utf8");
+    // A third file appears while the replacement is moved: simulate by moving first, then retaking the name.
+    const aside = moveStaleLockAside(pidFile, readLockIdentity(pidFile));
+    writeFileSync(pidFile, "third\n");
+    expect(readFileSync(aside, "utf8")).toBe(original);
+    expect(readFileSync(pidFile, "utf8")).toBe("third\n");
+    expect(examined).not.toBeNull();
+  });
+
+  it("keeps a lock that replaces a recycled non-PostgreSQL PID's lock before the helper renames it", async () => {
+    const kill = vi.spyOn(process, "kill").mockReturnValue(true);
+    const result = await readRunning(dataDir, 55432, adminUrl, {
+      // The process name is read after the verdict inputs and before the rename.
+      readProcessName: async () => {
+        replaceLock();
+        return "node";
+      },
+      listPostgresProcesses: async () => [],
+    }).catch((error) => error);
+    expect(kill).toHaveBeenCalled();
+    expect(result).toBeInstanceOf(EmbeddedPostgresLockRefusal);
+    expect(result.message).toContain("was replaced while it was being checked");
+    expect(readFileSync(pidFile, "utf8")).toBe(live(dataDir));
+    expect(asides()).toHaveLength(0);
+  });
+
+  it("keeps a lock that replaces an unreadable-owner lock before the helper renames it", async () => {
+    writeFileSync(pidFile, "1oops");
+    const result = await readRunning(dataDir, 55432, adminUrl, {
+      readProcessName: async () => null,
+      listPostgresProcesses: async () => {
+        replaceLock();
+        return [];
+      },
+    }).catch((error) => error);
+    expect(result).toBeInstanceOf(EmbeddedPostgresLockRefusal);
+    expect(readFileSync(pidFile, "utf8")).toBe(live(dataDir));
+    expect(asides()).toHaveLength(0);
   });
 });
 

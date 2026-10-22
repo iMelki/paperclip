@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { existsSync, readFileSync, readlinkSync, renameSync } from "node:fs";
+import { existsSync, linkSync, lstatSync, readFileSync, readlinkSync, renameSync, unlinkSync } from "node:fs";
 import { realpath } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { getPostgresDataDirectory } from "@paperclipai/db";
@@ -135,21 +135,65 @@ export function commandReferencesPath(command: string, needle: string): boolean 
   return false;
 }
 
+/** What identifies one particular `postmaster.pid` file: a replacement file differs in at least one field. */
+export type LockIdentity = { dev: number; ino: number; size: number; mtimeMs: number };
+
+/** Identity of the lock file now at `pidFile`, or `null` when it cannot be inspected. */
+export function readLockIdentity(pidFile: string): LockIdentity | null {
+  try {
+    const { dev, ino, size, mtimeMs } = lstatSync(pidFile);
+    return { dev, ino, size, mtimeMs };
+  } catch {
+    return null;
+  }
+}
+
+const sameLockIdentity = (a: LockIdentity | null, b: LockIdentity) =>
+  a !== null && a.dev === b.dev && a.ino === b.ino && a.size === b.size && a.mtimeMs === b.mtimeMs;
+
+/**
+ * Moves `pidFile` aside and, when `expected` is given, checks that the file that was moved is the one
+ * the caller examined. A rename acts on whatever file has the name at that moment, so a lock that a
+ * live server wrote after the verdict would otherwise be archived. A different file is put back
+ * without overwriting anything, and the caller gets a refusal: the new lock is never left archived.
+ * Raw rename errors are thrown as they are.
+ */
+function renameLockAside(pidFile: string, expected: LockIdentity | null | undefined): string {
+  const aside = uniqueAsidePath(pidFile);
+  renameSync(pidFile, aside);
+  if (!expected || sameLockIdentity(readLockIdentity(aside), expected)) return aside;
+  let restored = false;
+  try {
+    // A hard link fails when the name is taken again, so a newer lock is never replaced.
+    linkSync(aside, pidFile);
+    unlinkSync(aside);
+    restored = true;
+  } catch {
+    // The replacement stays at `aside` for the operator.
+  }
+  throw new EmbeddedPostgresLockRefusal(
+    `Refusing to start embedded PostgreSQL: ${pidFile} was replaced while it was being checked, so it is not the lock that was examined. ` +
+      (restored
+        ? "It was left in place."
+        : `It could not be put back and is kept at ${aside}; check that no PostgreSQL is using this data directory.`),
+  );
+}
+
 /**
  * Moves a leftover lock out of the way before start-up. The file is never deleted, so
- * an operator can still inspect it. Throws a lock refusal when it cannot be moved.
+ * an operator can still inspect it. Throws a lock refusal when it cannot be moved, or when
+ * `expected` is given and the file that was moved is not the one it describes.
  */
-export function moveStaleLockAside(pidFile: string): string {
-  const aside = uniqueAsidePath(pidFile);
+export function moveStaleLockAside(pidFile: string, expected?: LockIdentity | null): string {
   try {
-    renameSync(pidFile, aside);
+    return renameLockAside(pidFile, expected);
   } catch (error) {
+    if (error instanceof EmbeddedPostgresLockRefusal) throw error;
     throw new EmbeddedPostgresLockRefusal(
       `Refusing to start embedded PostgreSQL: the leftover lock ${pidFile} could not be moved aside ` +
         `(${(error as NodeJS.ErrnoException).code ?? "unknown error"}). Fix its permissions and start again.`,
     );
   }
-  return aside;
 }
 
 export type PostgresProcess = { pid: number; command: string };
@@ -323,6 +367,7 @@ async function recoverLockWithUnknownOwner(
   adminUrl: EmbeddedPostgresAdminUrl,
   options: EmbeddedPostgresReuseOptions,
   problem: string,
+  lockIdentity: LockIdentity | null,
 ): Promise<null> {
   const refuse = (detail: string) =>
     new EmbeddedPostgresLockRefusal(
@@ -350,10 +395,11 @@ async function recoverLockWithUnknownOwner(
         `Stop it with \`${stopCommand(first.pid)}\`, then start again; the stale lock is handled automatically.`,
     );
   }
-  const aside = uniqueAsidePath(pidFile);
+  let aside: string;
   try {
-    renameSync(pidFile, aside);
+    aside = renameLockAside(pidFile, lockIdentity);
   } catch (error) {
+    if (error instanceof EmbeddedPostgresLockRefusal) throw error;
     throw refuse(
       `it could not be moved aside (${(error as NodeJS.ErrnoException).code ?? "unknown error"}). Fix its permissions and start again.`,
     );
@@ -371,9 +417,9 @@ async function recoverLockWithUnknownOwner(
  * lock handling, so the lock is archived beside the directory here. An initialised cluster
  * keeps its lock for the caller's existing handling.
  */
-function moveAsideBeforeInitialisation(pidFile: string, dataDir: string): void {
+function moveAsideBeforeInitialisation(pidFile: string, dataDir: string, lockIdentity: LockIdentity | null): void {
   if (existsSync(join(dataDir, "PG_VERSION"))) return;
-  const aside = moveStaleLockAside(pidFile);
+  const aside = moveStaleLockAside(pidFile, lockIdentity);
   logger.warn({ pidFile, aside }, "moved a stale postmaster.pid out of an uninitialised data directory");
 }
 
@@ -399,6 +445,8 @@ export async function readRunningEmbeddedPostgres(
 ): Promise<{ pid: number; port: number } | null> {
   const pidFile = resolve(dataDir, "postmaster.pid");
   if (!existsSync(pidFile)) return null;
+  // The verdict below is about this file; a rename later must still find the same one.
+  const lockIdentity = readLockIdentity(pidFile);
   let lines: string[];
   try {
     lines = readFileSync(pidFile, "utf8").split("\n");
@@ -410,6 +458,7 @@ export async function readRunningEmbeddedPostgres(
       adminUrl,
       options,
       `could not be read (${(error as NodeJS.ErrnoException).code ?? "unknown error"})`,
+      lockIdentity,
     );
   }
   const pid = Number(lines[0]?.trim());
@@ -421,6 +470,7 @@ export async function readRunningEmbeddedPostgres(
       adminUrl,
       options,
       "does not hold a valid process id",
+      lockIdentity,
     );
   }
   try {
@@ -429,7 +479,7 @@ export async function readRunningEmbeddedPostgres(
     // Only ESRCH proves the process is gone. EPERM and any other error leave
     // liveness unknown, so identity must still be established.
     if ((error as NodeJS.ErrnoException).code === "ESRCH") {
-      moveAsideBeforeInitialisation(pidFile, dataDir);
+      moveAsideBeforeInitialisation(pidFile, dataDir, lockIdentity);
       return null;
     }
   }
@@ -448,7 +498,7 @@ export async function readRunningEmbeddedPostgres(
         { pid, port },
         "Embedded PostgreSQL identity could not be verified and postmaster.pid names the current process; treating postmaster.pid as stale and trying normal startup",
       );
-      moveAsideBeforeInitialisation(pidFile, dataDir);
+      moveAsideBeforeInitialisation(pidFile, dataDir, lockIdentity);
       return null;
     }
     // A live PID that is affirmatively not PostgreSQL (the OS recycled it), with
@@ -465,10 +515,11 @@ export async function readRunningEmbeddedPostgres(
       // A server on the configured port that serves another data directory does not own this lock.
       const configuredAnswers = configuredDir !== null && (await isSameDataDirectory(configuredDir, dataDir));
       if (!configuredAnswers) {
-        const aside = uniqueAsidePath(pidFile);
+        let aside: string;
         try {
-          renameSync(pidFile, aside);
+          aside = renameLockAside(pidFile, lockIdentity);
         } catch (error) {
+          if (error instanceof EmbeddedPostgresLockRefusal) throw error;
           throw new EmbeddedPostgresLockRefusal(
             `Refusing to start embedded PostgreSQL: postmaster.pid names process ${pid} (${processName}), which is not PostgreSQL, ` +
               `but the lock could not be moved aside (${(error as NodeJS.ErrnoException).code ?? "unknown error"}). Fix its permissions and start again.`,
