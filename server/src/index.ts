@@ -470,20 +470,35 @@ export async function startServer(): Promise<StartedServer> {
           logger.info(`Embedded PostgreSQL cluster already exists (${clusterVersionFile}); skipping init`);
         }
 
+        // Port detection and initialise() can take seconds, so a second start on this data directory
+        // may have written a live lock since the check above. Verify it again; only a lock that is
+        // still affirmatively stale is moved aside, and a live owner is reused or refused instead.
+        let racingPostgres: { pid: number; port: number } | null = null;
         if (existsSync(postmasterPidFile)) {
-          const aside = moveStaleLockAside(postmasterPidFile);
-          logger.warn({ aside }, "Moved stale embedded PostgreSQL lock file aside");
+          racingPostgres = await readRunningEmbeddedPostgres(dataDir, configuredPort, embeddedAdminUrl);
+          if (!racingPostgres && existsSync(postmasterPidFile)) {
+            const aside = moveStaleLockAside(postmasterPidFile);
+            logger.warn({ aside }, "Moved stale embedded PostgreSQL lock file aside");
+          }
         }
-        try {
-          await embeddedPostgres.start();
-        } catch (err) {
-          logEmbeddedPostgresFailure("start", err);
-          throw formatEmbeddedPostgresError(err, {
-            fallbackMessage: `Failed to start embedded PostgreSQL on port ${port}`,
-            recentLogs: logBuffer.getRecentLogs(),
-          });
+        if (racingPostgres) {
+          embeddedPostgres = null;
+          port = racingPostgres.port;
+          logger.warn(
+            `Embedded PostgreSQL was started concurrently; reusing it (pid=${racingPostgres.pid}, port=${port})`,
+          );
+        } else {
+          try {
+            await embeddedPostgres.start();
+          } catch (err) {
+            logEmbeddedPostgresFailure("start", err);
+            throw formatEmbeddedPostgresError(err, {
+              fallbackMessage: `Failed to start embedded PostgreSQL on port ${port}`,
+              recentLogs: logBuffer.getRecentLogs(),
+            });
+          }
+          embeddedPostgresStartedByThisProcess = true;
         }
-        embeddedPostgresStartedByThisProcess = true;
       }
     }
   

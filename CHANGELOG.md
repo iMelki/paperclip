@@ -6,6 +6,12 @@ All notable changes to this repository should be recorded here.
 
 ## Unreleased
 
+- **Fix:** a second embedded PostgreSQL start on the same data directory no
+  longer moves the first start's live `postmaster.pid` aside. The lock is
+  verified again just before `start()`. A live owner is reused, an owner that
+  cannot be verified makes startup refuse, and only a lock that is still stale
+  is moved aside.
+
 - **Docs:** the fork getting-started guide uses placeholders for local
   workspace and notes-vault paths instead of one machine's paths.
 

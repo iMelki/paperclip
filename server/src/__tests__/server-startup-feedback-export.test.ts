@@ -406,6 +406,68 @@ describe("startServer embedded PostgreSQL identity", () => {
     expect(process.kill(process.pid, 0)).toBe(true);
   });
 
+  describe("a second start writes the lock while this one initialises", () => {
+    // No lock exists at the first check; it appears during port detection, before start().
+    const lockAppearsDuringStart = (content: string) => {
+      rmSync(pidFile);
+      detectPortMock.mockImplementation(async ({ port }: { port: number; hostname: string }) => {
+        writeFileSync(pidFile, content);
+        return port;
+      });
+    };
+
+    it("reuses a live server instead of moving its lock aside", async () => {
+      lockAppearsDuringStart(`424242\n${dataDir}\n1700000000\n55433\n`);
+      vi.mocked(getPostgresDataDirectory)
+        .mockReset()
+        .mockRejectedValueOnce(new Error("not reachable yet"))
+        .mockResolvedValue(dataDir);
+      const kill = vi.spyOn(process, "kill").mockImplementation(() => true);
+      try {
+        await expect(startServer()).rejects.toThrow("database phase reached");
+      } finally {
+        kill.mockRestore();
+      }
+      expect(pgStartMock).not.toHaveBeenCalled();
+      expect(existsSync(pidFile)).toBe(true);
+      expect(staleLocks()).toHaveLength(0);
+      expect(ensurePostgresDatabase).toHaveBeenCalledWith(
+        "postgres://paperclip:paperclip@127.0.0.1:55433/postgres", "paperclip",
+      );
+    });
+
+    it("refuses and keeps the lock when the live owner is still starting", async () => {
+      const content = `424242\n${dataDir}\n1700000000\n55432\n`;
+      lockAppearsDuringStart(content);
+      vi.mocked(getPostgresDataDirectory).mockReset().mockResolvedValue(null);
+      const kill = vi.spyOn(process, "kill").mockImplementation(() => true);
+      try {
+        await expect(startServer()).rejects.toThrow("identity could not be verified");
+      } finally {
+        kill.mockRestore();
+      }
+      expect(readFileSync(pidFile, "utf8")).toBe(content);
+      expect(staleLocks()).toHaveLength(0);
+      expect(pgStartMock).not.toHaveBeenCalled();
+    });
+
+    it("still moves a lock aside that is dead at the second check", async () => {
+      const content = `424242\n${dataDir}\n1700000000\n55432\n`;
+      lockAppearsDuringStart(content);
+      const kill = vi.spyOn(process, "kill").mockImplementation(() => {
+        throw Object.assign(new Error("no such process"), { code: "ESRCH" });
+      });
+      try {
+        await expect(startServer()).rejects.toThrow("database phase reached");
+      } finally {
+        kill.mockRestore();
+      }
+      expect(pgStartMock).toHaveBeenCalledOnce();
+      expect(staleLocks()).toHaveLength(1);
+      expect(readFileSync(path.join(dataDir, staleLocks()[0]), "utf8")).toBe(content);
+    });
+  });
+
   it("keeps reusing verified live PostgreSQL on the recorded port", async () => {
     writeFileSync(pidFile, `${process.pid}\n${dataDir}\n1700000000\n55433\n`);
     vi.mocked(getPostgresDataDirectory).mockResolvedValue(dataDir);
