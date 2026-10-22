@@ -60,6 +60,10 @@ const DECLARED_SOURCE_TESTS = new Map([
     ["server/src/__tests__/server-startup-feedback-export.test.ts"],
   ],
   [
+    "scripts/lib/ephemeral-scratch.mjs",
+    ["packages/db/src/test-discovery.test.ts"],
+  ],
+  [
     "tests/e2e/onboarding-hire-route.ts",
     ["tests/e2e/onboarding-hire-route.spec.ts"],
   ],

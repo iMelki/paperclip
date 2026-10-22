@@ -83,6 +83,48 @@
       "limits": "Windows native fixture and mocked startup proof only. Production deployment, macOS/Linux native proof, longer crash-recovery readiness waits, and CLI lifecycle consumers remain separate."
     },
     {
+      "id": "db-discovery-canonical-scratch-provenance",
+      "path": "scripts/lib/ephemeral-scratch.mjs",
+      "description": "Keep the standalone scratch helper byte-equivalent to its pinned source after line-ending normalization. The pin moved from the canonical copy (a296c167...) to 4c29cea62dbba24e737f3e8776b504bd7c710c3fbc6dc3ad1c980243cef11af2 for the extension/unique/mode containment fix, the extension-aware name grammar, file-collision retry and private child roots; the canonical upstream copy still needs the same fix.",
+      "negativeFixture": "packages/db/src/test-discovery.test.ts",
+      "observedFailure": {
+        "date": "2026-10-01",
+        "command": "node scripts/run-vitest-stable.mjs --files packages/db/src/test-discovery.test.ts",
+        "breakApplied": "Added one inert comment to the isolated vendored helper; the module remained valid and its consumer still launched.",
+        "reason": "Exit 1 at the canonical SHA-256 assertion; the three CLI-backed discovery tests passed. The failure was source drift, not syntax, import, launch, or timeout.",
+        "restoredPass": "Restored the canonical helper text. The identical caller exited 0, 4/4 tests passed; normalized SHA-256 a296c167b1d77fcb4b665152917f38f02d9b7c8c9458601d96bb678eeb38a6be.",
+        "artifactPath": "doc/evidence/db-test-discovery-2026-10-01.md"
+      }
+    },
+    {
+      "id": "ephemeral-scratch-extension-containment",
+      "path": "scripts/lib/ephemeral-scratch.mjs",
+      "description": "createEphemeralFile accepts only a single safe extension suffix, ephemeralName accepts only a governed unique suffix, every created path is a direct child of the requested root, and scratch is created owner-only (0700 dirs, 0600 files).",
+      "negativeFixture": "packages/db/src/test-discovery.test.ts",
+      "observedFailure": {
+        "date": "2026-10-19",
+        "command": "node scripts/run-vitest-stable.mjs --files packages/db/src/test-discovery.test.ts",
+        "breakApplied": "Ran the new containment tests against the unfixed helper. An extension of '/../../escape' wrote a file one directory above the requested root.",
+        "reason": "Exit 1: 3 failed / 5 passed. Missing TypeError for traversal extensions and for an unsafe unique suffix; directory mode was not 0700.",
+        "restoredPass": "With the fix and the updated pin, the same command exited 0 with 8/8 tests passing.",
+        "artifactPath": "doc/evidence/db-test-discovery-2026-10-01.md"
+      }
+    },
+    {
+      "id": "db-authored-test-discovery",
+      "path": "packages/db/vitest.config.ts",
+      "description": "Select authored src and maintenance scripts tests while rejecting compiled, stale, and nested dist copies.",
+      "negativeFixture": "packages/db/src/test-discovery.test.ts",
+      "observedFailure": {
+        "date": "2026-10-01",
+        "command": "node scripts/run-vitest-stable.mjs --files packages/db/src/test-discovery.test.ts",
+        "breakApplied": "The isolated worktree restored the base config with unrestricted default discovery. Readback showed only environment: node; the same CLI-backed fixture and stable runner were retained.",
+        "reason": "Exit 1, two of three tests failed: discovery returned dist/basic.test.js, dist/stale-only.spec.js and other non-authored paths, and a CLI stale-dist filter returned a generated suite instead of an empty list. No syntax/import/launch error caused the failure.",
+        "restoredPass": "Restoring authored src/scripts inclusion and default-preserving dist exclusions gave exit 0, 3/3 tests. The separate real maintenance suite passed 15/15. The repaired config SHA-256 is 18c0d1d32d4d55f3017864881466c597fc7232ccb6ef82e9f85adf17288c1e2f.",
+        "artifactPath": "doc/evidence/db-test-discovery-2026-10-01.md"
+      }
+    },
+    {
       "id": "hermes-local-strict-isolation-launch",
       "path": "packages/adapters/hermes/src/server/strict-isolation.ts",
       "description": "Reject unsafe Hermes Local profile/home/env/limit/API-host inputs before child spawn.",
