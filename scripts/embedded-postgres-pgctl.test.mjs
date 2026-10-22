@@ -37,6 +37,7 @@ function harness(outcome = { code: 0 }, platform = 'win32') {
   const mutations = [];
   const probes = [];
   const state = { postmasterPidPresent: true };
+  const realpaths = new Map();
   const context = {
     path: path.win32, platform: () => platform,
     postgres: 'C:\\Postgres Bin\\postgres.exe', pg_ctl: 'C:\\Postgres Bin\\pg_ctl.exe',
@@ -48,6 +49,12 @@ function harness(outcome = { code: 0 }, platform = 'win32') {
     fs: {
       async rm(file) { mutations.push(['rm', file]); },
       async mkdir(dir, options) { mutations.push(['mkdir', dir, options]); },
+      // Identity unless a test maps a path (a symlink or junction alias) to its physical location.
+      async realpath(file) {
+        const target = realpaths.get(file);
+        if (target === 'ENOENT') throw Object.assign(new Error(`ENOENT: ${file}`), { code: 'ENOENT' });
+        return target ?? file;
+      },
       async access(file) {
         probes.push(file);
         if (!state.postmasterPidPresent) {
@@ -85,7 +92,7 @@ function harness(outcome = { code: 0 }, platform = 'win32') {
   const execute = (source) => runGenerator(
     new vm.Script(`(function* () { ${source} })`).runInNewContext(context).call(instance),
   );
-  return { calls, reads, probes, state, logs, errors, mutations, context, instance,
+  return { calls, reads, probes, state, logs, errors, mutations, context, instance, realpaths,
     start: () => execute(startSource), stop: () => execute(stopSource) };
 }
 
@@ -221,6 +228,26 @@ test('start rejects a log file inside the data directory before any effect', asy
     subject.instance.options.logFile = logFile;
     await rejectsBeforeEffects(subject, /^Error: The PostgreSQL log file must be outside the data directory$/);
   }
+});
+
+test('start rejects a log file that is physically inside a data directory reached through an alias', async () => {
+  const subject = harness();
+  subject.instance.options.databaseDir = 'C:\\Link';
+  subject.instance.options.logFile = 'C:\\Real\\Data\\logs\\postgres.log';
+  subject.realpaths.set('C:\\Link', 'C:\\Real\\Data');
+  // The log directory does not exist yet, so it resolves through its nearest existing ancestor.
+  subject.realpaths.set('C:\\Real\\Data\\logs\\postgres.log', 'ENOENT');
+  subject.realpaths.set('C:\\Real\\Data\\logs', 'ENOENT');
+  await rejectsBeforeEffects(subject, /^Error: The PostgreSQL log file must be outside the data directory$/);
+});
+
+test('start accepts a log file outside a data directory reached through an alias', async () => {
+  const subject = harness();
+  subject.instance.options.databaseDir = 'C:\\Link';
+  subject.instance.options.logFile = 'C:\\Real\\logs\\postgres.log';
+  subject.realpaths.set('C:\\Link', 'C:\\Real\\Data');
+  await subject.start();
+  assert.equal(subject.calls[0].args[subject.calls[0].args.indexOf('-l') + 1], 'C:\\Real\\logs\\postgres.log');
 });
 
 test('Windows guard accepts parentheses and apostrophes, which are inert in pg_ctl\'s quoted cmd string', async () => {

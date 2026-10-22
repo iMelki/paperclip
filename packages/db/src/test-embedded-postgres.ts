@@ -120,12 +120,15 @@ async function createEmbeddedPostgresTestInstance(tempDirPrefix: string) {
 }
 
 function cleanupEmbeddedPostgresTestDirs(dataDir: string) {
-  fs.rmSync(dataDir, {
+  const removal = {
     recursive: true,
     force: true,
     maxRetries: process.platform === "win32" ? 20 : 3,
     retryDelay: process.platform === "win32" ? 100 : 10,
-  });
+  };
+  fs.rmSync(dataDir, removal);
+  // Without an explicit logFile, Windows pg_ctl writes its log beside the data directory.
+  fs.rmSync(`${dataDir}-postgres.log`, removal);
 }
 
 // Native Windows can take materially longer to initialize a fresh embedded

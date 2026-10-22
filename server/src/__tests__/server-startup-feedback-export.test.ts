@@ -236,6 +236,7 @@ vi.mock("../config.js", () => ({
 }));
 
 vi.mock("../middleware/logger.js", () => ({
+  resolveServerLogDir: () => "/configured/log/dir",
   logger: {
     child: vi.fn(function child() {
       return this;
@@ -404,6 +405,15 @@ describe("startServer embedded PostgreSQL identity", () => {
     expect(staleLocks()).toHaveLength(1);
     expect(readFileSync(path.join(dataDir, staleLocks()[0])).equals(lockBefore)).toBe(true);
     expect(process.kill(process.pid, 0)).toBe(true);
+  });
+
+  it("writes the PostgreSQL log into the configured server log directory", async () => {
+    await expect(startServer()).rejects.toThrow("database phase reached");
+    expect(pgCtorMock).toHaveBeenCalledWith(expect.objectContaining({
+      logFile: path.resolve("/configured/log/dir", "postgres.log"),
+      // The leftover lock means crash recovery, which gets the longer wait.
+      startTimeoutSeconds: 600,
+    }));
   });
 
   it("keeps reusing verified live PostgreSQL on the recorded port", async () => {

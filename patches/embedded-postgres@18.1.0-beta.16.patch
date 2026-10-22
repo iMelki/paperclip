@@ -28,7 +28,7 @@ diff --git a/dist/index.js b/dist/index.js
              // Optionally retrieve the uid and gid
              const permissionIds = yield this.getUidAndGid()
                  .catch(() => {
-@@ -168,6 +168,159 @@ class EmbeddedPostgres {
+@@ -168,6 +168,177 @@ class EmbeddedPostgres {
              });
              // Make the file executable, in case it is not
 -            ensureBinIsExecutable(postgres);
@@ -78,7 +78,25 @@ diff --git a/dist/index.js b/dist/index.js
 +                    || path.join(path.dirname(this.options.databaseDir), `${path.basename(this.options.databaseDir)}-postgres.log`);
 +                requireSafePath(logFile, 'log path');
 +                {
-+                    const relative = path.relative(this.options.databaseDir, logFile);
++                    // Compare physical locations: a symlink or junction alias of the data
++                    // directory must not hide a log that is physically inside it. A path
++                    // that does not exist yet resolves through its nearest existing ancestor.
++                    const canonical = async (target) => {
++                        const pending = [];
++                        let current = path.resolve(target);
++                        for (;;) {
++                            try {
++                                return path.join(await fs.realpath(current), ...pending.reverse());
++                            }
++                            catch (_c) {
++                                const parent = path.dirname(current);
++                                if (parent === current) return path.resolve(target);
++                                pending.push(path.basename(current));
++                                current = parent;
++                            }
++                        }
++                    };
++                    const relative = path.relative(yield canonical(this.options.databaseDir), yield canonical(logFile));
 +                    if (relative === '' || (relative !== '..' && !relative.startsWith('..' + path.sep) && !path.isAbsolute(relative))) {
 +                        throw new Error('The PostgreSQL log file must be outside the data directory');
 +                    }
@@ -189,7 +207,7 @@ diff --git a/dist/index.js b/dist/index.js
              yield new Promise((resolve, reject) => {
                  var _a;
                  // Spawn a postgres server
-@@ -177,7 +330,7 @@ class EmbeddedPostgres {
+@@ -177,7 +348,7 @@ class EmbeddedPostgres {
                      '-p',
                      this.options.port.toString(),
                      ...this.options.postgresFlags,
@@ -198,7 +216,7 @@ diff --git a/dist/index.js b/dist/index.js
                  // Connect to stderr, as that is where the messages get sent
                  (_a = this.process.stderr) === null || _a === void 0 ? void 0 : _a.on('data', (chunk) => {
                      // Parse the data as a string and log it
-@@ -208,26 +361,64 @@ class EmbeddedPostgres {
+@@ -208,26 +379,64 @@ class EmbeddedPostgres {
                  return;
              }
              // Kill the existing postgres process
