@@ -4916,21 +4916,9 @@ describeEmbeddedPostgres("tool access service", () => {
       credentialRefs: [],
     }).returning();
 
-    const result = await service.startOAuth(company.id, connection!.id, {
-      redirectUri: "http://paperclip.test/api/tools/oauth/callback",
-      actor: { actorType: "user", actorId: "board" },
-    });
-
-    const authorizationUrl = new URL(result.authorizationUrl);
-    expect(`${authorizationUrl.origin}${authorizationUrl.pathname}`).toBe(
-      `http://paperclip.test/api/companies/${company.id}/smoke-lab/oauth/authorize`,
-    );
-    expect(authorizationUrl.searchParams.get("client_id")).toBe("paperclip-smoke-lab");
-    expect(authorizationUrl.searchParams.get("scope")).toBe("smoke:openid smoke:profile smoke:email");
-    await expect(db.select().from(toolOauthStates)).resolves.toHaveLength(1);
-
-    const state = authorizationUrl.searchParams.get("state");
-    expect(state).toBeTruthy();
+    // Mock fetch before startOAuth: remote OAuth discovery still probes the fixture
+    // URL's .well-known paths. Unmocked, that hits the network, which fails fast
+    // on NXDOMAIN but hangs past the test timeout where DNS answers every name.
     const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (url) => {
       if (String(url).endsWith("/smoke-lab/oauth/token")) {
         return {
@@ -4952,6 +4940,22 @@ describeEmbeddedPostgres("tool access service", () => {
       }
       throw new Error(`unexpected fetch ${String(url)}`);
     });
+
+    const result = await service.startOAuth(company.id, connection!.id, {
+      redirectUri: "http://paperclip.test/api/tools/oauth/callback",
+      actor: { actorType: "user", actorId: "board" },
+    });
+
+    const authorizationUrl = new URL(result.authorizationUrl);
+    expect(`${authorizationUrl.origin}${authorizationUrl.pathname}`).toBe(
+      `http://paperclip.test/api/companies/${company.id}/smoke-lab/oauth/authorize`,
+    );
+    expect(authorizationUrl.searchParams.get("client_id")).toBe("paperclip-smoke-lab");
+    expect(authorizationUrl.searchParams.get("scope")).toBe("smoke:openid smoke:profile smoke:email");
+    await expect(db.select().from(toolOauthStates)).resolves.toHaveLength(1);
+
+    const state = authorizationUrl.searchParams.get("state");
+    expect(state).toBeTruthy();
 
     await service.completeOAuthCallback({
       state: state!,
