@@ -160,6 +160,16 @@ const UUID_REGEX =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 const PLUGIN_API_BODY_LIMIT_BYTES = 1_000_000;
+
+/**
+ * RPC timeout for the performAction bridge routes (`/bridge/action` and
+ * `/actions/:key`). Plugin actions such as GitHub Sync's `sync.runNow` can run
+ * well past the 30s default RPC timeout; when that default fires the host
+ * clears the invocation scope while the worker keeps running, so the rest of
+ * the action fails with "missing, expired, or unknown invocation scope".
+ * Scoped to these two routes only; every other bridge call keeps the default.
+ */
+export const PLUGIN_ACTION_RPC_TIMEOUT_MS = 5 * 60 * 1000;
 const PLUGIN_SCOPED_API_RESPONSE_HEADER_ALLOWLIST = new Set([
   "cache-control",
   "etag",
@@ -1532,6 +1542,7 @@ export function pluginRoutes(
           actorContext: performActionActorContext(req, companyId),
           renderEnvironment: body.renderEnvironment ?? null,
         },
+        PLUGIN_ACTION_RPC_TIMEOUT_MS,
       );
       res.json({ data: result });
     } catch (err) {
@@ -1716,6 +1727,7 @@ export function pluginRoutes(
           actorContext: performActionActorContext(req, companyId),
           renderEnvironment: body?.renderEnvironment ?? null,
         },
+        PLUGIN_ACTION_RPC_TIMEOUT_MS,
       );
       res.json({ data: result });
     } catch (err) {

@@ -738,8 +738,10 @@ export function createPluginWorkerHandle(
     // configuration set only when it identifies exactly one company, matching
     // webhook tenant resolution. A real invocation keeps nested config/secret
     // calls bound to that company even while another invocation is active.
-    // Instance-only and multi-company jobs keep their existing unscoped path;
-    // never select a tenant from worker-controlled settings or company lists.
+    // Instance-only jobs keep their existing unscoped path. Multi-company jobs
+    // are fanned out by `handle.call` (one invocation per configured company,
+    // see `callJobPerCompany`), so they never reach this point unscoped. Never
+    // select a tenant from worker-controlled settings or company lists.
     if (method === "runJob" && proactiveCompanyScopes.size === 1) {
       return { companyId: proactiveCompanyScopes.values().next().value! };
     }
@@ -1602,6 +1604,7 @@ export function createPluginWorkerHandle(
     params: HostToWorkerMethods[M][0],
     timeoutMs?: number,
     executeLogSink?: ExecuteLogSink,
+    scopeOverride?: PluginInvocationScope,
   ): Promise<HostToWorkerMethods[M][1]> {
     const rpcPromise = new Promise<HostToWorkerMethods[M][1]>((resolve, reject) => {
       if (!childProcess?.stdin?.writable) {
@@ -1615,7 +1618,7 @@ export function createPluginWorkerHandle(
 
       const id = nextRequestId++;
       const timeout = resolveRpcCallTimeoutMs(timeoutMs, rpcTimeoutMs);
-      const invocationScope = deriveInvocationScope(method, params);
+      const invocationScope = scopeOverride ?? deriveInvocationScope(method, params);
       const invocation = invocationScope ? registerInvocation(invocationScope) : null;
       // Register the host-owned execute route only for an execute call that
       // carries a log sink. The company id comes from the host-derived
@@ -1712,6 +1715,60 @@ export function createPluginWorkerHandle(
     return rpcPromise;
   }
 
+  /**
+   * True when a `runJob` call must be fanned out per company: the caller gave
+   * no explicit company and the host-authorized configuration set names more
+   * than one company. A single invocation can only carry one company scope, so
+   * an unscoped multi-company job would have every config/secret read denied.
+   */
+  function needsPerCompanyJobFanOut(method: string, params: unknown): boolean {
+    if (method !== "runJob") return false;
+    if (proactiveCompanyScopes.size < 2) return false;
+    return !(isRecord(params) && readNonEmptyString(params.companyId));
+  }
+
+  /**
+   * Run one job once per host-authorized configured company, in a stable
+   * (sorted) order, each with that company's invocation scope. The company set
+   * is snapshotted up front so a concurrent config change cannot alter a run in
+   * flight. Every company runs even when an earlier one fails; the call
+   * rejects afterwards, naming each failed company, so the job run is recorded
+   * as failed.
+   */
+  async function callJobPerCompany<M extends HostToWorkerMethodName>(
+    method: M,
+    params: HostToWorkerMethods[M][0],
+    timeoutMs?: number,
+  ): Promise<HostToWorkerMethods[M][1]> {
+    const companyIds = Array.from(proactiveCompanyScopes).sort();
+    const failures: Array<{ companyId: string; message: string }> = [];
+    for (const companyId of companyIds) {
+      try {
+        await callInternal(method, params, timeoutMs, undefined, { companyId });
+      } catch (err) {
+        failures.push({
+          companyId,
+          message: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+    if (failures.length > 0) {
+      log.warn(
+        {
+          method,
+          companyCount: companyIds.length,
+          failedCompanyIds: failures.map((failure) => failure.companyId),
+        },
+        "per-company job run failed for some companies",
+      );
+      throw new Error(
+        `"${method}" failed for ${failures.length} of ${companyIds.length} companies: ` +
+          failures.map((failure) => `company "${failure.companyId}": ${failure.message}`).join("; "),
+      );
+    }
+    return undefined as HostToWorkerMethods[M][1];
+  }
+
   // -----------------------------------------------------------------------
   // Public API
   // -----------------------------------------------------------------------
@@ -1754,6 +1811,9 @@ export function createPluginWorkerHandle(
             `Cannot call "${method}" — worker for "${pluginId}" is ${status}`,
           ),
         );
+      }
+      if (needsPerCompanyJobFanOut(method, params)) {
+        return callJobPerCompany(method, params, timeoutMs);
       }
       return callInternal(method, params, timeoutMs, executeLogSink);
     },
