@@ -13,6 +13,8 @@
 // objects/arrays. Caps depth so a hostile or accidental cycle can't pin
 // the logger.
 
+import { isSensitiveHttpHeaderName } from "./http-log-redaction.js";
+
 const SENSITIVE_KEYS = new Set<string>([
   "password",
   "currentpassword",
@@ -124,7 +126,9 @@ const SENSITIVE_HEADER_NAME_RE =
 
 function isSensitiveHeaderName(name: string): boolean {
   const normalized = name.trim().toLowerCase();
-  return SENSITIVE_HEADER_NAMES.has(normalized) || SENSITIVE_HEADER_NAME_RE.test(normalized);
+  return SENSITIVE_HEADER_NAMES.has(normalized)
+    || SENSITIVE_HEADER_NAME_RE.test(normalized)
+    || isSensitiveHttpHeaderName(normalized);
 }
 
 function isSensitiveHeaderRecord(record: Record<string, unknown>): boolean {

@@ -278,4 +278,46 @@ describe("production httpLogger wiring", () => {
     expect(msgs.some((msg) => msg.startsWith("GET /api/invites/[REDACTED]/onboarding 500"))).toBe(true);
   });
 
+  it("redacts credential headers by name pattern on success, 4xx and 5xx lines", async () => {
+    const canaries: Record<string, string> = {
+      "x-openclaw-token": "openclaw-token-canary-must-not-reach-pino",
+      "x-openclaw-auth": "openclaw-auth-canary-must-not-reach-pino",
+      "x-paperclip-cloud-tenant-token": "cloud-tenant-token-canary-must-not-reach-pino",
+      "x-paperclip-tool-gateway-token": "tool-gateway-token-canary-must-not-reach-pino",
+      "x-paperclip-signature": "paperclip-signature-canary-must-not-reach-pino",
+      "x-hub-signature-256": "hub-signature-canary-must-not-reach-pino",
+      "x-auth-token": "x-auth-token-canary-must-not-reach-pino",
+      "X-Access-Token": "x-access-token-canary-must-not-reach-pino",
+      "x-webhook-secret": "webhook-secret-canary-must-not-reach-pino",
+      "x-service-key": "service-key-canary-must-not-reach-pino",
+    };
+    const output = await driveApp(
+      (app) => {
+        app.get("/hdr-ok", (_req, res) => {
+          res.status(200).send("ok");
+        });
+        app.get("/hdr-422", (_req, res) => {
+          res.status(422).send("rejected");
+        });
+        app.get("/hdr-500", () => {
+          throw new Error("failed");
+        });
+      },
+      [["/hdr-ok", "GET"], ["/hdr-422", "GET"], ["/hdr-500", "GET"]],
+      { ...canaries, "x-request-id": "request-id-kept" },
+    );
+
+    expect(leakedCanaries(output, canaries)).toEqual([]);
+    const logs = output.trim().split("\n").map((line) => JSON.parse(line)) as Array<{
+      msg: string;
+      req?: { headers?: Record<string, unknown> };
+    }>;
+    const headerLines = logs.filter((log) => log.msg.startsWith("GET /hdr-"));
+    expect(headerLines).toHaveLength(3);
+    for (const line of headerLines) {
+      expect(line.req?.headers?.["x-openclaw-token"]).toBe("[Redacted]");
+      expect(line.req?.headers?.["x-hub-signature-256"]).toBe("[Redacted]");
+      expect(line.req?.headers?.["x-request-id"]).toBe("request-id-kept");
+    }
+  });
 });

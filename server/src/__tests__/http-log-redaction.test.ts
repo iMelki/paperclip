@@ -4,7 +4,7 @@ import express from "express";
 import pino from "pino";
 import { pinoHttp } from "pino-http";
 import { describe, expect, it } from "vitest";
-import { HTTP_LOG_REDACT_PATHS } from "../middleware/http-log-redaction.js";
+import { HTTP_LOG_REDACT_PATHS, isSensitiveHttpHeaderName } from "../middleware/http-log-redaction.js";
 import { createHttpLogger } from "../middleware/http-logger.js";
 
 describe("HTTP logger redaction", () => {
@@ -23,6 +23,33 @@ describe("HTTP logger redaction", () => {
     expect(HTTP_LOG_REDACT_PATHS).toContain('req.headers["x-original-url"]');
     expect(HTTP_LOG_REDACT_PATHS).toContain('req.headers["x-rewrite-url"]');
     expect(HTTP_LOG_REDACT_PATHS).toContain("res.headers.location");
+  });
+
+  it("classifies credential header names by pattern, case-insensitive", () => {
+    for (const name of [
+      "authorization",
+      "Proxy-Authorization",
+      "cookie",
+      "Set-Cookie",
+      "x-api-key",
+      "x-csrf-token",
+      "x-openclaw-token",
+      "X-OpenClaw-Auth",
+      "x-paperclip-cloud-tenant-token",
+      "x-paperclip-tool-gateway-token",
+      "x-paperclip-dev-server-status-token",
+      "x-paperclip-signature",
+      "X-Hub-Signature-256",
+      "x-auth-token",
+      "x-access-token",
+      "x-webhook-secret",
+      "x-service-key",
+    ]) {
+      expect(isSensitiveHttpHeaderName(name), name).toBe(true);
+    }
+    for (const name of ["accept", "content-type", "user-agent", "x-request-id", "keep-alive", "host"]) {
+      expect(isSensitiveHttpHeaderName(name), name).toBe(false);
+    }
   });
 
   it("redacts request and response header secrets from pino-http output", async () => {

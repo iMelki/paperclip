@@ -5,6 +5,7 @@ import {
   shouldOmitHttpRequestBody,
   shouldSilenceHttpSuccessLog,
 } from "./http-log-policy.js";
+import { redactHttpHeaders } from "./http-log-redaction.js";
 import { redactSensitive } from "./redact-sensitive.js";
 
 function isNonEmptyRecord(value: unknown): value is Record<string, unknown> {
@@ -102,7 +103,12 @@ export function createHttpLogger(baseLogger: Logger) {
         return {
           ...safeReq,
           url: requestPathForHttpLog(req.url),
+          ...(safeReq.headers ? { headers: redactHttpHeaders(safeReq.headers) } : {}),
         };
+      },
+      res(res) {
+        const record = res as Record<string, unknown>;
+        return record.headers ? { ...record, headers: redactHttpHeaders(record.headers) } : record;
       },
     },
     customLogLevel(_req, res, err) {
