@@ -4,6 +4,8 @@ import {
   parseClaudeStreamJson,
   detectClaudeLoginRequired,
   extractClaudeRetryNotBefore,
+  extractClaudeRetryNotBeforeWithSource,
+  findClaudeProviderQuotaEvidenceSource,
   isClaudeProviderQuotaError,
   isClaudeTransientUpstreamError,
   isClaudePoisonedPreviousMessageIdError,
@@ -85,6 +87,41 @@ describe("isClaudeTransientUpstreamError", () => {
     expect(extractClaudeRetryNotBefore({ errorMessage }, now)?.toISOString()).toBe(
       "2026-04-22T21:00:00.000Z",
     );
+  });
+
+  describe("only provider error evidence counts", () => {
+    const quoted = "You've hit your session limit · resets 9am (UTC)";
+    const now = new Date("2026-04-22T06:00:00.000Z");
+
+    it("ignores raw stdout and the result of a result event that is not an error", () => {
+      const input = {
+        parsed: { type: "result", subtype: "success", is_error: false, result: `Summary: ${quoted}` },
+        stdout: `{"type":"assistant","text":"${quoted}"}\n`,
+        stderr: "",
+        errorMessage: `Claude run failed: ${quoted}`,
+      };
+      expect(isClaudeProviderQuotaError(input)).toBe(false);
+      expect(isClaudeTransientUpstreamError({ ...input, stdout: "HTTP 429 Too Many Requests" })).toBe(false);
+      expect(extractClaudeRetryNotBefore(input, now)).toBeNull();
+      expect(findClaudeProviderQuotaEvidenceSource(input)).toBeNull();
+    });
+
+    it("ignores stdout when no result event was parsed", () => {
+      const input = { parsed: null, stdout: quoted, stderr: "segmentation fault", errorMessage: "Claude exited with code 1: segmentation fault" };
+      expect(isClaudeProviderQuotaError(input)).toBe(false);
+      expect(extractClaudeRetryNotBefore(input, now)).toBeNull();
+    });
+
+    it("reads an error result, its errors list and stderr, and names the source", () => {
+      expect(
+        extractClaudeRetryNotBeforeWithSource({ parsed: { is_error: true, result: quoted } }, now),
+      ).toEqual({ retryAt: new Date("2026-04-22T09:00:00.000Z"), source: "result_error" });
+      expect(
+        findClaudeProviderQuotaEvidenceSource({ parsed: { is_error: true, result: "", errors: [{ message: quoted }] } }),
+      ).toBe("errors");
+      expect(findClaudeProviderQuotaEvidenceSource({ stderr: quoted })).toBe("stderr");
+      expect(findClaudeProviderQuotaEvidenceSource({ parsed: null, errorMessage: quoted })).toBe("error_message");
+    });
   });
 
   it("classifies Anthropic API rate_limit_error and overloaded_error as transient", () => {

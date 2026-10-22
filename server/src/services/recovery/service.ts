@@ -399,7 +399,7 @@ export type AdapterFailureRecoveryClassification =
 
 function parseProviderQuotaClockReset(error: string, now: Date, scope?: ProviderQuotaResetScope, failedAt?: Date | null) {
   const matches = error.matchAll(
-    /\b(?:try again at|resets(?: at)?)\s+(\d{1,2})(?::(\d{2}))?(?:\s*([ap])\.?\s*m\.?)?(?:\s*\(([^)]+)\)|\s+([A-Z]{2,5}))?/gi,
+    /\b(?:try again at|resets(?: at)?)\s+(\d{1,2})(?::(\d{2}))?(?![\d:])(?:\s*([ap])\.?\s*m\.?)?(?:\s*\(([^)]+)\)|\s+([A-Z]{2,5}))?/gi,
   );
   const inScope = (candidate: RegExpMatchArray) =>
     scope !== undefined && candidate.index! >= scope.start && candidate.index! <= scope.end;

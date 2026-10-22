@@ -27,7 +27,14 @@ All notable changes to this repository should be recorded here.
   error (and the ACP error and stop reason), never from quoted result text.
   Each `resets` or `try again at` candidate is validated before one is chosen,
   so an impossible clock or an unknown timezone no longer hides a later valid
-  reset.
+  reset. A clock must be a complete token: `9:000` is not read as `9:00`.
+  The Claude adapter now decides "provider quota" and "transient upstream", and
+  extracts the retry time, only from provider error evidence: the `result` of a
+  result event that the CLI marked as an error, its `errors` list, stderr, and
+  the adapter's own fallback message. Raw stdout and the result of a result
+  event that is not an error are ignored. The run result records where the
+  verdict and the retry time came from as `providerQuotaEvidenceSource` and
+  `retryNotBeforeSource`.
 
 - Embedded PostgreSQL process discovery reads only an uppercase `-D` as the
   data directory option. PostgreSQL's lowercase `-d <debug level>` no longer
