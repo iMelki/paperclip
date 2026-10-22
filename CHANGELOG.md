@@ -6,6 +6,9 @@ All notable changes to this repository should be recorded here.
 
 ## Unreleased
 
+- **Docs:** the fork getting-started guide uses placeholders for local
+  workspace and notes-vault paths instead of one machine's paths.
+
 - **[#164]** Refresh Lockfile accepts manual `ref` and `base` inputs that default
   to `dev`. Each base has its own refresh branch and matching PR lookup. Master
   pushes still refresh their triggering commit and retain auto-merge; other bases
