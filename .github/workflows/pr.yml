@@ -569,24 +569,29 @@ jobs:
 
       - name: Clean up leftover e2e server and temp home
         # The runner's orphan cleanup only catches processes that keep
-        # RUNNER_TRACKING_ID. Kill this user's leftover onboard/Postgres
-        # processes and anything still on port 3199, then drop the temp homes.
-        # Best effort: this step never fails the job. This shell's own PID is
-        # skipped so the pattern match cannot kill the cleanup step itself.
+        # RUNNER_TRACKING_ID. Collect the exact PIDs of this user's leftover
+        # onboard/Postgres processes and of the listener on port 3199, then kill
+        # each PID after checking it still belongs to this user. No pkill -f and
+        # no fuser -k, so nothing is killed by pattern or port alone. Best effort:
+        # this step never fails the job, and it skips its own shell PID.
         if: always()
         run: |
           uid="$(id -u)"
+          pids=""
           for pattern in '[p]aperclipai onboard' '[p]aperclip-e2e-home-'; do
-            for pid in $(pgrep -u "$uid" -f "$pattern" || true); do
-              [ "$pid" = "$$" ] || kill "$pid" 2>/dev/null || true
-            done
+            pids="$pids $(pgrep -u "$uid" -f "$pattern" || true)"
           done
-          if command -v fuser >/dev/null 2>&1; then
-            fuser -k -n tcp 3199 >/dev/null 2>&1 || true
-          elif command -v lsof >/dev/null 2>&1; then
-            pids="$(lsof -t -a -u "$uid" -iTCP:3199 -sTCP:LISTEN 2>/dev/null || true)"
-            if [ -n "$pids" ]; then kill $pids 2>/dev/null || true; fi
+          if command -v lsof >/dev/null 2>&1; then
+            pids="$pids $(lsof -t -a -u "$uid" -iTCP:3199 -sTCP:LISTEN 2>/dev/null || true)"
+          elif command -v ss >/dev/null 2>&1; then
+            pids="$pids $(ss -Htlnp 'sport = :3199' 2>/dev/null | grep -oE ',pid=[0-9]+,fd=' | grep -oE '[0-9]+' || true)"
           fi
+          for pid in $(printf '%s\n' $pids | sort -un); do
+            [ "$pid" = "$$" ] && continue
+            [ "$(stat -c %u "/proc/$pid" 2>/dev/null)" = "$uid" ] || continue
+            echo "killing leftover e2e pid $pid"
+            kill "$pid" 2>/dev/null || true
+          done
           for dir in "${RUNNER_TEMP:-}" /tmp; do
             [ -n "$dir" ] && [ -d "$dir" ] || continue
             find "$dir" -maxdepth 1 -user "$uid" -name 'paperclip-e2e-home-*' \
