@@ -148,6 +148,7 @@ describe("production httpLogger wiring", () => {
   async function driveApp(
     register: (app: express.Express) => void,
     requests: Array<[path: string, method: string]>,
+    headers: Record<string, string> = {},
   ): Promise<string> {
     chunks.length = 0;
     const { httpLogger } = await import("../middleware/logger.js");
@@ -167,7 +168,7 @@ describe("production httpLogger wiring", () => {
     try {
       for (const [path, method] of requests) {
         await new Promise<void>((resolve, reject) => {
-          const client = request({ hostname: "127.0.0.1", port: address.port, path, method }, (res) => {
+          const client = request({ hostname: "127.0.0.1", port: address.port, path, method, headers }, (res) => {
             res.resume();
             res.on("end", resolve);
           });
@@ -240,5 +241,83 @@ describe("production httpLogger wiring", () => {
     expect(leakedCanaries(output, canaries)).toEqual([]);
     const logs = output.trim().split("\n").map((line) => JSON.parse(line)) as Array<{ msg: string }>;
     expect(logs.map((log) => log.msg)).toContain("GET /api/invites/[REDACTED] 200");
+  });
+
+  it("redacts board-claim and invite tokens from msg when routes live on a router mounted at /api", async () => {
+    const canaries = {
+      claimToken: "mounted-claim-token-canary-must-not-reach-pino",
+      inviteToken: "mounted-invite-token-canary-must-not-reach-pino",
+      inviteOnboardingToken: "mounted-invite-onboarding-canary-must-not-reach-pino",
+    };
+    const output = await driveApp(
+      (app) => {
+        const api = express.Router();
+        api.get("/board-claim/:token", (_req, res) => {
+          res.status(200).json({ ok: true });
+        });
+        api.get("/invites/:token", (_req, res) => {
+          res.status(200).json({ ok: true });
+        });
+        api.get("/invites/:token/onboarding", () => {
+          throw new Error("onboarding failed");
+        });
+        app.use("/api", api);
+      },
+      [
+        [`/api/board-claim/${canaries.claimToken}`, "GET"],
+        [`/api/invites/${canaries.inviteToken}`, "GET"],
+        [`/api/invites/${canaries.inviteOnboardingToken}/onboarding`, "GET"],
+      ],
+    );
+
+    expect(leakedCanaries(output, canaries)).toEqual([]);
+    const msgs = (output.trim().split("\n").map((line) => JSON.parse(line)) as Array<{ msg: string }>)
+      .map((log) => log.msg);
+    expect(msgs).toContain("GET /api/board-claim/[REDACTED] 200");
+    expect(msgs).toContain("GET /api/invites/[REDACTED] 200");
+    expect(msgs.some((msg) => msg.startsWith("GET /api/invites/[REDACTED]/onboarding 500"))).toBe(true);
+  });
+
+  it("redacts credential headers by name pattern on success, 4xx and 5xx lines", async () => {
+    const canaries: Record<string, string> = {
+      "x-openclaw-token": "openclaw-token-canary-must-not-reach-pino",
+      "x-openclaw-auth": "openclaw-auth-canary-must-not-reach-pino",
+      "x-paperclip-cloud-tenant-token": "cloud-tenant-token-canary-must-not-reach-pino",
+      "x-paperclip-tool-gateway-token": "tool-gateway-token-canary-must-not-reach-pino",
+      "x-paperclip-signature": "paperclip-signature-canary-must-not-reach-pino",
+      "x-hub-signature-256": "hub-signature-canary-must-not-reach-pino",
+      "x-auth-token": "x-auth-token-canary-must-not-reach-pino",
+      "X-Access-Token": "x-access-token-canary-must-not-reach-pino",
+      "x-webhook-secret": "webhook-secret-canary-must-not-reach-pino",
+      "x-service-key": "service-key-canary-must-not-reach-pino",
+    };
+    const output = await driveApp(
+      (app) => {
+        app.get("/hdr-ok", (_req, res) => {
+          res.status(200).send("ok");
+        });
+        app.get("/hdr-422", (_req, res) => {
+          res.status(422).send("rejected");
+        });
+        app.get("/hdr-500", () => {
+          throw new Error("failed");
+        });
+      },
+      [["/hdr-ok", "GET"], ["/hdr-422", "GET"], ["/hdr-500", "GET"]],
+      { ...canaries, "x-request-id": "request-id-kept" },
+    );
+
+    expect(leakedCanaries(output, canaries)).toEqual([]);
+    const logs = output.trim().split("\n").map((line) => JSON.parse(line)) as Array<{
+      msg: string;
+      req?: { headers?: Record<string, unknown> };
+    }>;
+    const headerLines = logs.filter((log) => log.msg.startsWith("GET /hdr-"));
+    expect(headerLines).toHaveLength(3);
+    for (const line of headerLines) {
+      expect(line.req?.headers?.["x-openclaw-token"]).toBe("[Redacted]");
+      expect(line.req?.headers?.["x-hub-signature-256"]).toBe("[Redacted]");
+      expect(line.req?.headers?.["x-request-id"]).toBe("request-id-kept");
+    }
   });
 });

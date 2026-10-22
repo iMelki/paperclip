@@ -19,3 +19,41 @@ export const HTTP_LOG_REDACT_PATHS = [
   'req.headers["x-rewrite-url"]',
   "res.headers.location",
 ] as const;
+
+// Static paths above only cover headers we know by name. Credential headers this
+// server reads (x-openclaw-token, x-openclaw-auth, x-paperclip-cloud-tenant-token,
+// x-paperclip-tool-gateway-token, x-paperclip-signature, x-hub-signature-256, ...)
+// and any future ones are caught by a case-insensitive name rule instead.
+const SENSITIVE_HTTP_HEADER_NAMES = new Set<string>([
+  "authorization",
+  "proxy-authorization",
+  "cookie",
+  "set-cookie",
+  "x-api-key",
+  "x-csrf-token",
+  "x-xsrf-token",
+  "referer",
+  "referrer",
+  "x-forwarded-uri",
+  "x-original-url",
+  "x-rewrite-url",
+  "location",
+]);
+const SENSITIVE_HTTP_HEADER_SEGMENT_RE =
+  /(?:^|[-_])(?:token|auth|authorization|signature|secret|key|apikey|api[-_]key|password|passwd|credentials?|jwt|bearer|session|cookie)(?:$|[-_])/i;
+
+export function isSensitiveHttpHeaderName(name: string): boolean {
+  const normalized = name.trim().toLowerCase();
+  return SENSITIVE_HTTP_HEADER_NAMES.has(normalized) || SENSITIVE_HTTP_HEADER_SEGMENT_RE.test(normalized);
+}
+
+export const REDACTED_HTTP_HEADER = "[Redacted]";
+
+export function redactHttpHeaders(headers: unknown): unknown {
+  if (!headers || typeof headers !== "object" || Array.isArray(headers)) return headers;
+  const out: Record<string, unknown> = {};
+  for (const [name, value] of Object.entries(headers as Record<string, unknown>)) {
+    out[name] = isSensitiveHttpHeaderName(name) ? REDACTED_HTTP_HEADER : value;
+  }
+  return out;
+}

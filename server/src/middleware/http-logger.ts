@@ -5,6 +5,7 @@ import {
   shouldOmitHttpRequestBody,
   shouldSilenceHttpSuccessLog,
 } from "./http-log-policy.js";
+import { redactHttpHeaders } from "./http-log-redaction.js";
 import { redactSensitive } from "./redact-sensitive.js";
 
 function isNonEmptyRecord(value: unknown): value is Record<string, unknown> {
@@ -88,6 +89,11 @@ function buildFailedResponseContext(req: any, res: any): Record<string, unknown>
   return props;
 }
 
+function logUrl(req: unknown): string | undefined {
+  const record = req as { originalUrl?: string; url?: string };
+  return record.originalUrl ?? record.url;
+}
+
 export function createHttpLogger(baseLogger: Logger) {
   return pinoHttp({
     logger: baseLogger,
@@ -97,7 +103,12 @@ export function createHttpLogger(baseLogger: Logger) {
         return {
           ...safeReq,
           url: requestPathForHttpLog(req.url),
+          ...(safeReq.headers ? { headers: redactHttpHeaders(safeReq.headers) } : {}),
         };
+      },
+      res(res) {
+        const record = res as Record<string, unknown>;
+        return record.headers ? { ...record, headers: redactHttpHeaders(record.headers) } : record;
       },
     },
     customLogLevel(_req, res, err) {
@@ -108,11 +119,13 @@ export function createHttpLogger(baseLogger: Logger) {
       if (res.statusCode >= 400) return "warn";
       return "info";
     },
+    // Routers mounted at /api strip that prefix from req.url, so build the
+    // message from originalUrl, or path-token redaction never matches.
     customSuccessMessage(req, res) {
-      return `${req.method} ${requestPathForHttpLog(req.url)} ${res.statusCode}`;
+      return `${req.method} ${requestPathForHttpLog(logUrl(req))} ${res.statusCode}`;
     },
     customErrorMessage(req, res) {
-      return `${req.method} ${requestPathForHttpLog(req.url)} ${res.statusCode} — request failed`;
+      return `${req.method} ${requestPathForHttpLog(logUrl(req))} ${res.statusCode} — request failed`;
     },
     customSuccessObject(req, res, value) {
       if (res.statusCode < 400) return withSafeErr(value);
