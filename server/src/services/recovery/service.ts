@@ -411,10 +411,9 @@ function parseProviderQuotaClockReset(error: string, now: Date, scope?: Provider
   };
   const match = [...matches].find(accepts);
   if (!match) return null;
-  const elapsedGraceMs = scope?.acp ? PROVIDER_QUOTA_RESET_ELAPSED_GRACE_MS : 0;
   const settle = (candidate: Date, next: () => Date) => {
     if (candidate.getTime() > now.getTime()) return candidate;
-    return now.getTime() - candidate.getTime() <= elapsedGraceMs ? new Date(now) : next();
+    return now.getTime() - candidate.getTime() <= PROVIDER_QUOTA_RESET_ELAPSED_GRACE_MS ? new Date(now) : next();
   };
 
   const hourValue = Number.parseInt(match[1] ?? "", 10);

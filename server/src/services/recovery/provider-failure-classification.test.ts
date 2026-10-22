@@ -216,6 +216,23 @@ describe("classifyAdapterFailureForRecovery", () => {
     }
   });
 
+  it.each(["adapter_failed", "provider_quota"])(
+    "retries now when a %s reset clock elapsed moments ago",
+    (errorCode) => {
+      const now = new Date("2026-10-13T19:40:20.000Z");
+      for (const error of [
+        "You've hit your session limit · resets 10:40pm (Asia/Jerusalem)",
+        "You've hit your usage limit. Upgrade or try again at 19:40 (UTC).",
+      ]) {
+        expect(classifyAdapterFailureForRecovery({ errorCode, error, resultJson: {} }, now)).toEqual({
+          kind: "provider_quota",
+          retryAt: now,
+          parsedResetTime: true,
+        });
+      }
+    },
+  );
+
   it("still reads a reset clock that follows long upgrade text on non-ACP adapters", () => {
     const now = new Date("2026-10-13T18:00:38.000Z");
     const error = `You've hit your usage limit. Upgrade to Pro (https://example.test/upgrade), visit ${"settings ".repeat(30)}to purchase more credits or try again at 10:40pm (Asia/Jerusalem).`;
