@@ -487,6 +487,18 @@ describe("scanPsOutputForDataDir", () => {
     expect(await scanPsOutputForDataDir(reversed, [real], real, unreadable)).toEqual([]);
   });
 
+  it("does not read the lowercase -d debug level as a data directory", async () => {
+    const other = clusterDir("pg-debug-");
+    const out = `901\tpostgres\t/usr/bin/postgres -D ${other} -d 5\n`;
+    expect(await scanPsOutputForDataDir(out, [dir], dir, unreadable)).toEqual([]);
+    const base = clusterDir("pg-debug-parent-");
+    const child = join(base, "backup");
+    mkdirSync(child);
+    writeFileSync(join(child, "PG_VERSION"), "16\n");
+    const descendant = `902\tpostgres\t/usr/bin/postgres -D ${child} -d 5\n`;
+    expect(await scanPsOutputForDataDir(descendant, [base], base, unreadable)).toEqual([]);
+  });
+
   it("finds a server by command line or by working directory", async () => {
     const out = `901\tpostgres\tpostgres -D ${dir}\n902\tpostgres\t/usr/bin/postgres\n903\tpostgres\t/usr/bin/postgres\n`;
     const cwd = (pid: number) => (pid === 902 ? dir : "/elsewhere");

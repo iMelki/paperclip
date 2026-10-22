@@ -38,8 +38,9 @@ export async function readProcessName(pid: number): Promise<string | null> {
 }
 
 const POSTGRES_PROCESS_NAME_RE = /^(?:postgres|postmaster)(?:\.exe)?$/i;
+// Case-sensitive on purpose: PostgreSQL's lowercase `-d <debuglevel>` is not a data directory.
 const DATA_DIRECTORY_ARGUMENT =
-  /(?:^|\s)(?:-D\s*|--data-directory[=\s])(?:"([^"]+)"|'([^']+)'|(\S+))/gi;
+  /(?:^|\s)(?:-D\s*|--data-directory[=\s])(?:"([^"]+)"|'([^']+)'|(\S+))/g;
 
 const POSTGRES_CHILD_TITLE_RE = /^postgres:\s/i;
 const POSTGRES_FORK_CHILD_RE = /(?:^|\s)--fork/i;
