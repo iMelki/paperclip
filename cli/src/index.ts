@@ -5,7 +5,7 @@ import { envCommand } from "./commands/env.js";
 import { configure } from "./commands/configure.js";
 import { addAllowedHostname } from "./commands/allowed-hostname.js";
 import { heartbeatRun } from "./commands/heartbeat-run.js";
-import { runCommand } from "./commands/run.js";
+import { runCommand, startupRefusalExitCode } from "./commands/run.js";
 import { bootstrapCeoInvite } from "./commands/auth-bootstrap-ceo.js";
 import { dbBackupCommand } from "./commands/db-backup.js";
 import { registerEnvLabCommands } from "./commands/env-lab.js";
@@ -243,17 +243,19 @@ registerClientAuthCommands(auth);
 
 async function main(): Promise<void> {
   let failed = false;
+  let exitCode = 1;
   try {
     await program.parseAsync();
   } catch (err) {
     failed = true;
+    exitCode = startupRefusalExitCode(err) ?? 1;
     console.error(err instanceof Error ? err.message : String(err));
   } finally {
     await flushTelemetry();
   }
 
   if (failed) {
-    process.exit(1);
+    process.exit(exitCode);
   }
 }
 

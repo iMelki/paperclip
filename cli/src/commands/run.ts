@@ -182,6 +182,16 @@ function ensureDevWorkspaceBuildDeps(projectRoot: string): void {
   }
 }
 
+/**
+ * The server refuses to start (exit 75) when an existing PostgreSQL may own the data
+ * directory. The class lives in the server package, so match it by shape.
+ */
+export function startupRefusalExitCode(err: unknown): number | null {
+  if (!(err instanceof Error) || err.name !== "EmbeddedPostgresLockRefusal") return null;
+  const code = (err as { exitCode?: unknown }).exitCode;
+  return typeof code === "number" && Number.isInteger(code) && code > 0 && code < 256 ? code : null;
+}
+
 async function importServerEntry(): Promise<StartedServer> {
   // Dev mode: try local workspace path (monorepo with tsx)
   const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
@@ -198,6 +208,7 @@ async function importServerEntry(): Promise<StartedServer> {
     const mod = await import("@paperclipai/server");
     return await startServerFromModule(mod, "@paperclipai/server");
   } catch (err) {
+    if (startupRefusalExitCode(err) !== null) throw err;
     const missingSpecifier = getMissingModuleSpecifier(err);
     const missingServerEntrypoint = !missingSpecifier || missingSpecifier === "@paperclipai/server";
     if (isModuleNotFoundError(err) && missingServerEntrypoint) {

@@ -19,6 +19,46 @@ That's it. On first start the server:
 
 Data persists across restarts in `~/.paperclip/instances/default/db/`. To reset local dev data, delete that directory.
 
+On server startup, a live PID in `postmaster.pid` is not enough to reuse the
+embedded server. Paperclip queries PostgreSQL on the recorded port, with the
+same login it uses for the embedded database, and checks that its
+`data_directory` is the configured directory. Both paths are resolved to their
+physical location first (symlinks and junctions), and compared without case on
+Windows.
+
+On server startup, PostgreSQL is started only when the lock is stale: the PID no longer exists
+(`ESRCH`), or it is the server's own process. If the live PID is affirmatively
+not PostgreSQL (the OS recycled it, checked with `ps` or `tasklist`) and nothing
+answers on the recorded or configured port, the lock is stale too. A stale lock is
+never deleted: startup renames it to `postmaster.pid.stale-<timestamp>`, then
+starts normally. If the rename fails, startup refuses (exit code 75). Moved-aside
+locks are never pruned automatically; delete old `postmaster.pid.stale-*` files by hand
+once you no longer need them. For a data directory that was never initialised (no
+`PG_VERSION`), the archive is written beside it as `<dir>.postmaster.pid.stale-<timestamp>`
+so the first-time `initdb` still finds an empty directory.
+
+If `postmaster.pid` cannot be read or holds no valid process id, the owner is
+looked up without it. A server answering on the configured port, or any
+PostgreSQL process whose command line or working directory is this data
+directory, keeps the lock in place. Otherwise the lock is renamed to
+`postmaster.pid.stale-<timestamp>` with a warning and startup continues.
+
+Startup stops, leaving `postmaster.pid` unchanged, only when a PostgreSQL that
+may own the directory is found or the process list cannot be read. A PostgreSQL
+process that names no resolvable data directory and whose working directory cannot be read
+(no `/proc` on macOS or BSD, or no permission) counts as "cannot be read", since it
+may have been started through `PGDATA`. The error
+names the process found and the command that resolves it (`kill <pid>` or
+`taskkill /PID <pid>`); after that, the next start handles any leftover lock by
+itself. The same refusal applies when a live PID is not verified as non-PostgreSQL
+and the identity query fails (PostgreSQL may be starting or recovering). It names
+a stop command only for a PID confirmed to be PostgreSQL for this data directory;
+otherwise it shows how to inspect the process first. It also applies when
+a reachable server reports another data directory. These refusals exit with code
+75 (all other startup failures exit 1), so a service manager or health check can
+tell them apart. This check applies to server startup; the CLI lifecycle checks
+remain separate.
+
 If you need to apply pending migrations manually, run:
 
 ```sh

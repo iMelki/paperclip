@@ -4,7 +4,7 @@
 // instrumentationReady before opening DB connections or constructing the
 // HTTP server, so trace coverage does not depend on incidental timing.
 import { instrumentationReady, shutdownInstrumentation } from "./instrumentation.js";
-import { existsSync, readFileSync, rmSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { createServer } from "node:http";
 import { resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
@@ -33,6 +33,7 @@ import detectPort from "detect-port";
 import { createApp } from "./app.js";
 import { loadConfig } from "./config.js";
 import { resolveListenPort } from "./listen-port.js";
+import { EmbeddedPostgresLockRefusal, isSameDataDirectory, moveStaleLockAside, readRunningEmbeddedPostgres } from "./embedded-postgres-reuse.js";
 import { logger } from "./middleware/logger.js";
 import {
   getManagedInstanceConfig,
@@ -413,38 +414,23 @@ export async function startServer(): Promise<StartedServer> {
     const clusterVersionFile = resolve(dataDir, "PG_VERSION");
     const clusterAlreadyInitialized = existsSync(clusterVersionFile);
     const postmasterPidFile = resolve(dataDir, "postmaster.pid");
-    const isPidRunning = (pid: number): boolean => {
-      try {
-        process.kill(pid, 0);
-        return true;
-      } catch {
-        return false;
-      }
-    };
-  
-    const getRunningPid = (): number | null => {
-      if (!existsSync(postmasterPidFile)) return null;
-      try {
-        const pidLine = readFileSync(postmasterPidFile, "utf8").split("\n")[0]?.trim();
-        const pid = Number(pidLine);
-        if (!Number.isInteger(pid) || pid <= 0) return null;
-        if (!isPidRunning(pid)) return null;
-        return pid;
-      } catch {
-        return null;
-      }
-    };
-  
-    const runningPid = getRunningPid();
-    if (runningPid) {
-      logger.warn(`Embedded PostgreSQL already running; reusing existing process (pid=${runningPid}, port=${port})`);
+    // One embedded login for init, identity probes, and database access.
+    const embeddedPostgresUser = "paperclip";
+    const embeddedPostgresPassword = "paperclip";
+    const embeddedPostgresUrl = (targetPort: number, database: string) =>
+      `postgres://${encodeURIComponent(embeddedPostgresUser)}:${encodeURIComponent(embeddedPostgresPassword)}@127.0.0.1:${targetPort}/${database}`;
+    const embeddedAdminUrl = (targetPort: number) => embeddedPostgresUrl(targetPort, "postgres");
+    const runningPostgres = await readRunningEmbeddedPostgres(dataDir, configuredPort, embeddedAdminUrl);
+    if (runningPostgres) {
+      port = runningPostgres.port;
+      logger.warn(`Embedded PostgreSQL already running; reusing existing process (pid=${runningPostgres.pid}, port=${port})`);
     } else {
-      const configuredAdminConnectionString = `postgres://paperclip:paperclip@127.0.0.1:${configuredPort}/postgres`;
+      const configuredAdminConnectionString = embeddedAdminUrl(configuredPort);
       try {
         const actualDataDir = await getPostgresDataDirectory(configuredAdminConnectionString);
         if (
           typeof actualDataDir !== "string" ||
-          resolve(actualDataDir) !== resolve(dataDir)
+          !(await isSameDataDirectory(actualDataDir, dataDir))
         ) {
           throw new Error("reachable postgres does not use the expected embedded data directory");
         }
@@ -461,8 +447,8 @@ export async function startServer(): Promise<StartedServer> {
         logger.info(`Using embedded PostgreSQL because no DATABASE_URL set (dataDir=${dataDir}, port=${port})`);
         embeddedPostgres = new EmbeddedPostgres({
           databaseDir: dataDir,
-          user: "paperclip",
-          password: "paperclip",
+          user: embeddedPostgresUser,
+          password: embeddedPostgresPassword,
           port,
           persistent: true,
           initdbFlags: ["--encoding=UTF8", "--locale=C", "--lc-messages=C"],
@@ -485,8 +471,8 @@ export async function startServer(): Promise<StartedServer> {
         }
 
         if (existsSync(postmasterPidFile)) {
-          logger.warn("Removing stale embedded PostgreSQL lock file");
-          rmSync(postmasterPidFile, { force: true });
+          const aside = moveStaleLockAside(postmasterPidFile);
+          logger.warn({ aside }, "Moved stale embedded PostgreSQL lock file aside");
         }
         try {
           await embeddedPostgres.start();
@@ -501,13 +487,13 @@ export async function startServer(): Promise<StartedServer> {
       }
     }
   
-    const embeddedAdminConnectionString = `postgres://paperclip:paperclip@127.0.0.1:${port}/postgres`;
+    const embeddedAdminConnectionString = embeddedAdminUrl(port);
     const dbStatus = await ensurePostgresDatabase(embeddedAdminConnectionString, "paperclip");
     if (dbStatus === "created") {
       logger.info("Created embedded PostgreSQL database: paperclip");
     }
   
-    const embeddedConnectionString = `postgres://paperclip:paperclip@127.0.0.1:${port}/paperclip`;
+    const embeddedConnectionString = embeddedPostgresUrl(port, "paperclip");
     const shouldAutoApplyFirstRunMigrations = !clusterAlreadyInitialized || dbStatus === "created";
     if (shouldAutoApplyFirstRunMigrations) {
       logger.info("Detected first-run embedded PostgreSQL setup; applying pending migrations automatically");
@@ -1536,6 +1522,8 @@ function isMainModule(metaUrl: string): boolean {
 if (isMainModule(import.meta.url)) {
   void startServer().catch((err) => {
     logger.error({ err }, "Paperclip server failed to start");
-    process.exit(1);
+    // A distinct code lets service managers and health checks tell "an existing
+    // PostgreSQL may own the data directory" apart from other startup failures.
+    process.exit(err instanceof EmbeddedPostgresLockRefusal ? err.exitCode : 1);
   });
 }

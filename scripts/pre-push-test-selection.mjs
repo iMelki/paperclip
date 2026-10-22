@@ -56,6 +56,10 @@ const NON_PRODUCTION_PATH_PATTERNS = [
 // an unbounded import-graph scan.
 const DECLARED_SOURCE_TESTS = new Map([
   [
+    "server/src/index.ts",
+    ["server/src/__tests__/server-startup-feedback-export.test.ts"],
+  ],
+  [
     "scripts/lib/ephemeral-scratch.mjs",
     ["packages/db/src/test-discovery.test.ts"],
   ],

@@ -1,7 +1,18 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { ensurePostgresDatabase, getPostgresDataDirectory } from "@paperclipai/db";
+
+const { pgStartMock, pgCtorMock } = vi.hoisted(() => {
+  const pgStartMock = vi.fn(async () => {});
+  const pgCtorMock = vi.fn(function () {
+    return { initialise: vi.fn(async () => {}), start: pgStartMock, stop: vi.fn(async () => {}) };
+  });
+  return { pgStartMock, pgCtorMock };
+});
+
+vi.mock("embedded-postgres", () => ({ default: pgCtorMock }));
 
 const ORIGINAL_PAPERCLIP_API_URL = process.env.PAPERCLIP_API_URL;
 const ORIGINAL_PAPERCLIP_RUNTIME_API_URL = process.env.PAPERCLIP_RUNTIME_API_URL;
@@ -203,6 +214,8 @@ vi.mock("@paperclipai/db", () => ({
   createDb: createDbMock,
   ensurePostgresDatabase: vi.fn(),
   getPostgresDataDirectory: vi.fn(),
+  prepareEmbeddedPostgresNativeRuntime: vi.fn(async () => {}),
+  createEmbeddedPostgresLogBuffer: vi.fn(() => ({ append: vi.fn(), getRecentLogs: () => [] })),
   inspectMigrations: vi.fn(async () => ({ status: "upToDate" })),
   applyPendingMigrations: vi.fn(),
   reconcilePendingMigrationHistory: vi.fn(async () => ({ repairedMigrations: [] })),
@@ -349,6 +362,166 @@ vi.mock("../auth/better-auth.js", () => ({
 }));
 
 import { startServer } from "../index.ts";
+
+describe("startServer embedded PostgreSQL identity", () => {
+  let dataDir: string;
+  let pidFile: string;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    dataDir = mkdtempSync(path.join(tmpdir(), "server-pg-identity-"));
+    pidFile = path.join(dataDir, "postmaster.pid");
+    writeFileSync(path.join(dataDir, "PG_VERSION"), "18\n");
+    writeFileSync(pidFile, `${process.pid}\n${dataDir}\n1700000000\n55432\n`);
+    process.env.PAPERCLIP_DECISION_SIGNING_SECRET = "test-only-signing-fixture".repeat(2);
+    loadConfigMock.mockReturnValue(buildTestConfig({
+      databaseMode: "embedded-postgres",
+      databaseUrl: undefined,
+      embeddedPostgresDataDir: dataDir,
+      embeddedPostgresPort: 55432,
+    }));
+    detectPortMock.mockResolvedValue(55432);
+    vi.mocked(getPostgresDataDirectory).mockReset().mockResolvedValue(null);
+    // Stop after the database lifecycle decision, before constructing the app.
+    vi.mocked(ensurePostgresDatabase).mockReset().mockRejectedValue(new Error("database phase reached"));
+  });
+
+  afterEach(() => {
+    detectPortMock.mockReset().mockImplementation(async ({ port }: { port: number; hostname: string }) => port);
+    vi.mocked(getPostgresDataDirectory).mockReset();
+    vi.mocked(ensurePostgresDatabase).mockReset();
+  });
+
+  // A stale lock is moved aside, never deleted; the moved file keeps its contents.
+  const staleLocks = () => readdirSync(dataDir).filter((name) => name.startsWith("postmaster.pid.stale-"));
+
+  it("starts PostgreSQL and moves the recycled-PID lock aside instead of reusing node", async () => {
+    expect(process.kill(process.pid, 0)).toBe(true);
+    const lockBefore = readFileSync(pidFile);
+    await expect(startServer()).rejects.toThrow("database phase reached");
+    expect(pgStartMock).toHaveBeenCalledOnce();
+    expect(existsSync(pidFile)).toBe(false);
+    expect(staleLocks()).toHaveLength(1);
+    expect(readFileSync(path.join(dataDir, staleLocks()[0])).equals(lockBefore)).toBe(true);
+    expect(process.kill(process.pid, 0)).toBe(true);
+  });
+
+  it("keeps reusing verified live PostgreSQL on the recorded port", async () => {
+    writeFileSync(pidFile, `${process.pid}\n${dataDir}\n1700000000\n55433\n`);
+    vi.mocked(getPostgresDataDirectory).mockResolvedValue(dataDir);
+    await expect(startServer()).rejects.toThrow("database phase reached");
+    expect(pgCtorMock).not.toHaveBeenCalled();
+    expect(pgStartMock).not.toHaveBeenCalled();
+    expect(ensurePostgresDatabase).toHaveBeenCalledWith(
+      "postgres://paperclip:paperclip@127.0.0.1:55433/postgres", "paperclip",
+    );
+    expect(existsSync(pidFile)).toBe(true);
+  });
+
+  it("starts PostgreSQL and moves the dead-PID lock aside", async () => {
+    const lockBefore = readFileSync(pidFile);
+    const kill = vi.spyOn(process, "kill").mockImplementation(() => {
+      throw Object.assign(new Error("no such process"), { code: "ESRCH" });
+    });
+    try {
+      await expect(startServer()).rejects.toThrow("database phase reached");
+      expect(pgStartMock).toHaveBeenCalledOnce();
+      expect(existsSync(pidFile)).toBe(false);
+      expect(staleLocks()).toHaveLength(1);
+      expect(readFileSync(path.join(dataDir, staleLocks()[0])).equals(lockBefore)).toBe(true);
+    } finally {
+      kill.mockRestore();
+    }
+  });
+
+  const foreignLiveness: Array<[string, () => true]> = [
+    ["live", () => true],
+    ["EPERM", () => { throw Object.assign(new Error("permission denied"), { code: "EPERM" }); }],
+    ["EIO", () => { throw Object.assign(new Error("i/o error"), { code: "EIO" }); }],
+  ];
+  const identityFailures: Array<[string, () => void]> = [
+    ["unreachable/null", () => vi.mocked(getPostgresDataDirectory).mockResolvedValue(null)],
+    ["recovery", () => vi.mocked(getPostgresDataDirectory).mockRejectedValue(new Error("the database system is in recovery mode"))],
+    ["permission", () => vi.mocked(getPostgresDataDirectory).mockRejectedValue(new Error("password authentication failed"))],
+  ];
+  for (const [livenessName, killOutcome] of foreignLiveness) {
+    for (const [failureName, failIdentity] of identityFailures) {
+      it(`keeps the lock and refuses a second start for a foreign ${livenessName} PID with a failed identity query (${failureName})`, async () => {
+        writeFileSync(pidFile, `424242\n${dataDir}\n1700000000\n55432\n\nlocalhost\n\nready\n`);
+        const lockBefore = readFileSync(pidFile);
+        failIdentity();
+        const kill = vi.spyOn(process, "kill").mockImplementation(killOutcome);
+        try {
+          await expect(startServer()).rejects.toThrow("identity could not be verified");
+        } finally {
+          kill.mockRestore();
+        }
+        expect(readFileSync(pidFile).equals(lockBefore)).toBe(true);
+        expect(pgCtorMock).not.toHaveBeenCalled();
+        expect(pgStartMock).not.toHaveBeenCalled();
+        expect(ensurePostgresDatabase).not.toHaveBeenCalled();
+        expect(createDbMock).not.toHaveBeenCalled();
+      });
+    }
+  }
+
+  it("reuses verified PostgreSQL reached through a symlinked data directory", async () => {
+    const root = realpathSync(mkdtempSync(path.join(tmpdir(), "server-pg-alias-")));
+    const physical = path.join(root, "physical");
+    const alias = path.join(root, "alias");
+    mkdirSync(physical);
+    symlinkSync(physical, alias, "dir");
+    writeFileSync(path.join(physical, "PG_VERSION"), "18\n");
+    writeFileSync(path.join(physical, "postmaster.pid"), `${process.pid}\n${physical}\n1700000000\n55432\n`);
+    loadConfigMock.mockReturnValue(buildTestConfig({
+      databaseMode: "embedded-postgres",
+      databaseUrl: undefined,
+      embeddedPostgresDataDir: alias,
+      embeddedPostgresPort: 55432,
+    }));
+    vi.mocked(getPostgresDataDirectory).mockResolvedValue(physical);
+    await expect(startServer()).rejects.toThrow("database phase reached");
+    expect(pgCtorMock).not.toHaveBeenCalled();
+    expect(pgStartMock).not.toHaveBeenCalled();
+    expect(existsSync(path.join(physical, "postmaster.pid"))).toBe(true);
+  });
+
+  it("reuses a verified PID-less server through a symlinked data directory", async () => {
+    const root = realpathSync(mkdtempSync(path.join(tmpdir(), "server-pg-alias-")));
+    const physical = path.join(root, "physical");
+    const alias = path.join(root, "alias");
+    mkdirSync(physical);
+    symlinkSync(physical, alias, "dir");
+    writeFileSync(path.join(physical, "PG_VERSION"), "18\n");
+    loadConfigMock.mockReturnValue(buildTestConfig({
+      databaseMode: "embedded-postgres",
+      databaseUrl: undefined,
+      embeddedPostgresDataDir: alias,
+      embeddedPostgresPort: 55432,
+    }));
+    vi.mocked(getPostgresDataDirectory).mockResolvedValue(physical);
+    vi.mocked(ensurePostgresDatabase).mockReset()
+      .mockResolvedValueOnce("exists")
+      .mockRejectedValue(new Error("database phase reached"));
+    await expect(startServer()).rejects.toThrow("database phase reached");
+    expect(pgCtorMock).not.toHaveBeenCalled();
+    expect(pgStartMock).not.toHaveBeenCalled();
+  });
+
+  it("probes identity with the same login it uses to open the database", async () => {
+    vi.mocked(getPostgresDataDirectory).mockResolvedValue(dataDir);
+    await expect(startServer()).rejects.toThrow("database phase reached");
+    const probeUrl = vi.mocked(getPostgresDataDirectory).mock.calls[0]?.[0];
+    expect(probeUrl).toBe(vi.mocked(ensurePostgresDatabase).mock.calls[0]?.[0]);
+  });
+
+  it("refuses another PostgreSQL instance without removing the lock or starting", async () => {
+    vi.mocked(getPostgresDataDirectory).mockResolvedValue(path.resolve(dataDir, "another-instance"));
+    await expect(startServer()).rejects.toThrow("data directory belongs to another instance");
+    expect(pgStartMock).not.toHaveBeenCalled();
+    expect(existsSync(pidFile)).toBe(true);
+  });
+});
 
 describe("startServer feedback export wiring", () => {
   beforeEach(() => {
