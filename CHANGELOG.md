@@ -20,6 +20,11 @@ All notable changes to this repository should be recorded here.
 
 ## Unreleased
 
+- Embedded PostgreSQL process discovery reads only an uppercase `-D` as the
+  data directory option. PostgreSQL's lowercase `-d <debug level>` no longer
+  replaces it, so a server that is started with `-D <dir> -d 5` is identified
+  by its `-D` value.
+
 - **Docs:** the fork getting-started guide uses placeholders for local
   workspace and notes-vault paths instead of one machine's paths.
 

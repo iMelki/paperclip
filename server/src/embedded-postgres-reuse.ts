@@ -38,8 +38,9 @@ export async function readProcessName(pid: number): Promise<string | null> {
 }
 
 const POSTGRES_PROCESS_NAME_RE = /^(?:postgres|postmaster)(?:\.exe)?$/i;
+// Case-sensitive on purpose: PostgreSQL's lowercase `-d <debuglevel>` is not a data directory.
 const DATA_DIRECTORY_ARGUMENT =
-  /(?:^|\s)(?:-D\s*|--data-directory[=\s])(?:"([^"]+)"|'([^']+)'|(\S+))/gi;
+  /(?:^|\s)(?:-D\s*|--data-directory[=\s])(?:"([^"]+)"|'([^']+)'|(\S+))/g;
 
 const POSTGRES_CHILD_TITLE_RE = /^postgres:\s/i;
 const POSTGRES_FORK_CHILD_RE = /(?:^|\s)--fork/i;
@@ -59,17 +60,20 @@ async function commandOwnership(
   // PostgreSQL applies the last data-directory option, so that one is the effective value. An
   // explicit existing value is compared first: a descendant such as `<dataDir>/backup` would
   // otherwise pass the broader path-reference test below.
+  // `-D` is read from the command as given: Windows normalization lowercases the whole line, which
+  // would turn `-D` into the debug-level option `-d`. Only the path comparison below uses it.
   let value: string | undefined;
   for (const named of command.matchAll(DATA_DIRECTORY_ARGUMENT)) value = named[1] ?? named[2] ?? named[3];
+  const normalized = normalizeCommand(command);
   if (value && isAbsolute(value) && existsSync(value)) {
     if (await isSameDataDirectory(value, dataDir)) return "owns";
     // `data_directory` in postgresql.conf overrides `-D`, so `-D` may only name the configuration
     // directory of a server that still stores this cluster. A directory that is itself a cluster
     // (it has PG_VERSION) is the data directory; anything else proves nothing.
     if (existsSync(join(value, "PG_VERSION"))) return "other";
-    return needles.some((needle) => commandReferencesPath(command, needle)) ? "owns" : "unknown";
+    return needles.some((needle) => commandReferencesPath(normalized, needle)) ? "owns" : "unknown";
   }
-  if (needles.some((needle) => commandReferencesPath(command, needle))) return "owns";
+  if (needles.some((needle) => commandReferencesPath(normalized, needle))) return "owns";
   return "unknown";
 }
 
@@ -205,7 +209,7 @@ export async function scanWindowsPostgresRows(
     // Windows postmaster children (`postgres.exe --forkbackend` etc.) carry no data directory and
     // are not servers; counting them would make any unrelated PostgreSQL look inconclusive.
     if (POSTGRES_FORK_CHILD_RE.test(command)) continue;
-    const ownership = await commandOwnership(normalizeCommand(command), needles, dataDir);
+    const ownership = await commandOwnership(command, needles, dataDir);
     if (ownership === "owns") found.push({ pid: row.ProcessId, command });
     else if (ownership === "unknown") unknown = true;
   }
