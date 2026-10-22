@@ -6,6 +6,11 @@ All notable changes to this repository should be recorded here.
 
 ## Unreleased
 
+- **[Refs #173]** Recovery reads the Claude session-limit statement only from
+  the ACP error and stop reason, or from a non-ACP run's own error field. A run
+  whose summary, output or transcript only quotes the phrase is no longer parked
+  as a provider quota wait.
+
 - **Docs:** the fork getting-started guide uses placeholders for local
   workspace and notes-vault paths instead of one machine's paths.
 

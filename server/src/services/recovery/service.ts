@@ -375,9 +375,11 @@ export const PROVIDER_QUOTA_RECOVERY_DEFAULT_BACKOFF_MS = 60 * 60 * 1000;
 
 // Session-limit wording counts only as Claude's own statement ("You've hit your
 // session limit · resets …"); bare "session limit" also appears in unrelated
-// tool, MCP and terminal failures and must not enter quota recovery.
+// tool, MCP and terminal failures and must not enter quota recovery. It is read
+// from the ACP error and stop reason, or from a non-ACP run's own error field,
+// never from the rest of the result (summaries and stdout can quote it).
 const PROVIDER_QUOTA_ERROR_RE =
-  /(?:you(?:'|’)ve hit your (?:usage|session) limit|usage limit(?: reached| exceeded)?|provider quota|quota (?:limit )?exceeded|model (?:is )?at capacity)/i;
+  /(?:you(?:'|’)ve hit your usage limit|usage limit(?: reached| exceeded)?|provider quota|quota (?:limit )?exceeded|model (?:is )?at capacity)/i;
 const CLAUDE_SESSION_LIMIT_RE = /you(?:'|’)ve hit your (?:usage|session) limit/i;
 // On the ACP path a reset clock only counts when it sits right next to the quota statement.
 const PROVIDER_QUOTA_RESET_WINDOW_CHARS = 120;
@@ -509,22 +511,36 @@ export function classifyAdapterFailureForRecovery(
       .filter((value): value is string => typeof value === "string")
       .join("\n");
     if (!CLAUDE_SESSION_LIMIT_RE.test(evidence)) return null;
-    return buildProviderQuotaClassification(resultJson, evidence, now, { boundResetWindow: true, failedAt });
+    return buildProviderQuotaClassification(resultJson, evidence, now, {
+      boundResetWindow: true,
+      failedAt,
+      acceptSessionLimit: true,
+    });
   }
   const error = [latestRun.errorCode ?? "", latestRun.error ?? "", JSON.stringify(resultJson)].join("\n");
   if (latestRun.errorCode === "configuration_incomplete" || CONFIGURATION_INCOMPLETE_ERROR_RE.test(error)) {
     return { kind: "configuration_incomplete" };
   }
-  if (latestRun.errorCode !== "provider_quota" && !PROVIDER_QUOTA_ERROR_RE.test(error)) return null;
+  const sessionLimitInOwnError = typeof latestRun.error === "string" && CLAUDE_SESSION_LIMIT_RE.test(latestRun.error);
+  if (
+    latestRun.errorCode !== "provider_quota" &&
+    !PROVIDER_QUOTA_ERROR_RE.test(error) &&
+    !sessionLimitInOwnError
+  ) {
+    return null;
+  }
 
-  return buildProviderQuotaClassification(resultJson, error, now, { failedAt });
+  return buildProviderQuotaClassification(resultJson, error, now, {
+    failedAt,
+    acceptSessionLimit: sessionLimitInOwnError,
+  });
 }
 
 function buildProviderQuotaClassification(
   resultJson: Record<string, unknown>,
   error: string,
   now: Date,
-  options: { boundResetWindow?: boolean; failedAt?: Date | null } = {},
+  options: { boundResetWindow?: boolean; failedAt?: Date | null; acceptSessionLimit?: boolean } = {},
 ): AdapterFailureRecoveryClassification {
   const persistedRetryAt = readNonEmptyString(resultJson.retryNotBefore) ??
     readNonEmptyString(resultJson.transientRetryNotBefore) ??
@@ -534,7 +550,11 @@ function buildProviderQuotaClassification(
     return { kind: "provider_quota", retryAt: parsedPersistedRetryAt, parsedResetTime: true };
   }
 
-  const quotaMatch = PROVIDER_QUOTA_ERROR_RE.exec(error);
+  const genericMatch = PROVIDER_QUOTA_ERROR_RE.exec(error);
+  const sessionMatch = options.acceptSessionLimit ? CLAUDE_SESSION_LIMIT_RE.exec(error) : null;
+  const quotaMatch = genericMatch && sessionMatch
+    ? (sessionMatch.index < genericMatch.index ? sessionMatch : genericMatch)
+    : (genericMatch ?? sessionMatch);
   // The ACP path only reads a clock that sits right after Claude's statement: its evidence
   // joins several fields, so a clock far from it belongs to something else. Other adapters
   // (for example Codex's "...or try again at 3:42 PM") put `try again at` after long upgrade

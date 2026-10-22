@@ -114,6 +114,36 @@ describe("classifyAdapterFailureForRecovery", () => {
     }, new Date("2026-10-13T18:00:38.000Z"))).toBeNull();
   });
 
+  it.each(["adapter_failed"])(
+    "does not park a %s run (Codex and other non-ACP adapters) that only quotes the Claude session statement in its result",
+    (errorCode) => {
+      const quote = "You've hit your session limit · resets 10:40pm (Asia/Jerusalem)";
+      for (const resultJson of [
+        { summary: `Added a test for "${quote}"` },
+        { stdout: `$ grep -r "${quote}" src\n` },
+        { transcript: [{ role: "assistant", text: quote }] },
+      ]) {
+        expect(classifyAdapterFailureForRecovery({
+          errorCode,
+          error: "Process exited with code 1",
+          resultJson,
+        }, new Date("2026-10-13T18:00:38.000Z"))).toBeNull();
+      }
+    },
+  );
+
+  it("still reads the session statement from a non-ACP run's own error field", () => {
+    expect(classifyAdapterFailureForRecovery({
+      errorCode: "adapter_failed",
+      error: "You've hit your session limit · resets 10:40pm (Asia/Jerusalem)",
+      resultJson: { summary: "Quoted again: You've hit your session limit · resets 9:00am (UTC)" },
+    }, new Date("2026-10-13T18:00:38.000Z"))).toEqual({
+      kind: "provider_quota",
+      retryAt: new Date("2026-10-13T19:40:00.000Z"),
+      parsedResetTime: true,
+    });
+  });
+
   it("takes the exact Claude statement from the ACP stop reason", () => {
     const now = new Date("2026-10-13T18:00:38.000Z");
     for (const resultJson of [
