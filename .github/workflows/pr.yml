@@ -11,7 +11,8 @@ concurrency:
 
 jobs:
   secret-scan:
-    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [rf-paperclip]
     timeout-minutes: 10
     permissions:
       contents: read
@@ -53,7 +54,8 @@ jobs:
 
   policy:
     needs: [secret-scan]
-    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [rf-paperclip]
     timeout-minutes: 5
     outputs:
       lockfile_regenerated: ${{ steps.regen_lockfile.outputs.regenerated }}
@@ -149,7 +151,8 @@ jobs:
   typecheck_release_registry:
     name: Typecheck + Release Registry
     needs: [policy]
-    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [rf-paperclip]
     timeout-minutes: 20
 
     steps:
@@ -186,7 +189,8 @@ jobs:
   general_tests:
     name: General tests (${{ matrix.group_label }})
     needs: [policy]
-    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [rf-paperclip]
     timeout-minutes: 20
     strategy:
       fail-fast: false
@@ -261,9 +265,9 @@ jobs:
   verify:
     # Preserve the legacy required-check name while the underlying work runs in parallel.
     name: verify
-    if: ${{ always() }}
+    if: ${{ (always()) && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
     needs: [typecheck_release_registry, general_tests, build]
-    runs-on: ubuntu-latest
+    runs-on: [rf-paperclip]
     timeout-minutes: 5
 
     steps:
@@ -280,7 +284,8 @@ jobs:
   build:
     name: Build
     needs: [policy]
-    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [rf-paperclip]
     timeout-minutes: 20
 
     steps:
@@ -314,7 +319,8 @@ jobs:
   verify_serialized_server:
     name: Verify serialized server suites (${{ matrix.shard_label }})
     needs: [policy]
-    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [rf-paperclip]
     timeout-minutes: 20
     strategy:
       fail-fast: false
@@ -371,7 +377,8 @@ jobs:
   canary_dry_run:
     name: Canary Dry Run
     needs: [policy]
-    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [rf-paperclip]
     timeout-minutes: 20
 
     steps:
@@ -426,7 +433,8 @@ jobs:
   e2e_shards:
     name: e2e shard (${{ matrix.shard_label }})
     needs: [policy]
-    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [rf-paperclip]
     timeout-minutes: 30
     strategy:
       fail-fast: false
@@ -522,9 +530,9 @@ jobs:
     # Preserve the legacy required-check name while the specs run sharded
     # across the matrix above (same pattern as the `verify` aggregate).
     name: e2e
-    if: ${{ always() }}
+    if: ${{ (always()) && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
     needs: [e2e_shards]
-    runs-on: ubuntu-latest
+    runs-on: [rf-paperclip]
     timeout-minutes: 5
 
     steps:
