@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
 import { existsSync, readFileSync, readlinkSync, renameSync } from "node:fs";
 import { realpath } from "node:fs/promises";
-import { isAbsolute, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { getPostgresDataDirectory } from "@paperclipai/db";
 import { logger } from "./middleware/logger.js";
 
@@ -56,11 +56,15 @@ async function commandOwnership(
   needles: string[],
   dataDir: string,
 ): Promise<DataDirectoryOwnership> {
-  if (needles.some((needle) => commandReferencesPath(command, needle))) return "owns";
+  // An explicit existing -D value is compared first: a descendant such as `<dataDir>/backup`
+  // would otherwise pass the broader path-reference test below.
   const named = DATA_DIRECTORY_ARGUMENT.exec(command);
   const value = named?.[1] ?? named?.[2] ?? named?.[3];
-  if (!value || !isAbsolute(value) || !existsSync(value)) return "unknown";
-  return (await isSameDataDirectory(value, dataDir)) ? "owns" : "other";
+  if (value && isAbsolute(value) && existsSync(value)) {
+    return (await isSameDataDirectory(value, dataDir)) ? "owns" : "other";
+  }
+  if (needles.some((needle) => commandReferencesPath(command, needle))) return "owns";
+  return "unknown";
 }
 
 /**
@@ -84,7 +88,13 @@ export class EmbeddedPostgresLockRefusal extends Error {
  * earlier archive, so a counter is appended until the name is free.
  */
 function uniqueAsidePath(pidFile: string): string {
-  const base = `${pidFile}.stale-${Date.now()}`;
+  // An archive inside a cluster directory that was never initialised (no PG_VERSION) would make
+  // initdb reject it as non-empty, so it is kept beside the directory instead.
+  const dir = dirname(pidFile);
+  const archived = existsSync(join(dir, "PG_VERSION"))
+    ? pidFile
+    : join(dirname(dir), `${basename(dir)}.${basename(pidFile)}`);
+  const base = `${archived}.stale-${Date.now()}`;
   let candidate = base;
   for (let n = 1; existsSync(candidate); n += 1) candidate = `${base}-${n}`;
   return candidate;
@@ -297,7 +307,9 @@ async function recoverLockWithUnknownOwner(
       `Refusing to start embedded PostgreSQL: postmaster.pid ${problem}, and ${detail} ` +
         "The lock file was left unchanged.",
     );
-  if ((await getPostgresDataDirectory(adminUrl(configuredPort)).catch(() => null)) !== null) {
+  const answeringDir = await getPostgresDataDirectory(adminUrl(configuredPort)).catch(() => null);
+  // A server on the configured port that serves another data directory is not this lock's owner.
+  if (answeringDir !== null && (await isSameDataDirectory(answeringDir, dataDir))) {
     throw refuse(
       `a PostgreSQL server is answering on port ${configuredPort}. Stop it (or point the server at that instance), then start again.`,
     );

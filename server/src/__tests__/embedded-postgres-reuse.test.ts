@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   EMBEDDED_POSTGRES_LOCK_REFUSAL_EXIT_CODE,
@@ -41,6 +41,7 @@ describe("embedded PostgreSQL reuse identity", () => {
   beforeEach(() => {
     vi.resetAllMocks();
     dataDir = mkdtempSync(join(tmpdir(), "embedded-pg-identity-"));
+    writeFileSync(join(dataDir, "PG_VERSION"), "16\n");
     pidFile = join(dataDir, "postmaster.pid");
     probe.mockResolvedValue(dataDir);
     vi.spyOn(process, "kill").mockReturnValue(true);
@@ -126,6 +127,24 @@ describe("embedded PostgreSQL reuse identity", () => {
       expect(await readRunningEmbeddedPostgres(dataDir, 55432)).toBeNull();
       expect(existsSync(pidFile)).toBe(false);
       expect(asideFiles()).toHaveLength(1);
+    });
+
+      it("keeps the archive out of a cluster directory that was never initialised", async () => {
+      rmSync(join(dataDir, "PG_VERSION"));
+      garbled();
+      probe.mockRejectedValue(new Error("connection refused"));
+      expect(await readRunningEmbeddedPostgres(dataDir, 55432)).toBeNull();
+      expect(readdirSync(dataDir)).toEqual([]);
+      const beside = readdirSync(dirname(dataDir)).filter((n) => n.startsWith(`${basename(dataDir)}.postmaster.pid.stale-`));
+      expect(beside).toHaveLength(1);
+      rmSync(join(dirname(dataDir), beside[0]));
+    });
+
+    it("ignores a server on the configured port that serves another data directory", async () => {
+      garbled();
+      probe.mockResolvedValue(mkdtempSync(join(tmpdir(), "other-pg-")));
+      expect(await readRunningEmbeddedPostgres(dataDir, 55432)).toBeNull();
+      expect(existsSync(pidFile)).toBe(false);
     });
 
     it("refuses and names the process when a PostgreSQL references the data directory", async () => {
@@ -327,6 +346,7 @@ describe("embedded PostgreSQL reuse identity", () => {
 describe("moveStaleLockAside", () => {
   it("renames the lock next to itself and keeps its contents", () => {
     const dir = mkdtempSync(join(tmpdir(), "embedded-pg-aside-"));
+    writeFileSync(join(dir, "PG_VERSION"), "16\n");
     const lock = join(dir, "postmaster.pid");
     writeFileSync(lock, "4242\n");
     const aside = moveStaleLockAside(lock);
@@ -340,6 +360,7 @@ describe("moveStaleLockAside", () => {
     vi.setSystemTime(new Date("2026-10-21T22:00:00.000Z"));
     try {
       const dir = mkdtempSync(join(tmpdir(), "embedded-pg-aside-"));
+      writeFileSync(join(dir, "PG_VERSION"), "16\n");
       const lock = join(dir, "postmaster.pid");
       writeFileSync(lock, "first\n");
       const first = moveStaleLockAside(lock);
@@ -410,6 +431,14 @@ describe("scanPsOutputForDataDir", () => {
   it("treats an unresolvable -D value as no evidence", async () => {
     const out = "901\tpostgres\t/usr/bin/postgres -D /does/not/exist/anywhere\n";
     expect(await scanPsOutputForDataDir(out, [dir], dir, unreadable)).toBeNull();
+  });
+
+  it("does not treat a descendant -D directory as the data directory", async () => {
+    const base = mkdtempSync(join(tmpdir(), "pg-parent-"));
+    const child = join(base, "backup");
+    mkdirSync(child);
+    const out = `901\tpostgres\t/usr/bin/postgres -D ${child}\n`;
+    expect(await scanPsOutputForDataDir(out, [base], base, unreadable)).toEqual([]);
   });
 
   it("finds a server by command line or by working directory", async () => {
