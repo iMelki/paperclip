@@ -6,7 +6,9 @@ on:
 
 # Runs on pull_request (not pull_request_target) on the rf-paperclip box runner.
 # Same-repo PRs only: fork PRs are skipped by the job guard and get no secrets or
-# write token. The steps still check out trusted refs only, never PR code.
+# write token. Both checkouts use the PR base commit, never the PR head or the
+# merge commit, so the scripts in .github/scripts come from trusted code. Note
+# that the workflow file itself still comes from the PR under pull_request.
 
 permissions:
   pull-requests: write
@@ -21,10 +23,16 @@ jobs:
     # Up to 30 min can go to the rf-slot hook waiting for a box-wide slot.
     timeout-minutes: 35
     steps:
-      - name: Checkout trusted workflow revision (never PR code)
+      # Under pull_request, github.workflow_sha is the PR merge commit, so a
+      # checkout of it would let the token scripts below run PR code. Check out
+      # the PR base commit instead: it is already on master, so the scripts that
+      # handle secrets come from trusted code. github.sha is a fallback for
+      # non-PR events (this workflow currently has none).
+      - name: Checkout trusted base revision for token scripts (not PR code)
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
-          ref: ${{ github.workflow_sha }}
+          ref: ${{ github.event.pull_request.base.sha || github.sha }}
+          persist-credentials: false
 
       - name: Set up Node
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
