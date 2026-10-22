@@ -939,8 +939,15 @@ export async function terminateLocalService(
   };
 }
 
+// A TCP port is an integer from 1 to 65535. Anything else (a string such as
+// "80 or sport = :22", a float, NaN, 0, or 65536+) is rejected before it can
+// reach an lsof or ss argument, where ss would read extra filter terms.
+export function isValidTcpPort(port: unknown): port is number {
+  return typeof port === "number" && Number.isInteger(port) && port >= 1 && port <= 65535;
+}
+
 export async function readLocalServicePortOwner(port: number) {
-  if (!Number.isInteger(port) || port <= 0) return null;
+  if (!isValidTcpPort(port)) return null;
   if (process.platform === "win32") {
     try {
       const netstatCommand = path.join(
@@ -979,12 +986,17 @@ export async function readLocalServicePortOwner(port: number) {
 }
 
 export function parseSsListenPortOwner(stdout: string, port: number) {
+  if (!isValidTcpPort(port)) return null;
   for (const rawLine of stdout.split(/\r?\n/)) {
     const columns = rawLine.trim().split(/\s+/);
     if (columns.length < 5 || columns[0]?.toUpperCase() !== "LISTEN") continue;
     const localAddress = columns[3] ?? "";
     if (!localAddress.endsWith(`:${port}`)) continue;
-    const match = /pid=(\d+)/.exec(rawLine);
+    // ss prints users:(("<name>",pid=N,fd=M)) and the process name is free text,
+    // so a name such as ',pid=1,fd=' must not be read as the pid. Take only the
+    // ',pid=N,fd=M)' that closes the users field at the end of the line, which
+    // ss always writes after the name.
+    const match = /,pid=(\d+),fd=\d+\)\)\s*$/.exec(rawLine);
     const pid = match ? Number.parseInt(match[1]!, 10) : Number.NaN;
     if (Number.isInteger(pid) && pid > 0) return pid;
   }
@@ -992,6 +1004,7 @@ export function parseSsListenPortOwner(stdout: string, port: number) {
 }
 
 async function readLocalServicePortOwnerFromSs(port: number) {
+  if (!isValidTcpPort(port)) return null;
   try {
     const { stdout } = await execFileAsync("ss", ["-ltnp", "sport", "=", `:${port}`]);
     return parseSsListenPortOwner(stdout, port);

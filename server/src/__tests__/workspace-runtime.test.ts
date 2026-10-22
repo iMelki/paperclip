@@ -4310,6 +4310,28 @@ describe("readLocalServicePortOwner", () => {
     expect(parseSsListenPortOwner("", 4242)).toBeNull();
   });
 
+  it("reads the ss pid from the end of the users field, not from a spoofing process name", () => {
+    const stdout = [
+      'LISTEN 0 511 127.0.0.1:4242 0.0.0.0:* users:(("x,pid=999,fd=",pid=222,fd=21))   ',
+      'LISTEN 0 511 127.0.0.1:4245 0.0.0.0:* users:(("x",pid=9,fd=1))",pid=555,fd=7))',
+      'LISTEN 0 511 127.0.0.1:4246 0.0.0.0:* users:(("pid=999",pid=666,fd=8))',
+      'LISTEN 0 511 127.0.0.1:4247 0.0.0.0:* users:(("a,pid=999,fd=1",fd=9))',
+    ].join("\n");
+    expect(parseSsListenPortOwner(stdout, 4242)).toBe(222);
+    expect(parseSsListenPortOwner(stdout, 4245)).toBe(555);
+    expect(parseSsListenPortOwner(stdout, 4246)).toBe(666);
+    expect(parseSsListenPortOwner(stdout, 4247)).toBeNull();
+  });
+
+  it("accepts only an integer port from 1 to 65535", () => {
+    const stdout = 'LISTEN 0 511 127.0.0.1:65535 0.0.0.0:* users:(("node",pid=1,fd=3))';
+    expect(parseSsListenPortOwner(stdout, 65535)).toBe(1);
+    for (const port of [0, -1, 65536, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+      expect(parseSsListenPortOwner(stdout, port)).toBeNull();
+    }
+    expect(parseSsListenPortOwner(stdout, "80 or sport = :22" as unknown as number)).toBeNull();
+  });
+
   describe.skipIf(process.platform === "win32")("POSIX port owner lookup without lsof", () => {
     let fakeBin: string;
     let previousPath: string | undefined;
@@ -4339,6 +4361,21 @@ describe("readLocalServicePortOwner", () => {
         `printf '%s\\n' 'State Recv-Q Send-Q Local Address:Port Peer Address:Port Process' 'LISTEN 0 511 127.0.0.1:43123 0.0.0.0:* users:(("node",pid=4242,fd=3))'`,
       );
       await expect(readLocalServicePortOwner(43123)).resolves.toBe(4242);
+    });
+
+    it("rejects a non-integer or out-of-range port before ss runs", async () => {
+      const marker = path.join(fakeBin, "ss-ran");
+      await writeFakeTool(
+        "ss",
+        `printf '%s\\n' "$*" > '${marker}'\nprintf '%s\\n' 'LISTEN 0 511 127.0.0.1:22 0.0.0.0:* users:(("sshd",pid=4242,fd=3))'`,
+      );
+      for (const port of ["80 or sport = :22", 0, 65536, 22.5, Number.NaN] as unknown[]) {
+        await expect(readLocalServicePortOwner(port as number)).resolves.toBeNull();
+      }
+      expect(existsSync(marker)).toBe(false);
+      // A valid port still reaches ss, so the marker check above is meaningful.
+      await expect(readLocalServicePortOwner(22)).resolves.toBe(4242);
+      expect(existsSync(marker)).toBe(true);
     });
 
     it("returns null when neither lsof nor ss is installed", async () => {
