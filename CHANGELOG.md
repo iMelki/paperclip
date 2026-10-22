@@ -6,6 +6,9 @@ All notable changes to this repository should be recorded here.
 
 ## Unreleased
 
+- **Docs:** the fork getting-started guide uses placeholders for local
+  workspace and notes-vault paths instead of one machine's paths.
+
 - **[#169]** Server startup reuses an embedded PostgreSQL only when a query on
   the `postmaster.pid` port reports the configured data directory, compared by
   physical path (case-insensitive on Windows) with the embedded login. If the
