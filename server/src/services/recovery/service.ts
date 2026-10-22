@@ -161,6 +161,7 @@ type LatestIssueRun = Pick<
   | "createdAt"
 > & {
   resultJson?: unknown;
+  finishedAt?: Date | null;
 } | null;
 type SuccessfulLatestIssueRun = NonNullable<LatestIssueRun> & { status: "succeeded" };
 
@@ -394,7 +395,7 @@ export type AdapterFailureRecoveryClassification =
   | { kind: "configuration_incomplete" }
   | null;
 
-function parseProviderQuotaClockReset(error: string, now: Date, scope?: ProviderQuotaResetScope) {
+function parseProviderQuotaClockReset(error: string, now: Date, scope?: ProviderQuotaResetScope, failedAt?: Date | null) {
   const matches = error.matchAll(
     /\b(?:try again at|resets(?: at)?)\s+(\d{1,2})(?::(\d{2}))?(?:\s*([ap])\.?\s*m\.?)?(?:\s*\(([^)]+)\)|\s+([A-Z]{2,5}))?/gi,
   );
@@ -411,9 +412,14 @@ function parseProviderQuotaClockReset(error: string, now: Date, scope?: Provider
   };
   const match = [...matches].find(accepts);
   if (!match) return null;
+  // The clock is read relative to when the run failed (never later than now), so a failure
+  // examined hours after its reset sees that reset as already due instead of tomorrow's.
+  // A clock within the grace window before that moment still counts as that moment's reset.
+  const anchorMs = failedAt && !Number.isNaN(failedAt.getTime()) ? Math.min(failedAt.getTime(), now.getTime()) : now.getTime();
+  const base = new Date(anchorMs - PROVIDER_QUOTA_RESET_ELAPSED_GRACE_MS);
   const settle = (candidate: Date, next: () => Date) => {
-    if (candidate.getTime() > now.getTime()) return candidate;
-    return now.getTime() - candidate.getTime() <= PROVIDER_QUOTA_RESET_ELAPSED_GRACE_MS ? new Date(now) : next();
+    const occurrence = candidate.getTime() >= base.getTime() ? candidate : next();
+    return occurrence.getTime() > now.getTime() ? occurrence : new Date(now);
   };
 
   const hourValue = Number.parseInt(match[1] ?? "", 10);
@@ -427,7 +433,7 @@ function parseProviderQuotaClockReset(error: string, now: Date, scope?: Provider
   if (meridiem === "p") hour += 12;
   const timeZone = (match[4] ?? match[5])?.trim();
   if (!timeZone) {
-    const retryAt = new Date(now);
+    const retryAt = new Date(base);
     retryAt.setUTCHours(hour, minute, 0, 0);
     return settle(retryAt, () => {
       retryAt.setUTCDate(retryAt.getUTCDate() + 1);
@@ -447,7 +453,7 @@ function parseProviderQuotaClockReset(error: string, now: Date, scope?: Provider
         minute: "2-digit",
       }).formatToParts(date).map((part) => [part.type, part.value]),
     );
-    const nowParts = wallClock(now);
+    const nowParts = wallClock(base);
     const buildRetryAt = (dayOffset: number) => {
       const targetDay = new Date(Date.UTC(
         Number(nowParts.year),
@@ -481,7 +487,8 @@ function parseProviderQuotaClockReset(error: string, now: Date, scope?: Provider
 }
 
 export function classifyAdapterFailureForRecovery(
-  latestRun: Pick<NonNullable<LatestIssueRun>, "error" | "errorCode" | "resultJson">,
+  latestRun: Pick<NonNullable<LatestIssueRun>, "error" | "errorCode" | "resultJson"> &
+    Partial<Pick<NonNullable<LatestIssueRun>, "startedAt" | "createdAt" | "finishedAt">>,
   now = new Date(),
 ): AdapterFailureRecoveryClassification {
   if (
@@ -493,6 +500,7 @@ export function classifyAdapterFailureForRecovery(
     return null;
   }
   const resultJson = parseObject(latestRun.resultJson);
+  const failedAt = latestRun.finishedAt ?? latestRun.startedAt ?? latestRun.createdAt ?? null;
   if (latestRun.errorCode === "acpx_turn_failed") {
     // Every failed ACP turn carries this code, so only Claude's own statement in the
     // error or stop reason counts; transcript text elsewhere in the result
@@ -501,7 +509,7 @@ export function classifyAdapterFailureForRecovery(
       .filter((value): value is string => typeof value === "string")
       .join("\n");
     if (!CLAUDE_SESSION_LIMIT_RE.test(evidence)) return null;
-    return buildProviderQuotaClassification(resultJson, evidence, now, { boundResetWindow: true });
+    return buildProviderQuotaClassification(resultJson, evidence, now, { boundResetWindow: true, failedAt });
   }
   const error = [latestRun.errorCode ?? "", latestRun.error ?? "", JSON.stringify(resultJson)].join("\n");
   if (latestRun.errorCode === "configuration_incomplete" || CONFIGURATION_INCOMPLETE_ERROR_RE.test(error)) {
@@ -509,14 +517,14 @@ export function classifyAdapterFailureForRecovery(
   }
   if (latestRun.errorCode !== "provider_quota" && !PROVIDER_QUOTA_ERROR_RE.test(error)) return null;
 
-  return buildProviderQuotaClassification(resultJson, error, now);
+  return buildProviderQuotaClassification(resultJson, error, now, { failedAt });
 }
 
 function buildProviderQuotaClassification(
   resultJson: Record<string, unknown>,
   error: string,
   now: Date,
-  options: { boundResetWindow?: boolean } = {},
+  options: { boundResetWindow?: boolean; failedAt?: Date | null } = {},
 ): AdapterFailureRecoveryClassification {
   const persistedRetryAt = readNonEmptyString(resultJson.retryNotBefore) ??
     readNonEmptyString(resultJson.transientRetryNotBefore) ??
@@ -539,7 +547,7 @@ function buildProviderQuotaClassification(
       acp: options.boundResetWindow === true,
     }
     : undefined;
-  const parsedClockReset = parseProviderQuotaClockReset(error, now, scope);
+  const parsedClockReset = parseProviderQuotaClockReset(error, now, scope, options.failedAt);
   if (parsedClockReset) {
     return { kind: "provider_quota", retryAt: parsedClockReset, parsedResetTime: true };
   }
@@ -863,6 +871,7 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
         resultJson: heartbeatRuns.resultJson,
         startedAt: heartbeatRuns.startedAt,
         createdAt: heartbeatRuns.createdAt,
+        finishedAt: heartbeatRuns.finishedAt,
       })
       .from(heartbeatRuns)
       .where(
@@ -893,6 +902,7 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
         resultJson: heartbeatRuns.resultJson,
         startedAt: heartbeatRuns.startedAt,
         createdAt: heartbeatRuns.createdAt,
+        finishedAt: heartbeatRuns.finishedAt,
       })
       .from(heartbeatRuns)
       .where(
@@ -1132,6 +1142,7 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
         resultJson: heartbeatRuns.resultJson,
         startedAt: heartbeatRuns.startedAt,
         createdAt: heartbeatRuns.createdAt,
+        finishedAt: heartbeatRuns.finishedAt,
       })
       .from(heartbeatRuns)
       .where(
