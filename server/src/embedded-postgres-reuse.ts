@@ -46,64 +46,46 @@ const DATA_DIRECTORY_ARGUMENT =
 // precedence over `-D`, which then names only the configuration directory.
 const DATA_DIRECTORY_SETTING =
   /(?:^|\s)(?:-c\s*|--)data_directory=(?:"([^"]+)"|'([^']+)'|(\S+))/g;
-// An uncommented `data_directory` line in a cluster's configuration file.
-const CONFIG_DATA_DIRECTORY_LINE = /^[ \t]*data_directory[ \t]*=/m;
 
 const POSTGRES_CHILD_TITLE_RE = /^postgres:\s/i;
 const POSTGRES_FORK_CHILD_RE = /(?:^|\s)--fork/i;
 
-type DataDirectoryOwnership = "owns" | "other" | "unknown";
+type DataDirectoryOwnership = "owns" | "unknown";
 
 /**
- * Whether `command` names this data directory. An explicit absolute `-D` or
- * `--data-directory` that exists settles the question either way. Anything else
- * (PGDATA, a relative path, a value cut at a space) is not evidence.
+ * Whether `command` names this data directory. A command can only prove that it owns the directory:
+ * `data_directory` in a configuration file (or one it includes) can replace whatever `-D` names, so a
+ * different directory is "unknown", never "other". Anything that is not evidence (PGDATA, a relative
+ * path, a value cut at a space) is also "unknown".
  */
 async function commandOwnership(
   command: string,
   needles: string[],
   dataDir: string,
 ): Promise<DataDirectoryOwnership> {
-  // PostgreSQL applies the last data-directory option, so that one is the effective value. An
-  // explicit existing value is compared first: a descendant such as `<dataDir>/backup` would
-  // otherwise pass the broader path-reference test below.
   // `-D` is read from the command as given: Windows normalization lowercases the whole line, which
   // would turn `-D` into the debug-level option `-d`. Only the path comparison below uses it.
-  // A data_directory setting on the command line is the effective directory whatever `-D` says.
+  // PostgreSQL applies the last occurrence of an option, so that one is the effective value. A
+  // data_directory setting on the command line wins over `-D`.
   let override: string | undefined;
   for (const named of command.matchAll(DATA_DIRECTORY_SETTING)) override = named[1] ?? named[2] ?? named[3];
   if (override && isAbsolute(override)) {
-    return (await isSameDataDirectory(override, dataDir)) ? "owns" : "other";
+    return (await isSameDataDirectory(override, dataDir)) ? "owns" : "unknown";
   }
   let value: string | undefined;
   for (const named of command.matchAll(DATA_DIRECTORY_ARGUMENT)) value = named[1] ?? named[2] ?? named[3];
-  const normalized = normalizeCommand(command);
+  let normalized = normalizeCommand(command);
   if (value && isAbsolute(value) && existsSync(value)) {
     if (await isSameDataDirectory(value, dataDir)) return "owns";
-    // `data_directory` in postgresql.conf overrides `-D`, so `-D` may only name the configuration
-    // directory of a server that still stores this cluster. A directory that is itself a cluster
-    // (it has PG_VERSION) is the data directory, unless its own configuration sets data_directory:
-    // then the server's working directory decides. Anything else proves nothing.
-    if (existsSync(join(value, "PG_VERSION"))) return clusterConfigSetsDataDirectory(value) ? "unknown" : "other";
-    return needles.some((needle) => commandReferencesPath(normalized, needle)) ? "owns" : "unknown";
-  }
-  if (needles.some((needle) => commandReferencesPath(normalized, needle))) return "owns";
-  return "unknown";
-}
-
-/**
- * Whether the configuration files in `clusterDir` set `data_directory`. A file that exists but cannot
- * be read counts as setting it, because the server may store its cluster elsewhere.
- */
-function clusterConfigSetsDataDirectory(clusterDir: string): boolean {
-  for (const name of ["postgresql.conf", "postgresql.auto.conf"]) {
-    try {
-      if (CONFIG_DATA_DIRECTORY_LINE.test(readFileSync(join(clusterDir, name), "utf8"))) return true;
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") return true;
+    // Another existing directory is the effective one: look for this directory elsewhere in the
+    // command, not in an earlier or longer data-directory option (a descendant such as
+    // `<dataDir>/backup` would otherwise pass the path-reference test).
+    for (const named of command.matchAll(DATA_DIRECTORY_ARGUMENT)) {
+      const given = named[1] ?? named[2] ?? named[3];
+      if (given) normalized = normalized.split(normalizeCommand(given)).join(" ");
     }
   }
-  return false;
+  return needles.some((needle) => commandReferencesPath(normalized, needle)) ? "owns" : "unknown";
 }
 
 /**
@@ -286,21 +268,22 @@ export async function scanPsOutputForDataDir(
     if (pid === process.pid || !POSTGRES_PROCESS_NAME_RE.test(comm.replace(/\\/g, "/").split("/").pop() ?? "")) continue;
     // Backends and workers rename themselves `postgres: checkpointer ...`; they are not servers.
     if (POSTGRES_CHILD_TITLE_RE.test(command)) continue;
-    const ownership = await commandOwnership(command, needles, dataDir);
-    let owns = ownership === "owns";
-    if (ownership === "unknown") {
-      // A postmaster's working directory is its data directory (also when it was
-      // started through PGDATA instead of -D).
-      const cwd = (() => {
-        try {
-          return readCwd(pid);
-        } catch {
-          return null;
-        }
-      })();
-      // No /proc (macOS, BSD) or an unreadable entry: this server's directory is unknown.
-      if (cwd === null) cwdUnknown = true;
-      else owns = await isSameDataDirectory(cwd, dataDir);
+    // A postmaster's working directory is its data directory, whatever its command line says (an
+    // include in a configuration file can hide a data_directory override), so a readable one decides.
+    const cwd = (() => {
+      try {
+        return readCwd(pid);
+      } catch {
+        return null;
+      }
+    })();
+    let owns: boolean;
+    if (cwd !== null) owns = await isSameDataDirectory(cwd, dataDir);
+    else {
+      // No /proc (macOS, BSD) or an unreadable entry: only the command line can show ownership.
+      owns = (await commandOwnership(command, needles, dataDir)) === "owns";
+      // Nothing proves it is another server, so its directory is unknown.
+      if (!owns) cwdUnknown = true;
     }
     if (owns) found.push({ pid, command });
   }
