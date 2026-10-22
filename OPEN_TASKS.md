@@ -25,6 +25,15 @@ integration outcome; later rows remain queued and do not imply concurrent execut
 
 ## Current work
 
+- [#162 — Recognize Claude ACP session quota waits](https://github.com/iMelki/paperclip/issues/162):
+  The local candidate recognizes Claude's session-limit statement with
+  `acpx_turn_failed` and parses its reset clock through the existing quota
+  recovery path. Generic `session limit` wording stays out of quota recovery.
+  The ACP statement is read only from the error and stop reason, its reset clock must sit within 120 characters of it, and a clock that elapsed moments ago retries now on every adapter path. The focused suite passes 31 cases.
+  Independent review, publication, installed adoption, and a native recovery
+  observation remain open. See
+  [verification and rollout conditions](doc/evidence/acp-session-quota/verification.md).
+
 - [#154 — Stabilize workspace containment test completion](https://github.com/iMelki/paperclip/issues/154):
   Await tracked heartbeat executions before reading final state. The isolated
   database fixture delays agent finalization to expose the old one-second wait.
