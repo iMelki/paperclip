@@ -939,8 +939,19 @@ export async function terminateLocalService(
   };
 }
 
+// A TCP port is an integer from 1 to 65535. Anything else (a string such as
+// "80 or sport = :22", a float, NaN, 0, or 65536+) is rejected before it can
+// reach an lsof or ss argument, where ss would read extra filter terms.
+// Bounds each port-owner lookup tool (netstat, lsof, ss) so a hung tool cannot
+// stall the supervisor. A timed-out lookup is treated as "no owner found".
+export const LOCAL_SERVICE_PORT_OWNER_TIMEOUT_MS = 5_000;
+
+export function isValidTcpPort(port: unknown): port is number {
+  return typeof port === "number" && Number.isInteger(port) && port >= 1 && port <= 65535;
+}
+
 export async function readLocalServicePortOwner(port: number) {
-  if (!Number.isInteger(port) || port <= 0) return null;
+  if (!isValidTcpPort(port)) return null;
   if (process.platform === "win32") {
     try {
       const netstatCommand = path.join(
@@ -948,7 +959,9 @@ export async function readLocalServicePortOwner(port: number) {
         "System32",
         "netstat.exe",
       );
-      const { stdout } = await execFileAsync(netstatCommand, ["-ano", "-p", "TCP"]);
+      const { stdout } = await execFileAsync(netstatCommand, ["-ano", "-p", "TCP"], {
+        timeout: LOCAL_SERVICE_PORT_OWNER_TIMEOUT_MS,
+      });
       for (const rawLine of stdout.split(/\r?\n/)) {
         const columns = rawLine.trim().split(/\s+/);
         if (columns.length < 5 || columns[0]?.toUpperCase() !== "TCP") continue;
@@ -964,12 +977,47 @@ export async function readLocalServicePortOwner(port: number) {
     }
   }
   try {
-    const { stdout } = await execFileAsync("lsof", ["-nP", `-iTCP:${port}`, "-sTCP:LISTEN", "-t"]);
+    const { stdout } = await execFileAsync("lsof", ["-nP", `-iTCP:${port}`, "-sTCP:LISTEN", "-t"], {
+      timeout: LOCAL_SERVICE_PORT_OWNER_TIMEOUT_MS,
+    });
     const firstPid = stdout
       .split("\n")
       .map((line) => Number.parseInt(line.trim(), 10))
       .find((value) => Number.isInteger(value) && value > 0);
     return firstPid ?? null;
+  } catch (error) {
+    // Only fall back when lsof itself is not installed. Any other lsof result
+    // (including its exit 1 for "no listener") keeps the original behavior.
+    if ((error as NodeJS.ErrnoException | null)?.code !== "ENOENT") return null;
+    return readLocalServicePortOwnerFromSs(port);
+  }
+}
+
+export function parseSsListenPortOwner(stdout: string, port: number) {
+  if (!isValidTcpPort(port)) return null;
+  for (const rawLine of stdout.split(/\r?\n/)) {
+    const columns = rawLine.trim().split(/\s+/);
+    if (columns.length < 5 || columns[0]?.toUpperCase() !== "LISTEN") continue;
+    const localAddress = columns[3] ?? "";
+    if (!localAddress.endsWith(`:${port}`)) continue;
+    // ss prints users:(("<name>",pid=N,fd=M)) and the process name is free text,
+    // so a name such as ',pid=1,fd=' must not be read as the pid. Take only the
+    // ',pid=N,fd=M)' that closes the users field at the end of the line, which
+    // ss always writes after the name.
+    const match = /,pid=(\d+),fd=\d+\)\)\s*$/.exec(rawLine);
+    const pid = match ? Number.parseInt(match[1]!, 10) : Number.NaN;
+    if (Number.isInteger(pid) && pid > 0) return pid;
+  }
+  return null;
+}
+
+async function readLocalServicePortOwnerFromSs(port: number) {
+  if (!isValidTcpPort(port)) return null;
+  try {
+    const { stdout } = await execFileAsync("ss", ["-ltnp", "sport", "=", `:${port}`], {
+      timeout: LOCAL_SERVICE_PORT_OWNER_TIMEOUT_MS,
+    });
+    return parseSsListenPortOwner(stdout, port);
   } catch {
     return null;
   }

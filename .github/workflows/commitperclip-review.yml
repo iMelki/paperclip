@@ -1,11 +1,17 @@
 name: commitperclip PR Review
 
 on:
-  pull_request_target:
+  pull_request:
     types: [opened, synchronize, reopened]
 
-# Always runs from base branch context — never executes PR code.
-# pull_request_target gives access to secrets for untrusted fork PRs.
+# Runs on pull_request (not pull_request_target) on a GitHub-hosted runner
+# (ubuntu-latest, free for this public repo). It reads COMMITPERCLIP_KEY, and no
+# secret may be used by a self-hosted PR job, so it must never run on the box.
+# The workflow stays disabled in the repo's Actions settings; CTO re-enables it.
+# Same-repo PRs only: fork PRs are skipped by the job guard and get no secrets or
+# write token. Both checkouts use the PR base commit, never the PR head or the
+# merge commit, so the scripts in .github/scripts come from trusted code. Note
+# that the workflow file itself still comes from the PR under pull_request.
 
 permissions:
   pull-requests: write
@@ -15,13 +21,32 @@ permissions:
 
 jobs:
   review:
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
     steps:
-      - name: Checkout trusted workflow revision (never PR code)
+      # Dependabot PRs run under pull_request with a read-only GITHUB_TOKEN and no
+      # Actions secrets, even though they come from a branch of this repository.
+      # The security gate below would then fail to create its check run or
+      # advisory, and continue-on-error would leave this job green with no
+      # security signal. Fail them explicitly instead (Codex P1 4349718684), so a
+      # maintainer reviews dependency PRs by hand.
+      - name: Refuse Dependabot PRs (read-only token, no gate signal)
+        if: ${{ github.event.pull_request.user.login == 'dependabot[bot]' || github.actor == 'dependabot[bot]' }}
+        run: |
+          echo "::error::Dependabot PR: this run has a read-only GITHUB_TOKEN and no secrets, so the commitperclip security gate cannot record a result. Failing instead of passing silently. A maintainer must review this dependency PR by hand."
+          exit 1
+
+      # Under pull_request, github.workflow_sha is the PR merge commit, so a
+      # checkout of it would let the token scripts below run PR code. Check out
+      # the PR base commit instead: it is already on master, so the scripts that
+      # handle secrets come from trusted code. github.sha is a fallback for
+      # non-PR events (this workflow currently has none).
+      - name: Checkout trusted base revision for token scripts (not PR code)
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
-          ref: ${{ github.workflow_sha }}
+          ref: ${{ github.event.pull_request.base.sha || github.sha }}
+          persist-credentials: false
 
       - name: Set up Node
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
@@ -50,6 +75,7 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           ref: ${{ github.event.pull_request.base.sha }}
+          persist-credentials: false
 
       - name: Dependency Review
         if: ${{ !github.event.repository.fork }}

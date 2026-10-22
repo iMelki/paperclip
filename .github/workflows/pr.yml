@@ -11,8 +11,13 @@ concurrency:
 
 jobs:
   secret-scan:
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [rf-paperclip]
+    # The rf-slot job-started hook runs inside this job and its wait counts toward
+    # timeout-minutes: up to 15 min (RF_MEM_WAIT 900s) for free memory plus up to
+    # 30 min (RF_SLOT_TIMEOUT 1800s) for one of the 2 box-wide slots, so 45 min
+    # of hook budget plus 10 min of work.
+    timeout-minutes: 55
     permissions:
       contents: read
 
@@ -53,16 +58,22 @@ jobs:
 
   policy:
     needs: [secret-scan]
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [rf-paperclip]
+    # The rf-slot job-started hook runs inside this job and its wait counts toward
+    # timeout-minutes: up to 15 min (RF_MEM_WAIT 900s) for free memory plus up to
+    # 30 min (RF_SLOT_TIMEOUT 1800s) for one of the 2 box-wide slots, so 45 min
+    # of hook budget plus 5 min of work.
+    timeout-minutes: 50
     outputs:
       lockfile_regenerated: ${{ steps.regen_lockfile.outputs.regenerated }}
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Block manual lockfile edits
         if: >-
@@ -78,13 +89,13 @@ jobs:
           fi
 
       - name: Setup pnpm
-        uses: pnpm/action-setup@v6
+        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
         with:
           version: 9.15.4
           run_install: false
 
       - name: Setup Node.js
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24
 
@@ -139,7 +150,7 @@ jobs:
       # every job consumes the same hash without recomputing.
       - name: Upload regenerated lockfile for downstream jobs
         if: steps.regen_lockfile.outputs.regenerated == '1'
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: pr-lockfile
           path: pnpm-lock.yaml
@@ -149,27 +160,34 @@ jobs:
   typecheck_release_registry:
     name: Typecheck + Release Registry
     needs: [policy]
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [rf-paperclip]
+    # The rf-slot job-started hook runs inside this job and its wait counts toward
+    # timeout-minutes: up to 15 min (RF_MEM_WAIT 900s) for free memory plus up to
+    # 30 min (RF_SLOT_TIMEOUT 1800s) for one of the 2 box-wide slots, so 45 min
+    # of hook budget plus 20 min of work.
+    timeout-minutes: 65
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Setup pnpm
-        uses: pnpm/action-setup@v6
+        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
         with:
           version: 9.15.4
 
       - name: Restore regenerated PR lockfile (if policy uploaded one)
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         continue-on-error: true
         with:
           name: pr-lockfile
           path: .
 
       - name: Setup Node.js
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24
           cache: pnpm
@@ -186,8 +204,13 @@ jobs:
   general_tests:
     name: General tests (${{ matrix.group_label }})
     needs: [policy]
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [rf-paperclip]
+    # The rf-slot job-started hook runs inside this job and its wait counts toward
+    # timeout-minutes: up to 15 min (RF_MEM_WAIT 900s) for free memory plus up to
+    # 30 min (RF_SLOT_TIMEOUT 1800s) for one of the 2 box-wide slots, so 45 min
+    # of hook budget plus 20 min of work.
+    timeout-minutes: 65
     strategy:
       fail-fast: false
       matrix:
@@ -226,22 +249,24 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Setup pnpm
-        uses: pnpm/action-setup@v6
+        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
         with:
           version: 9.15.4
 
       - name: Restore regenerated PR lockfile (if policy uploaded one)
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         continue-on-error: true
         with:
           name: pr-lockfile
           path: .
 
       - name: Setup Node.js
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24
           cache: pnpm
@@ -261,12 +286,32 @@ jobs:
   verify:
     # Preserve the legacy required-check name while the underlying work runs in parallel.
     name: verify
+    # A skip-style job guard would make a fork PR's required check count as
+    # passing, so the same-repo guard picks the runner instead: same-repo runs
+    # use the box, and a fork run (even an approved one) is never scheduled on
+    # the box. It runs on ubuntu-latest, where the first step fails it. No
+    # checkout and no secrets, so no PR code runs on either runner.
     if: ${{ always() }}
     needs: [typecheck_release_registry, general_tests, build]
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && 'rf-paperclip' || 'ubuntu-latest' }}
+    # The rf-slot job-started hook runs inside this job and its wait counts toward
+    # timeout-minutes: up to 15 min (RF_MEM_WAIT 900s) for free memory plus up to
+    # 30 min (RF_SLOT_TIMEOUT 1800s) for one of the 2 box-wide slots, so 45 min
+    # of hook budget plus 5 min of work.
+    timeout-minutes: 50
 
     steps:
+      - name: Fail fork PRs (CI runs only on same-repo branches)
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          BASE_REPO: ${{ github.repository }}
+        run: |
+          if [ "$EVENT_NAME" = "pull_request" ] && [ "$HEAD_REPO" != "$BASE_REPO" ]; then
+            echo "::error::fork PR: CI runs only on same-repo branches, maintainer re-run needed"
+            exit 1
+          fi
+          echo "same-repo or non-PR event: gate passed"
       - name: Fail if any split verify lane failed
         env:
           TYPECHECK_RELEASE_REGISTRY_RESULT: ${{ needs.typecheck_release_registry.result }}
@@ -280,27 +325,34 @@ jobs:
   build:
     name: Build
     needs: [policy]
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [rf-paperclip]
+    # The rf-slot job-started hook runs inside this job and its wait counts toward
+    # timeout-minutes: up to 15 min (RF_MEM_WAIT 900s) for free memory plus up to
+    # 30 min (RF_SLOT_TIMEOUT 1800s) for one of the 2 box-wide slots, so 45 min
+    # of hook budget plus 20 min of work.
+    timeout-minutes: 65
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Setup pnpm
-        uses: pnpm/action-setup@v6
+        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
         with:
           version: 9.15.4
 
       - name: Restore regenerated PR lockfile (if policy uploaded one)
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         continue-on-error: true
         with:
           name: pr-lockfile
           path: .
 
       - name: Setup Node.js
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24
           cache: pnpm
@@ -314,8 +366,13 @@ jobs:
   verify_serialized_server:
     name: Verify serialized server suites (${{ matrix.shard_label }})
     needs: [policy]
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [rf-paperclip]
+    # The rf-slot job-started hook runs inside this job and its wait counts toward
+    # timeout-minutes: up to 15 min (RF_MEM_WAIT 900s) for free memory plus up to
+    # 30 min (RF_SLOT_TIMEOUT 1800s) for one of the 2 box-wide slots, so 45 min
+    # of hook budget plus 20 min of work.
+    timeout-minutes: 65
     strategy:
       fail-fast: false
       matrix:
@@ -342,22 +399,24 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Setup pnpm
-        uses: pnpm/action-setup@v6
+        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
         with:
           version: 9.15.4
 
       - name: Restore regenerated PR lockfile (if policy uploaded one)
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         continue-on-error: true
         with:
           name: pr-lockfile
           path: .
 
       - name: Setup Node.js
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24
           cache: pnpm
@@ -371,27 +430,34 @@ jobs:
   canary_dry_run:
     name: Canary Dry Run
     needs: [policy]
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [rf-paperclip]
+    # The rf-slot job-started hook runs inside this job and its wait counts toward
+    # timeout-minutes: up to 15 min (RF_MEM_WAIT 900s) for free memory plus up to
+    # 30 min (RF_SLOT_TIMEOUT 1800s) for one of the 2 box-wide slots, so 45 min
+    # of hook budget plus 20 min of work.
+    timeout-minutes: 65
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Setup pnpm
-        uses: pnpm/action-setup@v6
+        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
         with:
           version: 9.15.4
 
       - name: Restore regenerated PR lockfile (if policy uploaded one)
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         continue-on-error: true
         with:
           name: pr-lockfile
           path: .
 
       - name: Setup Node.js
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24
           cache: pnpm
@@ -426,8 +492,13 @@ jobs:
   e2e_shards:
     name: e2e shard (${{ matrix.shard_label }})
     needs: [policy]
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [rf-paperclip]
+    # The rf-slot job-started hook runs inside this job and its wait counts toward
+    # timeout-minutes: up to 15 min (RF_MEM_WAIT 900s) for free memory plus up to
+    # 30 min (RF_SLOT_TIMEOUT 1800s) for one of the 2 box-wide slots, so 45 min
+    # of hook budget plus 30 min of work.
+    timeout-minutes: 75
     strategy:
       fail-fast: false
       matrix:
@@ -451,22 +522,24 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Setup pnpm
-        uses: pnpm/action-setup@v6
+        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
         with:
           version: 9.15.4
 
       - name: Restore regenerated PR lockfile (if policy uploaded one)
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         continue-on-error: true
         with:
           name: pr-lockfile
           path: .
 
       - name: Setup Node.js
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24
           cache: pnpm
@@ -475,28 +548,20 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Verify runner Chrome
-        # GitHub's Ubuntu runner image already ships Google Chrome, so use that
-        # directly for the headless e2e lane instead of downloading Playwright
-        # browser bundles inside the 30 minute job budget.
+        # The rf-paperclip box runner has system Google Chrome installed, so the
+        # headless e2e lane uses it (channel chrome) instead of downloading
+        # Playwright browser bundles, which would also need sudo for --with-deps.
+        # No config is written to the runner's persistent ~/.paperclip:
+        # playwright.config.ts boots onboard in its own temp PAPERCLIP_HOME.
         run: google-chrome --version
-
-      - name: Generate Paperclip config
-        run: |
-          mkdir -p ~/.paperclip/instances/default
-          cat > ~/.paperclip/instances/default/config.json << 'CONF'
-          {
-            "$meta": { "version": 1, "updatedAt": "2026-01-01T00:00:00.000Z", "source": "onboard" },
-            "database": { "mode": "embedded-postgres" },
-            "logging": { "mode": "file" },
-            "server": { "deploymentMode": "local_trusted", "host": "127.0.0.1", "port": 3100 },
-            "auth": { "baseUrlMode": "auto" },
-            "storage": { "provider": "local_disk" },
-            "secrets": { "provider": "local_encrypted", "strictMode": false }
-          }
-          CONF
 
       - name: Run e2e tests
         env:
+          # playwright.config.ts creates paperclip-e2e-home-* (embedded Postgres
+          # data) under os.tmpdir(). On the box /tmp is a long-lived tmpfs, so
+          # point it at the per-job temp dir, which the runner wipes after each
+          # job. (The runner context is not available in job-level env.)
+          TMPDIR: ${{ runner.temp }}
           PAPERCLIP_E2E_SKIP_LLM: "true"
           PAPERCLIP_PLAYWRIGHT_CHANNEL: "chrome"
         run: |
@@ -509,7 +574,7 @@ jobs:
           pnpm run test:e2e $specs
 
       - name: Upload Playwright report
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
           name: playwright-report-${{ matrix.shard_index }}
@@ -518,16 +583,68 @@ jobs:
             tests/e2e/test-results/
           retention-days: 14
 
+      - name: Clean up leftover e2e server and temp home
+        # The runner's orphan cleanup only catches processes that keep
+        # RUNNER_TRACKING_ID. Collect the exact PIDs of this user's leftover
+        # onboard/Postgres processes and of the listener on port 3199, then kill
+        # each PID after checking it still belongs to this user. No pkill -f and
+        # no fuser -k, so nothing is killed by pattern or port alone. Best effort:
+        # this step never fails the job, and it skips its own shell PID.
+        if: always()
+        run: |
+          uid="$(id -u)"
+          pids=""
+          for pattern in '[p]aperclipai onboard' '[p]aperclip-e2e-home-'; do
+            pids="$pids $(pgrep -u "$uid" -f "$pattern" || true)"
+          done
+          if command -v lsof >/dev/null 2>&1; then
+            pids="$pids $(lsof -t -a -u "$uid" -iTCP:3199 -sTCP:LISTEN 2>/dev/null || true)"
+          elif command -v ss >/dev/null 2>&1; then
+            pids="$pids $(ss -Htlnp 'sport = :3199' 2>/dev/null | grep -oE ',pid=[0-9]+,fd=' | grep -oE '[0-9]+' || true)"
+          fi
+          for pid in $(printf '%s\n' $pids | sort -un); do
+            [ "$pid" = "$$" ] && continue
+            [ "$(stat -c %u "/proc/$pid" 2>/dev/null)" = "$uid" ] || continue
+            echo "killing leftover e2e pid $pid"
+            kill "$pid" 2>/dev/null || true
+          done
+          for dir in "${RUNNER_TEMP:-}" /tmp; do
+            [ -n "$dir" ] && [ -d "$dir" ] || continue
+            find "$dir" -maxdepth 1 -user "$uid" -name 'paperclip-e2e-home-*' \
+              -exec rm -rf {} + 2>/dev/null || true
+          done
+          echo "e2e cleanup done"
+
   e2e:
     # Preserve the legacy required-check name while the specs run sharded
     # across the matrix above (same pattern as the `verify` aggregate).
     name: e2e
+    # A skip-style job guard would make a fork PR's required check count as
+    # passing, so the same-repo guard picks the runner instead: same-repo runs
+    # use the box, and a fork run (even an approved one) is never scheduled on
+    # the box. It runs on ubuntu-latest, where the first step fails it. No
+    # checkout and no secrets, so no PR code runs on either runner.
     if: ${{ always() }}
     needs: [e2e_shards]
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && 'rf-paperclip' || 'ubuntu-latest' }}
+    # The rf-slot job-started hook runs inside this job and its wait counts toward
+    # timeout-minutes: up to 15 min (RF_MEM_WAIT 900s) for free memory plus up to
+    # 30 min (RF_SLOT_TIMEOUT 1800s) for one of the 2 box-wide slots, so 45 min
+    # of hook budget plus 5 min of work.
+    timeout-minutes: 50
 
     steps:
+      - name: Fail fork PRs (CI runs only on same-repo branches)
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          BASE_REPO: ${{ github.repository }}
+        run: |
+          if [ "$EVENT_NAME" = "pull_request" ] && [ "$HEAD_REPO" != "$BASE_REPO" ]; then
+            echo "::error::fork PR: CI runs only on same-repo branches, maintainer re-run needed"
+            exit 1
+          fi
+          echo "same-repo or non-PR event: gate passed"
       - name: Fail if any e2e shard failed
         env:
           E2E_SHARDS_RESULT: ${{ needs.e2e_shards.result }}

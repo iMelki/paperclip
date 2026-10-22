@@ -10,22 +10,29 @@ on:
 
 jobs:
   e2e:
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [rf-paperclip]
+    # The rf-slot job-started hook runs inside this job and its wait counts toward
+    # timeout-minutes: up to 15 min (RF_MEM_WAIT 900s) for free memory plus up to
+    # 30 min (RF_SLOT_TIMEOUT 1800s) for one of the 2 box-wide slots, so 45 min
+    # of hook budget plus 30 min of work.
+    timeout-minutes: 75
     env:
       PAPERCLIP_E2E_SKIP_LLM: ${{ inputs.skip_llm && 'true' || 'false' }}
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
       PAPERCLIP_PLAYWRIGHT_CHANNEL: chrome
     steps:
-      - uses: actions/checkout@v7
-
-      - uses: pnpm/action-setup@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          version: 9
+          persist-credentials: false
 
-      - uses: actions/setup-node@v7
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
         with:
-          node-version: 20
+          version: 9.15.4
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
           cache: pnpm
 
       - run: pnpm install --frozen-lockfile
@@ -34,10 +41,12 @@ jobs:
 
       - name: Run e2e tests
         env:
+          # Keep paperclip-e2e-home-* out of the box's long-lived /tmp.
+          TMPDIR: ${{ runner.temp }}
           PAPERCLIP_PLAYWRIGHT_CHANNEL: "chrome"
         run: pnpm run test:e2e
 
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
           name: playwright-report
@@ -45,3 +54,36 @@ jobs:
             tests/e2e/playwright-report/
             tests/e2e/test-results/
           retention-days: 14
+
+      - name: Clean up leftover e2e server and temp home
+        # Same step as pr.yml e2e_shards (Bugbot 4351124833).
+        # The runner's orphan cleanup only catches processes that keep
+        # RUNNER_TRACKING_ID. Collect the exact PIDs of this user's leftover
+        # onboard/Postgres processes and of the listener on port 3199, then kill
+        # each PID after checking it still belongs to this user. No pkill -f and
+        # no fuser -k, so nothing is killed by pattern or port alone. Best effort:
+        # this step never fails the job, and it skips its own shell PID.
+        if: always()
+        run: |
+          uid="$(id -u)"
+          pids=""
+          for pattern in '[p]aperclipai onboard' '[p]aperclip-e2e-home-'; do
+            pids="$pids $(pgrep -u "$uid" -f "$pattern" || true)"
+          done
+          if command -v lsof >/dev/null 2>&1; then
+            pids="$pids $(lsof -t -a -u "$uid" -iTCP:3199 -sTCP:LISTEN 2>/dev/null || true)"
+          elif command -v ss >/dev/null 2>&1; then
+            pids="$pids $(ss -Htlnp 'sport = :3199' 2>/dev/null | grep -oE ',pid=[0-9]+,fd=' | grep -oE '[0-9]+' || true)"
+          fi
+          for pid in $(printf '%s\n' $pids | sort -un); do
+            [ "$pid" = "$$" ] && continue
+            [ "$(stat -c %u "/proc/$pid" 2>/dev/null)" = "$uid" ] || continue
+            echo "killing leftover e2e pid $pid"
+            kill "$pid" 2>/dev/null || true
+          done
+          for dir in "${RUNNER_TEMP:-}" /tmp; do
+            [ -n "$dir" ] && [ -d "$dir" ] || continue
+            find "$dir" -maxdepth 1 -user "$uid" -name 'paperclip-e2e-home-*' \
+              -exec rm -rf {} + 2>/dev/null || true
+          done
+          echo "e2e cleanup done"

@@ -8,7 +8,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { parse as parseEnvContents } from "dotenv";
-import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   activityLog,
   agents,
@@ -54,6 +54,8 @@ import {
   isLocalServiceProcessInWorkspace,
   listLocalServiceRegistryRecords,
   normalizeLocalServicePid,
+  LOCAL_SERVICE_PORT_OWNER_TIMEOUT_MS,
+  parseSsListenPortOwner,
   readLocalServiceRegistryRecord,
   readLocalServiceProcessGroupId,
   readLocalServicePortOwner,
@@ -4293,6 +4295,130 @@ describe("readLocalServicePortOwner", () => {
     }
   });
 
+  it("parses the listening pid for a port from ss -ltnp output", () => {
+    const stdout = [
+      "State  Recv-Q Send-Q Local Address:Port  Peer Address:PortProcess",
+      'LISTEN 0      511        127.0.0.1:41000      0.0.0.0:*    users:(("node",pid=111,fd=20))',
+      'LISTEN 0      511        127.0.0.1:4242       0.0.0.0:*    users:(("node",pid=222,fd=21))',
+      'LISTEN 0      511             [::]:4243          [::]:*    users:(("node",pid=333,fd=22))',
+      "LISTEN 0      511          0.0.0.0:4244       0.0.0.0:*",
+      "",
+    ].join("\n");
+    expect(parseSsListenPortOwner(stdout, 4242)).toBe(222);
+    expect(parseSsListenPortOwner(stdout, 4243)).toBe(333);
+    expect(parseSsListenPortOwner(stdout, 4244)).toBeNull();
+    expect(parseSsListenPortOwner(stdout, 242)).toBeNull();
+    expect(parseSsListenPortOwner("", 4242)).toBeNull();
+  });
+
+  it("reads the ss pid from the end of the users field, not from a spoofing process name", () => {
+    const stdout = [
+      'LISTEN 0 511 127.0.0.1:4242 0.0.0.0:* users:(("x,pid=999,fd=",pid=222,fd=21))   ',
+      'LISTEN 0 511 127.0.0.1:4245 0.0.0.0:* users:(("x",pid=9,fd=1))",pid=555,fd=7))',
+      'LISTEN 0 511 127.0.0.1:4246 0.0.0.0:* users:(("pid=999",pid=666,fd=8))',
+      'LISTEN 0 511 127.0.0.1:4247 0.0.0.0:* users:(("a,pid=999,fd=1",fd=9))',
+    ].join("\n");
+    expect(parseSsListenPortOwner(stdout, 4242)).toBe(222);
+    expect(parseSsListenPortOwner(stdout, 4245)).toBe(555);
+    expect(parseSsListenPortOwner(stdout, 4246)).toBe(666);
+    expect(parseSsListenPortOwner(stdout, 4247)).toBeNull();
+  });
+
+  it("accepts only an integer port from 1 to 65535", () => {
+    const stdout = 'LISTEN 0 511 127.0.0.1:65535 0.0.0.0:* users:(("node",pid=1,fd=3))';
+    expect(parseSsListenPortOwner(stdout, 65535)).toBe(1);
+    for (const port of [0, -1, 65536, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+      expect(parseSsListenPortOwner(stdout, port)).toBeNull();
+    }
+    expect(parseSsListenPortOwner(stdout, "80 or sport = :22" as unknown as number)).toBeNull();
+  });
+
+  describe.skipIf(process.platform === "win32")("POSIX port owner lookup without lsof", () => {
+    let fakeBin: string;
+    let previousPath: string | undefined;
+
+    async function writeFakeTool(name: string, body: string) {
+      const toolPath = path.join(fakeBin, name);
+      await fs.writeFile(toolPath, `#!/bin/sh\n${body}\n`, "utf8");
+      await fs.chmod(toolPath, 0o755);
+    }
+
+    beforeEach(async () => {
+      fakeBin = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-runtime-port-owner-"));
+      previousPath = process.env.PATH;
+      // Only the fake tools are on PATH, so a missing tool is a real ENOENT.
+      process.env.PATH = fakeBin;
+    });
+
+    afterEach(async () => {
+      if (previousPath === undefined) delete process.env.PATH;
+      else process.env.PATH = previousPath;
+      await fs.rm(fakeBin, { recursive: true, force: true });
+    });
+
+    it("falls back to ss when lsof is not installed", async () => {
+      await writeFakeTool(
+        "ss",
+        `printf '%s\\n' 'State Recv-Q Send-Q Local Address:Port Peer Address:Port Process' 'LISTEN 0 511 127.0.0.1:43123 0.0.0.0:* users:(("node",pid=4242,fd=3))'`,
+      );
+      await expect(readLocalServicePortOwner(43123)).resolves.toBe(4242);
+    });
+
+    it("rejects a non-integer or out-of-range port before ss runs", async () => {
+      const marker = path.join(fakeBin, "ss-ran");
+      await writeFakeTool(
+        "ss",
+        `printf '%s\\n' "$*" > '${marker}'\nprintf '%s\\n' 'LISTEN 0 511 127.0.0.1:22 0.0.0.0:* users:(("sshd",pid=4242,fd=3))'`,
+      );
+      for (const port of ["80 or sport = :22", 0, 65536, 22.5, Number.NaN] as unknown[]) {
+        await expect(readLocalServicePortOwner(port as number)).resolves.toBeNull();
+      }
+      expect(existsSync(marker)).toBe(false);
+      // A valid port still reaches ss, so the marker check above is meaningful.
+      await expect(readLocalServicePortOwner(22)).resolves.toBe(4242);
+      expect(existsSync(marker)).toBe(true);
+    });
+
+    it("bounds a hung ss so the port owner lookup still returns", async () => {
+      await writeFakeTool("ss", "exec sleep 30");
+      const startedAt = Date.now();
+      await expect(readLocalServicePortOwner(43123)).resolves.toBeNull();
+      expect(Date.now() - startedAt).toBeLessThan(LOCAL_SERVICE_PORT_OWNER_TIMEOUT_MS + 2_000);
+    });
+
+    it("returns null when neither lsof nor ss is installed", async () => {
+      await expect(readLocalServicePortOwner(43123)).resolves.toBeNull();
+    });
+
+    it("keeps the lsof answer and never consults ss when lsof is installed", async () => {
+      await writeFakeTool(
+        "ss",
+        `printf '%s\\n' 'LISTEN 0 511 127.0.0.1:43123 0.0.0.0:* users:(("node",pid=4242,fd=3))'`,
+      );
+      await writeFakeTool("lsof", "printf '777\\n'");
+      await expect(readLocalServicePortOwner(43123)).resolves.toBe(777);
+      // lsof exits 1 when nothing listens; that must stay "no owner", not an ss fallback.
+      await writeFakeTool("lsof", "exit 1");
+      await expect(readLocalServicePortOwner(43123)).resolves.toBeNull();
+    });
+
+    it.skipIf(process.platform !== "linux" || !existsSync("/usr/bin/ss"))(
+      "finds a real listener through ss when lsof is not installed",
+      async () => {
+        await fs.symlink("/usr/bin/ss", path.join(fakeBin, "ss"));
+        const server = net.createServer();
+        await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+        try {
+          const address = server.address();
+          const port = typeof address === "object" && address ? address.port : 0;
+          await expect(readLocalServicePortOwner(port)).resolves.toBe(process.pid);
+        } finally {
+          await new Promise<void>((resolve) => server.close(() => resolve()));
+        }
+      },
+    );
+  });
+
   it.skipIf(process.platform === "win32")(
     "bounds the POSIX ps lineage fallback when ps does not return",
     async () => {
@@ -5854,6 +5980,21 @@ describeEmbeddedPostgres("workspace runtime startup reconciliation", () => {
       "require('node:http').createServer((_req,res)=>res.end('ok')).listen(Number(process.env.PORT), '127.0.0.1');",
       "utf8",
     );
+    // Stand-in for the pnpm wrapper: a parent process that runs the dev script as a
+    // child, so the port owner is not the spawned pid. Real pnpm is resolved through
+    // the login shell's PATH, which on CI drops setup-node's Node and lands on a
+    // system corepack pnpm with an unwritable cache, so invoke node explicitly.
+    await fs.writeFile(
+      path.join(workspaceRoot, "pnpm-wrapper.cjs"),
+      [
+        "const { spawn } = require('node:child_process');",
+        "const child = spawn(process.execPath, ['runtime-service.cjs'], { stdio: 'inherit', env: process.env });",
+        "for (const signal of ['SIGINT', 'SIGTERM']) process.on(signal, () => child.kill(signal));",
+        "child.on('exit', (code, signal) => process.exit(code ?? (signal ? 1 : 0)));",
+      ].join("\n"),
+      "utf8",
+    );
+    const wrapperCommand = `${shellQuotePath(process.execPath)} pnpm-wrapper.cjs dev`;
 
     const companyId = randomUUID();
     const agentId = randomUUID();
@@ -5909,7 +6050,7 @@ describeEmbeddedPostgres("workspace runtime startup reconciliation", () => {
           services: [
             {
               name: "web",
-              command: "pnpm dev",
+              command: wrapperCommand,
               port: { type: "auto" },
               readiness: {
                 type: "http",
