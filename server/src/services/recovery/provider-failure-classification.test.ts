@@ -233,6 +233,19 @@ describe("classifyAdapterFailureForRecovery", () => {
     },
   );
 
+  it("reads a reset clock that has a timezone but no minutes or meridiem", () => {
+    const now = new Date("2026-10-13T05:00:00.000Z");
+    expect(classifyAdapterFailureForRecovery({
+      errorCode: "acpx_turn_failed",
+      error: "You've hit your session limit · resets 8 UTC",
+      resultJson: {},
+    }, now)).toEqual({
+      kind: "provider_quota",
+      retryAt: new Date("2026-10-13T08:00:00.000Z"),
+      parsedResetTime: true,
+    });
+  });
+
   it("still reads a reset clock that follows long upgrade text on non-ACP adapters", () => {
     const now = new Date("2026-10-13T18:00:38.000Z");
     const error = `You've hit your usage limit. Upgrade to Pro (https://example.test/upgrade), visit ${"settings ".repeat(30)}to purchase more credits or try again at 10:40pm (Asia/Jerusalem).`;
