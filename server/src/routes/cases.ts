@@ -590,7 +590,7 @@ function singleFileUpload(req: Request, res: Response, maxBytes: number) {
     limits: { fileSize: maxBytes, files: 1 },
   }).single("file");
   return new Promise<void>((resolve, reject) => {
-    upload(req, res, (err) => {
+    upload(req, res, (err: unknown) => {
       if (err) reject(err);
       else resolve();
     });

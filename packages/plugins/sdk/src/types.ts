@@ -231,6 +231,8 @@ export interface PluginEvent<TPayload = unknown> {
  * @see PLUGIN_SPEC.md §13.6 — `runJob`
  */
 export interface PluginJobContext {
+  /** Host-selected tenant for an opted-in company job; never a plugin-selected scope. */
+  companyId?: string;
   /** Stable job key matching the declaration in the manifest. */
   jobKey: string;
   /** UUID for this specific job run instance. */

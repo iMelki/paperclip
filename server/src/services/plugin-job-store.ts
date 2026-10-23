@@ -30,7 +30,7 @@
  * @see PLUGIN_SPEC.md §21.3 — `plugin_jobs` / `plugin_job_runs` tables
  */
 
-import { and, desc, eq, isNull } from "drizzle-orm";
+import { and, desc, eq, inArray, isNull } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { plugins, pluginJobs, pluginJobRuns } from "@paperclipai/db";
 import type {
@@ -61,6 +61,8 @@ export interface CreateJobRunInput {
   jobId: string;
   /** FK to the plugins row. */
   pluginId: string;
+  /** Exact host-selected tenant, absent/null only for an instance run. */
+  companyId?: string | null;
   /** What triggered this run. */
   trigger: PluginJobRunTrigger;
   /** Company scope of this run; omit or `null` for an instance-level run. */
@@ -425,7 +427,7 @@ export function pluginJobStore(db: Db) {
           status: "running" as PluginJobRunStatus,
           startedAt: new Date(),
         })
-        .where(eq(pluginJobRuns.id, runId));
+        .where(and(eq(pluginJobRuns.id, runId), eq(pluginJobRuns.status, "queued")));
     },
 
     /**
@@ -447,7 +449,7 @@ export function pluginJobStore(db: Db) {
           durationMs: input.durationMs ?? null,
           finishedAt: new Date(),
         })
-        .where(eq(pluginJobRuns.id, runId));
+        .where(and(eq(pluginJobRuns.id, runId), inArray(pluginJobRuns.status, ["pending", "queued", "running"])));
     },
 
     /**
