@@ -80,6 +80,7 @@ import {
 } from "./services/bundled-plugins.js";
 import { createPluginWorkerManager, type PluginWorkerManager } from "./services/plugin-worker-manager.js";
 import { createPluginJobScheduler } from "./services/plugin-job-scheduler.js";
+import { resolvePluginJobDispatchPlan } from "./services/plugin-job-scope.js";
 import { pluginJobStore } from "./services/plugin-job-store.js";
 import { createPluginToolDispatcher } from "./services/plugin-tool-dispatcher.js";
 import { createToolGatewayService } from "./services/tool-gateway.js";
@@ -434,6 +435,14 @@ export async function createApp(
     db,
     jobStore,
     workerManager,
+    resolveJobDispatch: async (pluginId, jobKey) => {
+      const plugin = await pluginRegistry.getById(pluginId);
+      if (!plugin) throw new Error("Plugin is no longer installed");
+      return resolvePluginJobDispatchPlan(
+        plugin.manifestJson.jobs?.find((job) => job.jobKey === jobKey),
+        async () => (await pluginRegistry.listConfigs(pluginId)).map((config) => config.companyId),
+      );
+    },
   });
   const toolDispatcher = createPluginToolDispatcher({
     workerManager,

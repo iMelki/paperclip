@@ -393,6 +393,8 @@ export interface OnEventParams {
  * @see PLUGIN_SPEC.md §13.6 — `runJob`
  */
 export interface RunJobParams {
+  /** Host-selected invocation envelope; must match job.companyId when present. */
+  companyId?: string;
   /** Job execution context. */
   job: PluginJobContext;
   /**

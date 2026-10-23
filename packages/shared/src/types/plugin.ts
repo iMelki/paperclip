@@ -94,6 +94,13 @@ export interface PluginJobDeclaration {
    *   that company id), its own `runId`, and that company's invocation scope.
    */
   scope?: PluginJobScope;
+  /**
+   * Strict opt-in company fan-out from host-owned config rows. Unlike `scope: "company"`
+   * (which falls back to one unscoped run when no company has configured the plugin),
+   * a job declaring `dispatchScope: "company"` refuses to dispatch when no host-configured
+   * company exists. Omitted preserves instance dispatch.
+   */
+  dispatchScope?: "instance" | "company";
 }
 
 /** Execution scope of a plugin job. See {@link PluginJobDeclaration.scope}. */
@@ -884,6 +891,8 @@ export interface PluginJobRunRecord {
   jobId: string;
   /** FK to `plugins.id`. */
   pluginId: string;
+  /** Exact company for this execution, or null for legacy instance jobs. */
+  companyId: string | null;
   /** What triggered this run. */
   trigger: "schedule" | "manual" | "retry";
   /** Current run status. */

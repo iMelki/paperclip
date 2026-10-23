@@ -588,13 +588,42 @@ The host provides:
 - run id
 - schedule metadata
 
+Jobs may opt into `dispatchScope: "company"` in their manifest declaration.
+The host then resolves authorized companies from that plugin's stored config
+rows and dispatches sequentially once per company. Each execution has its own
+`plugin_job_runs.company_id` and run ID. The trusted RPC envelope's `companyId`
+matches `job.companyId`; the worker echoes the host-issued invocation ID for
+nested calls. The plugin handler must process only the supplied company and
+must await its work. Plugin mappings, state and company lists cannot authorize
+additional targets. Missing/invalid scope declarations or failed/empty company
+configuration resolution never fall back to unrestricted dispatch.
+
+Omitting `dispatchScope` (or specifying `instance`) preserves the existing
+single-dispatch contract below. An opted-in plugin requires a host supporting
+this contract; it should reject a missing company context rather than fan out
+itself on an older host. Company retry dispatch identifies the prior failed or
+cancelled run; the host reloads that run's original company and revalidates the
+current configuration. It does not replay other companies. No retry API/UI is
+introduced by this contract; existing instance-admin manual-trigger access stays
+unchanged and its response adds a `runs` array while retaining the first `runId`.
+
+The scheduler records ordinary company failures independently. On RPC timeout,
+worker loss, or batch RPC-budget exhaustion, remaining executions are explicitly
+cancelled/deferred rather than silently skipped or overlapped. The shared time
+budget applies to the RPC-dispatch batch; database/config-resolution operations
+retain their own underlying database timeout policy. It is not a process-kill or
+whole-scheduler deadline. Unregistering revokes the exact batch owner before
+asynchronous cleanup; late completion cannot resume that batch or rewrite a
+cancelled run. Re-registering does not revive old owners.
+
 For a job without an explicit company envelope, the worker manager registers a
 company invocation when the plugin has exactly one host-authorized configured
 company. Nested `config.get()` calls can then resolve that company's config,
 and explicit reads for another company remain denied. Zero or multiple configured
 companies leave the job unscoped; the host does not choose a company from plugin
-state or an instance-wide company list. This does not add a company field to
-`PluginJobContext` or turn one job into per-company runs. Job handlers must await
+state or an instance-wide company list. This legacy fallback does not itself
+populate `PluginJobContext.companyId` or fan out; use the opt-in contract above
+for that behavior. Job handlers must await
 their scoped work before returning, because the invocation ends with the RPC.
 
 ### 13.7 `handleWebhook`
