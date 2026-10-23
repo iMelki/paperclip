@@ -33,8 +33,9 @@ import detectPort from "detect-port";
 import { createApp } from "./app.js";
 import { loadConfig } from "./config.js";
 import { resolveListenPort } from "./listen-port.js";
+import { resolveEmbeddedPostgresLogFile } from "./embedded-postgres-log-file.js";
 import { EmbeddedPostgresLockRefusal, acquireEmbeddedStartLock, isSameDataDirectory, moveStaleLockAside, readLockIdentity, readRunningEmbeddedPostgres } from "./embedded-postgres-reuse.js";
-import { logger } from "./middleware/logger.js";
+import { logger, resolveServerLogDir } from "./middleware/logger.js";
 import {
   getManagedInstanceConfig,
   type ManagedInstanceConfig,
@@ -116,6 +117,8 @@ type EmbeddedPostgresCtor = new (opts: {
   password: string;
   port: number;
   persistent: boolean;
+  logFile?: string;
+  startTimeoutSeconds?: number;
   initdbFlags?: string[];
   onLog?: (message: unknown) => void;
   onError?: (message: unknown) => void;
@@ -414,6 +417,9 @@ export async function startServer(): Promise<StartedServer> {
     const clusterVersionFile = resolve(dataDir, "PG_VERSION");
     const clusterAlreadyInitialized = existsSync(clusterVersionFile);
     const postmasterPidFile = resolve(dataDir, "postmaster.pid");
+    // Recorded before anything inspects or removes the lock (the reuse check can move a
+    // stale one aside), so the crash-recovery wait below sees what the last shutdown left.
+    const leftoverLockAtStart = existsSync(postmasterPidFile);
     // One embedded login for init, identity probes, and database access.
     const embeddedPostgresUser = "paperclip";
     const embeddedPostgresPassword = "paperclip";
@@ -455,6 +461,14 @@ export async function startServer(): Promise<StartedServer> {
             password: embeddedPostgresPassword,
             port,
             persistent: true,
+            // Windows: pg_ctl keeps this file open, so it must stay outside the data
+            // directory or crash recovery cannot fsync it (sharing violation). It uses the server
+            // log directory; a data directory that contains it gets a sibling log file.
+            logFile: resolveEmbeddedPostgresLogFile(dataDir, resolveServerLogDir()),
+            // A leftover lock means the last shutdown was unclean, so start-up runs crash
+            // recovery. The lock is removed just before start(), which would hide that from
+            // the patch, so the wait is decided from the flag recorded at the top.
+            ...(leftoverLockAtStart ? { startTimeoutSeconds: 600 } : {}),
             initdbFlags: ["--encoding=UTF8", "--locale=C", "--lc-messages=C"],
             onLog: appendEmbeddedPostgresLog,
             onError: appendEmbeddedPostgresLog,
