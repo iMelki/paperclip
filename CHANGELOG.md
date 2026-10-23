@@ -42,6 +42,30 @@ All notable changes to this repository should be recorded here.
   refuses (instead of continuing unserialised) when the lock cannot be created or
   written. A refusal names every server whose ownership could
   not be proven and the safe manual step.
+- **[Refs #173]** Recovery reads the Claude session-limit statement only from
+  the ACP error and stop reason, or from a non-ACP run's own error field. A run
+  whose summary, output or transcript only quotes the phrase is no longer parked
+  as a provider quota wait. The reset clock is read only from the run's own
+  error (and the ACP error and stop reason), never from quoted result text.
+  Each `resets` or `try again at` candidate is validated before one is chosen,
+  so an impossible clock or an unknown timezone no longer hides a later valid
+  reset. A clock must be a complete token: `9:000` is not read as `9:00`.
+  The Claude adapter now decides "provider quota" and "transient upstream", and
+  extracts the retry time, only from provider error evidence: the `result` of a
+  result event that the CLI marked as an error, its `errors` list, stderr, and
+  the adapter's own fallback message. Raw stdout and the result of a result
+  event that is not an error are ignored. The run result records where the
+  verdict and the retry time came from as `providerQuotaEvidenceSource` and
+  `retryNotBeforeSource`. The failure message that recovery reads as the run's
+  own error no longer carries the text of a result event that is not an error,
+  every reset statement in a source is tried in turn, and a reset clock that
+  names an unknown timezone is skipped instead of being read in the server's
+  timezone. Recovery decides the quota verdict from the run's own error only,
+  never from the result JSON: a non-error result that quotes "usage limit
+  reached", "you've hit your usage limit" or "provider quota exceeded" no longer
+  parks the run. Prose after a clock ("try again at 10:40pm or upgrade your
+  plan") is no longer read as a timezone; only a word written in capitals is a
+  timezone candidate, and an unknown one still makes the candidate unusable.
 
 - Embedded PostgreSQL process discovery reads only an uppercase `-D` as the
   data directory option. PostgreSQL's lowercase `-d <debug level>` no longer

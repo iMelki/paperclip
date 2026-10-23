@@ -10,6 +10,7 @@ import {
   execute,
   resetClaudeCliCapabilitiesCacheForTests,
 } from "@paperclipai/adapter-claude-local/server";
+import { classifyAdapterFailureForRecovery } from "../services/recovery/service.js";
 
 // Sandbox-managed execution starts a short-lived API bridge plus one or more
 // child CLI processes. Loaded Windows shards can legitimately cross the old
@@ -1422,6 +1423,123 @@ describe("claude execute", () => {
       else process.env.HOME = previousHome;
       await fs.rm(root, { recursive: true, force: true });
     }
+  });
+
+  describe("provider quota evidence", () => {
+    const QUOTED = "You've hit your session limit · resets 9am (UTC)";
+    const FAILED_AT = new Date("2026-04-22T06:00:00.000Z");
+    const line = (event: Record<string, unknown>) => `${JSON.stringify(event)}\n`;
+    const assistantQuoting = line({
+      type: "assistant",
+      message: { role: "assistant", content: [{ type: "text", text: `The docs say: ${QUOTED}` }] },
+    });
+
+    async function runFailingClaude(output: { stdout?: string; stderr?: string }) {
+      const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-claude-quota-evidence-"));
+      const workspace = path.join(root, "workspace");
+      const commandPath = path.join(root, "claude");
+      await fs.mkdir(workspace, { recursive: true });
+      await writeTextFailingClaudeCommand(commandPath, output);
+      const previousHome = process.env.HOME;
+      process.env.HOME = root;
+      vi.useFakeTimers({ toFake: ["Date"] });
+      vi.setSystemTime(FAILED_AT);
+      try {
+        const result = await execute({
+          runId: "run-claude-quota-evidence",
+          agent: {
+            id: "agent-1",
+            companyId: "company-1",
+            name: "Claude Coder",
+            adapterType: "claude_local",
+            adapterConfig: { engine: "cli" },
+          },
+          runtime: { sessionId: null, sessionParams: null, sessionDisplayId: null, taskKey: null },
+          config: { engine: "cli", command: commandPath, cwd: workspace, promptTemplate: "Follow the paperclip heartbeat." },
+          context: {},
+          authToken: "run-jwt-token",
+          onLog: async () => {},
+        });
+        // The heartbeat stores a failed run with no adapter code as `adapter_failed`; a null code would
+        // make recovery return at once and turn every `toBeNull()` below into a vacuous check.
+        const recovery = classifyAdapterFailureForRecovery(
+          { errorCode: result.errorCode ?? "adapter_failed", error: result.errorMessage ?? null, resultJson: result.resultJson ?? null },
+          FAILED_AT,
+        );
+        return { result, recovery };
+      } finally {
+        vi.useRealTimers();
+        if (previousHome === undefined) delete process.env.HOME;
+        else process.env.HOME = previousHome;
+        await fs.rm(root, { recursive: true, force: true });
+      }
+    }
+
+    it("does not park a run whose assistant text and unrelated error only quote the phrase", async () => {
+      const { result, recovery } = await runFailingClaude({
+        stdout:
+          assistantQuoting +
+          line({ type: "result", subtype: "error_during_execution", is_error: true, result: "The tool crashed", errors: [] }),
+      });
+      expect(result.errorCode).toBeNull();
+      expect(result.errorFamily).toBeNull();
+      expect(result.retryNotBefore).toBeNull();
+      expect(result.resultJson?.providerQuotaRetryNotBefore).toBeUndefined();
+      expect(result.resultJson?.providerQuotaEvidenceSource).toBeUndefined();
+      expect(recovery).toBeNull();
+    });
+
+    it("does not read a quota or a clock from a result that is not an error", async () => {
+      const { result, recovery } = await runFailingClaude({
+        stdout:
+          assistantQuoting +
+          line({ type: "result", subtype: "error_during_execution", is_error: false, result: `Summary: ${QUOTED}` }),
+      });
+      expect(result.errorCode).not.toBe("provider_quota");
+      expect(result.retryNotBefore).toBeNull();
+      // The agent's quoted text is not copied into the error that recovery reads.
+      expect(result.errorMessage ?? "").not.toContain("session limit");
+      expect(recovery).toBeNull();
+    });
+
+    it("does not park a run when only raw stdout, with no result event, quotes the phrase", async () => {
+      const { result, recovery } = await runFailingClaude({
+        stdout: assistantQuoting,
+        stderr: "Claude crashed: segmentation fault",
+      });
+      expect(result.errorCode).toBeNull();
+      expect(result.retryNotBefore).toBeNull();
+      expect(recovery).toBeNull();
+    });
+
+    it("uses the error's own clock, records where it came from, and recovery honours it", async () => {
+      const { result, recovery } = await runFailingClaude({
+        stdout:
+          line({
+            type: "assistant",
+            message: { role: "assistant", content: [{ type: "text", text: "Quoted: You've hit your session limit · resets 11pm (UTC)" }] },
+          }) + line({ type: "result", subtype: "error", is_error: true, result: QUOTED, errors: [] }),
+      });
+      expect(result.errorCode).toBe("provider_quota");
+      expect(result.resultJson?.providerQuotaEvidenceSource).toBe("result_error");
+      expect(result.resultJson?.retryNotBeforeSource).toBe("result_error");
+      expect(result.retryNotBefore).toBe("2026-04-22T09:00:00.000Z");
+      expect(recovery).toEqual({
+        kind: "provider_quota",
+        retryAt: new Date("2026-04-22T09:00:00.000Z"),
+        parsedResetTime: true,
+      });
+    });
+
+    it("trusts the CLI's stderr when no result event was produced", async () => {
+      const { result, recovery } = await runFailingClaude({ stderr: QUOTED });
+      expect(result.errorCode).toBe("provider_quota");
+      // With no result event the adapter's fallback message is the CLI's first stderr line.
+      expect(result.resultJson?.providerQuotaEvidenceSource).toBe("error_message");
+      expect(result.resultJson?.retryNotBeforeSource).toBe("error_message");
+      expect(result.retryNotBefore).toBe("2026-04-22T09:00:00.000Z");
+      expect(recovery?.kind).toBe("provider_quota");
+    });
   });
 
   it("treats subtype=success results as successful even when the process exits nonzero", async () => {
