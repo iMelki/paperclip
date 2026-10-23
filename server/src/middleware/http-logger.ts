@@ -5,6 +5,7 @@ import {
   shouldOmitHttpRequestBody,
   shouldSilenceHttpSuccessLog,
 } from "./http-log-policy.js";
+import { redactHttpHeaders } from "./http-log-redaction.js";
 import { redactSensitive } from "./redact-sensitive.js";
 
 function isNonEmptyRecord(value: unknown): value is Record<string, unknown> {
@@ -34,6 +35,40 @@ function buildSafeErrorContext(error: unknown): Record<string, unknown> | null {
   return isNonEmptyRecord(safeRecord) ? (redactSensitive(safeRecord) as Record<string, unknown>) : null;
 }
 
+// pino-http copies res.err (the raw exception the error handler attaches) into
+// the log object as `err`. Its message and the first stack lines can carry
+// credentials, connection strings, or user payloads, so replace it with the
+// error type, allowlisted fields, and stack frames only (no message text).
+function buildSafeErr(error: unknown): Record<string, unknown> | undefined {
+  if (error === undefined || error === null) return undefined;
+  if (typeof error !== "object") return { type: typeof error };
+  const record = error as Record<string, unknown>;
+  const ctorName = (error as { constructor?: { name?: unknown } }).constructor?.name;
+  const safe: Record<string, unknown> = {
+    type: typeof ctorName === "string" && ctorName.length > 0 ? ctorName : "Object",
+  };
+  const allowlisted = buildSafeErrorContext(
+    Object.fromEntries(
+      ["code", "name", "statusCode", "status"]
+        .filter((key) => record[key] !== undefined)
+        .map((key) => [key, record[key]]),
+    ),
+  );
+  if (allowlisted) Object.assign(safe, allowlisted);
+  if (typeof record.stack === "string") {
+    const frames = record.stack.split("\n").filter((line) => /^\s+at\s/.test(line));
+    if (frames.length > 0) safe.stack = frames.join("\n");
+  }
+  return safe;
+}
+
+function withSafeErr(value: Record<string, unknown>): Record<string, unknown> {
+  if (!Object.prototype.hasOwnProperty.call(value, "err")) return value;
+  const { err, ...rest } = value;
+  const safeErr = buildSafeErr(err);
+  return safeErr ? { ...rest, err: safeErr } : rest;
+}
+
 function buildFailedResponseContext(req: any, res: any): Record<string, unknown> {
   const props: Record<string, unknown> = {};
   const ctx = res.__errorContext;
@@ -54,6 +89,11 @@ function buildFailedResponseContext(req: any, res: any): Record<string, unknown>
   return props;
 }
 
+function logUrl(req: unknown): string | undefined {
+  const record = req as { originalUrl?: string; url?: string };
+  return record.originalUrl ?? record.url;
+}
+
 export function createHttpLogger(baseLogger: Logger) {
   return pinoHttp({
     logger: baseLogger,
@@ -63,7 +103,12 @@ export function createHttpLogger(baseLogger: Logger) {
         return {
           ...safeReq,
           url: requestPathForHttpLog(req.url),
+          ...(safeReq.headers ? { headers: redactHttpHeaders(safeReq.headers) } : {}),
         };
+      },
+      res(res) {
+        const record = res as Record<string, unknown>;
+        return record.headers ? { ...record, headers: redactHttpHeaders(record.headers) } : record;
       },
     },
     customLogLevel(_req, res, err) {
@@ -74,18 +119,20 @@ export function createHttpLogger(baseLogger: Logger) {
       if (res.statusCode >= 400) return "warn";
       return "info";
     },
+    // Routers mounted at /api strip that prefix from req.url, so build the
+    // message from originalUrl, or path-token redaction never matches.
     customSuccessMessage(req, res) {
-      return `${req.method} ${requestPathForHttpLog(req.url)} ${res.statusCode}`;
+      return `${req.method} ${requestPathForHttpLog(logUrl(req))} ${res.statusCode}`;
     },
     customErrorMessage(req, res) {
-      return `${req.method} ${requestPathForHttpLog(req.url)} ${res.statusCode} — request failed`;
+      return `${req.method} ${requestPathForHttpLog(logUrl(req))} ${res.statusCode} — request failed`;
     },
     customSuccessObject(req, res, value) {
-      if (res.statusCode < 400) return value;
-      return { ...value, ...buildFailedResponseContext(req, res) };
+      if (res.statusCode < 400) return withSafeErr(value);
+      return { ...withSafeErr(value), ...buildFailedResponseContext(req, res) };
     },
     customErrorObject(req, res, _error, value) {
-      return { ...value, ...buildFailedResponseContext(req, res) };
+      return { ...withSafeErr(value), ...buildFailedResponseContext(req, res) };
     },
   });
 }

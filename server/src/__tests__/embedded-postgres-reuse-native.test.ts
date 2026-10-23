@@ -6,7 +6,7 @@ import EmbeddedPostgres from "embedded-postgres";
 import { prepareEmbeddedPostgresNativeRuntime } from "@paperclipai/db";
 import { expect, it } from "vitest";
 import { getEmbeddedPostgresTestSupport } from "./helpers/embedded-postgres.js";
-import { moveStaleLockAside, readRunningEmbeddedPostgres } from "../embedded-postgres-reuse.js";
+import { moveStaleLockAside, readLockIdentity, readRunningEmbeddedPostgres } from "../embedded-postgres-reuse.js";
 
 async function unusedPort(): Promise<number> {
   const server = createServer();
@@ -55,7 +55,7 @@ it.skipIf(!embeddedPostgresSupport.supported)("rejects an actual node PID on a c
 
   // This is the server start path: it moves the stale lock aside before start().
   // The dependency itself does not clean up a recycled-PID lock.
-  const aside = moveStaleLockAside(pidFile);
+  const aside = moveStaleLockAside(pidFile, readLockIdentity(pidFile));
   expect(readFileSync(aside, "utf8")).toBe(stale);
   expect(readdirSync(dataDir).filter((name) => name.startsWith("postmaster.pid.stale-"))).toHaveLength(1);
   try {

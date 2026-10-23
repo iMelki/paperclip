@@ -43,10 +43,18 @@ export function requestPathWithoutQuery(url: string | undefined): string {
   return queryStart === -1 ? url : url.slice(0, queryStart);
 }
 
+// Path segments that are bearer credentials: board-claim challenge tokens and
+// invite tokens (/api/invites/<token> and every subroute authenticate by
+// hashing that segment).
+const CREDENTIAL_PATH_SEGMENTS = [
+  /^(\/api\/board-claim\/)[^/]+/i,
+  /^(\/api\/invites\/)[^/]+/i,
+];
+
 export function requestPathForHttpLog(url: string | undefined): string {
-  return requestPathWithoutQuery(url).replace(
-    /^(\/api\/board-claim\/)[^/]+/i,
-    "$1[REDACTED]",
+  return CREDENTIAL_PATH_SEGMENTS.reduce(
+    (path, pattern) => path.replace(pattern, "$1[REDACTED]"),
+    requestPathWithoutQuery(url),
   );
 }
 

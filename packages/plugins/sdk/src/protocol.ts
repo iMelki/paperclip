@@ -393,6 +393,11 @@ export interface OnEventParams {
 export interface RunJobParams {
   /** Job execution context. */
   job: PluginJobContext;
+  /**
+   * Host-authorized company scope for a company-scoped job run. The host
+   * derives the invocation scope from this value; it is never worker-chosen.
+   */
+  companyId?: string | null;
 }
 
 /**
