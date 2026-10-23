@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process";
-import { existsSync, readFileSync, readlinkSync, renameSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { closeSync, existsSync, linkSync, lstatSync, mkdirSync, openSync, readFileSync, readlinkSync, realpathSync, renameSync, unlinkSync, writeSync } from "node:fs";
 import { realpath } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { getPostgresDataDirectory } from "@paperclipai/db";
@@ -38,39 +39,54 @@ export async function readProcessName(pid: number): Promise<string | null> {
 }
 
 const POSTGRES_PROCESS_NAME_RE = /^(?:postgres|postmaster)(?:\.exe)?$/i;
+// Case-sensitive on purpose: PostgreSQL's lowercase `-d <debuglevel>` is not a data directory.
 const DATA_DIRECTORY_ARGUMENT =
-  /(?:^|\s)(?:-D\s*|--data-directory[=\s])(?:"([^"]+)"|'([^']+)'|(\S+))/gi;
+  /(?:^|\s)(?:-D\s*|--data-directory[=\s])(?:"([^"]+)"|'([^']+)'|(\S+))/g;
+
+// `-c data_directory=<path>` and `--data_directory=<path>` set the effective data directory and take
+// precedence over `-D`, which then names only the configuration directory.
+const DATA_DIRECTORY_SETTING =
+  /(?:^|\s)(?:-c\s*|--)data_directory=(?:"([^"]+)"|'([^']+)'|(\S+))/g;
 
 const POSTGRES_CHILD_TITLE_RE = /^postgres:\s/i;
 const POSTGRES_FORK_CHILD_RE = /(?:^|\s)--fork/i;
 
-type DataDirectoryOwnership = "owns" | "other" | "unknown";
+type DataDirectoryOwnership = "owns" | "unknown";
 
 /**
- * Whether `command` names this data directory. An explicit absolute `-D` or
- * `--data-directory` that exists settles the question either way. Anything else
- * (PGDATA, a relative path, a value cut at a space) is not evidence.
+ * Whether `command` names this data directory. A command can only prove that it owns the directory:
+ * `data_directory` in a configuration file (or one it includes) can replace whatever `-D` names, so a
+ * different directory is "unknown", never "other". Anything that is not evidence (PGDATA, a relative
+ * path, a value cut at a space) is also "unknown".
  */
 async function commandOwnership(
   command: string,
   needles: string[],
   dataDir: string,
 ): Promise<DataDirectoryOwnership> {
-  // PostgreSQL applies the last data-directory option, so that one is the effective value. An
-  // explicit existing value is compared first: a descendant such as `<dataDir>/backup` would
-  // otherwise pass the broader path-reference test below.
+  // `-D` is read from the command as given: Windows normalization lowercases the whole line, which
+  // would turn `-D` into the debug-level option `-d`. Only the path comparison below uses it.
+  // PostgreSQL applies the last occurrence of an option, so that one is the effective value. A
+  // data_directory setting on the command line wins over `-D`.
+  let override: string | undefined;
+  for (const named of command.matchAll(DATA_DIRECTORY_SETTING)) override = named[1] ?? named[2] ?? named[3];
+  if (override && isAbsolute(override)) {
+    return (await isSameDataDirectory(override, dataDir)) ? "owns" : "unknown";
+  }
   let value: string | undefined;
   for (const named of command.matchAll(DATA_DIRECTORY_ARGUMENT)) value = named[1] ?? named[2] ?? named[3];
+  let normalized = normalizeCommand(command);
   if (value && isAbsolute(value) && existsSync(value)) {
     if (await isSameDataDirectory(value, dataDir)) return "owns";
-    // `data_directory` in postgresql.conf overrides `-D`, so `-D` may only name the configuration
-    // directory of a server that still stores this cluster. A directory that is itself a cluster
-    // (it has PG_VERSION) is the data directory; anything else proves nothing.
-    if (existsSync(join(value, "PG_VERSION"))) return "other";
-    return needles.some((needle) => commandReferencesPath(command, needle)) ? "owns" : "unknown";
+    // Another existing directory is the effective one: look for this directory elsewhere in the
+    // command, not in an earlier or longer data-directory option (a descendant such as
+    // `<dataDir>/backup` would otherwise pass the path-reference test).
+    for (const named of command.matchAll(DATA_DIRECTORY_ARGUMENT)) {
+      const given = named[1] ?? named[2] ?? named[3];
+      if (given) normalized = normalized.split(normalizeCommand(given)).join(" ");
+    }
   }
-  if (needles.some((needle) => commandReferencesPath(command, needle))) return "owns";
-  return "unknown";
+  return needles.some((needle) => commandReferencesPath(normalized, needle)) ? "owns" : "unknown";
 }
 
 /**
@@ -120,21 +136,258 @@ export function commandReferencesPath(command: string, needle: string): boolean 
   return false;
 }
 
+/** What identifies one particular `postmaster.pid` file: a replacement file differs in at least one field. */
+export type LockIdentity = { dev: number; ino: number; size: number; mtimeMs: number };
+
+/** Identity of the lock file now at `pidFile`, or `null` when it cannot be inspected. */
+export function readLockIdentity(pidFile: string): LockIdentity | null {
+  try {
+    const { dev, ino, size, mtimeMs } = lstatSync(pidFile);
+    return { dev, ino, size, mtimeMs };
+  } catch {
+    return null;
+  }
+}
+
+const sameLockIdentity = (a: LockIdentity | null, b: LockIdentity) =>
+  a !== null && a.dev === b.dev && a.ino === b.ino && a.size === b.size && a.mtimeMs === b.mtimeMs;
+
+export type EmbeddedStartLockOptions = {
+  timeoutMs?: number;
+  pollMs?: number;
+  /** Test seam: writes the owner record into the freshly created lock file. */
+  writeOwner?: (fd: number, text: string) => void;
+};
+
 /**
- * Moves a leftover lock out of the way before start-up. The file is never deleted, so
- * an operator can still inspect it. Throws a lock refusal when it cannot be moved.
+ * Serialises embedded PostgreSQL starts on one data directory. The lock is a file beside the data
+ * directory (never inside it), created exclusively and holding the owner's PID. A start that finds it
+ * waits until the owner releases it or is gone, so a second Paperclip start can neither look at the
+ * data directory's `postmaster.pid` while the first is still starting PostgreSQL, nor move it. Hold it
+ * from the first lock check through `start()`. A lock is never moved or removed by a later start:
+ * an owner that is alive, or a file that cannot be read, is waited for and then refused after
+ * `timeoutMs`; an owner that is gone (`ESRCH`) is refused at once with a manual step, because no
+ * rename can test that the file is still the one that was read. Where the lock cannot be created
+ * or written (for example a read-only parent directory) the start refuses; it never continues
+ * unserialised.
+ * Returns the function that releases the lock.
  */
-export function moveStaleLockAside(pidFile: string): string {
+export async function acquireEmbeddedStartLock(
+  dataDir: string,
+  options: EmbeddedStartLockOptions = {},
+): Promise<() => void> {
+  const timeoutMs = options.timeoutMs ?? 60_000;
+  const pollMs = options.pollMs ?? 250;
+  const token = randomUUID();
+  const deadline = Date.now() + timeoutMs;
+  const refuse = (message: string) => new EmbeddedPostgresLockRefusal(`Refusing to start embedded PostgreSQL: ${message}`);
+  // The name is keyed on the physical path, so a symlink or junction to the data directory shares one lock.
+  const lockBase = (() => {
+    try {
+      return physicalPathBeside(dataDir);
+    } catch (error) {
+      throw refuse(
+        `the physical location of ${resolve(dataDir)} could not be established (${(error as NodeJS.ErrnoException).code ?? "unknown error"}), ` +
+          "so concurrent starts cannot be serialised. Fix the path or its permissions and start again.",
+      );
+    }
+  })();
+  const lockPath = `${lockBase}.paperclip-start.lock`;
+  try {
+    // On a first start the directory that will contain the data directory may not exist yet.
+    mkdirSync(dirname(lockPath), { recursive: true });
+  } catch (error) {
+    throw refuse(
+      `the directory ${dirname(lockPath)} could not be created (${(error as NodeJS.ErrnoException).code ?? "unknown error"}), ` +
+        "so concurrent starts cannot be serialised. Fix its permissions and start again.",
+    );
+  }
+  const readOwner = (file: string): { text: string; pid: number | null } | null => {
+    try {
+      const text = readFileSync(file, "utf8");
+      const pid = Number((JSON.parse(text) as { pid?: unknown }).pid);
+      return { text, pid: Number.isSafeInteger(pid) && pid > 0 ? pid : null };
+    } catch (error) {
+      return (error as NodeJS.ErrnoException).code === "ENOENT" ? null : { text: "", pid: null };
+    }
+  };
+  const createExclusively = (file: string): void => {
+    const fd = openSync(file, "wx");
+    try {
+      (options.writeOwner ?? ((target, text) => void writeSync(target, text)))(fd, JSON.stringify({ pid: process.pid, token }));
+      closeSync(fd);
+    } catch (error) {
+      // The file was created by this call, so it may be removed: an empty or partial lock would
+      // otherwise block every later start. Any write or close error refuses the start.
+      try {
+        closeSync(fd);
+      } catch {
+        // Already closed.
+      }
+      try {
+        unlinkSync(file);
+      } catch {
+        // Gone already.
+      }
+      throw error;
+    }
+  };
+  const timeoutRefusal = (owner: { pid: number | null } | null) =>
+    refuse(
+      `another start holds ${lockPath}` +
+        (owner?.pid != null ? ` (process ${owner.pid})` : " (its owner could not be read)") +
+        ` and did not finish in ${Math.round(timeoutMs / 1000)} seconds. If no Paperclip server is starting, move that file aside by hand and start again. Do not delete any data.`,
+    );
+  for (;;) {
+    try {
+      createExclusively(lockPath);
+      return () => {
+        try {
+          if (readOwner(lockPath)?.text.includes(token)) unlinkSync(lockPath);
+        } catch {
+          // Already gone.
+        }
+      };
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      // Anything but "already exists" is a permanent problem: starting without the lock would leave
+      // concurrent starts unserialised, so the start refuses and says what to fix.
+      if (code !== "EEXIST") {
+        throw refuse(
+          `the start lock ${lockPath} could not be created (${code ?? "unknown error"}), so concurrent starts cannot be serialised. ` +
+            `The directory that contains the data directory must be writable. Fix its permissions and start again.`,
+        );
+      }
+    }
+    const owner = readOwner(lockPath);
+    let dead = false;
+    if (owner !== null && owner.pid !== null) {
+      try {
+        process.kill(owner.pid, 0);
+      } catch (error) {
+        dead = (error as NodeJS.ErrnoException).code === "ESRCH";
+      }
+    }
+    if (owner !== null && dead) {
+      // ESRCH shows that the recorded process is gone, not that the file at this name is still the
+      // lock that was read, and a rename cannot test that. The file is left for an operator.
+      throw refuse(
+        `the start lock ${lockPath} names process ${owner.pid}, which is gone (a start that did not finish). ` +
+          "It is not removed automatically. Confirm that no Paperclip server is starting, move that file aside by hand (keep it), and start again. Do not delete any data.",
+      );
+    }
+    if (Date.now() >= deadline) throw timeoutRefusal(owner);
+    await new Promise((done) => setTimeout(done, owner === null ? Math.min(pollMs, 10) : pollMs));
+  }
+}
+
+/**
+ * `dataDir` resolved through every symlink and junction of the part that exists, with the part that
+ * does not exist yet appended. Throws when no ancestor can be resolved.
+ */
+function physicalPathBeside(dataDir: string): string {
+  const absolute = resolve(dataDir);
+  const missing: string[] = [];
+  let probe = absolute;
+  for (;;) {
+    try {
+      const real = realpathSync(probe);
+      const physical = missing.length > 0 ? join(real, ...missing.reverse()) : real;
+      return process.platform === "win32" ? physical.toLowerCase() : physical;
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      const parent = dirname(probe);
+      if ((code === "ENOENT" || code === "ENOTDIR") && parent !== probe) {
+        missing.push(basename(probe));
+        probe = parent;
+        continue;
+      }
+      throw error;
+    }
+  }
+}
+
+/** Test seam: runs at the two points where another process could replace the lock. */
+export type LockMoveHooks = {
+  /** After the file at the name was verified, before it is moved. */
+  afterVerify?: () => void;
+  /** After a replacement was moved, before it is put back. */
+  beforeRestore?: () => void;
+};
+
+/**
+ * Moves `pidFile` aside only if it is still the file the caller examined (`expected`). The check
+ * happens before anything is removed: a hard link takes hold of whatever file has the name now, and
+ * that file is compared with `expected` while it is still in place, so a replacement (a live server's
+ * new lock) is never taken out of its path on the strength of a stale verdict. Only then is the name
+ * moved, and the moved file is compared once more. The rename itself cannot test identity, so a file
+ * that replaces the verified one in that last instant is put back with a hard link, which never
+ * overwrites a newer file; if the name was taken again it stays where it was moved and the refusal
+ * names it. An unknown identity (`expected` null) fails closed. Other lock-start processes are kept
+ * out of that last instant by the start lock (`acquireEmbeddedStartLock`).
+ * Returns the archive path, or `null` when the lock was already gone. Raw OS errors are thrown as they are.
+ */
+function renameLockAside(
+  pidFile: string,
+  expected: LockIdentity | null | undefined,
+  hooks: LockMoveHooks = {},
+): string | null {
+  const refuse = (detail: string) =>
+    new EmbeddedPostgresLockRefusal(`Refusing to start embedded PostgreSQL: ${pidFile} ${detail} The lock was not archived.`);
+  if (!expected) {
+    throw refuse("could not be identified, so it cannot be shown to be the stale lock that was examined.");
+  }
   const aside = uniqueAsidePath(pidFile);
   try {
-    renameSync(pidFile, aside);
+    linkSync(pidFile, aside);
   } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw error;
+  }
+  if (!sameLockIdentity(readLockIdentity(aside), expected)) {
+    unlinkSync(aside); // only the extra name; the file at pidFile is untouched
+    throw refuse("was replaced while it was being checked, so it is not the lock that was examined. It was left in place.");
+  }
+  hooks.afterVerify?.();
+  const moved = `${aside}.moving`;
+  renameSync(pidFile, moved);
+  if (sameLockIdentity(readLockIdentity(moved), expected)) {
+    unlinkSync(moved); // the verified file is archived under `aside`
+    return aside;
+  }
+  hooks.beforeRestore?.();
+  try {
+    linkSync(moved, pidFile);
+    unlinkSync(moved);
+  } catch {
+    throw refuse(
+      `was replaced in the instant it was moved, and the name was taken again before it could be put back. The replacement is kept at ${moved}; ` +
+        "check that no PostgreSQL is using this data directory.",
+    );
+  }
+  throw refuse("was replaced in the instant it was moved. The replacement was put back.");
+}
+
+/**
+ * Moves a leftover lock out of the way before start-up. The file is never deleted, so
+ * an operator can still inspect it. Throws a lock refusal when it cannot be moved, when
+ * `expected` is missing, or when the file at the name is not the one `expected` describes.
+ * Returns `null` when the lock was already gone.
+ */
+export function moveStaleLockAside(
+  pidFile: string,
+  expected: LockIdentity | null | undefined,
+  hooks?: LockMoveHooks,
+): string | null {
+  try {
+    return renameLockAside(pidFile, expected, hooks);
+  } catch (error) {
+    if (error instanceof EmbeddedPostgresLockRefusal) throw error;
     throw new EmbeddedPostgresLockRefusal(
       `Refusing to start embedded PostgreSQL: the leftover lock ${pidFile} could not be moved aside ` +
         `(${(error as NodeJS.ErrnoException).code ?? "unknown error"}). Fix its permissions and start again.`,
     );
   }
-  return aside;
 }
 
 export type PostgresProcess = { pid: number; command: string };
@@ -148,8 +401,13 @@ const stopCommand = (pid: number) => (process.platform === "win32" ? `taskkill /
  * Finds PostgreSQL server processes that reference `dataDir` (by command line
  * or, where readable, working directory). Returns `null` when the process list
  * itself cannot be read, so callers can tell "none found" from "could not look".
+ * When the result is `null` because some servers could not be tied to any directory,
+ * those servers are added to `undecided` so a refusal can name them.
  */
-export async function listPostgresProcessesForDataDir(dataDir: string): Promise<PostgresProcess[] | null> {
+export async function listPostgresProcessesForDataDir(
+  dataDir: string,
+  undecided?: PostgresProcess[],
+): Promise<PostgresProcess[] | null> {
   const run = (file: string, args: string[]) =>
     new Promise<string | null>((done) => {
       execFile(file, args, { timeout: 10000, windowsHide: true, maxBuffer: 16 * 1024 * 1024 }, (error, stdout) =>
@@ -168,7 +426,7 @@ export async function listPostgresProcessesForDataDir(dataDir: string): Promise<
     if (!trimmed) return [];
     try {
       const parsed = JSON.parse(trimmed) as WindowsPostgresRow | WindowsPostgresRow[];
-      return scanWindowsPostgresRows(Array.isArray(parsed) ? parsed : [parsed], needles, dataDir);
+      return scanWindowsPostgresRows(Array.isArray(parsed) ? parsed : [parsed], needles, dataDir, undecided);
     } catch {
       return null;
     }
@@ -181,7 +439,7 @@ export async function listPostgresProcessesForDataDir(dataDir: string): Promise<
   const argsOut = await run("ps", ["-eo", "pid=,args="]);
   if (commOut === null || argsOut === null) return null;
   return scanPsOutputForDataDir(joinPsColumns(commOut, argsOut), needles, dataDir, (pid) =>
-    readlinkSync(`/proc/${pid}/cwd`));
+    readlinkSync(`/proc/${pid}/cwd`), undecided);
 }
 
 export type WindowsPostgresRow = { ProcessId?: number; CommandLine?: string | null };
@@ -196,6 +454,7 @@ export async function scanWindowsPostgresRows(
   rows: WindowsPostgresRow[],
   needles: string[],
   dataDir: string,
+  undecided: PostgresProcess[] = [],
 ): Promise<PostgresProcess[] | null> {
   const found: PostgresProcess[] = [];
   let unknown = false;
@@ -205,9 +464,12 @@ export async function scanWindowsPostgresRows(
     // Windows postmaster children (`postgres.exe --forkbackend` etc.) carry no data directory and
     // are not servers; counting them would make any unrelated PostgreSQL look inconclusive.
     if (POSTGRES_FORK_CHILD_RE.test(command)) continue;
-    const ownership = await commandOwnership(normalizeCommand(command), needles, dataDir);
+    const ownership = await commandOwnership(command, needles, dataDir);
     if (ownership === "owns") found.push({ pid: row.ProcessId, command });
-    else if (ownership === "unknown") unknown = true;
+    else if (ownership === "unknown") {
+      unknown = true;
+      undecided.push({ pid: row.ProcessId, command });
+    }
   }
   if (found.length === 0 && unknown) return null;
   return found;
@@ -243,6 +505,7 @@ export async function scanPsOutputForDataDir(
   needles: string[],
   dataDir: string,
   readCwd: (pid: number) => string,
+  undecided: PostgresProcess[] = [],
 ): Promise<PostgresProcess[] | null> {
   const found: PostgresProcess[] = [];
   let cwdUnknown = false;
@@ -253,21 +516,25 @@ export async function scanPsOutputForDataDir(
     if (pid === process.pid || !POSTGRES_PROCESS_NAME_RE.test(comm.replace(/\\/g, "/").split("/").pop() ?? "")) continue;
     // Backends and workers rename themselves `postgres: checkpointer ...`; they are not servers.
     if (POSTGRES_CHILD_TITLE_RE.test(command)) continue;
-    const ownership = await commandOwnership(command, needles, dataDir);
-    let owns = ownership === "owns";
-    if (ownership === "unknown") {
-      // A postmaster's working directory is its data directory (also when it was
-      // started through PGDATA instead of -D).
-      const cwd = (() => {
-        try {
-          return readCwd(pid);
-        } catch {
-          return null;
-        }
-      })();
-      // No /proc (macOS, BSD) or an unreadable entry: this server's directory is unknown.
-      if (cwd === null) cwdUnknown = true;
-      else owns = await isSameDataDirectory(cwd, dataDir);
+    // A postmaster's working directory is its data directory, whatever its command line says (an
+    // include in a configuration file can hide a data_directory override), so a readable one decides.
+    const cwd = (() => {
+      try {
+        return readCwd(pid);
+      } catch {
+        return null;
+      }
+    })();
+    let owns: boolean;
+    if (cwd !== null) owns = await isSameDataDirectory(cwd, dataDir);
+    else {
+      // No /proc (macOS, BSD) or an unreadable entry: only the command line can show ownership.
+      owns = (await commandOwnership(command, needles, dataDir)) === "owns";
+      // Nothing proves it is another server, so its directory is unknown.
+      if (!owns) {
+        cwdUnknown = true;
+        undecided.push({ pid, command });
+      }
     }
     if (owns) found.push({ pid, command });
   }
@@ -290,8 +557,35 @@ export type EmbeddedPostgresReuseOptions = {
   /** Test seam: resolves the executable name of a live PID. */
   readProcessName?: (pid: number) => Promise<string | null>;
   /** Test seam: PostgreSQL processes that reference the data directory, or null if unreadable. */
-  listPostgresProcesses?: (dataDir: string) => Promise<PostgresProcess[] | null>;
+  listPostgresProcesses?: (dataDir: string, undecided?: PostgresProcess[]) => Promise<PostgresProcess[] | null>;
+  /** Test seam: runs where another process could replace the lock while it is moved. */
+  lockMoveHooks?: LockMoveHooks;
+  /** True only while the caller holds the start lock (`acquireEmbeddedStartLock`). A lock is moved aside only then. */
+  startLockHeld?: boolean;
 };
+
+/**
+ * A lock is only moved aside while this start holds the start lock for the data directory. Without
+ * it nothing keeps another Paperclip start out of the short step in which a lock is moved, so the
+ * lock stays where it is and an operator decides.
+ */
+function requireStartLock(pidFile: string, options: EmbeddedPostgresReuseOptions): void {
+  if (options.startLockHeld === true) return;
+  throw new EmbeddedPostgresLockRefusal(
+    `Refusing to start embedded PostgreSQL: ${pidFile} may be stale, but it is only moved aside while this start holds the start lock, ` +
+      "which it does not. The lock was not archived. Start again through the server, or move the file aside by hand after confirming no PostgreSQL uses this data directory. Do not delete any data.",
+  );
+}
+
+const describeProcesses = (processes: PostgresProcess[]) =>
+  processes.map((entry) => `PostgreSQL process ${entry.pid} (${entry.command || "command line not available"})`).join("; ");
+
+/** The safe manual step when ownership cannot be proven. It never suggests deleting data. */
+const manualStep = (pidFile: string, processes: PostgresProcess[]) =>
+  `Stop ${processes.length === 1 ? "that server" : "those servers"}` +
+  (processes.length === 1 ? ` with \`${stopCommand(processes[0].pid)}\`` : "") +
+  `, or, if ${processes.length === 1 ? "it is" : "they are"} unrelated, move ${pidFile} aside by hand after confirming no Paperclip instance is running. ` +
+  "Do not delete any data.";
 
 /**
  * Handles a `postmaster.pid` whose owner cannot be read from the file (unreadable
@@ -307,6 +601,7 @@ async function recoverLockWithUnknownOwner(
   adminUrl: EmbeddedPostgresAdminUrl,
   options: EmbeddedPostgresReuseOptions,
   problem: string,
+  lockIdentity: LockIdentity | null,
 ): Promise<null> {
   const refuse = (detail: string) =>
     new EmbeddedPostgresLockRefusal(
@@ -320,11 +615,14 @@ async function recoverLockWithUnknownOwner(
       `a PostgreSQL server is answering on port ${configuredPort}. Stop it (or point the server at that instance), then start again.`,
     );
   }
-  const owners = await (options.listPostgresProcesses ?? listPostgresProcessesForDataDir)(dataDir);
+  const undecided: PostgresProcess[] = [];
+  const owners = await (options.listPostgresProcesses ?? listPostgresProcessesForDataDir)(dataDir, undecided);
   if (owners === null) {
     throw refuse(
-      "the process list could not be read, so a running PostgreSQL cannot be ruled out. " +
-        `Once no PostgreSQL uses ${dataDir}, move postmaster.pid aside and start again.`,
+      undecided.length > 0
+        ? `ownership of this data directory could not be proven for ${describeProcesses(undecided)}. ${manualStep(pidFile, undecided)}`
+        : "the process list could not be read, so a running PostgreSQL cannot be ruled out. " +
+            `Once no PostgreSQL uses ${dataDir}, move postmaster.pid aside and start again.`,
     );
   }
   if (owners.length > 0) {
@@ -334,10 +632,12 @@ async function recoverLockWithUnknownOwner(
         `Stop it with \`${stopCommand(first.pid)}\`, then start again; the stale lock is handled automatically.`,
     );
   }
-  const aside = uniqueAsidePath(pidFile);
+  let aside: string | null;
   try {
-    renameSync(pidFile, aside);
+    requireStartLock(pidFile, options);
+    aside = renameLockAside(pidFile, lockIdentity, options.lockMoveHooks);
   } catch (error) {
+    if (error instanceof EmbeddedPostgresLockRefusal) throw error;
     throw refuse(
       `it could not be moved aside (${(error as NodeJS.ErrnoException).code ?? "unknown error"}). Fix its permissions and start again.`,
     );
@@ -355,9 +655,15 @@ async function recoverLockWithUnknownOwner(
  * lock handling, so the lock is archived beside the directory here. An initialised cluster
  * keeps its lock for the caller's existing handling.
  */
-function moveAsideBeforeInitialisation(pidFile: string, dataDir: string): void {
+function moveAsideBeforeInitialisation(
+  pidFile: string,
+  dataDir: string,
+  lockIdentity: LockIdentity | null,
+  options: EmbeddedPostgresReuseOptions,
+): void {
   if (existsSync(join(dataDir, "PG_VERSION"))) return;
-  const aside = moveStaleLockAside(pidFile);
+  requireStartLock(pidFile, options);
+  const aside = moveStaleLockAside(pidFile, lockIdentity, options.lockMoveHooks);
   logger.warn({ pidFile, aside }, "moved a stale postmaster.pid out of an uninitialised data directory");
 }
 
@@ -383,6 +689,8 @@ export async function readRunningEmbeddedPostgres(
 ): Promise<{ pid: number; port: number } | null> {
   const pidFile = resolve(dataDir, "postmaster.pid");
   if (!existsSync(pidFile)) return null;
+  // The verdict below is about this file; a rename later must still find the same one.
+  const lockIdentity = readLockIdentity(pidFile);
   let lines: string[];
   try {
     lines = readFileSync(pidFile, "utf8").split("\n");
@@ -394,6 +702,7 @@ export async function readRunningEmbeddedPostgres(
       adminUrl,
       options,
       `could not be read (${(error as NodeJS.ErrnoException).code ?? "unknown error"})`,
+      lockIdentity,
     );
   }
   const pid = Number(lines[0]?.trim());
@@ -405,6 +714,7 @@ export async function readRunningEmbeddedPostgres(
       adminUrl,
       options,
       "does not hold a valid process id",
+      lockIdentity,
     );
   }
   try {
@@ -413,7 +723,7 @@ export async function readRunningEmbeddedPostgres(
     // Only ESRCH proves the process is gone. EPERM and any other error leave
     // liveness unknown, so identity must still be established.
     if ((error as NodeJS.ErrnoException).code === "ESRCH") {
-      moveAsideBeforeInitialisation(pidFile, dataDir);
+      moveAsideBeforeInitialisation(pidFile, dataDir, lockIdentity, options);
       return null;
     }
   }
@@ -432,7 +742,7 @@ export async function readRunningEmbeddedPostgres(
         { pid, port },
         "Embedded PostgreSQL identity could not be verified and postmaster.pid names the current process; treating postmaster.pid as stale and trying normal startup",
       );
-      moveAsideBeforeInitialisation(pidFile, dataDir);
+      moveAsideBeforeInitialisation(pidFile, dataDir, lockIdentity, options);
       return null;
     }
     // A live PID that is affirmatively not PostgreSQL (the OS recycled it), with
@@ -449,10 +759,12 @@ export async function readRunningEmbeddedPostgres(
       // A server on the configured port that serves another data directory does not own this lock.
       const configuredAnswers = configuredDir !== null && (await isSameDataDirectory(configuredDir, dataDir));
       if (!configuredAnswers) {
-        const aside = uniqueAsidePath(pidFile);
+        let aside: string | null;
         try {
-          renameSync(pidFile, aside);
+          requireStartLock(pidFile, options);
+    aside = renameLockAside(pidFile, lockIdentity, options.lockMoveHooks);
         } catch (error) {
+          if (error instanceof EmbeddedPostgresLockRefusal) throw error;
           throw new EmbeddedPostgresLockRefusal(
             `Refusing to start embedded PostgreSQL: postmaster.pid names process ${pid} (${processName}), which is not PostgreSQL, ` +
               `but the lock could not be moved aside (${(error as NodeJS.ErrnoException).code ?? "unknown error"}). Fix its permissions and start again.`,
@@ -467,7 +779,8 @@ export async function readRunningEmbeddedPostgres(
     }
     // Only name a stop command for a process that is verified to be a PostgreSQL
     // referencing this data directory; otherwise the PID may belong to anything.
-    const owners = await (options.listPostgresProcesses ?? listPostgresProcessesForDataDir)(dataDir);
+    const undecided: PostgresProcess[] = [];
+    const owners = await (options.listPostgresProcesses ?? listPostgresProcessesForDataDir)(dataDir, undecided);
     const verified = owners?.find((owner) => owner.pid === pid);
     const action = verified
       ? `It is PostgreSQL for this data directory (${verified.command}). Stop it with \`${stopCommand(pid)}\` and start again.`
@@ -476,7 +789,10 @@ export async function readRunningEmbeddedPostgres(
     throw new EmbeddedPostgresLockRefusal(
       `Refusing to start embedded PostgreSQL: postmaster.pid names process ${pid}, which may still be alive, ` +
         `but PostgreSQL identity could not be verified on port ${port} (it may be starting, recovering, ` +
-        `or refusing the login). The lock file was left unchanged. ${action}`,
+        `or refusing the login). The lock file was left unchanged. ${action}` +
+        (undecided.length > 0
+          ? ` Ownership of this data directory also could not be proven for ${describeProcesses(undecided)}. ${manualStep(pidFile, undecided)}`
+          : ""),
     );
   }
   if (!(await isSameDataDirectory(actualDataDir, dataDir))) {

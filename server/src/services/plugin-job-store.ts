@@ -35,6 +35,7 @@ import type { Db } from "@paperclipai/db";
 import { plugins, pluginJobs, pluginJobRuns } from "@paperclipai/db";
 import type {
   PluginJobDeclaration,
+  PluginJobScope,
   PluginJobRunStatus,
   PluginJobRunTrigger,
   PluginJobRecord,
@@ -62,6 +63,8 @@ export interface CreateJobRunInput {
   pluginId: string;
   /** What triggered this run. */
   trigger: PluginJobRunTrigger;
+  /** Company scope of this run; omit or `null` for an instance-level run. */
+  companyId?: string | null;
 }
 
 /**
@@ -356,12 +359,34 @@ export function pluginJobStore(db: Db) {
         .values({
           jobId: input.jobId,
           pluginId: input.pluginId,
+          companyId: input.companyId ?? null,
           trigger: input.trigger,
           status: "queued",
         })
         .returning();
 
       return rows[0]!;
+    },
+
+    /**
+     * Resolve the declared execution scope of a job from the plugin's stored
+     * manifest. Jobs that do not declare a scope (or whose plugin or
+     * declaration cannot be found) are treated as `"instance"`, which keeps
+     * the single-run behavior that existed before scopes were declared.
+     *
+     * @param pluginId - UUID of the owning plugin
+     * @param jobKey - Job key from the manifest
+     */
+    async getJobDeclarationScope(
+      pluginId: string,
+      jobKey: string,
+    ): Promise<PluginJobScope> {
+      const rows = await db
+        .select({ manifestJson: plugins.manifestJson })
+        .from(plugins)
+        .where(eq(plugins.id, pluginId));
+      const declaration = rows[0]?.manifestJson?.jobs?.find((job) => job.jobKey === jobKey);
+      return declaration?.scope === "company" ? "company" : "instance";
     },
 
     /**

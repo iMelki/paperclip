@@ -13,6 +13,7 @@ import {
   appendStderrExcerpt,
   createPluginWorkerHandle,
   formatWorkerFailureMessage,
+  getTimedOutWorkerSettled,
   resolveRpcCallTimeoutMs,
 } from "../services/plugin-worker-manager.js";
 
@@ -518,7 +519,7 @@ describe("plugin job company context", () => {
     },
   );
 
-  it.each([{ companyIds: [] }, { companyIds: ["company-a", "company-b"] }])(
+  it.each([{ companyIds: [] }])(
     "does not select a company from $companyIds", async ({ companyIds }) => {
       const { handle, configGet } = makeJobHandle(companyIds);
       try {
@@ -533,6 +534,91 @@ describe("plugin job company context", () => {
       }
     },
   );
+
+  it.each(["schedule", "manual", "retry"] as const)(
+    "runs an instance-scoped %s job once, unscoped, when several companies are configured",
+    async (trigger) => {
+      // Fan-out for company-scoped jobs belongs to the job scheduler, which
+      // creates a run record per company. The worker handle must not multiply
+      // an instance job: one call is one execution.
+      const { handle, configGet, configCall } = makeJobHandle(["company-b", "company-a"]);
+      try {
+        await handle.start();
+        await expect(handle.call("runJob", jobProbe(trigger))).rejects.toMatchObject({
+          code: PLUGIN_RPC_ERROR_CODES.INVOCATION_SCOPE_DENIED,
+          message: expect.stringContaining("company context is required"),
+        });
+        expect(configCall).toHaveBeenCalledTimes(1);
+        expect(configGet).not.toHaveBeenCalled();
+      } finally {
+        await handle.stop().catch(() => undefined);
+      }
+    },
+  );
+
+  it("reports the configured company set sorted for the scheduler's per-company fan-out", () => {
+    const { handle } = makeJobHandle(["company-b", " company-a ", ""]);
+    expect(handle.getProactiveCompanyScopes()).toEqual(["company-a", "company-b"]);
+  });
+
+  it("lets a caller wait for a timed-out job handler to actually finish in the worker", async () => {
+    const { handle } = makeJobHandle(["company-a", "company-b"]);
+    try {
+      await handle.start();
+      const startedAt = Date.now();
+      const err = await handle
+        .call("runJob", { ...jobProbe("schedule", { mode: "slow", slowDelayMs: 400 }), companyId: "company-a" } as HostToWorkerMethods["runJob"][0], 50)
+        .catch((error: unknown) => error);
+      expect(err).toMatchObject({ code: PLUGIN_RPC_ERROR_CODES.TIMEOUT });
+      const workerSettled = getTimedOutWorkerSettled(err);
+      expect(workerSettled).toBeInstanceOf(Promise);
+      let finished = false;
+      void workerSettled!.then(() => {
+        finished = true;
+      });
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      expect(finished).toBe(false);
+      await workerSettled;
+      expect(Date.now() - startedAt).toBeGreaterThanOrEqual(380);
+    } finally {
+      await handle.stop().catch(() => undefined);
+    }
+  });
+
+  it("settles a timed-out job handler's wait when the worker stops", async () => {
+    const { handle } = makeJobHandle(["company-a"]);
+    await handle.start();
+    const err = await handle
+      .call("runJob", jobProbe("schedule", { mode: "slow", slowDelayMs: 60_000 }), 50)
+      .catch((error: unknown) => error);
+    const workerSettled = getTimedOutWorkerSettled(err);
+    expect(workerSettled).toBeInstanceOf(Promise);
+    await handle.stop().catch(() => undefined);
+    await expect(workerSettled).resolves.toBeUndefined();
+  });
+
+  it("returns no worker-settled wait for errors that are not timeouts", () => {
+    expect(getTimedOutWorkerSettled(new Error("boom"))).toBeNull();
+    expect(getTimedOutWorkerSettled(undefined)).toBeNull();
+  });
+
+  it("scopes a job run to the company the scheduler names", async () => {
+    const { handle, configGet } = makeJobHandle(["company-a", "company-b"]);
+    try {
+      await handle.start();
+      await expect(handle.call("runJob", {
+        ...jobProbe("schedule"),
+        companyId: "company-b",
+      } as HostToWorkerMethods["runJob"][0])).resolves.toEqual({ companyId: "company-b" });
+      expect(configGet).toHaveBeenCalledTimes(1);
+      expect(configGet).toHaveBeenCalledWith(
+        { companyId: "company-b" },
+        { invocationScope: { companyId: "company-b" } },
+      );
+    } finally {
+      await handle.stop().catch(() => undefined);
+    }
+  });
 
   it.each(["omit", "unknown"])("denies a job config read with an %s invocation id", async (mode) => {
     const { handle, configGet } = makeJobHandle(["company-a"]);

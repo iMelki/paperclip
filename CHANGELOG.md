@@ -1,10 +1,52 @@
 # Changelog
 
+- **[#162]** The patched acpx 0.12.0 client now advertises AIR `sessionFailure`
+  support and fails error-severity typed terminal turns even when the agent
+  returns `end_turn`. A record with no severity counts as an error, as the AIR
+  contract defines. Only an explicit warning stays successful. Per-turn callbacks receive the
+  complete title and details for later diagnostic handling. The current
+  codex-acp 1.1.14 ignores this capability; its existing behavior is unchanged.
+  A warning or incident that an agent sends on `session_info_update` is shown as
+  status text (its title, else the category) instead of the generic "session
+  updated". The failed run result records the typed category as
+  `resultJson.sessionFailureCategory`; mapping it to quota or retry handling is
+  left to the recovery changes.
+  Prompt-response usage is recorded once per turn, including failed turns.
+  Refresh the lockfile patch hash in a separate dependency pull request.
+
 - Preserve historical browser proof variants in a verified private archive and dated index without replacing current gauntlet images or receipts.
 
 All notable changes to this repository should be recorded here.
 
 ## Unreleased
+
+- **Fix:** a second embedded PostgreSQL start on the same data directory no
+  longer moves the first start's live `postmaster.pid` aside. The lock is
+  verified again just before `start()`. A live owner is reused, an owner that
+  cannot be verified makes startup refuse, and only a lock that is still stale
+  is moved aside.
+
+- Embedded PostgreSQL process discovery reads `-c data_directory=<path>` and
+  `--data_directory=<path>` as the effective data directory, ahead of `-D`. A
+  readable working directory of a server now decides ownership first. A `-D`
+  that names another cluster no longer proves that the server stores a
+  different one, because a configuration file or an include can replace it; such
+  a server is "unknown", and startup refuses instead of moving the lock aside.
+  A lock is moved aside only if it is the file that was examined: the file is
+  verified through a hard link before anything is moved, an unknown identity
+  fails closed, and a file that replaces it in the last instant is put back
+  without overwriting a newer file. A start lock beside the data directory keeps
+  two Paperclip starts apart. It is keyed on the physical path, it is never moved
+  or removed automatically (a dead owner is refused with a manual step), a
+  `postmaster.pid` is moved aside only while that start lock is held, and a start
+  refuses (instead of continuing unserialised) when the lock cannot be created or
+  written. A refusal names every server whose ownership could
+  not be proven and the safe manual step.
+
+- Embedded PostgreSQL process discovery reads only an uppercase `-D` as the
+  data directory option. PostgreSQL's lowercase `-d <debug level>` no longer
+  replaces it, so a server that is started with `-D <dir> -d 5` is identified
+  by its `-D` value.
 
 - Windows embedded PostgreSQL now writes its server log outside the data
   directory, in the same log directory as the server log (`<instance>/logs/postgres.log`

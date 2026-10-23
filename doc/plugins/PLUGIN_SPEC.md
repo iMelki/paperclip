@@ -1017,6 +1017,10 @@ Job rules:
 4. Every job run is recorded in Postgres.
 5. Failed jobs are retryable.
 6. For recurring business workflows that should create visible Paperclip work, prefer managed routines and managed resources over jobs. Jobs remain useful for private plugin-runtime maintenance tasks.
+7. A job may declare `scope: "company" | "instance"`. Undeclared jobs are `"instance"`.
+   - `"instance"` jobs run once per trigger, with one run record. They get a company scope only when exactly one company has configured the plugin.
+   - `"company"` jobs run once per company that has configured the plugin, sequentially in sorted company order. Each company run has its own run record (with that `companyId`), its own `runId`, `job.companyId`, and that company's invocation scope. With no configured company the job runs once unscoped.
+   - A manual trigger of a `"company"` job may name one configured `companyId` to run or retry only that company.
 
 ## 18. Webhooks
 

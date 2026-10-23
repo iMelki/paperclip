@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -13,20 +13,26 @@ function clusterDir(prefix: string): string {
 
 import {
   EMBEDDED_POSTGRES_LOCK_REFUSAL_EXIT_CODE,
+  acquireEmbeddedStartLock,
   EmbeddedPostgresLockRefusal,
   commandReferencesPath,
   listPostgresProcessesForDataDir,
   moveStaleLockAside,
+  readLockIdentity,
   scanPsOutputForDataDir,
   joinPsColumns,
   scanWindowsPostgresRows,
-  readRunningEmbeddedPostgres as readRunning,
+  readRunningEmbeddedPostgres as readRunningReal,
   type PostgresProcess,
 } from "../embedded-postgres-reuse.js";
 
 const { probe, warn } = vi.hoisted(() => ({ probe: vi.fn(), warn: vi.fn() }));
 vi.mock("@paperclipai/db", () => ({ getPostgresDataDirectory: probe }));
 vi.mock("../middleware/logger.js", () => ({ logger: { warn } }));
+
+// A lock is moved aside only while the start lock is held, so tests act as a caller that holds it.
+const readRunning: typeof readRunningReal = (dataDir, port, adminUrlFor, options = {}) =>
+  readRunningReal(dataDir, port, adminUrlFor, { startLockHeld: true, ...options });
 
 // The caller owns the embedded login; the helper must not hard-code one.
 const adminUrl = (port: number) => `postgres://configured-user:configured-secret@127.0.0.1:${port}/postgres`;
@@ -129,12 +135,14 @@ describe("embedded PostgreSQL reuse identity", () => {
       },
     );
 
-    it("moves an unreadable lock aside when nothing owns the directory", async () => {
-      mkdirSync(pidFile); // exists but cannot be read as a file
+    it("refuses and keeps an unreadable lock that cannot be taken hold of", async () => {
+      mkdirSync(pidFile); // exists but is not a file: it cannot be verified or linked
       probe.mockRejectedValue(new Error("connection refused"));
-      expect(await readRunningEmbeddedPostgres(dataDir, 55432)).toBeNull();
-      expect(existsSync(pidFile)).toBe(false);
-      expect(asideFiles()).toHaveLength(1);
+      const error = await readRunningEmbeddedPostgres(dataDir, 55432).catch((e) => e);
+      expect(error).toBeInstanceOf(EmbeddedPostgresLockRefusal);
+      expect(error.exitCode).toBe(EMBEDDED_POSTGRES_LOCK_REFUSAL_EXIT_CODE);
+      expect(existsSync(pidFile)).toBe(true);
+      expect(asideFiles()).toHaveLength(0);
     });
 
       it("keeps the archive out of a cluster directory that was never initialised", async () => {
@@ -183,6 +191,134 @@ describe("embedded PostgreSQL reuse identity", () => {
       expect(error).toBeInstanceOf(EmbeddedPostgresLockRefusal);
       expect(error.message).toContain("process list could not be read");
       expect(existsSync(pidFile)).toBe(true);
+    });
+
+    describe("when ownership cannot be proven", () => {
+      const withPlatform = async (platform: string, run: () => Promise<void>) => {
+        const original = Object.getOwnPropertyDescriptor(process, "platform") as PropertyDescriptor;
+        Object.defineProperty(process, "platform", { value: platform });
+        try {
+          await run();
+        } finally {
+          Object.defineProperty(process, "platform", original);
+        }
+      };
+      const unrelatedRows = () => [
+        { ProcessId: 5150, CommandLine: '"C:\\Program Files\\PostgreSQL\\16\\bin\\postgres.exe"' },
+        { ProcessId: 5151, CommandLine: `postgres.exe -D ${clusterDir("Other-PG-")}` },
+      ];
+      const scanRows = (rows: ReturnType<typeof unrelatedRows>) => (dir: string, undecided?: PostgresProcess[]) =>
+        scanWindowsPostgresRows(rows, [dir], dir, undecided);
+
+      it("names every blocking process and its command line, and the safe manual step, on win32", async () => {
+        await withPlatform("win32", async () => {
+          garbled();
+          probe.mockRejectedValue(new Error("connection refused"));
+          const before = readFileSync(pidFile, "utf8");
+          const rows = unrelatedRows();
+          const error = await readRunning(dataDir, 55432, adminUrl, {
+            readProcessName: async () => null,
+            listPostgresProcesses: scanRows(rows),
+          }).catch((e) => e);
+          expect(error).toBeInstanceOf(EmbeddedPostgresLockRefusal);
+          expect(error.exitCode).toBe(EMBEDDED_POSTGRES_LOCK_REFUSAL_EXIT_CODE);
+          expect(error.message).toContain("could not be proven");
+          for (const row of rows) {
+            expect(error.message).toContain(`process ${row.ProcessId}`);
+            expect(error.message).toContain(row.CommandLine);
+          }
+          expect(error.message).toContain("those servers");
+          expect(error.message).toContain(`move ${pidFile} aside by hand after confirming no Paperclip instance is running`);
+          expect(error.message).toContain("Do not delete any data");
+          expect(error.message).not.toMatch(/\b(rm|del|delete the)\b/i);
+          expect(readFileSync(pidFile, "utf8")).toBe(before);
+          expect(asideFiles()).toHaveLength(0);
+        });
+      });
+
+      it("names the one blocking process with its stop command on Unix", async () => {
+        garbled();
+        probe.mockRejectedValue(new Error("connection refused"));
+        const out = "901\tpostgres\t/usr/bin/postgres -D /elsewhere -c config_file=/etc/pg.conf\n";
+        const error = await readRunning(dataDir, 55432, adminUrl, {
+          readProcessName: async () => null,
+          listPostgresProcesses: (dir, undecided) =>
+            scanPsOutputForDataDir(out, [dir], dir, () => { throw new Error("EACCES"); }, undecided),
+        }).catch((e) => e);
+        expect(error.message).toContain("could not be proven for PostgreSQL process 901 (/usr/bin/postgres -D /elsewhere");
+        expect(error.message).toContain("that server");
+        expect(error.message).toMatch(/`(kill|taskkill \/PID) 901`/);
+        expect(error.message).toContain(`move ${pidFile} aside by hand`);
+      });
+
+      it("never scans processes, and starts normally, on win32 when there is no lock", async () => {
+        await withPlatform("win32", async () => {
+          rmSync(pidFile, { force: true });
+          const listPostgresProcesses = vi.fn(scanRows(unrelatedRows()));
+          expect(await readRunning(dataDir, 55432, adminUrl, { listPostgresProcesses })).toBeNull();
+          expect(listPostgresProcesses).not.toHaveBeenCalled();
+          expect(probe).not.toHaveBeenCalled();
+        });
+      });
+
+      it("never scans processes, and starts normally, on win32 for a dead-PID lock", async () => {
+        await withPlatform("win32", async () => {
+          writePid("424242");
+          vi.mocked(process.kill).mockImplementation(() => {
+            throw Object.assign(new Error("no such process"), { code: "ESRCH" });
+          });
+          const listPostgresProcesses = vi.fn(scanRows(unrelatedRows()));
+          expect(await readRunning(dataDir, 55432, adminUrl, { listPostgresProcesses })).toBeNull();
+          expect(listPostgresProcesses).not.toHaveBeenCalled();
+        });
+      });
+
+      it("never scans processes on win32 when the identity probe proves the owner", async () => {
+        await withPlatform("win32", async () => {
+          writePid(String(process.pid));
+          probe.mockResolvedValue(dataDir);
+          const listPostgresProcesses = vi.fn(scanRows(unrelatedRows()));
+          expect(await readRunning(dataDir, 55432, adminUrl, { listPostgresProcesses })).toEqual({ pid: process.pid, port: 55432 });
+          expect(listPostgresProcesses).not.toHaveBeenCalled();
+        });
+      });
+    });
+
+    describe("a PostgreSQL whose -D names another cluster", () => {
+      const other = () => clusterDir("other-pg-");
+      const unreadableCwd = () => {
+        throw new Error("EACCES");
+      };
+
+      it("refuses and preserves the lock when its working directory cannot be read", async () => {
+        // An include, include_dir or `-c config_file=` can set the real data directory to this one.
+        garbled();
+        probe.mockRejectedValue(new Error("connection refused"));
+        const before = readFileSync(pidFile, "utf8");
+        const out = `901\tpostgres\t/usr/bin/postgres -D ${other()} -c config_file=/etc/external/pg.conf\n`;
+        const owners = await scanPsOutputForDataDir(out, [dataDir], dataDir, unreadableCwd);
+        expect(owners).toBeNull();
+        const error = await readRunningEmbeddedPostgres(dataDir, 55432, null, owners).catch((e) => e);
+        expect(error).toBeInstanceOf(EmbeddedPostgresLockRefusal);
+        expect(error.exitCode).toBe(EMBEDDED_POSTGRES_LOCK_REFUSAL_EXIT_CODE);
+        expect(readFileSync(pidFile, "utf8")).toBe(before);
+        expect(asideFiles()).toHaveLength(0);
+        expect(readdirSync(dirname(dataDir)).filter((n) => n.startsWith(`${basename(dataDir)}.postmaster.pid`))).toEqual([]);
+      });
+
+      it("refuses and names the process when its working directory is this data directory", async () => {
+        garbled();
+        probe.mockRejectedValue(new Error("connection refused"));
+        const before = readFileSync(pidFile, "utf8");
+        const out = `901\tpostgres\t/usr/bin/postgres -D ${other()} -c config_file=/etc/external/pg.conf\n`;
+        const owners = await scanPsOutputForDataDir(out, [dataDir], dataDir, () => dataDir);
+        expect(owners?.map((owner) => owner.pid)).toEqual([901]);
+        const error = await readRunningEmbeddedPostgres(dataDir, 55432, null, owners).catch((e) => e);
+        expect(error).toBeInstanceOf(EmbeddedPostgresLockRefusal);
+        expect(error.message).toContain("process 901");
+        expect(readFileSync(pidFile, "utf8")).toBe(before);
+        expect(asideFiles()).toHaveLength(0);
+      });
     });
   });
 
@@ -372,16 +508,183 @@ describe("embedded PostgreSQL reuse identity", () => {
   });
 });
 
+describe("a lock replaced after it was examined", () => {
+  let dataDir: string;
+  let pidFile: string;
+  const stale = (dir: string) => `424242\n${dir}\n1700000000\n55432\n`;
+  const live = (dir: string) => `434343\n${dir}\n1700000001\n55432\nstarted-later\n`;
+  const names = () => readdirSync(dataDir).filter((name) => name.startsWith("postmaster.pid."));
+  const contentsOf = (list: string[]) => list.map((name) => readFileSync(join(dataDir, name), "utf8"));
+  const replaceLock = () => {
+    rmSync(pidFile);
+    writeFileSync(pidFile, live(dataDir));
+  };
+  const thirdFile = () => {
+    rmSync(pidFile, { force: true });
+    writeFileSync(pidFile, "third-file\n");
+  };
+  // Nothing but the examined stale lock may ever be archived: a live lock is never archived.
+  const expectOnlyStaleArchived = (examined: string = stale(dataDir)) => {
+    for (const text of contentsOf(names().filter((name) => name.includes(".stale-") && !name.endsWith(".moving")))) {
+      expect(text).toBe(examined);
+    }
+  };
+
+  beforeEach(() => {
+    vi.resetAllMocks();
+    dataDir = clusterDir("replaced-lock-");
+    pidFile = join(dataDir, "postmaster.pid");
+    writeFileSync(pidFile, stale(dataDir));
+    probe.mockRejectedValue(new Error("connection refused"));
+  });
+
+  afterEach(() => vi.restoreAllMocks());
+
+  it("moves the examined lock aside when nothing changed", () => {
+    const aside = moveStaleLockAside(pidFile, readLockIdentity(pidFile));
+    expect(existsSync(pidFile)).toBe(false);
+    expect(aside && readFileSync(aside, "utf8")).toBe(stale(dataDir));
+    expect(names()).toEqual([basename(aside as string)]);
+  });
+
+  it("fails closed when the identity of the examined lock is unknown", () => {
+    for (const unknown of [null, undefined]) {
+      const error = (() => {
+        try {
+          moveStaleLockAside(pidFile, unknown);
+        } catch (e) {
+          return e as EmbeddedPostgresLockRefusal;
+        }
+        return null;
+      })();
+      expect(error).toBeInstanceOf(EmbeddedPostgresLockRefusal);
+      expect(error?.exitCode).toBe(EMBEDDED_POSTGRES_LOCK_REFUSAL_EXIT_CODE);
+      expect(readFileSync(pidFile, "utf8")).toBe(stale(dataDir));
+      expect(names()).toEqual([]);
+    }
+  });
+
+  it("returns null when the lock is already gone", () => {
+    const examined = readLockIdentity(pidFile);
+    rmSync(pidFile);
+    expect(moveStaleLockAside(pidFile, examined)).toBeNull();
+  });
+
+  it("never takes a replacement out of its path when it differs before the move", () => {
+    const examined = readLockIdentity(pidFile);
+    replaceLock();
+    const inode = readLockIdentity(pidFile)?.ino;
+    expect(() => moveStaleLockAside(pidFile, examined)).toThrow("was replaced while it was being checked");
+    // The replacement stayed in place the whole time: same file, no archive, no leftover name.
+    expect(readFileSync(pidFile, "utf8")).toBe(live(dataDir));
+    expect(readLockIdentity(pidFile)?.ino).toBe(inode);
+    expect(names()).toEqual([]);
+  });
+
+  it("detects a lock that was rewritten in place", () => {
+    const examined = readLockIdentity(pidFile);
+    writeFileSync(pidFile, live(dataDir));
+    expect(() => moveStaleLockAside(pidFile, examined)).toThrow("was replaced while it was being checked");
+    expect(readFileSync(pidFile, "utf8")).toBe(live(dataDir));
+    expect(names()).toEqual([]);
+  });
+
+  it("puts back a replacement that appears in the instant the lock is moved", () => {
+    const examined = readLockIdentity(pidFile);
+    expect(() => moveStaleLockAside(pidFile, examined, { afterVerify: replaceLock })).toThrow(
+      "was replaced in the instant it was moved. The replacement was put back.",
+    );
+    expect(readFileSync(pidFile, "utf8")).toBe(live(dataDir));
+    expect(names().some((name) => name.endsWith(".moving"))).toBe(false);
+    expectOnlyStaleArchived();
+  });
+
+  it("keeps a third file that takes the name while a replacement is being put back", () => {
+    const examined = readLockIdentity(pidFile);
+    let thrown: Error | null = null;
+    try {
+      moveStaleLockAside(pidFile, examined, { afterVerify: replaceLock, beforeRestore: thirdFile });
+    } catch (error) {
+      thrown = error as Error;
+    }
+    expect(thrown).toBeInstanceOf(EmbeddedPostgresLockRefusal);
+    expect(thrown?.message).toContain("the name was taken again before it could be put back");
+    // The third file is untouched, and the replacement is preserved, named in the refusal, not archived as stale.
+    expect(readFileSync(pidFile, "utf8")).toBe("third-file\n");
+    const kept = names().filter((name) => name.endsWith(".moving"));
+    expect(kept).toHaveLength(1);
+    expect(thrown?.message).toContain(kept[0]);
+    expect(readFileSync(join(dataDir, kept[0]), "utf8")).toBe(live(dataDir));
+    expectOnlyStaleArchived();
+  });
+
+  it("cannot move a lock it cannot take hold of, so a directory in its place is refused", () => {
+    rmSync(pidFile);
+    mkdirSync(pidFile);
+    const examined = readLockIdentity(pidFile);
+    expect(() => moveStaleLockAside(pidFile, examined)).toThrow(EmbeddedPostgresLockRefusal);
+    expect(existsSync(pidFile)).toBe(true);
+    expect(names()).toEqual([]);
+  });
+
+  describe.each([
+    [
+      "a recycled non-PostgreSQL PID",
+      () => vi.spyOn(process, "kill").mockReturnValue(true),
+      (hooks: { afterVerify?: () => void; beforeRestore?: () => void }) => ({
+        readProcessName: async () => "node",
+        listPostgresProcesses: async () => [],
+        lockMoveHooks: hooks,
+      }),
+    ],
+    [
+      "an unreadable-owner lock",
+      () => writeFileSync(pidFile, "1oops"),
+      (hooks: { afterVerify?: () => void; beforeRestore?: () => void }) => ({
+        readProcessName: async () => null,
+        listPostgresProcesses: async () => [],
+        lockMoveHooks: hooks,
+      }),
+    ],
+  ])("the helper rename for %s", (_name, arrange, optionsFor) => {
+    it("keeps a lock that replaces the examined one before the move, with no gap", async () => {
+      arrange();
+      const examined = readFileSync(pidFile, "utf8");
+      const hooks = { afterVerify: replaceLock };
+      const result = await readRunning(dataDir, 55432, adminUrl, optionsFor(hooks)).catch((error) => error);
+      expect(result).toBeInstanceOf(EmbeddedPostgresLockRefusal);
+      expect(result.message).toContain("was replaced in the instant it was moved");
+      expect(readFileSync(pidFile, "utf8")).toBe(live(dataDir));
+      expect(names().some((name) => name.endsWith(".moving"))).toBe(false);
+      expectOnlyStaleArchived(examined);
+    });
+
+    it("keeps a third file that takes the name during the restore", async () => {
+      arrange();
+      const examined = readFileSync(pidFile, "utf8");
+      const hooks = { afterVerify: replaceLock, beforeRestore: thirdFile };
+      const result = await readRunning(dataDir, 55432, adminUrl, optionsFor(hooks)).catch((error) => error);
+      expect(result).toBeInstanceOf(EmbeddedPostgresLockRefusal);
+      expect(result.exitCode).toBe(EMBEDDED_POSTGRES_LOCK_REFUSAL_EXIT_CODE);
+      expect(readFileSync(pidFile, "utf8")).toBe("third-file\n");
+      const kept = names().filter((name) => name.endsWith(".moving"));
+      expect(kept).toHaveLength(1);
+      expect(readFileSync(join(dataDir, kept[0]), "utf8")).toBe(live(dataDir));
+      expectOnlyStaleArchived(examined);
+    });
+  });
+});
+
 describe("moveStaleLockAside", () => {
   it("renames the lock next to itself and keeps its contents", () => {
     const dir = mkdtempSync(join(tmpdir(), "embedded-pg-aside-"));
     writeFileSync(join(dir, "PG_VERSION"), "16\n");
     const lock = join(dir, "postmaster.pid");
     writeFileSync(lock, "4242\n");
-    const aside = moveStaleLockAside(lock);
+    const aside = moveStaleLockAside(lock, readLockIdentity(lock));
     expect(existsSync(lock)).toBe(false);
-    expect(aside.startsWith(`${lock}.stale-`)).toBe(true);
-    expect(readFileSync(aside, "utf8")).toBe("4242\n");
+    expect(aside?.startsWith(`${lock}.stale-`)).toBe(true);
+    expect(readFileSync(aside as string, "utf8")).toBe("4242\n");
   });
 
   it("never replaces an earlier archive that has the same timestamp", () => {
@@ -392,9 +695,9 @@ describe("moveStaleLockAside", () => {
       writeFileSync(join(dir, "PG_VERSION"), "16\n");
       const lock = join(dir, "postmaster.pid");
       writeFileSync(lock, "first\n");
-      const first = moveStaleLockAside(lock);
+      const first = moveStaleLockAside(lock, readLockIdentity(lock)) as string;
       writeFileSync(lock, "second\n");
-      const second = moveStaleLockAside(lock);
+      const second = moveStaleLockAside(lock, readLockIdentity(lock)) as string;
       expect(second).not.toBe(first);
       expect(readFileSync(first, "utf8")).toBe("first\n");
       expect(readFileSync(second, "utf8")).toBe("second\n");
@@ -405,16 +708,194 @@ describe("moveStaleLockAside", () => {
 
   it("refuses with the lock exit code when the lock cannot be moved", () => {
     const dir = mkdtempSync(join(tmpdir(), "embedded-pg-aside-"));
-    const missing = join(dir, "no-such-dir", "postmaster.pid");
+    const notADirectory = join(dir, "a-file");
+    writeFileSync(notADirectory, "x");
+    const unreachable = join(notADirectory, "postmaster.pid"); // ENOTDIR when the lock is looked up
     let thrown: unknown;
     try {
-      moveStaleLockAside(missing);
+      moveStaleLockAside(unreachable, { dev: 1, ino: 1, size: 1, mtimeMs: 1 });
     } catch (error) {
       thrown = error;
     }
     expect(thrown).toBeInstanceOf(EmbeddedPostgresLockRefusal);
     expect((thrown as EmbeddedPostgresLockRefusal).exitCode).toBe(EMBEDDED_POSTGRES_LOCK_REFUSAL_EXIT_CODE);
-    expect((thrown as Error).message).toContain("could not be moved aside");
+  });
+});
+
+describe("acquireEmbeddedStartLock", () => {
+  let dataDir: string;
+  let lockPath: string;
+  beforeEach(() => {
+    vi.resetAllMocks();
+    dataDir = join(mkdtempSync(join(tmpdir(), "start-lock-")), "db");
+    mkdirSync(dataDir);
+    lockPath = `${dataDir}.paperclip-start.lock`;
+  });
+  afterEach(() => vi.restoreAllMocks());
+
+  it("is exclusive: a second start waits for the release and then proceeds", async () => {
+    const release = await acquireEmbeddedStartLock(dataDir);
+    expect(existsSync(lockPath)).toBe(true);
+    expect(existsSync(join(dataDir, `${basename(lockPath)}`))).toBe(false); // outside the data directory
+    let second = false;
+    const waiting = acquireEmbeddedStartLock(dataDir, { pollMs: 10, timeoutMs: 5000 }).then((r) => {
+      second = true;
+      return r;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    expect(second).toBe(false);
+    release();
+    const releaseSecond = await waiting;
+    expect(second).toBe(true);
+    releaseSecond();
+    expect(existsSync(lockPath)).toBe(false);
+  });
+
+  it("refuses after the timeout while a live owner holds it, and keeps the lock", async () => {
+    const release = await acquireEmbeddedStartLock(dataDir);
+    const held = readFileSync(lockPath, "utf8");
+    const error = await acquireEmbeddedStartLock(dataDir, { pollMs: 5, timeoutMs: 40 }).catch((e) => e);
+    expect(error).toBeInstanceOf(EmbeddedPostgresLockRefusal);
+    expect(error.message).toContain(lockPath);
+    expect(error.message).toContain("Do not delete any data");
+    expect(readFileSync(lockPath, "utf8")).toBe(held);
+    release();
+  });
+
+  it("refuses when the owner cannot be read", async () => {
+    writeFileSync(lockPath, "not json");
+    const error = await acquireEmbeddedStartLock(dataDir, { pollMs: 5, timeoutMs: 30 }).catch((e) => e);
+    expect(error).toBeInstanceOf(EmbeddedPostgresLockRefusal);
+    expect(readFileSync(lockPath, "utf8")).toBe("not json");
+  });
+
+  const deadOwnerKill = () =>
+    vi.spyOn(process, "kill").mockImplementation((pid) => {
+      if (pid === 424242) throw Object.assign(new Error("no such process"), { code: "ESRCH" });
+      return true;
+    });
+
+  it("never moves or removes a lock whose owner is gone: it refuses with a manual step", async () => {
+    const dead = JSON.stringify({ pid: 424242, token: "dead" });
+    writeFileSync(lockPath, dead);
+    const kill = deadOwnerKill();
+    const error = await acquireEmbeddedStartLock(dataDir, { pollMs: 5, timeoutMs: 1000 }).catch((e) => e);
+    expect(kill).toHaveBeenCalledWith(424242, 0);
+    expect(error).toBeInstanceOf(EmbeddedPostgresLockRefusal);
+    expect(error.exitCode).toBe(EMBEDDED_POSTGRES_LOCK_REFUSAL_EXIT_CODE);
+    expect(error.message).toContain(lockPath);
+    expect(error.message).toContain("process 424242, which is gone");
+    expect(error.message).toContain("by hand");
+    expect(error.message).toContain("Do not delete any data");
+    expect(readFileSync(lockPath, "utf8")).toBe(dead);
+    expect(readdirSync(dirname(dataDir)).filter((name) => name.includes(".stale-") || name.endsWith(".takeover"))).toEqual([]);
+  });
+
+  it("two observers of a dead lock and a third starter all leave it untouched", async () => {
+    const dead = JSON.stringify({ pid: 424242, token: "dead" });
+    writeFileSync(lockPath, dead);
+    deadOwnerKill();
+    const results = await Promise.all([1, 2, 3].map(() => acquireEmbeddedStartLock(dataDir, { pollMs: 5, timeoutMs: 100 }).catch((e) => e)));
+    for (const result of results) expect(result).toBeInstanceOf(EmbeddedPostgresLockRefusal);
+    expect(readFileSync(lockPath, "utf8")).toBe(dead);
+    expect(readdirSync(dirname(dataDir)).filter((name) => name.includes(".stale-"))).toEqual([]);
+  });
+
+  it("an operator who moved the dead lock aside lets exactly one of several waiting starters in at a time", async () => {
+    const live = await acquireEmbeddedStartLock(dataDir);
+    let holders = 0;
+    let maxHolders = 0;
+    const order: number[] = [];
+    const starters = [1, 2, 3].map((id) =>
+      acquireEmbeddedStartLock(dataDir, { pollMs: 5, timeoutMs: 5000 }).then(async (release) => {
+        holders += 1;
+        maxHolders = Math.max(maxHolders, holders);
+        order.push(id);
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        holders -= 1;
+        release();
+      }),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    expect(order).toEqual([]);
+    live();
+    await Promise.all(starters);
+    expect(order).toHaveLength(3);
+    expect(maxHolders).toBe(1);
+    expect(existsSync(lockPath)).toBe(false);
+  });
+
+  it("is keyed on the physical path, so a symlink to the data directory shares the lock", async () => {
+    const alias = join(dirname(dataDir), "alias-of-db");
+    symlinkSync(dataDir, alias, "dir");
+    const release = await acquireEmbeddedStartLock(dataDir);
+    const error = await acquireEmbeddedStartLock(alias, { pollMs: 5, timeoutMs: 40 }).catch((e) => e);
+    expect(error).toBeInstanceOf(EmbeddedPostgresLockRefusal);
+    expect(error.message).toContain(lockPath);
+    expect(readdirSync(dirname(dataDir)).filter((name) => name.endsWith(".paperclip-start.lock"))).toEqual([basename(lockPath)]);
+    release();
+  });
+
+  it("refuses, instead of starting unserialised, when the lock cannot be created", async () => {
+    const longName = join(dirname(dataDir), "d".repeat(250));
+    const error = await acquireEmbeddedStartLock(longName, { pollMs: 5, timeoutMs: 40 }).catch((e) => e);
+    expect(error).toBeInstanceOf(EmbeddedPostgresLockRefusal);
+    expect(error.exitCode).toBe(EMBEDDED_POSTGRES_LOCK_REFUSAL_EXIT_CODE);
+    expect(error.message).toContain("could not be created");
+  });
+
+  it.each(["EIO", "ENOSPC", "EACCES"])("refuses, removes the empty lock it created and never returns a no-op unlock when writing fails (%s)", async (code) => {
+    const error = await acquireEmbeddedStartLock(dataDir, {
+      pollMs: 5,
+      timeoutMs: 40,
+      writeOwner: () => {
+        throw Object.assign(new Error("write failed"), { code });
+      },
+    }).catch((e) => e);
+    expect(error).toBeInstanceOf(EmbeddedPostgresLockRefusal);
+    expect(error.exitCode).toBe(EMBEDDED_POSTGRES_LOCK_REFUSAL_EXIT_CODE);
+    expect(error.message).toContain(code);
+    expect(existsSync(lockPath)).toBe(false);
+    // A later start is not blocked by a leftover file.
+    const release = await acquireEmbeddedStartLock(dataDir);
+    release();
+  });
+
+  it("refuses when the physical location of the data directory cannot be established", async () => {
+    const file = join(dirname(dataDir), "not-a-directory");
+    writeFileSync(file, "x");
+    const error = await acquireEmbeddedStartLock(join(file, "db"), { pollMs: 5, timeoutMs: 40 }).catch((e) => e);
+    expect(error).toBeInstanceOf(EmbeddedPostgresLockRefusal);
+  });
+
+  it("creates the directory that will contain a data directory on a first start", async () => {
+    const fresh = join(dirname(dataDir), "fresh-parent", "db");
+    const release = await acquireEmbeddedStartLock(fresh);
+    expect(existsSync(`${fresh}.paperclip-start.lock`)).toBe(true);
+    release();
+    expect(existsSync(`${fresh}.paperclip-start.lock`)).toBe(false);
+  });
+
+  it("never takes over a lock whose owner cannot be signalled (EPERM), it waits and then refuses", async () => {
+    const held = JSON.stringify({ pid: 424242, token: "other-user" });
+    writeFileSync(lockPath, held);
+    const kill = vi.spyOn(process, "kill").mockImplementation(() => {
+      throw Object.assign(new Error("operation not permitted"), { code: "EPERM" });
+    });
+    const error = await acquireEmbeddedStartLock(dataDir, { pollMs: 5, timeoutMs: 40 }).catch((e) => e);
+    expect(kill).toHaveBeenCalledWith(424242, 0);
+    expect(error).toBeInstanceOf(EmbeddedPostgresLockRefusal);
+    expect(error.message).toContain("process 424242");
+    expect(readFileSync(lockPath, "utf8")).toBe(held);
+    expect(readdirSync(dirname(dataDir)).filter((name) => name.includes(".stale-"))).toEqual([]);
+  });
+
+  it("releases only its own lock", async () => {
+    const release = await acquireEmbeddedStartLock(dataDir);
+    rmSync(lockPath);
+    writeFileSync(lockPath, JSON.stringify({ pid: process.pid, token: "someone-else" }));
+    release();
+    expect(existsSync(lockPath)).toBe(true);
   });
 });
 
@@ -443,10 +924,33 @@ describe("scanPsOutputForDataDir", () => {
     expect(await scanPsOutputForDataDir(out, [dir], dir, unreadable)).toBeNull();
   });
 
-  it("is conclusive when the command names another existing data directory", async () => {
+  it("is inconclusive when only the command names another existing data directory", async () => {
+    // `data_directory` in a configuration file, or one it includes, can replace `-D`, so another
+    // cluster is never proof that this server stores a different one.
     const other = clusterDir("other-pg-");
     const out = `901\tpostgres\t/usr/bin/postgres -D ${other} -c config_file=/etc/pg.conf\n`;
-    expect(await scanPsOutputForDataDir(out, [dir], dir, unreadable)).toEqual([]);
+    expect(await scanPsOutputForDataDir(out, [dir], dir, unreadable)).toBeNull();
+  });
+
+  it("treats a readable working directory as authoritative over the command line", async () => {
+    const other = clusterDir("other-pg-");
+    const out = `901\tpostgres\t/usr/bin/postgres -D ${other}\n`;
+    expect(await scanPsOutputForDataDir(out, [dir], dir, () => other)).toEqual([]);
+    expect((await scanPsOutputForDataDir(out, [dir], dir, () => dir))?.map((p) => p.pid)).toEqual([901]);
+    // The server stores its cluster elsewhere although -D names this one.
+    const named = `902\tpostgres\t/usr/bin/postgres -D ${dir}\n`;
+    expect(await scanPsOutputForDataDir(named, [dir], dir, () => other)).toEqual([]);
+  });
+
+  it("finds the owner when -D is a real cluster, an include hides the data_directory override, and the working directory is the target", async () => {
+    const target = clusterDir("pg-target-");
+    const configCluster = clusterDir("pg-config-cluster-");
+    writeFileSync(join(configCluster, "postgresql.conf"), "include 'hidden.conf'\n");
+    writeFileSync(join(configCluster, "hidden.conf"), `data_directory = '${target}'\n`);
+    const out = `901\tpostgres\t/usr/bin/postgres -D ${configCluster}\n`;
+    expect((await scanPsOutputForDataDir(out, [target], target, () => target))?.map((p) => p.pid)).toEqual([901]);
+    // Without a readable working directory the command line cannot rule the server out.
+    expect(await scanPsOutputForDataDir(out, [target], target, unreadable)).toBeNull();
   });
 
   it("recognizes our data directory named through a symlink alias", async () => {
@@ -468,7 +972,8 @@ describe("scanPsOutputForDataDir", () => {
     mkdirSync(child);
     writeFileSync(join(child, "PG_VERSION"), "16\n");
     const out = `901\tpostgres\t/usr/bin/postgres -D ${child}\n`;
-    expect(await scanPsOutputForDataDir(out, [base], base, unreadable)).toEqual([]);
+    expect(await scanPsOutputForDataDir(out, [base], base, () => child)).toEqual([]);
+    expect(await scanPsOutputForDataDir(out, [base], base, unreadable)).toBeNull();
   });
 
   it("does not let a configuration-only -D settle ownership (data_directory overrides it)", async () => {
@@ -484,21 +989,86 @@ describe("scanPsOutputForDataDir", () => {
     const out = `901\tpostgres\t/usr/bin/postgres -D ${unrelated} -D ${real}\n`;
     expect((await scanPsOutputForDataDir(out, [real], real, unreadable))?.map((p) => p.pid)).toEqual([901]);
     const reversed = `902\tpostgres\t/usr/bin/postgres -D ${real} -D ${unrelated}\n`;
-    expect(await scanPsOutputForDataDir(reversed, [real], real, unreadable)).toEqual([]);
+    expect(await scanPsOutputForDataDir(reversed, [real], real, unreadable)).toBeNull();
+  });
+
+  it("does not read the lowercase -d debug level as a data directory", async () => {
+    const other = clusterDir("pg-debug-");
+    const out = `901\tpostgres\t/usr/bin/postgres -D ${other} -d 5\n`;
+    expect(await scanPsOutputForDataDir(out, [dir], dir, unreadable)).toBeNull();
+    const base = clusterDir("pg-debug-parent-");
+    const child = join(base, "backup");
+    mkdirSync(child);
+    writeFileSync(join(child, "PG_VERSION"), "16\n");
+    const descendant = `902\tpostgres\t/usr/bin/postgres -D ${child} -d 5\n`;
+    expect(await scanPsOutputForDataDir(descendant, [base], base, unreadable)).toBeNull();
+  });
+
+  describe("a data_directory setting overrides -D", () => {
+    // `-D` may name only the configuration directory of a server that stores this cluster elsewhere.
+    const settingForms = (target: string) =>
+      [
+        ["-c data_directory", `-c data_directory=${target}`],
+        ["--data_directory", `--data_directory=${target}`],
+      ] as const;
+
+    for (const debugLevel of ["", " -d 5"]) {
+      for (const [name] of settingForms("x")) {
+        it(`finds the owner when ${name} names the target and -D names another cluster${debugLevel ? " with a trailing -d 5" : ""}`, async () => {
+          const target = clusterDir("pg-target-");
+          const other = clusterDir("pg-config-dir-");
+          const setting = settingForms(target).find(([form]) => form === name)?.[1];
+          const out = `901\tpostgres\t/usr/bin/postgres -D ${other} ${setting}${debugLevel}\n`;
+          expect((await scanPsOutputForDataDir(out, [target], target, unreadable))?.map((p) => p.pid)).toEqual([901]);
+        });
+      }
+    }
+
+    it("lets the last data_directory setting win", async () => {
+      const target = clusterDir("pg-target-");
+      const other = clusterDir("pg-other-");
+      const toTarget = `901\tpostgres\tpostgres -D ${other} -c data_directory=${other} --data_directory=${target}\n`;
+      expect((await scanPsOutputForDataDir(toTarget, [target], target, unreadable))?.map((p) => p.pid)).toEqual([901]);
+      // The last setting names another directory: the command cannot show ownership.
+      const toOther = `902\tpostgres\tpostgres -D ${target} --data_directory=${target} -c data_directory=${other}\n`;
+      expect(await scanPsOutputForDataDir(toOther, [target], target, unreadable)).toBeNull();
+      expect(await scanPsOutputForDataDir(toOther, [target], target, () => other)).toEqual([]);
+    });
+
+    it("is not ownership when the setting names another directory", async () => {
+      const target = clusterDir("pg-target-");
+      const other = clusterDir("pg-other-");
+      const out = `901\tpostgres\tpostgres -D ${target} -c data_directory=${other}\n`;
+      expect(await scanPsOutputForDataDir(out, [target], target, unreadable)).toBeNull();
+      expect(await scanPsOutputForDataDir(out, [target], target, () => other)).toEqual([]);
+    });
+
+    it("finds the owner through the working directory when only the configuration file sets data_directory", async () => {
+      const target = clusterDir("pg-target-");
+      const configDir = clusterDir("pg-config-dir-");
+      writeFileSync(join(configDir, "postgresql.conf"), `# cluster elsewhere\ndata_directory = '${target}'\n`);
+      const out = `901\tpostgres\t/usr/bin/postgres -D ${configDir}\n`;
+      expect(await scanPsOutputForDataDir(out, [target], target, unreadable)).toBeNull();
+      expect((await scanPsOutputForDataDir(out, [target], target, () => target))?.map((p) => p.pid)).toEqual([901]);
+      expect(await scanPsOutputForDataDir(out, [target], target, () => "/elsewhere")).toEqual([]);
+    });
   });
 
   it("finds a server by command line or by working directory", async () => {
     const out = `901\tpostgres\tpostgres -D ${dir}\n902\tpostgres\t/usr/bin/postgres\n903\tpostgres\t/usr/bin/postgres\n`;
-    const cwd = (pid: number) => (pid === 902 ? dir : "/elsewhere");
+    const cwd = (pid: number) => {
+      if (pid === 901) throw new Error("ENOENT");
+      return pid === 902 ? dir : "/elsewhere";
+    };
     expect((await scanPsOutputForDataDir(out, [dir], dir, cwd))?.map((p) => p.pid)).toEqual([901, 902]);
   });
 
-  it("ignores the children of an unrelated PostgreSQL whose directory is conclusive", async () => {
+  it("ignores the children of an unrelated PostgreSQL whose directory is known", async () => {
     const other = clusterDir("other-pg-");
     const out =
       `901\tpostgres\t/usr/bin/postgres -D ${other}\n` +
       "902\tpostgres\tpostgres: checkpointer \n903\tpostgres\tpostgres: walwriter\n";
-    expect(await scanPsOutputForDataDir(out, [dir], dir, unreadable)).toEqual([]);
+    expect(await scanPsOutputForDataDir(out, [dir], dir, () => other)).toEqual([]);
   });
 
   it("still examines an executable path that contains spaces", async () => {
@@ -521,10 +1091,46 @@ describe("scanWindowsPostgresRows", () => {
     expect(await scanWindowsPostgresRows([{ ProcessId: 10, CommandLine: null }], [dir], dir)).toBeNull();
   });
 
-  it("is conclusive when -D names another existing directory", async () => {
+  it("is inconclusive when -D names another existing directory", async () => {
+    // A configuration file can replace `-D`, and Windows offers no working directory to check.
     const other = clusterDir("other-pg-");
     const rows = [{ ProcessId: 10, CommandLine: `postgres.exe -D ${other}` }];
-    expect(await scanWindowsPostgresRows(rows, [dir], dir)).toEqual([]);
+    expect(await scanWindowsPostgresRows(rows, [dir], dir)).toBeNull();
+  });
+
+  it("reads -D from the original command line, which win32 normalization lowercases", async () => {
+    const platform = Object.getOwnPropertyDescriptor(process, "platform") as PropertyDescriptor;
+    Object.defineProperty(process, "platform", { value: "win32" });
+    try {
+      const other = clusterDir("Other-PG-Mixed-");
+      const real = clusterDir("Real-PG-Mixed-");
+      expect(await scanWindowsPostgresRows([{ ProcessId: 10, CommandLine: `postgres.exe -D ${other}` }], [dir], dir)).toBeNull();
+      // The last -D still wins, and a trailing -d <debug level> does not replace it.
+      const last = [{ ProcessId: 11, CommandLine: `postgres.exe -D ${other} -D ${real} -d 5` }];
+      expect((await scanWindowsPostgresRows(last, [real], real))?.map((row) => row.pid)).toEqual([11]);
+    } finally {
+      Object.defineProperty(process, "platform", platform);
+    }
+  });
+
+  it("finds the owner when data_directory names the target and -D names another cluster", async () => {
+    const platform = Object.getOwnPropertyDescriptor(process, "platform") as PropertyDescriptor;
+    Object.defineProperty(process, "platform", { value: "win32" });
+    try {
+      const target = clusterDir("Target-PG-Mixed-");
+      const other = clusterDir("Config-PG-Mixed-");
+      const lines = [
+        `postgres.exe -D ${other} -c data_directory=${target}`,
+        `postgres.exe -D ${other} -c data_directory=${target} -d 5`,
+        `postgres.exe -D ${other} --data_directory=${target} -d 5`,
+      ];
+      for (const [index, CommandLine] of lines.entries()) {
+        const rows = [{ ProcessId: 20 + index, CommandLine }];
+        expect((await scanWindowsPostgresRows(rows, [target], target))?.map((row) => row.pid)).toEqual([20 + index]);
+      }
+    } finally {
+      Object.defineProperty(process, "platform", platform);
+    }
   });
 
   it("finds a server whose command line names the data directory", async () => {
@@ -532,13 +1138,13 @@ describe("scanWindowsPostgresRows", () => {
     expect((await scanWindowsPostgresRows(rows, [dir], dir))?.map((row) => row.pid)).toEqual([10]);
   });
 
-  it("ignores forked children of an unrelated postmaster", async () => {
-    const other = clusterDir("other-pg-");
+  it("ignores forked children of a postmaster", async () => {
     const rows = [
-      { ProcessId: 10, CommandLine: `postgres.exe -D ${other}` },
+      { ProcessId: 10, CommandLine: `postgres.exe -D ${dir}` },
       { ProcessId: 11, CommandLine: '"C:\\pg\\bin\\postgres.exe" --forkchild=checkpointer 1234' },
     ];
-    expect(await scanWindowsPostgresRows(rows, [dir], dir)).toEqual([]);
+    expect((await scanWindowsPostgresRows(rows, [dir], dir))?.map((row) => row.pid)).toEqual([10]);
+    expect(await scanWindowsPostgresRows(rows.slice(1), [dir], dir)).toEqual([]);
   });
 
   it("finds nothing when no postgres.exe is running", async () => {
@@ -550,7 +1156,10 @@ describe("scanPsOutputForDataDir with a full-path comm column", () => {
   it("reads a macOS comm path that contains spaces from its last segment", async () => {
     const dir = "/srv/paperclip/db";
     const out = `901\t/Applications/Postgres App/bin/postgres\t/Applications/Postgres App/bin/postgres -D ${dir}\n`;
-    expect((await scanPsOutputForDataDir(out, [dir], dir, () => "/elsewhere"))?.map((p) => p.pid)).toEqual([901]);
+    const unreadable = () => {
+      throw new Error("ENOENT");
+    };
+    expect((await scanPsOutputForDataDir(out, [dir], dir, unreadable))?.map((p) => p.pid)).toEqual([901]);
   });
 });
 
@@ -561,5 +1170,27 @@ describe("joinPsColumns", () => {
     expect(joinPsColumns(comm, args)).toBe(
       "901\t/Applications/Postgres App/bin/postgres\t/Applications/Postgres App/bin/postgres -D /srv/db\n902\tsshd: me\t\n",
     );
+  });
+});
+
+describe("a stale lock is moved aside only while the start lock is held", () => {
+  it("leaves a recycled-PID lock in place and refuses when the caller does not hold the start lock", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "embedded-pg-nostartlock-"));
+    writeFileSync(join(dir, "PG_VERSION"), "16\n");
+    const lock = join(dir, "postmaster.pid");
+    const text = `${process.pid + 1}\n${dir}\n1700000000\n55432\n`;
+    writeFileSync(lock, text);
+    vi.spyOn(process, "kill").mockReturnValue(true);
+    probe.mockReset().mockRejectedValue(new Error("nothing answers"));
+    const error = await readRunningReal(dir, 55432, adminUrl, {
+      readProcessName: async () => "node",
+      listPostgresProcesses: async () => [],
+    }).catch((e) => e);
+    expect(error).toBeInstanceOf(EmbeddedPostgresLockRefusal);
+    expect(error.exitCode).toBe(EMBEDDED_POSTGRES_LOCK_REFUSAL_EXIT_CODE);
+    expect(error.message).toContain("start lock");
+    expect(readFileSync(lock, "utf8")).toBe(text);
+    expect(readdirSync(dir).filter((name) => name.includes(".stale-"))).toEqual([]);
+    vi.restoreAllMocks();
   });
 });

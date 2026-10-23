@@ -1,3 +1,4 @@
+import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -407,6 +408,128 @@ describe("startServer embedded PostgreSQL identity", () => {
     expect(process.kill(process.pid, 0)).toBe(true);
   });
 
+  it("holds the start lock for this process while PostgreSQL starts, and releases it afterwards", async () => {
+    const startLock = `${dataDir}.paperclip-start.lock`;
+    let heldWhileStarting: string | null = null;
+    pgStartMock.mockImplementationOnce(async () => {
+      heldWhileStarting = existsSync(startLock) ? readFileSync(startLock, "utf8") : null;
+    });
+    await expect(startServer()).rejects.toThrow("database phase reached");
+    expect(pgStartMock).toHaveBeenCalledOnce();
+    expect(heldWhileStarting).not.toBeNull();
+    expect(JSON.parse(heldWhileStarting as unknown as string).pid).toBe(process.pid);
+    expect(existsSync(startLock)).toBe(false);
+  });
+
+  it("refuses with exit 75 and leaves the start lock of a process that is gone untouched", async () => {
+    const startLock = `${dataDir}.paperclip-start.lock`;
+    const dead = JSON.stringify({ pid: 424242, token: "dead" });
+    writeFileSync(startLock, dead);
+    const kill = vi.spyOn(process, "kill").mockImplementation((pid) => {
+      if (pid === 424242) throw Object.assign(new Error("no such process"), { code: "ESRCH" });
+      return true;
+    });
+    try {
+      const rejection = await startServer().catch((error) => error);
+      expect(rejection).toMatchObject({ name: "EmbeddedPostgresLockRefusal", exitCode: 75 });
+    } finally {
+      kill.mockRestore();
+    }
+    expect(readFileSync(startLock, "utf8")).toBe(dead);
+    expect(pgCtorMock).not.toHaveBeenCalled();
+    expect(pgStartMock).not.toHaveBeenCalled();
+    expect(readdirSync(path.dirname(dataDir)).filter((name) => name.startsWith(`${path.basename(startLock)}.`))).toEqual([]);
+    // The server's own lock file is not touched either.
+    expect(existsSync(pidFile)).toBe(true);
+  });
+
+  describe("a second start writes the lock while this one initialises", () => {
+    // No lock exists at the first check; it appears during port detection, before start().
+    const lockAppearsDuringStart = (content: string) => {
+      rmSync(pidFile);
+      // The embedded path calls detectPort(configuredPort) with a number; the HTTP path passes options.
+      detectPortMock.mockImplementation(async (requested: number | { port: number; hostname: string }) => {
+        writeFileSync(pidFile, content);
+        return typeof requested === "number" ? requested : requested.port;
+      });
+    };
+
+    it("reuses a live server instead of moving its lock aside", async () => {
+      lockAppearsDuringStart(`424242\n${dataDir}\n1700000000\n55433\n`);
+      vi.mocked(getPostgresDataDirectory)
+        .mockReset()
+        .mockRejectedValueOnce(new Error("not reachable yet"))
+        .mockResolvedValue(dataDir);
+      const kill = vi.spyOn(process, "kill").mockImplementation(() => true);
+      try {
+        await expect(startServer()).rejects.toThrow("database phase reached");
+      } finally {
+        kill.mockRestore();
+      }
+      expect(pgStartMock).not.toHaveBeenCalled();
+      expect(existsSync(pidFile)).toBe(true);
+      expect(staleLocks()).toHaveLength(0);
+      expect(ensurePostgresDatabase).toHaveBeenCalledWith(
+        "postgres://paperclip:paperclip@127.0.0.1:55433/postgres", "paperclip",
+      );
+    });
+
+    it("refuses and keeps the lock when the live owner is still starting", async () => {
+      const content = `424242\n${dataDir}\n1700000000\n55432\n`;
+      lockAppearsDuringStart(content);
+      vi.mocked(getPostgresDataDirectory).mockReset().mockResolvedValue(null);
+      const kill = vi.spyOn(process, "kill").mockImplementation(() => true);
+      try {
+        await expect(startServer()).rejects.toThrow("identity could not be verified");
+      } finally {
+        kill.mockRestore();
+      }
+      expect(readFileSync(pidFile, "utf8")).toBe(content);
+      expect(staleLocks()).toHaveLength(0);
+      expect(pgStartMock).not.toHaveBeenCalled();
+    });
+
+    it("still moves a lock aside that is dead at the second check", async () => {
+      const content = `424242\n${dataDir}\n1700000000\n55432\n`;
+      lockAppearsDuringStart(content);
+      const kill = vi.spyOn(process, "kill").mockImplementation(() => {
+        throw Object.assign(new Error("no such process"), { code: "ESRCH" });
+      });
+      try {
+        await expect(startServer()).rejects.toThrow("database phase reached");
+      } finally {
+        kill.mockRestore();
+      }
+      expect(pgStartMock).toHaveBeenCalledOnce();
+      expect(staleLocks()).toHaveLength(1);
+      expect(readFileSync(path.join(dataDir, staleLocks()[0]), "utf8")).toBe(content);
+    });
+
+    it("keeps a live lock that replaces the examined stale one before the lock is moved", async () => {
+      // Dead at the second check (verdict: stale) ...
+      const staleContent = `424242\n${dataDir}\n1700000000\n55432\n`;
+      const liveContent = `434343\n${dataDir}\n1700000001\n55432\npostmaster-started-later\n`;
+      lockAppearsDuringStart(staleContent);
+      // ... and replaced by another server's lock after the verdict, before the rename.
+      const kill = vi.spyOn(process, "kill").mockImplementation((pid) => {
+        if (pid === 424242) {
+          rmSync(pidFile);
+          writeFileSync(pidFile, liveContent);
+          throw Object.assign(new Error("no such process"), { code: "ESRCH" });
+        }
+        return true;
+      });
+      try {
+        await expect(startServer()).rejects.toThrow("was replaced while it was being checked");
+      } finally {
+        kill.mockRestore();
+      }
+      expect(pgStartMock).not.toHaveBeenCalled();
+      expect(readFileSync(pidFile, "utf8")).toBe(liveContent);
+      expect(staleLocks()).toHaveLength(0);
+    });
+  });
+
   it("writes the PostgreSQL log into the configured server log directory", async () => {
     await expect(startServer()).rejects.toThrow("database phase reached");
     expect(pgCtorMock).toHaveBeenCalledWith(expect.objectContaining({
@@ -516,6 +639,62 @@ describe("startServer embedded PostgreSQL identity", () => {
     await expect(startServer()).rejects.toThrow("database phase reached");
     expect(pgCtorMock).not.toHaveBeenCalled();
     expect(pgStartMock).not.toHaveBeenCalled();
+  });
+
+  describe.skipIf(process.platform === "win32")("a postmaster whose -D names another cluster", () => {
+    // A real process named `postgres` whose working directory is the target, like a postmaster that
+    // chdirs into its data directory. Its command line names a different, initialised cluster.
+    let child: ChildProcess | null = null;
+    afterEach(() => {
+      child?.kill();
+      child = null;
+    });
+
+    const startPostmaster = async (commandLine: string[]) => {
+      // A shell script named `postgres`: the kernel names such a process after the script. A symlink
+      // to node would not do, because Node 24 renames its main thread ("MainThread") and `ps` would
+      // no longer list the process as `postgres`.
+      const bin = path.join(mkdtempSync(path.join(tmpdir(), "pg-bin-")), "postgres");
+      writeFileSync(bin, "#!/bin/sh\nwhile :; do sleep 1; done\n");
+      chmodSync(bin, 0o755);
+      child = spawn(bin, ["--stand-in-postmaster", "--", ...commandLine], { cwd: dataDir, stdio: "ignore" });
+      // Wait until `ps` lists it as `postgres` with its arguments; a loaded CI runner needs longer than a fixed delay.
+      const listed = () => {
+        const row = spawnSync("ps", ["-p", String(child?.pid), "-o", "comm=,args="], { encoding: "utf8" }).stdout;
+        return /(?:^|\/)postgres\s/.test(row.trim()) && row.includes("--stand-in-postmaster");
+      };
+      for (let waited = 0; !listed(); waited += 50) {
+        if (waited > 15_000) throw new Error("the stand-in postgres process was never listed by ps");
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+    };
+    const clusterWithVersion = (prefix: string) => {
+      const dir = mkdtempSync(path.join(tmpdir(), prefix));
+      writeFileSync(path.join(dir, "PG_VERSION"), "18\n");
+      return dir;
+    };
+
+    it.each([
+      ["-c data_directory", (target: string, other: string) => ["-D", other, "-c", `data_directory=${target}`]],
+      ["a configuration include", (_target: string, other: string) => ["-D", other]],
+      ["an external config_file", (_target: string, other: string) => ["-D", other, "-c", "config_file=/etc/external/pg.conf"]],
+    ])("refuses with exit 75 and keeps the lock byte for byte (%s)", async (_name, argsFor) => {
+      const other = clusterWithVersion("pg-config-cluster-");
+      writeFileSync(path.join(other, "postgresql.conf"), "include 'hidden.conf'\n");
+      await startPostmaster(argsFor(dataDir, other));
+      writeFileSync(pidFile, "1oops"); // a lock that cannot name its owner
+      const before = readFileSync(pidFile);
+      const rejection = await startServer().catch((error) => error);
+      expect(rejection).toMatchObject({ name: "EmbeddedPostgresLockRefusal", exitCode: 75 });
+      expect(readFileSync(pidFile).equals(before)).toBe(true);
+      expect(staleLocks()).toHaveLength(0);
+      expect(readdirSync(path.dirname(dataDir)).filter((name) => name.startsWith(`${path.basename(dataDir)}.postmaster.pid`))).toEqual([]);
+      expect(pgCtorMock).not.toHaveBeenCalled();
+      expect(pgStartMock).not.toHaveBeenCalled();
+      expect(ensurePostgresDatabase).not.toHaveBeenCalled();
+      // The start lock is released even though startup refused.
+      expect(existsSync(`${dataDir}.paperclip-start.lock`)).toBe(false);
+    });
   });
 
   it("probes identity with the same login it uses to open the database", async () => {

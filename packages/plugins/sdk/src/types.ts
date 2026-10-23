@@ -59,6 +59,7 @@ import type { PluginPerformActionContext } from "./protocol.js";
 export type {
   PaperclipPluginManifestV1,
   PluginJobDeclaration,
+  PluginJobScope,
   PluginWebhookDeclaration,
   PluginToolDeclaration,
   PluginEnvironmentDriverDeclaration,
@@ -238,6 +239,12 @@ export interface PluginJobContext {
   trigger: "schedule" | "manual" | "retry";
   /** ISO 8601 timestamp when the run was scheduled to start. */
   scheduledAt: string;
+  /**
+   * Company this run is scoped to. Set by the host for jobs declared with
+   * `scope: "company"` (one run per configured company); absent or `null`
+   * for instance-scoped runs.
+   */
+  companyId?: string | null;
 }
 
 // ---------------------------------------------------------------------------
