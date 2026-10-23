@@ -39,12 +39,20 @@ jobs:
       - run: pnpm build
       - run: google-chrome --version
 
+      - name: Prepare this job's e2e home
+        # One canonical dir per run, attempt and job under RUNNER_TEMP, with an
+        # identity marker. The cleanup step deletes only this dir.
+        run: ./scripts/ci/e2e-owned-cleanup.sh prepare
+
       - name: Run e2e tests
         env:
-          # Keep paperclip-e2e-home-* out of the box's long-lived /tmp.
+          # Keep temp files and unix sockets out of the box's long-lived /tmp.
           TMPDIR: ${{ runner.temp }}
           PAPERCLIP_PLAYWRIGHT_CHANNEL: "chrome"
-        run: pnpm run test:e2e
+        # The wrapper points playwright.config.ts's PAPERCLIP_HOME at this job's
+        # owned dir via PAPERCLIP_E2E_HOME and records the session it starts, so
+        # cleanup can tell this job's processes and home apart.
+        run: ./scripts/ci/e2e-owned-cleanup.sh run -- pnpm run test:e2e
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
@@ -55,35 +63,12 @@ jobs:
             tests/e2e/test-results/
           retention-days: 14
 
-      - name: Clean up leftover e2e server and temp home
-        # Same step as pr.yml e2e_shards (Bugbot 4351124833).
-        # The runner's orphan cleanup only catches processes that keep
-        # RUNNER_TRACKING_ID. Collect the exact PIDs of this user's leftover
-        # onboard/Postgres processes and of the listener on port 3199, then kill
-        # each PID after checking it still belongs to this user. No pkill -f and
-        # no fuser -k, so nothing is killed by pattern or port alone. Best effort:
-        # this step never fails the job, and it skips its own shell PID.
+      - name: Clean up this job's e2e server and temp home
+        # Kills only processes this job started (recorded session leader PID
+        # plus start time, and the run's owner token in each process
+        # environment) and deletes only this job's canonical home dir under
+        # RUNNER_TEMP after checking its identity marker. No pattern, port or
+        # /tmp matching, so a concurrent job on the same box is never touched.
+        # Best effort: never fails the job.
         if: always()
-        run: |
-          uid="$(id -u)"
-          pids=""
-          for pattern in '[p]aperclipai onboard' '[p]aperclip-e2e-home-'; do
-            pids="$pids $(pgrep -u "$uid" -f "$pattern" || true)"
-          done
-          if command -v lsof >/dev/null 2>&1; then
-            pids="$pids $(lsof -t -a -u "$uid" -iTCP:3199 -sTCP:LISTEN 2>/dev/null || true)"
-          elif command -v ss >/dev/null 2>&1; then
-            pids="$pids $(ss -Htlnp 'sport = :3199' 2>/dev/null | grep -oE ',pid=[0-9]+,fd=' | grep -oE '[0-9]+' || true)"
-          fi
-          for pid in $(printf '%s\n' $pids | sort -un); do
-            [ "$pid" = "$$" ] && continue
-            [ "$(stat -c %u "/proc/$pid" 2>/dev/null)" = "$uid" ] || continue
-            echo "killing leftover e2e pid $pid"
-            kill "$pid" 2>/dev/null || true
-          done
-          for dir in "${RUNNER_TEMP:-}" /tmp; do
-            [ -n "$dir" ] && [ -d "$dir" ] || continue
-            find "$dir" -maxdepth 1 -user "$uid" -name 'paperclip-e2e-home-*' \
-              -exec rm -rf {} + 2>/dev/null || true
-          done
-          echo "e2e cleanup done"
+        run: ./scripts/ci/e2e-owned-cleanup.sh cleanup
