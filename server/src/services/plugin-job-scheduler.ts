@@ -48,6 +48,10 @@ import {
 } from "./plugin-worker-manager.js";
 import { parseCron, nextCronTick, validateCron } from "./cron.js";
 import { logger } from "../middleware/logger.js";
+import {
+  isNativeGitHubBoardJobKey,
+  type GitHubProjectBoardSchedulerBridge,
+} from "./plugin-github-project-board-scheduler-bridge.js";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -82,6 +86,8 @@ export interface PluginJobSchedulerOptions {
   jobTimeoutMs?: number;
   /** Maximum number of concurrent job executions (default: 10). */
   maxConcurrentJobs?: number;
+  /** Host-owned GitHub board jobs. A missing handler never falls back to a worker. */
+  nativeGitHubProjectBoard?: GitHubProjectBoardSchedulerBridge;
   /**
    * After a company run of a company-scoped job times out, how long to wait
    * for the worker's handler to actually finish before giving up on the
@@ -289,6 +295,7 @@ export function createPluginJobScheduler(
     tickIntervalMs = DEFAULT_TICK_INTERVAL_MS,
     jobTimeoutMs = DEFAULT_JOB_TIMEOUT_MS,
     maxConcurrentJobs = DEFAULT_MAX_CONCURRENT_JOBS,
+    nativeGitHubProjectBoard,
   } = options;
   const timedOutRunGraceMs = options.timedOutRunGraceMs ?? jobTimeoutMs;
 
@@ -378,8 +385,8 @@ export function createPluginJobScheduler(
           continue;
         }
 
-        // Check if the worker is available
-        if (!workerManager.isRunning(job.pluginId)) {
+        // Native board jobs run in-process. Every other job needs its worker.
+        if (!isNativeGitHubBoardJobKey(job.jobKey) && !workerManager.isRunning(job.pluginId)) {
           log.debug(
             { jobId: job.id, pluginId: job.pluginId },
             "skipping job — worker not running",
@@ -431,6 +438,21 @@ export function createPluginJobScheduler(
     job: typeof pluginJobs.$inferSelect,
     onlyCompanyId?: string | null,
   ): Promise<Array<string | null>> {
+    if (isNativeGitHubBoardJobKey(job.jobKey)) {
+      if (!nativeGitHubProjectBoard) {
+        throw new Error("Native GitHub board scheduler handler is unavailable; worker fallback refused");
+      }
+      const plan = await nativeGitHubProjectBoard.resolveDispatch(job.pluginId, job.jobKey);
+      if (onlyCompanyId) {
+        if (!plan.companyIds.includes(onlyCompanyId)) {
+          throw new Error(
+            `Company "${onlyCompanyId}" has not configured plugin "${job.pluginId}" (job "${job.jobKey}")`,
+          );
+        }
+        return [onlyCompanyId];
+      }
+      return plan.companyIds.length > 0 ? [...plan.companyIds] : [null];
+    }
     const scope = await jobStore.getJobDeclarationScope(job.pluginId, job.jobKey);
     if (scope !== "company") {
       if (onlyCompanyId) {
@@ -576,21 +598,27 @@ export function createPluginJobScheduler(
           await jobStore.markRunning(runId);
           runLog.info("dispatching job run");
 
-          await workerManager.call(
-            pluginId,
-            "runJob",
-            {
-              job: {
-                jobKey,
-                runId,
-                trigger,
-                scheduledAt,
-                ...(companyId ? { companyId } : {}),
-              },
+          const params = {
+            job: {
+              jobKey,
+              runId,
+              trigger,
+              scheduledAt,
               ...(companyId ? { companyId } : {}),
             },
-            jobTimeoutMs,
-          );
+            ...(companyId ? { companyId } : {}),
+          };
+          if (isNativeGitHubBoardJobKey(jobKey)) {
+            if (trigger !== "schedule") {
+              throw new Error("Native GitHub board jobs accept scheduled runs only");
+            }
+            if (!nativeGitHubProjectBoard) {
+              throw new Error("Native board handler disappeared; worker fallback refused");
+            }
+            await nativeGitHubProjectBoard.run(job, params, jobTimeoutMs, () => activeJobs.has(jobId));
+          } else {
+            await workerManager.call(pluginId, "runJob", params, jobTimeoutMs);
+          }
 
           const durationMs = Date.now() - startedAt;
           await jobStore.completeRun(runId, { status: "succeeded", durationMs });
@@ -702,6 +730,9 @@ export function createPluginJobScheduler(
     const job = await jobStore.getJobById(jobId);
     if (!job) {
       throw new Error(`Job not found: ${jobId}`);
+    }
+    if (isNativeGitHubBoardJobKey(job.jobKey)) {
+      throw new Error("Native GitHub board jobs refuse manual and retry triggers");
     }
 
     if (job.status !== "active") {
@@ -921,6 +952,7 @@ export function createPluginJobScheduler(
 
   async function unregisterPlugin(pluginId: string): Promise<void> {
     log.info({ pluginId }, "unregistering plugin from job scheduler");
+    nativeGitHubProjectBoard?.cancelPlugin(pluginId);
 
     // Cancel any in-flight run records for this plugin that are still
     // queued or running. Active jobs in-memory will finish naturally.

@@ -14,6 +14,11 @@ import { checkedGitHubProjectPage, parseGitHubProjectBoardUrl, validateGitHubPro
 import { validateBoardImportContext, validateBoardImportIntent, type BoardImportHostContext } from "./plugin-imported-issues-contract.js";
 import { advanceGitHubProjectAttestation, assertGitHubProjectAttestedIntent, pendingGitHubProjectAttestation,
   type GitHubProjectAttestation } from "./github-project-board-attestation.js";
+import { scheduleGrantSchema, parseScheduleGrantInput, type GitHubProjectScheduleGrant }
+  from "./github-project-schedule-grant-contract.js";
+import { matchesNativeScheduleGrantSnapshot } from "./plugin-github-project-schedule-grants.js";
+import type { ScheduledBoardAccess, ScheduledBoardTarget, ScheduledGitHubPageInput, ScheduledGitHubPageReader,
+  VerifiedScheduledBoard } from "./github-project-scheduled-contract.js";
 
 export const GITHUB_PROJECT_BINDING_NAMESPACE = "paperclip.host.github-project-board/v1";
 export const GITHUB_PROJECT_IMPORTER_KEY = "paperclip-github-plugin";
@@ -51,6 +56,8 @@ const parse = <T>(schema: z.ZodType<T>, value: unknown): T => {
 /** The host, not worker-writable state or secret refs, owns the OAuth authority for each destination. */
 export function pluginGitHubProjectBoardService(
   db: Db, identity: { pluginId: string; pluginKey: string }, readPage: ReadPage,
+  scheduledAccess?: ScheduledBoardAccess,
+  scheduledReadPage?: (input: ScheduledGitHubPageInput) => ReturnType<ScheduledGitHubPageReader>,
 ) {
   const key = (projectId: string) => `project:${projectId}`;
   const store = (executor: Db) => pluginStateStore(executor);
@@ -63,7 +70,13 @@ export function pluginGitHubProjectBoardService(
   async function authorize(executor: Db, context: BoardImportHostContext, input: unknown) {
     const userId = validateBoardImportContext(context)!;
     const scope = parse(scopeSchema, input);
-    if (scope.companyId !== context.companyId || identity.pluginKey !== GITHUB_PROJECT_IMPORTER_KEY) {
+    if (scope.companyId !== context.companyId) {
+      throw forbidden("Matching company and native GitHub importer required");
+    }
+    return authorizeSubject(executor, scope, userId);
+  }
+  async function authorizeSubject(executor: Db, scope: z.infer<typeof scopeSchema>, userId: string, readyOnly = false) {
+    if (identity.pluginKey !== GITHUB_PROJECT_IMPORTER_KEY || !userId || userId.trim() !== userId) {
       throw forbidden("Matching company and native GitHub importer required");
     }
     const [plugin] = await executor.select({ key: plugins.pluginKey, status: plugins.status }).from(plugins)
@@ -75,7 +88,7 @@ export function pluginGitHubProjectBoardService(
     const [project] = await executor.select({ id: projects.id }).from(projects).where(and(
       eq(projects.companyId, scope.companyId), eq(projects.id, scope.projectId), isNull(projects.archivedAt),
     )).for("share").limit(1);
-    if (!plugin || plugin.key !== identity.pluginKey || !["ready", "installed"].includes(plugin.status)
+    if (!plugin || plugin.key !== identity.pluginKey || !(readyOnly ? ["ready"] : ["ready", "installed"]).includes(plugin.status)
       || !member || member.role === "viewer" || !project) throw forbidden("Active operator and existing company project required");
     return { ...scope, userId };
   }
@@ -131,6 +144,9 @@ export function pluginGitHubProjectBoardService(
   }
   async function verifiedBinding(executor: Db, context: BoardImportHostContext, input: unknown) {
     const scope = await authorize(executor, context, input);
+    return verifiedSubjectBinding(executor, scope);
+  }
+  async function verifiedSubjectBinding(executor: Db, scope: z.infer<typeof scopeSchema> & { userId: string }) {
     await lockBinding(executor, scope.companyId, scope.projectId);
     const binding = await retained(executor, scope.companyId, scope.projectId);
     if (!binding) throw forbidden("Select and bind a native GitHub OAuth connection first");
@@ -142,6 +158,58 @@ export function pluginGitHubProjectBoardService(
       throw conflict("GitHub account changed after board binding");
     }
     return { ...scope, binding, authorizationDigest: current.authorizationDigest };
+  }
+  function requireScheduledAccess() {
+    if (!scheduledAccess) throw forbidden("Native scheduled board authority is not configured");
+    return scheduledAccess;
+  }
+  function assertScheduledTarget(target: ScheduledBoardTarget) {
+    const scope = parse(scopeSchema, { companyId: target.companyId, projectId: target.projectId });
+    if (target.pluginId !== identity.pluginId || identity.pluginKey !== GITHUB_PROJECT_IMPORTER_KEY) {
+      throw forbidden("Scheduled native board plugin differs");
+    }
+    return scope;
+  }
+  function assertScheduledSnapshot(current: Readonly<VerifiedScheduledBoard>, expected: Readonly<VerifiedScheduledBoard>) {
+    if (!isDeepStrictEqual(current.binding, expected.binding) || current.authorizationDigest !== expected.authorizationDigest
+      || !isDeepStrictEqual(current.owner, expected.owner) || current.leaseRevision !== expected.leaseRevision) {
+      throw conflict("Native scheduled board authorization changed during observation");
+    }
+  }
+  async function validateScheduledPage(authority: unknown, target: ScheduledBoardTarget) {
+    const access = requireScheduledAccess();
+    access.inspect(authority, target);
+    return db.transaction(async tx => {
+      const executor = tx as unknown as Db, startedAt = Date.now();
+      await executor.execute(sql`set local statement_timeout = '10000ms'`);
+      await executor.execute(sql`set local lock_timeout = '5000ms'`);
+      const current = await access.validate(executor, authority, target, "read-page");
+      assertTransactionDeadline(startedAt);
+      return current;
+    });
+  }
+  async function recordScheduledObservation(authority: unknown, target: ScheduledBoardTarget,
+    expected: Readonly<VerifiedScheduledBoard>, page: GitHubProjectPageInput, data?: unknown) {
+    return db.transaction(async tx => {
+      const executor = tx as unknown as Db, startedAt = Date.now(), access = requireScheduledAccess();
+      await executor.execute(sql`set local statement_timeout = '10000ms'`);
+      await executor.execute(sql`set local lock_timeout = '5000ms'`);
+      const current = await access.validate(executor, authority, target, "record-page");
+      assertScheduledSnapshot(current, expected);
+      const stateKey = `attestation:${target.projectId}`;
+      const previous = data === undefined ? pendingGitHubProjectAttestation(current.binding, current.authorizationDigest)
+        : await readProtectedState(executor, target.companyId, stateKey, true) as GitHubProjectAttestation;
+      const value = data === undefined ? previous
+        : advanceGitHubProjectAttestation(previous, current.binding, page, data, current.authorizationDigest);
+      assertTransactionDeadline(startedAt);
+      await store(executor).set(identity.pluginId, { scopeKind: "company", scopeId: target.companyId,
+        namespace: GITHUB_PROJECT_BINDING_NAMESPACE, stateKey, value });
+      if (!isDeepStrictEqual(await readProtectedState(executor, target.companyId, stateKey), value)) {
+        throw conflict("Native scheduled GitHub board observation readback failed");
+      }
+      assertScheduledSnapshot(await access.validate(executor, authority, target, "record-page"), expected);
+      assertTransactionDeadline(startedAt);
+    });
   }
   async function fetchBound(scope: Awaited<ReturnType<typeof verifiedBinding>>, page: GitHubProjectPageInput) {
     const reference = parseGitHubProjectBoardUrl(scope.binding.boardUrl);
@@ -186,6 +254,54 @@ export function pluginGitHubProjectBoardService(
     });
   }
   return {
+    // Internal host composition only; deliberately absent from the worker RPC discriminator.
+    async authorizeBindingScope(executor: Db, context: BoardImportHostContext, input: unknown) {
+      const scope = await authorize(executor, context, input);
+      await lockBinding(executor, scope.companyId, scope.projectId);
+      return { ...scope, pluginId: identity.pluginId, pluginKey: identity.pluginKey };
+    },
+    async verifiedBindingSnapshot(executor: Db, context: BoardImportHostContext, input: unknown) {
+      return { ...await verifiedBinding(executor, context, input), pluginId: identity.pluginId, pluginKey: identity.pluginKey };
+    },
+    // Subject membership is checked directly; a scheduled run never fabricates a user actor context.
+    async verifyDelegatedBindingSnapshot(executor: Db, value: GitHubProjectScheduleGrant) {
+      const grant = parseScheduleGrantInput(scheduleGrantSchema, value);
+      if (grant.pluginId !== identity.pluginId) throw forbidden("Delegated native board plugin differs");
+      const scope = await authorizeSubject(executor, { companyId: grant.companyId, projectId: grant.projectId }, grant.grantedByUserId, true);
+      const snapshot = await verifiedSubjectBinding(executor, scope);
+      if (!matchesNativeScheduleGrantSnapshot(grant, snapshot)) throw conflict("Delegated native board authorization changed");
+      return { ...snapshot, pluginId: identity.pluginId, pluginKey: identity.pluginKey };
+    },
+    async readScheduledProjectPage(authority: unknown, target: ScheduledBoardTarget, value: { page: unknown }) {
+      assertScheduledTarget(target);
+      const inspected = await validateScheduledPage(authority, target);
+      if (!scheduledReadPage) throw forbidden("Native scheduled GitHub page reader is not configured");
+      const page = validateGitHubProjectPageInput(parse(z.object({ page: z.unknown() }).strict(), value).page);
+      const reference = parseGitHubProjectBoardUrl(inspected.binding.boardUrl);
+      if (page.ownerType !== reference.ownerType || page.owner !== reference.owner || page.number !== reference.number) {
+        throw forbidden("Requested board differs from native destination binding");
+      }
+      if (page.after === null) await recordScheduledObservation(authority, target, inspected, page);
+      // The reader does its own short pre/post validation; no provider I/O is inside a database transaction.
+      const result = await scheduledReadPage({ authority, target, companyId: target.companyId,
+        connectionId: inspected.binding.connectionId, page, expectedAccountId: inspected.binding.accountId,
+        expectedLogin: inspected.binding.login, authorizationDigest: inspected.authorizationDigest });
+      const checked = checkedGitHubProjectPage(result.page, page);
+      if (checked.board.id !== inspected.binding.boardId || result.account.accountId !== inspected.binding.accountId
+        || result.account.login.toLowerCase() !== inspected.binding.login.toLowerCase()
+        || result.authorizationDigest !== inspected.authorizationDigest) throw conflict("GitHub board or account identity changed");
+      await recordScheduledObservation(authority, target, inspected, page, checked.data);
+      return checked.data;
+    },
+    async assertScheduledImportBinding(executor: Db, authority: unknown, target: ScheduledBoardTarget, value: unknown) {
+      assertScheduledTarget(target);
+      const intent = validateBoardImportIntent(value, target.companyId);
+      if (intent.projectId !== target.projectId) throw forbidden("Scheduled import destination differs");
+      const current = await requireScheduledAccess().validate(executor, authority, target, "prepare-import");
+      const attestation = await readProtectedState(executor, target.companyId, `attestation:${target.projectId}`, true);
+      assertGitHubProjectAttestedIntent(attestation, current.binding, intent, current.authorizationDigest);
+      return current;
+    },
     async listConnections(context: BoardImportHostContext, input: unknown) {
       const scope = await authorize(db, context, input);
       const rows = await db.select({ connection: toolConnections }).from(toolConnections).innerJoin(toolApplications,
