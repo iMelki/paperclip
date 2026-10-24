@@ -107,19 +107,44 @@ export function advanceGitHubProjectAttestation(
     nextCursor: complete ? null : info.endCursor as string, seenItemIds, issues };
 }
 
+export function assertCompleteGitHubProjectAttestation(
+  value: unknown, binding: GitHubProjectBinding, authorizationDigest: string, now = Date.now(),
+): GitHubProjectAttestation {
+  const attestation = record(value) as unknown as GitHubProjectAttestation;
+  if (!Number.isSafeInteger(now) || now < 0
+    || attestation.version !== 1 || attestation.bindingDigest !== boardImportDigest(binding)
+    || attestation.authorizationDigest !== authorizationDigest
+    || attestation.companyId !== binding.companyId || attestation.projectId !== binding.projectId
+    || attestation.boardId !== binding.boardId || attestation.boardUrl !== binding.boardUrl
+    || typeof attestation.sourceUpdatedAt !== "string" || !Number.isFinite(Date.parse(attestation.sourceUpdatedAt))
+    || attestation.complete !== true || attestation.nextCursor !== null || !Number.isSafeInteger(attestation.startedAt)
+    || !Number.isSafeInteger(attestation.completedAt) || now < attestation.completedAt!
+    || attestation.completedAt! < attestation.startedAt
+    || attestation.completedAt! - attestation.startedAt > GITHUB_PROJECT_ATTESTATION_MAX_AGE_MS
+    || now - attestation.completedAt! > GITHUB_PROJECT_ATTESTATION_MAX_AGE_MS
+    || !Array.isArray(attestation.issues) || !Array.isArray(attestation.seenItemIds)
+    || !Number.isSafeInteger(attestation.pages) || attestation.pages < 1 || attestation.pages > 20
+    || !Number.isSafeInteger(attestation.totalCount) || attestation.totalCount! < 0
+    || attestation.seenItemIds.length !== attestation.totalCount || attestation.seenItemIds.length > 1000
+    || attestation.issues.length > attestation.seenItemIds.length
+    || new Set(attestation.seenItemIds).size !== attestation.seenItemIds.length
+    || attestation.seenItemIds.some(id => typeof id !== "string" || !/^[A-Za-z0-9_=-]{1,256}$/.test(id))
+    || attestation.issues.some(issue => !issue || typeof issue !== "object"
+      || !attestation.seenItemIds.includes(issue.boardItemId))
+    || new Set(attestation.issues.map(issue => issue.boardItemId)).size !== attestation.issues.length
+    || new Set(attestation.issues.map(issue => issue.githubIssueNodeId)).size !== attestation.issues.length
+    || new Set(attestation.issues.map(issue => issue.sourceUrl)).size !== attestation.issues.length) {
+    throw conflict("A fresh complete host-observed board preview is required before import");
+  }
+  return attestation;
+}
 export function assertGitHubProjectAttestedIntent(
   value: unknown, binding: GitHubProjectBinding, intent: BoardImportIntent, authorizationDigest: string, now = Date.now(),
 ) {
-  const attestation = record(value) as unknown as GitHubProjectAttestation;
-  if (attestation.version !== 1 || attestation.bindingDigest !== boardImportDigest(binding)
-    || attestation.authorizationDigest !== authorizationDigest
-    || attestation.companyId !== intent.companyId || attestation.projectId !== intent.projectId
-    || attestation.boardId !== intent.boardId || attestation.boardUrl !== intent.boardUrl
-    || attestation.sourceUpdatedAt !== intent.sourceUpdatedAt || attestation.complete !== true
-    || !Number.isSafeInteger(attestation.completedAt) || now < attestation.completedAt!
-    || now - attestation.completedAt! > GITHUB_PROJECT_ATTESTATION_MAX_AGE_MS
-    || !Array.isArray(attestation.issues) || !Array.isArray(attestation.seenItemIds)
-    || attestation.seenItemIds.length !== attestation.totalCount || attestation.seenItemIds.length > 1000) {
+  const attestation = assertCompleteGitHubProjectAttestation(value, binding, authorizationDigest, now);
+  if (intent.companyId !== binding.companyId || intent.projectId !== binding.projectId
+    || intent.boardId !== binding.boardId || intent.boardUrl !== binding.boardUrl
+    || attestation.sourceUpdatedAt !== intent.sourceUpdatedAt) {
     throw conflict("A fresh complete host-observed board preview is required before import");
   }
   const observed = attestation.issues.find(issue => issue.boardItemId === intent.boardItemId);

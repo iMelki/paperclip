@@ -24,6 +24,7 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { Router } from "express";
+import { registerGitHubProjectScheduleGrantRoutes } from "./plugin-github-project-schedule-grants.js";
 import type { Request, Response } from "express";
 import { and, desc, eq, gte } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
@@ -539,6 +540,7 @@ export function pluginRoutes(
   toolGatewayDeps?: PluginRouteToolGatewayDeps,
 ) {
   const router = Router();
+  registerGitHubProjectScheduleGrantRoutes(router, db);
   const registry = pluginRegistryService(db);
   const lifecycle = pluginLifecycleManager(db, {
     loader,
