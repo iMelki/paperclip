@@ -137,7 +137,8 @@ import { bindGitHubOAuthState, isBoundGitHubOAuthState, verifyGitHubOAuthState }
 import { isNativeGitHubOAuthConnection, githubOAuthToolDescriptors, getGitHubOAuthToolDescriptor,
   verifyGitHubOAuthAccount, verifyGitHubOAuthAuthorization,
   executeGitHubOAuthTool as dispatchGitHubOAuthTool } from "./github-oauth-transport.js";
-import { readGitHubOAuthProjectPage, validateGitHubProjectPageInput, githubProjectAuthorizationDigest, parseGitHubProjectBoardUrl,
+import { readGitHubOAuthProjectPage, validateGitHubProjectPageInput, githubProjectAuthorizationDigest,
+  githubProjectConsentDigest, parseGitHubProjectBoardUrl,
   type GitHubProjectPageInput } from "./github-oauth-project-page.js";
 
 type ActorInfo = {
@@ -4390,14 +4391,14 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
     // Secret resolution updates lastResolvedAt. No outer metadata SHARE transaction spans this call or HTTP.
     const credential = await verifiedGitHubCredential(connection,
       { actorType: "system", actorId: native.actorId }, false, async revision => {
-        const digest = githubProjectAuthorizationDigest(revision.current,
+        const digest = githubProjectConsentDigest(revision.current,
           { secretId: revision.secretId, latestVersion: revision.latestVersion });
         if (digest !== input.authorizationDigest) throw conflict("Scheduled credential changed before provider access");
         await validate();
         await assertGitHubBoardReadRevision(revision);
         access.inspect(input.authority, input.target);
       });
-    const authorizationDigest = githubProjectAuthorizationDigest(credential.current,
+    const authorizationDigest = githubProjectConsentDigest(credential.current,
       { secretId: credential.secretId, latestVersion: credential.latestVersion });
     if (credential.facts.accountId !== input.expectedAccountId
       || credential.facts.login.toLowerCase() !== input.expectedLogin.toLowerCase()

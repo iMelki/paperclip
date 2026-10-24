@@ -9,7 +9,7 @@ import { toolConnectionSnapshotColumns } from "./tool-connection-snapshot.js";
 import { isNativeGitHubOAuthConnection } from "./github-oauth-transport.js";
 import { githubOAuthRequiredScopes, githubScopesExceed, githubScopesSatisfy, githubStoredPrivateRepoAccessOptIn } from "@paperclipai/shared/github-oauth";
 import { checkedGitHubProjectPage, parseGitHubProjectBoardUrl, validateGitHubProjectPageInput,
-  githubProjectAuthorizationDigest,
+  githubProjectAuthorizationDigest, githubProjectConsentDigest,
   type GitHubProjectPageInput } from "./github-oauth-project-page.js";
 import { validateBoardImportContext, validateBoardImportIntent, type BoardImportHostContext } from "./plugin-imported-issues-contract.js";
 import { advanceGitHubProjectAttestation, assertGitHubProjectAttestedIntent, pendingGitHubProjectAttestation,
@@ -122,6 +122,7 @@ export function pluginGitHubProjectBoardService(
         eq(companySecrets.status, "active"), isNull(companySecrets.deletedAt))).for("share").limit(1);
     if (!secret) throw forbidden("Native GitHub OAuth access credential is not active in this company");
     return { connection, facts: { accountId: facts.accountId, login: facts.login },
+      consentDigest: githubProjectConsentDigest(connection, { secretId: secret.id, latestVersion: secret.latestVersion }),
       authorizationDigest: githubProjectAuthorizationDigest(connection, { secretId: secret.id, latestVersion: secret.latestVersion }) };
   }
   async function readProtectedState(executor: Db, companyId: string, stateKey: string, locked = false) {
@@ -142,11 +143,12 @@ export function pluginGitHubProjectBoardService(
     }
     return binding;
   }
-  async function verifiedBinding(executor: Db, context: BoardImportHostContext, input: unknown) {
+  async function verifiedBinding(executor: Db, context: BoardImportHostContext, input: unknown, standingConsent = false) {
     const scope = await authorize(executor, context, input);
-    return verifiedSubjectBinding(executor, scope);
+    return verifiedSubjectBinding(executor, scope, standingConsent);
   }
-  async function verifiedSubjectBinding(executor: Db, scope: z.infer<typeof scopeSchema> & { userId: string }) {
+  async function verifiedSubjectBinding(executor: Db, scope: z.infer<typeof scopeSchema> & { userId: string },
+    standingConsent = false) {
     await lockBinding(executor, scope.companyId, scope.projectId);
     const binding = await retained(executor, scope.companyId, scope.projectId);
     if (!binding) throw forbidden("Select and bind a native GitHub OAuth connection first");
@@ -157,7 +159,8 @@ export function pluginGitHubProjectBoardService(
     if (current.facts.accountId !== binding.accountId || current.facts.login.toLowerCase() !== binding.login.toLowerCase()) {
       throw conflict("GitHub account changed after board binding");
     }
-    return { ...scope, binding, authorizationDigest: current.authorizationDigest };
+    return { ...scope, binding,
+      authorizationDigest: standingConsent ? current.consentDigest : current.authorizationDigest };
   }
   function requireScheduledAccess() {
     if (!scheduledAccess) throw forbidden("Native scheduled board authority is not configured");
@@ -261,14 +264,14 @@ export function pluginGitHubProjectBoardService(
       return { ...scope, pluginId: identity.pluginId, pluginKey: identity.pluginKey };
     },
     async verifiedBindingSnapshot(executor: Db, context: BoardImportHostContext, input: unknown) {
-      return { ...await verifiedBinding(executor, context, input), pluginId: identity.pluginId, pluginKey: identity.pluginKey };
+      return { ...await verifiedBinding(executor, context, input, true), pluginId: identity.pluginId, pluginKey: identity.pluginKey };
     },
     // Subject membership is checked directly; a scheduled run never fabricates a user actor context.
     async verifyDelegatedBindingSnapshot(executor: Db, value: GitHubProjectScheduleGrant) {
       const grant = parseScheduleGrantInput(scheduleGrantSchema, value);
       if (grant.pluginId !== identity.pluginId) throw forbidden("Delegated native board plugin differs");
       const scope = await authorizeSubject(executor, { companyId: grant.companyId, projectId: grant.projectId }, grant.grantedByUserId, true);
-      const snapshot = await verifiedSubjectBinding(executor, scope);
+      const snapshot = await verifiedSubjectBinding(executor, scope, true);
       if (!matchesNativeScheduleGrantSnapshot(grant, snapshot)) throw conflict("Delegated native board authorization changed");
       return { ...snapshot, pluginId: identity.pluginId, pluginKey: identity.pluginKey };
     },

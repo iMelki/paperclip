@@ -20,6 +20,18 @@ export function githubProjectAuthorizationDigest(connection: {
     credentialRevision: credential });
 }
 
+/** Standing consent excludes only generic row freshness. Credential/config changes still revoke it. */
+export function githubProjectConsentDigest(
+  connection: Parameters<typeof githubProjectAuthorizationDigest>[0],
+  credential: Parameters<typeof githubProjectAuthorizationDigest>[1],
+) {
+  // Reuse the exact revision validator/projection with a fixed, domain-separated sentinel instant.
+  // Actual provider reads still validate the real captured timestamp before and after every I/O.
+  return boardImportDigest({ kind: "github-project-standing-consent-v1",
+    authorization: githubProjectAuthorizationDigest({ ...connection,
+      updatedAt: new Date(0), updatedAtExact: "1970-01-01T00:00:00.000000Z" }, credential) });
+}
+
 const owner = z.string().regex(/^[a-z\d](?:[a-z\d-]{0,37}[a-z\d])?$/i);
 const pageSchema = z.object({
   ownerType: z.enum(["user", "organization"]), owner,
