@@ -114,6 +114,227 @@ describe("classifyAdapterFailureForRecovery", () => {
     }, new Date("2026-10-13T18:00:38.000Z"))).toBeNull();
   });
 
+  it.each(["adapter_failed"])(
+    "does not park a %s run (Codex and other non-ACP adapters) that only quotes the Claude session statement in its result",
+    (errorCode) => {
+      const quote = "You've hit your session limit · resets 10:40pm (Asia/Jerusalem)";
+      for (const resultJson of [
+        { summary: `Added a test for "${quote}"` },
+        { stdout: `$ grep -r "${quote}" src\n` },
+        { transcript: [{ role: "assistant", text: quote }] },
+      ]) {
+        expect(classifyAdapterFailureForRecovery({
+          errorCode,
+          error: "Process exited with code 1",
+          resultJson,
+        }, new Date("2026-10-13T18:00:38.000Z"))).toBeNull();
+      }
+    },
+  );
+
+  it("still reads the session statement from a non-ACP run's own error field", () => {
+    expect(classifyAdapterFailureForRecovery({
+      errorCode: "adapter_failed",
+      error: "You've hit your session limit · resets 10:40pm (Asia/Jerusalem)",
+      resultJson: { summary: "Quoted again: You've hit your session limit · resets 9:00am (UTC)" },
+    }, new Date("2026-10-13T18:00:38.000Z"))).toEqual({
+      kind: "provider_quota",
+      retryAt: new Date("2026-10-13T19:40:00.000Z"),
+      parsedResetTime: true,
+    });
+  });
+
+  describe("a reset clock comes only from the run's own error or ACP evidence", () => {
+    const now = new Date("2026-10-13T18:00:38.000Z");
+    const defaultBackoff = {
+      kind: "provider_quota",
+      retryAt: new Date(now.getTime() + PROVIDER_QUOTA_RECOVERY_DEFAULT_BACKOFF_MS),
+      parsedResetTime: false,
+    };
+
+    it("ignores a reset clock or 'try again at' that a result summary quotes when the own error has no clock", () => {
+      for (const summary of [
+        "Quoted: You've hit your session limit · resets 9:00am (UTC)",
+        "Quoted: you've hit your session limit. Try again at 9:00 AM (UTC).",
+        "Added a test for resets 21:30 (UTC)",
+      ]) {
+        expect(classifyAdapterFailureForRecovery({
+          errorCode: "adapter_failed",
+          error: "You've hit your session limit",
+          resultJson: { summary },
+        }, now)).toEqual(defaultBackoff);
+      }
+    });
+
+    it("ignores a quoted clock in the result when only the generic quota text is in the own error", () => {
+      expect(classifyAdapterFailureForRecovery({
+        errorCode: "adapter_failed",
+        error: "Usage limit reached",
+        resultJson: { stdout: "docs say: try again at 9:00 AM (UTC)" },
+      }, now)).toEqual(defaultBackoff);
+    });
+
+    it("still uses the own error's clock when the result quotes a different one", () => {
+      expect(classifyAdapterFailureForRecovery({
+        errorCode: "adapter_failed",
+        error: "You've hit your session limit · resets 10:40pm (Asia/Jerusalem)",
+        resultJson: { summary: "Quoted: resets 9:00am (UTC) and try again at 4 AM (UTC)" },
+      }, now)).toEqual({
+        kind: "provider_quota",
+        retryAt: new Date("2026-10-13T19:40:00.000Z"),
+        parsedResetTime: true,
+      });
+    });
+
+    it("keeps the ACP error and stop reason as trusted clock sources and ignores the rest of the result", () => {
+      expect(classifyAdapterFailureForRecovery({
+        errorCode: "acpx_turn_failed",
+        error: "You've hit your session limit",
+        resultJson: { summary: "Quoted: resets 9:00am (UTC)", stopReason: "end_turn" },
+      }, now)).toEqual(defaultBackoff);
+      expect(classifyAdapterFailureForRecovery({
+        errorCode: "acpx_turn_failed",
+        error: "Provider turn failed",
+        resultJson: { stopReason: "You've hit your session limit - resets at 21:30 (UTC)" },
+      }, now)).toEqual({
+        kind: "provider_quota",
+        retryAt: new Date("2026-10-13T21:30:00.000Z"),
+        parsedResetTime: true,
+      });
+    });
+
+    it("validates each candidate before choosing, so an invalid earlier clock does not hide a valid later one", () => {
+      for (const errorCode of ["adapter_failed", "acpx_turn_failed"]) {
+        const error = (invalid: string) =>
+          `You've hit your session limit · resets ${invalid} · or resets 10:40pm (Asia/Jerusalem)`;
+        for (const invalid of ["25:99 (UTC)", "13pm (UTC)", "9:75 UTC", "8:00 (Not/AZone)"]) {
+          expect(classifyAdapterFailureForRecovery({ errorCode, error: error(invalid), resultJson: {} }, now)).toEqual({
+            kind: "provider_quota",
+            retryAt: new Date("2026-10-13T19:40:00.000Z"),
+            parsedResetTime: true,
+          });
+        }
+      }
+    });
+
+    it("requires a complete clock token: trailing digits or colons make a candidate invalid", () => {
+      for (const errorCode of ["adapter_failed", "acpx_turn_failed"]) {
+        for (const incomplete of ["9:000 (UTC)", "9:00:30 (UTC)", "123:45 (UTC)", "9:0000pm (UTC)"]) {
+          expect(classifyAdapterFailureForRecovery({
+            errorCode,
+            error: `You've hit your session limit · resets ${incomplete}`,
+            resultJson: {},
+          }, now)).toEqual(defaultBackoff);
+        }
+        // A complete clock after an incomplete one is still found.
+        expect(classifyAdapterFailureForRecovery({
+          errorCode,
+          error: "You've hit your session limit · resets 9:000 (UTC) · or resets 10:40pm (Asia/Jerusalem)",
+          resultJson: {},
+        }, now)).toEqual({
+          kind: "provider_quota",
+          retryAt: new Date("2026-10-13T19:40:00.000Z"),
+          parsedResetTime: true,
+        });
+      }
+    });
+
+    it("does not read prose after a clock as a timezone", () => {
+      const prose = "You've hit your usage limit. Try again at 10:40pm or upgrade your plan";
+      for (const errorCode of ["adapter_failed", "acpx_turn_failed", "provider_quota"]) {
+        expect(classifyAdapterFailureForRecovery({ errorCode, error: prose, resultJson: {} }, now)).toEqual({
+          kind: "provider_quota",
+          retryAt: new Date("2026-10-13T22:40:00.000Z"),
+          parsedResetTime: true,
+        });
+      }
+      // Other lowercase or mixed-case words are prose too.
+      for (const word of ["Or", "and", "to", "Please"]) {
+        expect(classifyAdapterFailureForRecovery({
+          errorCode: "adapter_failed",
+          error: `You've hit your usage limit. Try again at 10:40pm ${word} upgrade your plan`,
+          resultJson: {},
+        }, now)).toEqual({
+          kind: "provider_quota",
+          retryAt: new Date("2026-10-13T22:40:00.000Z"),
+          parsedResetTime: true,
+        });
+      }
+    });
+
+    it("keeps valid UTC and IANA zones and still refuses an unknown zone", () => {
+      const at = (zone: string) => classifyAdapterFailureForRecovery({
+        errorCode: "adapter_failed",
+        error: `You've hit your usage limit. Try again at 10:40pm ${zone}`,
+        resultJson: {},
+      }, now);
+      expect(at("UTC")).toEqual({ kind: "provider_quota", retryAt: new Date("2026-10-13T22:40:00.000Z"), parsedResetTime: true });
+      expect(at("(UTC)")).toEqual({ kind: "provider_quota", retryAt: new Date("2026-10-13T22:40:00.000Z"), parsedResetTime: true });
+      expect(at("(Asia/Jerusalem)")).toEqual({ kind: "provider_quota", retryAt: new Date("2026-10-13T19:40:00.000Z"), parsedResetTime: true });
+      // An unknown explicit zone, in parentheses or written in capitals, is not guessed.
+      expect(at("(Not/AZone)")).toEqual(defaultBackoff);
+      expect(at("(Foo)")).toEqual(defaultBackoff);
+      expect(at("ZZZ")).toEqual(defaultBackoff);
+      expect(at("OR upgrade your plan")).toEqual(defaultBackoff);
+    });
+
+    it("falls back to the default backoff when every candidate is invalid", () => {
+      expect(classifyAdapterFailureForRecovery({
+        errorCode: "adapter_failed",
+        error: "You've hit your session limit · resets 25:99 (UTC) · try again at 8:00 (Not/AZone)",
+        resultJson: {},
+      }, now)).toEqual(defaultBackoff);
+    });
+
+    it("keeps a later try-again clock for a generic usage limit when an earlier reset text is invalid", () => {
+      expect(classifyAdapterFailureForRecovery({
+        errorCode: "adapter_failed",
+        error: "You've hit your usage limit; resets 8 pigs. Try again at 10:40pm (Asia/Jerusalem).",
+        resultJson: {},
+      }, now)).toEqual({
+        kind: "provider_quota",
+        retryAt: new Date("2026-10-13T19:40:00.000Z"),
+        parsedResetTime: true,
+      });
+    });
+  });
+
+  describe("generic quota wording counts only in the run's own error", () => {
+    const phrases = ["usage limit reached", "You've hit your usage limit", "provider quota exceeded"];
+    const now = new Date("2026-10-13T18:00:38.000Z");
+
+    it.each(phrases)("does not park a run whose non-error result quotes %j", (phrase) => {
+      for (const errorCode of ["adapter_failed", "provider_failed"]) {
+        expect(classifyAdapterFailureForRecovery({
+          errorCode,
+          error: "Process exited with code 1",
+          resultJson: {
+            summary: `The docs say: ${phrase}`,
+            result: `Output: ${phrase}`,
+            stdout: `... ${phrase} ...`,
+            transcript: [{ text: phrase }],
+          },
+        }, now)).toBeNull();
+      }
+    });
+
+    it.each(phrases)("still parks a run whose own error says %j", (phrase) => {
+      expect(classifyAdapterFailureForRecovery({
+        errorCode: "adapter_failed",
+        error: `Run failed: ${phrase}`,
+        resultJson: { summary: "unrelated" },
+      }, now)?.kind).toBe("provider_quota");
+    });
+
+    it("still trusts the marker an adapter recorded after judging its own evidence", () => {
+      expect(classifyAdapterFailureForRecovery({
+        errorCode: "adapter_failed",
+        error: "Claude run failed",
+        resultJson: { errorFamily: "provider_quota" },
+      }, now)?.kind).toBe("provider_quota");
+    });
+  });
+
   it("takes the exact Claude statement from the ACP stop reason", () => {
     const now = new Date("2026-10-13T18:00:38.000Z");
     for (const resultJson of [
