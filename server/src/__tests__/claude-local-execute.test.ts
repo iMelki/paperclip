@@ -1536,6 +1536,13 @@ describe("claude execute", () => {
         line({ type: "result", subtype: "error", is_error: true, result: text, errors: [] });
       const glued = "You've hit your session limit · resets 9:00pm:30 (UTC)";
 
+      // A full stop before the digits is not the end of the sentence; both parsers must refuse it.
+      const dotted = await runFailingClaude({
+        stdout: resultLine("You've hit your session limit · resets 9:00pm.30 (UTC)"),
+      });
+      expect(dotted.result.retryNotBefore).toBeNull();
+      expect(dotted.recovery).toMatchObject({ kind: "provider_quota", parsedResetTime: false });
+
       const invalidOnly = await runFailingClaude({ stdout: resultLine(glued) });
       expect(invalidOnly.result.errorCode).toBe("provider_quota");
       expect(invalidOnly.result.retryNotBefore).toBeNull();

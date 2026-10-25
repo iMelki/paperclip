@@ -123,7 +123,7 @@ describe("isClaudeTransientUpstreamError", () => {
     });
 
     it("requires a complete clock token: text glued to the meridiem makes the statement invalid", () => {
-      for (const glued of ["9:00pm:30 (UTC)", "9pm30 (UTC)", "9:00pm:30"]) {
+      for (const glued of ["9:00pm:30 (UTC)", "9pm30 (UTC)", "9:00pm:30", "9:00pm.30 (UTC)", "9pm.30", "9:00pm.30"]) {
         const stderr = `You've hit your session limit · resets ${glued}`;
         expect(extractClaudeRetryNotBefore({ stderr }, now)).toBeNull();
         // The quota verdict is unchanged; only the clock is refused.
