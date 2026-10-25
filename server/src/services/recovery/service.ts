@@ -404,20 +404,20 @@ export type AdapterFailureRecoveryClassification =
  * is a real zone is decided later, and an unknown one makes the candidate unusable.
  */
 function readBareZone(match: RegExpMatchArray): string | undefined {
-  const token = match[5];
+  const token = match[6];
   return token !== undefined && /^[A-Z]{2,5}$/.test(token) ? token : undefined;
 }
 
 function parseProviderQuotaClockReset(error: string, now: Date, scope?: ProviderQuotaResetScope, failedAt?: Date | null) {
   const matches = error.matchAll(
-    /\b(?:try again at|resets(?: at)?)\s+(\d{1,2})(?::(\d{2}))?(?![\d:])(?:\s*([ap])\.?\s*m\.?)?(?:\s*\(([^)]+)\)|\s+([A-Z]{2,5}))?/gi,
+    /\b(?:try again at|resets(?: at)?)\s+(\d{1,2})(?::(\d{2}))?(?![\d:])(?:\s*([ap])\.?\s*m\.?)?(?=(:?\d)?)(?:\s*\(([^)]+)\)|\s+([A-Z]{2,5}))?/gi,
   );
   const inScope = (candidate: RegExpMatchArray) =>
     scope !== undefined && candidate.index! >= scope.start && candidate.index! <= scope.end;
   // A bare `resets N` is ordinary prose ("cache resets 7 days ago"); as a quota clock it needs
   // minutes, a meridiem or a timezone.
   const clockLike = (candidate: RegExpMatchArray) =>
-    candidate[2] !== undefined || candidate[3] !== undefined || candidate[4] !== undefined || readBareZone(candidate) !== undefined;
+    candidate[2] !== undefined || candidate[3] !== undefined || candidate[5] !== undefined || readBareZone(candidate) !== undefined;
   const accepts = (candidate: RegExpMatchArray) => {
     if (scope?.acp) return inScope(candidate) && (/^try again at/i.test(candidate[0]) || clockLike(candidate));
     if (/^try again at/i.test(candidate[0])) return true;
@@ -444,6 +444,8 @@ function resolveProviderQuotaClock(match: RegExpMatchArray, now: Date, failedAt?
     return occurrence.getTime() > now.getTime() ? occurrence : new Date(now);
   };
 
+  // A digit or ":digit" right after the clock ("9:00pm:30") means the token is not a clock.
+  if (match[4] !== undefined) return null;
   const hourValue = Number.parseInt(match[1] ?? "", 10);
   const minute = Number.parseInt(match[2] ?? "0", 10);
   const meridiem = (match[3] ?? "").toLowerCase();
@@ -453,7 +455,7 @@ function resolveProviderQuotaClock(match: RegExpMatchArray, now: Date, failedAt?
 
   let hour = meridiem ? hourValue % 12 : hourValue;
   if (meridiem === "p") hour += 12;
-  const timeZone = (match[4] ?? readBareZone(match))?.trim();
+  const timeZone = (match[5] ?? readBareZone(match))?.trim();
   if (!timeZone) {
     const retryAt = new Date(base);
     retryAt.setUTCHours(hour, minute, 0, 0);

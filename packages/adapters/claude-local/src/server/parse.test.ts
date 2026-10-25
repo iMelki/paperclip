@@ -122,6 +122,21 @@ describe("isClaudeTransientUpstreamError", () => {
       expect(extractClaudeRetryNotBefore({ stderr: "You've hit your session limit · resets 9:000am (UTC)" }, now)).toBeNull();
     });
 
+    it("requires a complete clock token: text glued to the meridiem makes the statement invalid", () => {
+      for (const glued of ["9:00pm:30 (UTC)", "9pm30 (UTC)", "9:00pm:30"]) {
+        const stderr = `You've hit your session limit · resets ${glued}`;
+        expect(extractClaudeRetryNotBefore({ stderr }, now)).toBeNull();
+        // The quota verdict is unchanged; only the clock is refused.
+        expect(isClaudeProviderQuotaError({ stderr, errorMessage: stderr })).toBe(true);
+      }
+      expect(
+        extractClaudeRetryNotBeforeWithSource(
+          { stderr: "You've hit your session limit · resets 9:00pm:30 (UTC)\nYou've hit your session limit · resets 9am (UTC)" },
+          now,
+        ),
+      ).toEqual({ retryAt: new Date("2026-04-22T09:00:00.000Z"), source: "stderr" });
+    });
+
     it("does not read a clock in the server's timezone when the named timezone is unknown", () => {
       expect(extractClaudeRetryNotBefore({ stderr: "You've hit your session limit · resets 9am (Foo/Bar)" }, now)).toBeNull();
       expect(

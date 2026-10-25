@@ -456,6 +456,8 @@ function parseClaudeResetClockTime(clockText: string, now: Date, timeZoneHint?: 
   const normalized = clockText.trim().replace(/\s+/g, " ");
   const match = normalized.match(/^(\d{1,2})(?::(\d{2}))?\s*([ap])\.?\s*m\.?/i);
   if (!match) return null;
+  // Anything glued to the clock ("9:00pm:30", "9:00pm30") means it is not a complete clock token.
+  if (/^:?\d/.test(normalized.slice(match[0].length))) return null;
 
   const hour12 = Number.parseInt(match[1] ?? "", 10);
   const minute = Number.parseInt(match[2] ?? "0", 10);

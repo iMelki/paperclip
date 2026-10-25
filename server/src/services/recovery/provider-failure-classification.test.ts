@@ -219,7 +219,7 @@ describe("classifyAdapterFailureForRecovery", () => {
 
     it("requires a complete clock token: trailing digits or colons make a candidate invalid", () => {
       for (const errorCode of ["adapter_failed", "acpx_turn_failed"]) {
-        for (const incomplete of ["9:000 (UTC)", "9:00:30 (UTC)", "123:45 (UTC)", "9:0000pm (UTC)"]) {
+        for (const incomplete of ["9:000 (UTC)", "9:00:30 (UTC)", "123:45 (UTC)", "9:0000pm (UTC)", "9:00pm:30 (UTC)", "9pm30 (UTC)", "9:00pm:30 UTC"]) {
           expect(classifyAdapterFailureForRecovery({
             errorCode,
             error: `You've hit your session limit · resets ${incomplete}`,
@@ -230,6 +230,15 @@ describe("classifyAdapterFailureForRecovery", () => {
         expect(classifyAdapterFailureForRecovery({
           errorCode,
           error: "You've hit your session limit · resets 9:000 (UTC) · or resets 10:40pm (Asia/Jerusalem)",
+          resultJson: {},
+        }, now)).toEqual({
+          kind: "provider_quota",
+          retryAt: new Date("2026-10-13T19:40:00.000Z"),
+          parsedResetTime: true,
+        });
+        expect(classifyAdapterFailureForRecovery({
+          errorCode,
+          error: "You've hit your session limit · resets 9:00pm:30 (UTC) · or resets 10:40pm (Asia/Jerusalem)",
           resultJson: {},
         }, now)).toEqual({
           kind: "provider_quota",
