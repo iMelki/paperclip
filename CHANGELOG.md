@@ -49,7 +49,8 @@ All notable changes to this repository should be recorded here.
   by its `-D` value.
 
 - Windows embedded PostgreSQL now writes its server log outside the data
-  directory, in the same log directory as the server log (`<instance>/logs/postgres.log`
+  directory, in the same log directory as the server log (`<instance>/logs/postgres-<id>.log`,
+  one file per data directory so instances that share a log directory never share a file,
   by default, or the configured `logging.logDir` / `PAPERCLIP_LOG_DIR`). When the
   data directory contains that directory, including through a symlink or
   junction, the log goes to a sibling of the data directory. Server startup also

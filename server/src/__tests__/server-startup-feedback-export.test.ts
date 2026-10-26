@@ -533,7 +533,7 @@ describe("startServer embedded PostgreSQL identity", () => {
   it("writes the PostgreSQL log into the configured server log directory", async () => {
     await expect(startServer()).rejects.toThrow("database phase reached");
     expect(pgCtorMock).toHaveBeenCalledWith(expect.objectContaining({
-      logFile: path.resolve("/configured/log/dir", "postgres.log"),
+      logFile: expect.stringMatching(new RegExp(`^${path.resolve("/configured/log/dir").replace(/[\\^$.*+?()[\]{}|]/g, "\\$&")}[\\\\/]postgres-[0-9a-f]{8}\\.log$`)),
       // The leftover lock means crash recovery, which gets the longer wait.
       startTimeoutSeconds: 600,
     }));

@@ -1,19 +1,38 @@
-import { mkdirSync, mkdtempSync, realpathSync, symlinkSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { resolveEmbeddedPostgresLogFile } from "../embedded-postgres-log-file.js";
+
+const PER_INSTANCE_LOG = /^postgres-[0-9a-f]{8}\.log$/;
 
 describe("resolveEmbeddedPostgresLogFile", () => {
   const root = path.resolve("/srv/paperclip");
+  const scratch: string[] = [];
+  const tempDir = (prefix: string) => {
+    const dir = mkdtempSync(path.join(tmpdir(), prefix));
+    scratch.push(dir);
+    return dir;
+  };
+
+  afterEach(() => {
+    for (const dir of scratch.splice(0)) rmSync(dir, { recursive: true, force: true });
+  });
 
   it("uses the default logs directory when it is outside the data directory", () => {
-    expect(resolveEmbeddedPostgresLogFile(path.join(root, "db"), path.join(root, "logs"))).toBe(
-      path.join(root, "logs", "postgres.log"),
-    );
-    expect(resolveEmbeddedPostgresLogFile(path.join(root, "db"), path.join(root, "db-logs"))).toBe(
-      path.join(root, "db-logs", "postgres.log"),
-    );
+    const log = resolveEmbeddedPostgresLogFile(path.join(root, "db"), path.join(root, "logs"));
+    expect(path.dirname(log)).toBe(path.join(root, "logs"));
+    expect(path.basename(log)).toMatch(PER_INSTANCE_LOG);
+    const other = resolveEmbeddedPostgresLogFile(path.join(root, "db"), path.join(root, "db-logs"));
+    expect(path.dirname(other)).toBe(path.join(root, "db-logs"));
+  });
+
+  it("gives each data directory its own log file when instances share a log directory", () => {
+    const logs = path.join(root, "logs");
+    const first = resolveEmbeddedPostgresLogFile(path.join(root, "one"), logs);
+    const second = resolveEmbeddedPostgresLogFile(path.join(root, "two"), logs);
+    expect(first).not.toBe(second);
+    expect(resolveEmbeddedPostgresLogFile(path.join(root, "one"), logs)).toBe(first);
   });
 
   it("moves the log beside the data directory when the data directory contains the logs directory", () => {
@@ -27,9 +46,9 @@ describe("resolveEmbeddedPostgresLogFile", () => {
   });
 
   it("compares physical locations when the data directory is a symlink to a tree that holds the logs", () => {
-    const physical = mkdtempSync(path.join(tmpdir(), "pg-log-physical-"));
+    const physical = tempDir("pg-log-physical-");
     mkdirSync(path.join(physical, "logs"));
-    const alias = path.join(mkdtempSync(path.join(tmpdir(), "pg-log-alias-")), "data");
+    const alias = path.join(tempDir("pg-log-alias-"), "data");
     symlinkSync(physical, alias);
     const log = resolveEmbeddedPostgresLogFile(alias, path.join(physical, "logs"));
     expect(path.relative(realpathSync(physical), realpathSync(path.dirname(log))).startsWith("..")).toBe(true);
@@ -37,19 +56,19 @@ describe("resolveEmbeddedPostgresLogFile", () => {
   });
 
   it("resolves a logs directory that does not exist yet through its existing ancestor", () => {
-    const physical = mkdtempSync(path.join(tmpdir(), "pg-log-future-"));
-    const alias = path.join(mkdtempSync(path.join(tmpdir(), "pg-log-future-alias-")), "data");
+    const physical = tempDir("pg-log-future-");
+    const alias = path.join(tempDir("pg-log-future-alias-"), "data");
     symlinkSync(physical, alias);
     const log = resolveEmbeddedPostgresLogFile(physical, path.join(alias, "logs"));
     expect(log).toBe(path.join(path.dirname(physical), `${path.basename(physical)}-postgres.log`));
   });
 
   it("returns the caller's spelling of the path, not the resolved one", () => {
-    const physical = mkdtempSync(path.join(tmpdir(), "pg-log-spelling-"));
-    const alias = path.join(mkdtempSync(path.join(tmpdir(), "pg-log-spelling-alias-")), "logs");
+    const physical = tempDir("pg-log-spelling-");
+    const alias = path.join(tempDir("pg-log-spelling-alias-"), "logs");
     symlinkSync(physical, alias);
-    expect(resolveEmbeddedPostgresLogFile(path.join(tmpdir(), "pg-log-spelling-data"), alias)).toBe(
-      path.join(alias, "postgres.log"),
-    );
+    const log = resolveEmbeddedPostgresLogFile(path.join(tmpdir(), "pg-log-spelling-data"), alias);
+    expect(path.dirname(log)).toBe(alias);
+    expect(path.basename(log)).toMatch(PER_INSTANCE_LOG);
   });
 });
