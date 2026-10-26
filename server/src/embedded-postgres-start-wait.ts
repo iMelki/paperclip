@@ -17,7 +17,7 @@
  */
 
 import { readFile } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 
 /**
  * Server log lines that show crash recovery has started or moved forward.
@@ -166,14 +166,14 @@ export async function isPostmasterPidAlive(
 
 /**
  * The file pg_ctl writes the server log to on Windows: the `logFile` option
- * when it is set, otherwise `server.log` in the data directory (the current
- * patched embedded-postgres default). Callers resolve it once, from the same
+ * when it is set, otherwise `<data directory>-postgres.log` beside the data
+ * directory (the patched embedded-postgres default, kept outside it). Callers resolve it once, from the same
  * options the instance is built with, and pass the result to every reader.
  */
 export function resolveEmbeddedPostgresServerLogPath(dataDir: string, logFile: unknown): string {
   return typeof logFile === "string" && logFile.length > 0
     ? resolve(logFile)
-    : join(resolve(dataDir), "server.log");
+    : join(dirname(resolve(dataDir)), `${basename(resolve(dataDir))}-postgres.log`);
 }
 
 /** `resolveEmbeddedPostgresServerLogPath` for an instance (or its constructor options). */
