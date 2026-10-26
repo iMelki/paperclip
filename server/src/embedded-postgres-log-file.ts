@@ -35,10 +35,13 @@ function canonicalPath(target: string): string {
  * log moves to a sibling of the data directory instead of blocking startup.
  */
 export function resolveEmbeddedPostgresLogFile(dataDir: string, logsDir: string): string {
+  const data = path.resolve(dataDir);
+  const preferred = path.join(path.resolve(logsDir), "postgres.log");
   // Compared by physical location: a data directory that is a symlink or junction to a
-  // directory containing the logs directory is still the same tree.
-  const data = canonicalPath(dataDir);
-  const preferred = path.join(canonicalPath(logsDir), "postgres.log");
-  if (!isInside(data, preferred)) return preferred;
+  // directory containing the logs directory is still the same tree. Only the comparison uses
+  // the resolved form; the returned path keeps the caller's spelling, because the native
+  // resolver can rewrite a drive-letter path (mapped drive, folder redirection) to a UNC path
+  // that the patched dependency refuses.
+  if (!isInside(canonicalPath(dataDir), canonicalPath(preferred))) return preferred;
   return path.join(path.dirname(data), `${path.basename(data)}-postgres.log`);
 }
