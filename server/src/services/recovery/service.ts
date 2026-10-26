@@ -375,9 +375,11 @@ export const PROVIDER_QUOTA_RECOVERY_DEFAULT_BACKOFF_MS = 60 * 60 * 1000;
 
 // Session-limit wording counts only as Claude's own statement ("You've hit your
 // session limit · resets …"); bare "session limit" also appears in unrelated
-// tool, MCP and terminal failures and must not enter quota recovery.
+// tool, MCP and terminal failures and must not enter quota recovery. It is read
+// from the ACP error and stop reason, or from a non-ACP run's own error field,
+// never from the rest of the result (summaries and stdout can quote it).
 const PROVIDER_QUOTA_ERROR_RE =
-  /(?:you(?:'|’)ve hit your (?:usage|session) limit|usage limit(?: reached| exceeded)?|provider quota|quota (?:limit )?exceeded|model (?:is )?at capacity)/i;
+  /(?:you(?:'|’)ve hit your usage limit|usage limit(?: reached| exceeded)?|provider quota|quota (?:limit )?exceeded|model (?:is )?at capacity)/i;
 const CLAUDE_SESSION_LIMIT_RE = /you(?:'|’)ve hit your (?:usage|session) limit/i;
 // On the ACP path a reset clock only counts when it sits right next to the quota statement.
 const PROVIDER_QUOTA_RESET_WINDOW_CHARS = 120;
@@ -395,23 +397,43 @@ export type AdapterFailureRecoveryClassification =
   | { kind: "configuration_incomplete" }
   | null;
 
+/**
+ * A timezone written after the clock without parentheses ("resets 21:30 UTC"). The pattern is
+ * case-insensitive, so ordinary prose after a clock ("try again at 10:40pm or upgrade your plan")
+ * is captured too; only a token written entirely in capitals is a timezone candidate. Whether it
+ * is a real zone is decided later, and an unknown one makes the candidate unusable.
+ */
+function readBareZone(match: RegExpMatchArray): string | undefined {
+  const token = match[6];
+  return token !== undefined && /^[A-Z]{2,5}$/.test(token) ? token : undefined;
+}
+
 function parseProviderQuotaClockReset(error: string, now: Date, scope?: ProviderQuotaResetScope, failedAt?: Date | null) {
   const matches = error.matchAll(
-    /\b(?:try again at|resets(?: at)?)\s+(\d{1,2})(?::(\d{2}))?(?:\s*([ap])\.?\s*m\.?)?(?:\s*\(([^)]+)\)|\s+([A-Z]{2,5}))?/gi,
+    /\b(?:try again at|resets(?: at)?)\s+(\d{1,2})(?::(\d{2}))?(?![\d:])(?:\s*([ap])\.?\s*m\.?)?(?=(:?\d)?)(?:\s*\(([^)]+)\)|\s+([A-Z]{2,5}))?/gi,
   );
   const inScope = (candidate: RegExpMatchArray) =>
     scope !== undefined && candidate.index! >= scope.start && candidate.index! <= scope.end;
   // A bare `resets N` is ordinary prose ("cache resets 7 days ago"); as a quota clock it needs
   // minutes, a meridiem or a timezone.
   const clockLike = (candidate: RegExpMatchArray) =>
-    candidate[2] !== undefined || candidate[3] !== undefined || candidate[4] !== undefined || candidate[5] !== undefined;
+    candidate[2] !== undefined || candidate[3] !== undefined || candidate[5] !== undefined || readBareZone(candidate) !== undefined;
   const accepts = (candidate: RegExpMatchArray) => {
     if (scope?.acp) return inScope(candidate) && (/^try again at/i.test(candidate[0]) || clockLike(candidate));
     if (/^try again at/i.test(candidate[0])) return true;
     return inScope(candidate) && clockLike(candidate);
   };
-  const match = [...matches].find(accepts);
-  if (!match) return null;
+  // Every accepted candidate is validated before one is chosen: an impossible clock ("resets 25:99")
+  // or an unknown timezone must not hide a later, valid reset in the same text.
+  for (const match of matches) {
+    if (!accepts(match)) continue;
+    const resolved = resolveProviderQuotaClock(match, now, failedAt);
+    if (resolved) return resolved;
+  }
+  return null;
+}
+
+function resolveProviderQuotaClock(match: RegExpMatchArray, now: Date, failedAt?: Date | null): Date | null {
   // The clock is read relative to when the run failed (never later than now), so a failure
   // examined hours after its reset sees that reset as already due instead of tomorrow's.
   // A clock within the grace window before that moment still counts as that moment's reset.
@@ -422,6 +444,8 @@ function parseProviderQuotaClockReset(error: string, now: Date, scope?: Provider
     return occurrence.getTime() > now.getTime() ? occurrence : new Date(now);
   };
 
+  // A digit or ":digit" right after the clock ("9:00pm:30") means the token is not a clock.
+  if (match[4] !== undefined) return null;
   const hourValue = Number.parseInt(match[1] ?? "", 10);
   const minute = Number.parseInt(match[2] ?? "0", 10);
   const meridiem = (match[3] ?? "").toLowerCase();
@@ -431,7 +455,7 @@ function parseProviderQuotaClockReset(error: string, now: Date, scope?: Provider
 
   let hour = meridiem ? hourValue % 12 : hourValue;
   if (meridiem === "p") hour += 12;
-  const timeZone = (match[4] ?? match[5])?.trim();
+  const timeZone = (match[5] ?? readBareZone(match))?.trim();
   if (!timeZone) {
     const retryAt = new Date(base);
     retryAt.setUTCHours(hour, minute, 0, 0);
@@ -509,22 +533,44 @@ export function classifyAdapterFailureForRecovery(
       .filter((value): value is string => typeof value === "string")
       .join("\n");
     if (!CLAUDE_SESSION_LIMIT_RE.test(evidence)) return null;
-    return buildProviderQuotaClassification(resultJson, evidence, now, { boundResetWindow: true, failedAt });
+    return buildProviderQuotaClassification(resultJson, evidence, now, {
+      boundResetWindow: true,
+      failedAt,
+      acceptSessionLimit: true,
+    });
   }
-  const error = [latestRun.errorCode ?? "", latestRun.error ?? "", JSON.stringify(resultJson)].join("\n");
+  // Only the run's own error counts, for the quota verdict and for the reset clock alike. The
+  // result JSON holds summaries, output and transcripts, where an agent can quote any wording
+  // ("usage limit reached", "resets 10:40pm", "try again at"); that text neither parks the run
+  // as a quota wait nor sets when it retries. The marker an adapter records after it judged
+  // provider error evidence itself (`errorFamily`) is trusted.
+  const ownErrorText = [latestRun.errorCode ?? "", latestRun.error ?? ""].join("\n");
+  const error = [ownErrorText, JSON.stringify(resultJson)].join("\n");
   if (latestRun.errorCode === "configuration_incomplete" || CONFIGURATION_INCOMPLETE_ERROR_RE.test(error)) {
     return { kind: "configuration_incomplete" };
   }
-  if (latestRun.errorCode !== "provider_quota" && !PROVIDER_QUOTA_ERROR_RE.test(error)) return null;
+  const sessionLimitInOwnError = typeof latestRun.error === "string" && CLAUDE_SESSION_LIMIT_RE.test(latestRun.error);
+  if (
+    latestRun.errorCode !== "provider_quota" &&
+    resultJson.errorFamily !== "provider_quota" &&
+    !PROVIDER_QUOTA_ERROR_RE.test(ownErrorText) &&
+    !sessionLimitInOwnError
+  ) {
+    return null;
+  }
 
-  return buildProviderQuotaClassification(resultJson, error, now, { failedAt });
+  return buildProviderQuotaClassification(resultJson, ownErrorText, now, {
+    failedAt,
+    acceptSessionLimit: sessionLimitInOwnError,
+  });
 }
 
 function buildProviderQuotaClassification(
   resultJson: Record<string, unknown>,
+  // Trusted evidence only: the run's own error (and stop reason on the ACP path).
   error: string,
   now: Date,
-  options: { boundResetWindow?: boolean; failedAt?: Date | null } = {},
+  options: { boundResetWindow?: boolean; failedAt?: Date | null; acceptSessionLimit?: boolean } = {},
 ): AdapterFailureRecoveryClassification {
   const persistedRetryAt = readNonEmptyString(resultJson.retryNotBefore) ??
     readNonEmptyString(resultJson.transientRetryNotBefore) ??
@@ -534,7 +580,11 @@ function buildProviderQuotaClassification(
     return { kind: "provider_quota", retryAt: parsedPersistedRetryAt, parsedResetTime: true };
   }
 
-  const quotaMatch = PROVIDER_QUOTA_ERROR_RE.exec(error);
+  const genericMatch = PROVIDER_QUOTA_ERROR_RE.exec(error);
+  const sessionMatch = options.acceptSessionLimit ? CLAUDE_SESSION_LIMIT_RE.exec(error) : null;
+  const quotaMatch = genericMatch && sessionMatch
+    ? (sessionMatch.index < genericMatch.index ? sessionMatch : genericMatch)
+    : (genericMatch ?? sessionMatch);
   // The ACP path only reads a clock that sits right after Claude's statement: its evidence
   // joins several fields, so a clock far from it belongs to something else. Other adapters
   // (for example Codex's "...or try again at 3:42 PM") put `try again at` after long upgrade

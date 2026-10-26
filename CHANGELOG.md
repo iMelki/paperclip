@@ -20,6 +20,28 @@ All notable changes to this repository should be recorded here.
 
 ## Unreleased
 
+- **Fix:** embedded PostgreSQL start-up now survives slow crash recovery on
+  Windows. When `pg_ctl` stops waiting (60 s) while the server log shows crash
+  recovery (fsync of the data directory, WAL redo, end-of-recovery checkpoint)
+  and the postmaster is alive, start-up keeps waiting for readiness while new
+  recovery progress lines appear. It gives up after 300 s without progress or
+  at an upper bound of 1800 s (set with
+  `PAPERCLIP_EMBEDDED_POSTGRES_RECOVERY_STALL_SEC` and
+  `PAPERCLIP_EMBEDDED_POSTGRES_RECOVERY_MAX_WAIT_SEC`). While it waits, and
+  after it gives up, the embedded-postgres exit hook cannot stop the server, so
+  recovery is not restarted from zero. The error names the server log path.
+  Each readiness probe has a deadline inside the remaining wait, and a probe
+  that is still pending is awaited again rather than repeated. "resetting unlogged
+  relations" progress lines count as recovery progress. While the server log
+  shows unfinished recovery, the next start's refusal says to wait instead of
+  naming a stop command. Only the latest startup episode in the log counts, so
+  an earlier "ready to accept connections" line does not hide a newer recovery.
+  The refusal and the start wait read one server log path, resolved once from
+  the instance options. When the log already shows "ready" but the readiness
+  check keeps failing, the give-up says so. The wait logs its policy when it
+  starts and a heartbeat every 30 s without new progress, and each readiness
+  probe passes a connect timeout close to its deadline.
+
 - **Fix:** a second embedded PostgreSQL start on the same data directory no
   longer moves the first start's live `postmaster.pid` aside. The lock is
   verified again just before `start()`. A live owner is reused, an owner that
@@ -42,6 +64,32 @@ All notable changes to this repository should be recorded here.
   refuses (instead of continuing unserialised) when the lock cannot be created or
   written. A refusal names every server whose ownership could
   not be proven and the safe manual step.
+- **[Refs #173]** Recovery reads the Claude session-limit statement only from
+  the ACP error and stop reason, or from a non-ACP run's own error field. A run
+  whose summary, output or transcript only quotes the phrase is no longer parked
+  as a provider quota wait. The reset clock is read only from the run's own
+  error (and the ACP error and stop reason), never from quoted result text.
+  Each `resets` or `try again at` candidate is validated before one is chosen,
+  so an impossible clock or an unknown timezone no longer hides a later valid
+  reset. A clock must be a complete token: `9:000` is not read as `9:00`, and
+  `9:00pm:30` or `9pm30` is not read as `9:00pm` or `9pm`, in the adapter and in
+  recovery.
+  The Claude adapter now decides "provider quota" and "transient upstream", and
+  extracts the retry time, only from provider error evidence: the `result` of a
+  result event that the CLI marked as an error, its `errors` list, stderr, and
+  the adapter's own fallback message. Raw stdout and the result of a result
+  event that is not an error are ignored. The run result records where the
+  verdict and the retry time came from as `providerQuotaEvidenceSource` and
+  `retryNotBeforeSource`. The failure message that recovery reads as the run's
+  own error no longer carries the text of a result event that is not an error,
+  every reset statement in a source is tried in turn, and a reset clock that
+  names an unknown timezone is skipped instead of being read in the server's
+  timezone. Recovery decides the quota verdict from the run's own error only,
+  never from the result JSON: a non-error result that quotes "usage limit
+  reached", "you've hit your usage limit" or "provider quota exceeded" no longer
+  parks the run. Prose after a clock ("try again at 10:40pm or upgrade your
+  plan") is no longer read as a timezone; only a word written in capitals is a
+  timezone candidate, and an unknown one still makes the candidate unusable.
 
 - Embedded PostgreSQL process discovery reads only an uppercase `-D` as the
   data directory option. PostgreSQL's lowercase `-d <debug level>` no longer
