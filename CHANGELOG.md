@@ -49,11 +49,12 @@ All notable changes to this repository should be recorded here.
   by its `-D` value.
 
 - Windows embedded PostgreSQL now writes its server log outside the data
-  directory, in the same log directory as the server log (`<instance>/logs/postgres-<id>.log`,
-  one file per data directory so instances that share a log directory never share a file,
-  by default, or the configured `logging.logDir` / `PAPERCLIP_LOG_DIR`). When the
-  data directory contains that directory, including through a symlink or
-  junction, the log goes to a sibling of the data directory. Server startup also
+  directory, in the same log directory as the server log: by default
+  `<instance>/logs/postgres-<id>.log`, or the configured `logging.logDir` /
+  `PAPERCLIP_LOG_DIR`. Each data directory gets its own file, so instances that
+  share a log directory never share one. When the data directory contains that
+  directory, including through a symlink or junction, the log goes to a sibling
+  of the data directory. Server startup also
   allows up to 600 seconds to start when the last shutdown was unclean (a
   `postmaster.pid` was left behind); the CLI, worktree and migration paths that
   start the database still wait 60 seconds. An open log inside the data
