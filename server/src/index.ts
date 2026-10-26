@@ -5,6 +5,7 @@
 // HTTP server, so trace coverage does not depend on incidental timing.
 import { instrumentationReady, shutdownInstrumentation } from "./instrumentation.js";
 import { existsSync } from "node:fs";
+import { readFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
@@ -33,6 +34,12 @@ import detectPort from "detect-port";
 import { createApp } from "./app.js";
 import { loadConfig } from "./config.js";
 import { resolveListenPort } from "./listen-port.js";
+import {
+  embeddedPostgresServerLogPath,
+  isPostmasterPidAlive,
+  resolveRecoveryWaitPolicy,
+  startEmbeddedPostgresFollowingRecovery,
+} from "./embedded-postgres-start-wait.js";
 import { EmbeddedPostgresLockRefusal, acquireEmbeddedStartLock, isSameDataDirectory, moveStaleLockAside, readLockIdentity, readRunningEmbeddedPostgres } from "./embedded-postgres-reuse.js";
 import { logger } from "./middleware/logger.js";
 import {
@@ -108,6 +115,9 @@ type EmbeddedPostgresInstance = {
   initialise(): Promise<void>;
   start(): Promise<void>;
   stop(): Promise<void>;
+  /** Vendor fields the crash-recovery start wait reads and disarms. */
+  process?: unknown;
+  options?: { logFile?: unknown };
 };
 
 type EmbeddedPostgresCtor = new (opts: {
@@ -496,7 +506,31 @@ export async function startServer(): Promise<StartedServer> {
             );
           } else {
             try {
-              await embeddedPostgres.start();
+              // pg_ctl on Windows stops waiting after 60 s, but crash recovery after an unclean
+              // shutdown can take longer on a loaded host. Keep waiting while the server log shows
+              // recovery progress, and never stop PostgreSQL in the middle of recovery.
+              const serverLogPath = embeddedPostgresServerLogPath(embeddedPostgres, dataDir);
+              const readyPort = port;
+              const startWait = await startEmbeddedPostgresFollowingRecovery({
+                instance: embeddedPostgres,
+                serverLogPath,
+                policy: resolveRecoveryWaitPolicy(),
+                readServerLog: () => readFile(serverLogPath, "utf8"),
+                isPostmasterAlive: () => isPostmasterPidAlive(postmasterPidFile),
+                isReady: async () => {
+                  const actual = await getPostgresDataDirectory(embeddedAdminUrl(readyPort));
+                  return typeof actual === "string" && (await isSameDataDirectory(actual, dataDir));
+                },
+                onRecoveryWait: ({ progressLines, waitedMs }) => {
+                  logger.warn(
+                    { progressLines, waitedMs, serverLogPath },
+                    "Embedded PostgreSQL crash recovery in progress; waiting",
+                  );
+                },
+              });
+              if (startWait.followedRecovery) {
+                logger.warn({ waitedMs: startWait.waitedMs }, "Embedded PostgreSQL became ready after crash recovery");
+              }
             } catch (err) {
               logEmbeddedPostgresFailure("start", err);
               throw formatEmbeddedPostgresError(err, {

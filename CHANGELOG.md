@@ -20,6 +20,17 @@ All notable changes to this repository should be recorded here.
 
 ## Unreleased
 
+- **Fix:** embedded PostgreSQL start-up now survives slow crash recovery on
+  Windows. When `pg_ctl` stops waiting (60 s) while the server log shows crash
+  recovery (fsync of the data directory, WAL redo, end-of-recovery checkpoint)
+  and the postmaster is alive, start-up keeps waiting for readiness while new
+  recovery progress lines appear. It gives up after 300 s without progress or
+  at an upper bound of 1800 s (set with
+  `PAPERCLIP_EMBEDDED_POSTGRES_RECOVERY_STALL_SEC` and
+  `PAPERCLIP_EMBEDDED_POSTGRES_RECOVERY_MAX_WAIT_SEC`). While it waits, and
+  after it gives up, the embedded-postgres exit hook cannot stop the server, so
+  recovery is not restarted from zero. The error names the server log path.
+
 - **Fix:** a second embedded PostgreSQL start on the same data directory no
   longer moves the first start's live `postmaster.pid` aside. The lock is
   verified again just before `start()`. A live owner is reused, an owner that
