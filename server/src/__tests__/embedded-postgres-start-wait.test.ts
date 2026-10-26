@@ -7,9 +7,13 @@ import {
   countRecoveryProgressLines,
   embeddedPostgresServerLogPath,
   isPostmasterPidAlive,
+  latestServerLogEpisode,
+  readinessProbeUrl,
+  resolveEmbeddedPostgresServerLogPath,
   resolveRecoveryWaitPolicy,
   serverLogShowsRecoveryInProgress,
   startEmbeddedPostgresFollowingRecovery,
+  type RecoveryWaitInfo,
   type RecoveryWaitPolicy,
   type StartFollowingRecoveryInput,
 } from "../embedded-postgres-start-wait.js";
@@ -61,7 +65,7 @@ type Clock = { seconds: () => number; advance: (ms: number) => void };
 function simulate(
   scenario: Scenario,
   policy = POLICY,
-  waits: Array<{ progressLines: number; waitedMs: number }> = [],
+  waits: RecoveryWaitInfo[] = [],
   overrides: (clock: Clock) => Partial<StartFollowingRecoveryInput> = () => ({}),
 ) {
   let clockMs = 0;
@@ -127,7 +131,7 @@ describe("startEmbeddedPostgresFollowingRecovery", () => {
   it("(b) keeps waiting through crash recovery that outlasts the 60 s pg_ctl wait", async () => {
     const log = [...steadyFsyncLog(80), [85, "LOG:  redo starts at 1/48D4A000"], [86, "LOG:  redo done at 1/48D4E1A8"],
       [87, "LOG:  checkpoint starting: end-of-recovery immediate wait"]] as Array<[number, string]>;
-    const waits: Array<{ progressLines: number; waitedMs: number }> = [];
+    const waits: RecoveryWaitInfo[] = [];
     const sim = simulate({ readyAt: 95, log }, POLICY, waits);
     const result = await sim.run();
     expect(result.followedRecovery).toBe(true);
@@ -328,6 +332,117 @@ describe("review round 1 fixes", () => {
   });
 });
 
+describe("review round 2 fixes", () => {
+  const READY = "LOG:  database system is ready to accept connections";
+
+  it("M1: a start failure without recovery lines rethrows at once while the postmaster stays alive", async () => {
+    // A slow clean start (or a non-English server) logs no recovery line; the postmaster is alive.
+    const log: Array<[number, string]> = [
+      [0, "LOG:  starting PostgreSQL 18.1 on x86_64-windows"],
+      [0, "LOG:  listening on IPv4 address \"127.0.0.1\", port 54329"],
+      [5, "FATAL:  the database system is starting up"],
+    ];
+    const waits: RecoveryWaitInfo[] = [];
+    const sim = simulate({ readyAt: null, diesAt: null, log }, POLICY, waits);
+    await expect(sim.run()).rejects.toBe(PG_CTL_TIMEOUT);
+    // The original error at the pg_ctl timeout, with no recovery wait at all.
+    expect(sim.seconds()).toBe(60);
+    expect(waits).toEqual([]);
+    expect(sim.exitHookRuns).toEqual([]);
+    // stop() is armed again, so shutdown still reaches pg_ctl stop.
+    await sim.instance.stop();
+    expect(sim.instance.pgCtlStops).toEqual(["pg_ctl stop -m fast -w"]);
+  });
+
+  it("L2: says the server is ready but failed the readiness check when the log already shows ready", async () => {
+    const log = [...steadyFsyncLog(40), [45, READY]] as Array<[number, string]>;
+    const sim = simulate({ readyAt: null, log });
+    const error = (await sim.run().catch((err: unknown) => err)) as EmbeddedPostgresRecoveryIncomplete;
+    expect(error).toBeInstanceOf(EmbeddedPostgresRecoveryIncomplete);
+    expect(error.reason).toBe("stalled");
+    expect(error.leftRunning).toBe(true);
+    expect(error.message).toContain("did not pass the readiness check");
+    expect(error.message).toContain("already shows \"database system is ready to accept connections\"");
+    expect(error.message).toContain(LOG_PATH);
+    expect(error.message).not.toContain("start Paperclip again after it shows");
+    // Still a give-up during recovery: stop() stays disarmed.
+    await sim.instance.stop();
+    expect(sim.instance.pgCtlStops).toEqual([]);
+  });
+
+  it("L2: an older ready line before a newer recovery keeps the wait-for-ready advice", async () => {
+    const log = [[0, READY], ...steadyFsyncLog(40)] as Array<[number, string]>;
+    const sim = simulate({ readyAt: null, log });
+    const error = (await sim.run().catch((err: unknown) => err)) as EmbeddedPostgresRecoveryIncomplete;
+    expect(error.reason).toBe("stalled");
+    expect(error.message).toContain("start Paperclip again after it shows");
+    expect(error.message).not.toContain("did not pass the readiness check");
+  });
+
+  it("N1: logs the start of the wait, then a heartbeat every 30 s while no progress line appears", async () => {
+    const waits: RecoveryWaitInfo[] = [];
+    const sim = simulate({ readyAt: null, log: steadyFsyncLog(40) }, POLICY, waits);
+    await expect(sim.run()).rejects.toBeInstanceOf(EmbeddedPostgresRecoveryIncomplete);
+    expect(waits[0]).toMatchObject({ event: "started", waitedMs: 60_000, sinceProgressMs: 0 });
+    const heartbeats = waits.filter((wait) => wait.event === "heartbeat");
+    // Progress stops at 40 s; the stall give-up comes at 360 s: heartbeats at 90, 120, ... 360 s.
+    expect(heartbeats.length).toBeGreaterThanOrEqual(9);
+    expect(heartbeats.length).toBeLessThanOrEqual(10);
+    for (let i = 1; i < heartbeats.length; i += 1) {
+      expect(heartbeats[i].waitedMs - heartbeats[i - 1].waitedMs).toBeGreaterThanOrEqual(30_000);
+      expect(heartbeats[i].sinceProgressMs).toBeGreaterThan(heartbeats[i - 1].sinceProgressMs);
+    }
+    // Steady progress produces no heartbeat.
+    const steady: RecoveryWaitInfo[] = [];
+    await simulate({ readyAt: 95, log: steadyFsyncLog(90) }, POLICY, steady).run();
+    expect(steady.filter((wait) => wait.event === "heartbeat")).toEqual([]);
+  });
+
+  it("N2: the readiness probe URL carries a connect timeout close to the probe deadline", () => {
+    const url = "postgres://u:p@127.0.0.1:54329/postgres";
+    expect(readinessProbeUrl(url, 10_000)).toBe(`${url}?connect_timeout=10`);
+    expect(readinessProbeUrl(url, 2_500)).toBe(`${url}?connect_timeout=3`);
+    expect(readinessProbeUrl(url, 1)).toBe(`${url}?connect_timeout=1`);
+    expect(readinessProbeUrl(`${url}?sslmode=disable`, 4_000)).toBe(`${url}?sslmode=disable&connect_timeout=4`);
+  });
+
+  describe("P2: only the latest startup episode in the log counts", () => {
+    const recovery = [...RECOVERY_HEAD, fsyncLine(10)];
+    const cases: Array<[string, string[], "none" | "recovering" | "ready"]> = [
+      ["no lines", [], "none"],
+      ["recovery only", recovery, "recovering"],
+      ["recovery then ready", [...recovery, READY], "ready"],
+      // The reported case: an earlier successful start, then a crash and a new recovery.
+      ["ready then recovery", [
+        READY,
+        "LOG:  all server processes terminated; reinitializing",
+        "LOG:  database system was interrupted; last known up at 2026-10-26 07:00:00 UTC",
+        "LOG:  database system was not properly shut down; automatic recovery in progress",
+        "LOG:  redo in progress, elapsed time: 70.00 s, current LSN: 0/1A2B3C4",
+      ], "recovering"],
+      ["repeated episodes ending in recovery", [...recovery, READY, ...recovery, READY, ...recovery], "recovering"],
+      ["repeated episodes ending in ready", [...recovery, READY, ...recovery, READY], "ready"],
+    ];
+    for (const [name, lines, expected] of cases) {
+      it(name, () => {
+        const log = lines.join("\r\n");
+        expect(latestServerLogEpisode(log)).toBe(expected);
+        expect(serverLogShowsRecoveryInProgress(log)).toBe(expected === "recovering");
+      });
+    }
+  });
+
+  it("L1: one resolver gives the same log path for the instance options and for the refusal path", () => {
+    const dataDir = resolve(tmpdir(), "pc-db");
+    const custom = resolve(tmpdir(), "logs", "postgres.log");
+    for (const logFile of [undefined, "", custom]) {
+      expect(embeddedPostgresServerLogPath({ options: { logFile } }, dataDir))
+        .toBe(resolveEmbeddedPostgresServerLogPath(dataDir, logFile));
+    }
+    expect(resolveEmbeddedPostgresServerLogPath(dataDir, custom)).toBe(custom);
+  });
+});
+
 describe("countRecoveryProgressLines", () => {
   it("counts recovery lines and ignores connection refusals from readiness probes", () => {
     const log = [
@@ -346,7 +461,7 @@ describe("countRecoveryProgressLines", () => {
 describe("resolveRecoveryWaitPolicy", () => {
   it("defaults to 1800 s upper bound and 300 s stall window", () => {
     expect(resolveRecoveryWaitPolicy({})).toEqual({
-      maxWaitMs: 1_800_000, stallMs: 300_000, pollMs: 1000, probeTimeoutMs: 10_000,
+      maxWaitMs: 1_800_000, stallMs: 300_000, pollMs: 1000, probeTimeoutMs: 10_000, heartbeatMs: 30_000,
     });
   });
 

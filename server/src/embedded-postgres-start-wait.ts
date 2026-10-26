@@ -41,6 +41,7 @@ export const DEFAULT_RECOVERY_MAX_WAIT_SECONDS = 1800;
 export const DEFAULT_RECOVERY_STALL_SECONDS = 300;
 const DEFAULT_POLL_MS = 1000;
 const DEFAULT_PROBE_TIMEOUT_MS = 10_000;
+const DEFAULT_HEARTBEAT_MS = 30_000;
 const READY_LINE = /database system is ready to accept connections/i;
 
 export type RecoveryWaitPolicy = {
@@ -51,6 +52,8 @@ export type RecoveryWaitPolicy = {
   pollMs: number;
   /** Upper limit for one readiness probe; it is also cut to the remaining budget. */
   probeTimeoutMs: number;
+  /** Report a "still waiting" heartbeat when nothing was reported for this long. Default 30 s. */
+  heartbeatMs?: number;
 };
 
 export type RecoveryGiveUpReason = "upper-bound" | "stalled" | "exited";
@@ -87,12 +90,23 @@ export type StartFollowingRecoveryInput = {
    * probe deadline) and does not start another check while one is still pending.
    */
   isReady: (timeoutMs: number) => Promise<boolean>;
-  /** Called when the wait begins and each time a new recovery progress line appears. */
-  onRecoveryWait?: (info: { progressLines: number; waitedMs: number }) => void;
+  /**
+   * Called when the wait begins ("started"), each time a new recovery progress line appears
+   * ("progress"), and after `heartbeatMs` without either ("heartbeat").
+   */
+  onRecoveryWait?: (info: RecoveryWaitInfo) => void;
   now?: () => number;
   sleep?: (ms: number) => Promise<void>;
   /** Timer that bounds one readiness probe. Test seam; defaults to `setTimeout`. */
   probeTimer?: (ms: number) => { elapsed: Promise<void>; cancel: () => void };
+};
+
+export type RecoveryWaitInfo = {
+  event: "started" | "progress" | "heartbeat";
+  progressLines: number;
+  waitedMs: number;
+  /** Time since the last new recovery progress line (or since the wait began). */
+  sinceProgressMs: number;
 };
 
 export type StartFollowingRecoveryResult = { followedRecovery: boolean; waitedMs: number };
@@ -104,9 +118,24 @@ export function countRecoveryProgressLines(log: string | null): number {
     .filter((line) => RECOVERY_PROGRESS_PATTERNS.some((pattern) => pattern.test(line))).length;
 }
 
-/** True when the log shows crash recovery and no "ready to accept connections" line yet. */
+/**
+ * State of the latest startup episode in the server log, read in log order. A recovery line opens
+ * (or continues) a recovery episode, and a "ready to accept connections" line ends only the
+ * episode before it. So a ready line from an earlier start, or from before a crash that the
+ * postmaster is now recovering from (`restart_after_crash`), does not hide the newer recovery.
+ */
+export function latestServerLogEpisode(log: string | null): "none" | "recovering" | "ready" {
+  let state: "none" | "recovering" | "ready" = "none";
+  for (const line of (log ?? "").split(/\r?\n/)) {
+    if (READY_LINE.test(line)) state = "ready";
+    else if (RECOVERY_PROGRESS_PATTERNS.some((pattern) => pattern.test(line))) state = "recovering";
+  }
+  return state;
+}
+
+/** True when the latest episode in the log is crash recovery that has not logged "ready" yet. */
 export function serverLogShowsRecoveryInProgress(log: string | null): boolean {
-  return countRecoveryProgressLines(log) > 0 && !READY_LINE.test(log ?? "");
+  return latestServerLogEpisode(log) === "recovering";
 }
 
 /**
@@ -136,18 +165,33 @@ export async function isPostmasterPidAlive(
 }
 
 /**
- * The file pg_ctl writes the server log to on Windows: the instance's
- * `logFile` option when it has one, otherwise `server.log` in the data
- * directory (the current patched embedded-postgres default).
+ * The file pg_ctl writes the server log to on Windows: the `logFile` option
+ * when it is set, otherwise `server.log` in the data directory (the current
+ * patched embedded-postgres default). Callers resolve it once, from the same
+ * options the instance is built with, and pass the result to every reader.
  */
+export function resolveEmbeddedPostgresServerLogPath(dataDir: string, logFile: unknown): string {
+  return typeof logFile === "string" && logFile.length > 0
+    ? resolve(logFile)
+    : join(resolve(dataDir), "server.log");
+}
+
+/** `resolveEmbeddedPostgresServerLogPath` for an instance (or its constructor options). */
 export function embeddedPostgresServerLogPath(
   instance: { options?: { logFile?: unknown } },
   dataDir: string,
 ): string {
-  const configured = instance.options?.logFile;
-  return typeof configured === "string" && configured.length > 0
-    ? resolve(configured)
-    : join(resolve(dataDir), "server.log");
+  return resolveEmbeddedPostgresServerLogPath(dataDir, instance.options?.logFile);
+}
+
+/**
+ * The readiness-probe connection URL with a postgres.js `connect_timeout` (whole seconds, at
+ * least 1) close to the probe deadline, so a probe the wait stops waiting for does not keep its
+ * connection attempt open for the 30 s default.
+ */
+export function readinessProbeUrl(url: string, timeoutMs: number): string {
+  const seconds = Math.max(1, Math.ceil(timeoutMs / 1000));
+  return `${url}${url.includes("?") ? "&" : "?"}connect_timeout=${seconds}`;
 }
 
 function readSeconds(raw: string | undefined, fallback: number, min: number, max: number): number {
@@ -179,6 +223,7 @@ export function resolveRecoveryWaitPolicy(env: NodeJS.ProcessEnv = process.env):
     stallMs: stallSeconds * 1000,
     pollMs: DEFAULT_POLL_MS,
     probeTimeoutMs: DEFAULT_PROBE_TIMEOUT_MS,
+    heartbeatMs: DEFAULT_HEARTBEAT_MS,
   };
 }
 
@@ -187,6 +232,7 @@ function giveUp(
   input: StartFollowingRecoveryInput,
   waitedMs: number,
   startError: unknown,
+  lastLog: string | null = null,
 ): EmbeddedPostgresRecoveryIncomplete {
   const log = input.serverLogPath;
   const seconds = Math.round(waitedMs / 1000);
@@ -199,6 +245,17 @@ function giveUp(
   const why = reason === "stalled"
     ? `no recovery progress was logged for ${Math.round(input.policy.stallMs / 1000)} s`
     : `the upper bound of ${Math.round(input.policy.maxWaitMs / 1000)} s was reached`;
+  if (latestServerLogEpisode(lastLog) === "ready") {
+    // Recovery finished, but the readiness check (login and data-directory identity) kept failing.
+    return new EmbeddedPostgresRecoveryIncomplete(
+      `Embedded PostgreSQL did not pass the readiness check after ${seconds} s (${why}). ` +
+        `Its server log at ${log} already shows "database system is ready to accept connections", so crash ` +
+        "recovery finished, but Paperclip could not connect to it and confirm its data directory. " +
+        "Paperclip did not stop PostgreSQL. Check the connection errors in that log and the embedded " +
+        "PostgreSQL port, then start Paperclip again.",
+      reason, log, true, startError,
+    );
+  }
   return new EmbeddedPostgresRecoveryIncomplete(
     `Embedded PostgreSQL did not become ready after ${seconds} s of crash recovery (${why}). ` +
       `Paperclip did not stop PostgreSQL, so recovery can continue. Read the server log at ${log}; ` +
@@ -245,7 +302,7 @@ async function probeReady(input: StartFollowingRecoveryInput, budgetMs: number, 
 const presumedAlive = (input: StartFollowingRecoveryInput) =>
   Promise.resolve().then(() => input.isPostmasterAlive()).catch(() => true);
 
-function report(input: StartFollowingRecoveryInput, info: { progressLines: number; waitedMs: number }): void {
+function report(input: StartFollowingRecoveryInput, info: RecoveryWaitInfo): void {
   try {
     input.onRecoveryWait?.(info);
   } catch {
@@ -262,23 +319,33 @@ async function followRecovery(
   const now = input.now ?? Date.now;
   const sleep = input.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
   const { maxWaitMs, stallMs } = input.policy;
+  const heartbeatMs = input.policy.heartbeatMs ?? DEFAULT_HEARTBEAT_MS;
   let progress = progressLines;
   let lastProgressAt = now();
+  let lastReportAt = lastProgressAt;
+  let lastLog: string | null = null;
   const probes: ProbeState = { inflight: null };
-  report(input, { progressLines: progress, waitedMs: lastProgressAt - startedAt });
+  const started = { progressLines: progress, waitedMs: lastProgressAt - startedAt, sinceProgressMs: 0 };
+  report(input, { event: "started", ...started });
   for (;;) {
     const budgetMs = Math.min(startedAt + maxWaitMs, lastProgressAt + stallMs) - now();
     if (await probeReady(input, budgetMs, probes)) return now() - startedAt;
     const waitedMs = now() - startedAt;
     if (!(await presumedAlive(input))) throw giveUp("exited", input, waitedMs, startError);
-    const current = countRecoveryProgressLines(await input.readServerLog().catch(() => null));
+    lastLog = await input.readServerLog().catch(() => null);
+    const current = countRecoveryProgressLines(lastLog);
     if (current > progress) {
       progress = current;
       lastProgressAt = now();
-      report(input, { progressLines: progress, waitedMs });
+      lastReportAt = lastProgressAt;
+      report(input, { event: "progress", progressLines: progress, waitedMs, sinceProgressMs: 0 });
+    } else if (now() - lastReportAt >= heartbeatMs) {
+      lastReportAt = now();
+      const sinceProgressMs = lastReportAt - lastProgressAt;
+      report(input, { event: "heartbeat", progressLines: progress, waitedMs, sinceProgressMs });
     }
-    if (now() - lastProgressAt >= stallMs) throw giveUp("stalled", input, waitedMs, startError);
-    if (waitedMs >= maxWaitMs) throw giveUp("upper-bound", input, waitedMs, startError);
+    if (now() - lastProgressAt >= stallMs) throw giveUp("stalled", input, waitedMs, startError, lastLog);
+    if (waitedMs >= maxWaitMs) throw giveUp("upper-bound", input, waitedMs, startError, lastLog);
     await sleep(input.policy.pollMs);
   }
 }

@@ -4,7 +4,10 @@ import { closeSync, existsSync, linkSync, lstatSync, mkdirSync, openSync, readFi
 import { realpath } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { getPostgresDataDirectory } from "@paperclipai/db";
-import { serverLogShowsRecoveryInProgress } from "./embedded-postgres-start-wait.js";
+import {
+  resolveEmbeddedPostgresServerLogPath,
+  serverLogShowsRecoveryInProgress,
+} from "./embedded-postgres-start-wait.js";
 import { logger } from "./middleware/logger.js";
 
 /** Builds the admin connection URL for a port, using the caller's embedded login. */
@@ -563,7 +566,10 @@ export type EmbeddedPostgresReuseOptions = {
   lockMoveHooks?: LockMoveHooks;
   /** True only while the caller holds the start lock (`acquireEmbeddedStartLock`). A lock is moved aside only then. */
   startLockHeld?: boolean;
-  /** The embedded PostgreSQL server log. Defaults to `server.log` in the data directory. */
+  /**
+   * The embedded PostgreSQL server log, resolved by the caller from the same options its instance
+   * uses (see `embeddedPostgresServerLogPath`). Defaults to `server.log` in the data directory.
+   */
   serverLogPath?: string;
 };
 
@@ -794,7 +800,7 @@ export async function readRunningEmbeddedPostgres(
     const undecided: PostgresProcess[] = [];
     const owners = await (options.listPostgresProcesses ?? listPostgresProcessesForDataDir)(dataDir, undecided);
     const verified = owners?.find((owner) => owner.pid === pid);
-    const serverLogPath = options.serverLogPath ?? join(dataDir, "server.log");
+    const serverLogPath = options.serverLogPath ?? resolveEmbeddedPostgresServerLogPath(dataDir, undefined);
     // Stopping a server in crash recovery restarts recovery from the beginning, so say to wait instead.
     const action = verified && serverLogShowsRecovery(serverLogPath)
       ? `It is PostgreSQL for this data directory (${verified.command}), and its server log (${serverLogPath}) shows ` +

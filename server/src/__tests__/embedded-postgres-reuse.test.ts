@@ -25,6 +25,7 @@ import {
   readRunningEmbeddedPostgres as readRunningReal,
   type PostgresProcess,
 } from "../embedded-postgres-reuse.js";
+import { embeddedPostgresServerLogPath } from "../embedded-postgres-start-wait.js";
 
 const { probe, warn } = vi.hoisted(() => ({ probe: vi.fn(), warn: vi.fn() }));
 vi.mock("@paperclipai/db", () => ({ getPostgresDataDirectory: probe }));
@@ -447,6 +448,69 @@ describe("embedded PostgreSQL reuse identity", () => {
     writeFileSync(logPath, `${readFileSync(logPath, "utf8")}\r\nLOG:  database system is ready to accept connections\r\n`);
     const later = await readRunningEmbeddedPostgres(dataDir, 55432, "postgres", owners).catch((e) => e);
     expect(later.message).toMatch(new RegExp(`\`(kill|taskkill /PID) ${FOREIGN_PID}\``));
+  });
+
+  describe("P2: the refusal reads only the latest startup episode in the server log", () => {
+    const READY = "LOG:  database system is ready to accept connections";
+    const RECOVERY = [
+      "LOG:  database system was interrupted; last known up at 2026-10-26 07:00:00 UTC",
+      "LOG:  database system was not properly shut down; automatic recovery in progress",
+      "LOG:  redo in progress, elapsed time: 70.00 s, current LSN: 0/1A2B3C4",
+    ];
+    const owners = () => [{ pid: FOREIGN_PID, command: `postgres -D ${dataDir}` }];
+    const refuse = async (lines: string[]) => {
+      writePid(String(FOREIGN_PID));
+      probe.mockRejectedValue(new Error("the database system is not yet accepting connections"));
+      writeFileSync(join(dataDir, "server.log"), lines.join("\r\n"));
+      const error = await readRunningEmbeddedPostgres(dataDir, 55432, "postgres", owners()).catch((e) => e);
+      expect(error).toBeInstanceOf(EmbeddedPostgresLockRefusal);
+      expect(existsSync(pidFile)).toBe(true);
+      return error.message as string;
+    };
+    const stopAdvice = new RegExp(`\`(kill|taskkill /PID) ${FOREIGN_PID}\``);
+
+    it("ready then a newer recovery (restart_after_crash): says wait, not stop", async () => {
+      const message = await refuse([READY, "LOG:  all server processes terminated; reinitializing", ...RECOVERY]);
+      expect(message).toContain("Do not stop it");
+      expect(message).not.toMatch(stopAdvice);
+    });
+
+    it("repeated episodes ending in recovery: says wait", async () => {
+      const message = await refuse([...RECOVERY, READY, ...RECOVERY, READY, ...RECOVERY]);
+      expect(message).toContain("Do not stop it");
+      expect(message).not.toMatch(stopAdvice);
+    });
+
+    it("repeated episodes ending in ready: gives the normal stop advice", async () => {
+      const message = await refuse([...RECOVERY, READY, ...RECOVERY, READY]);
+      expect(message).not.toContain("Do not stop it");
+      expect(message).toMatch(stopAdvice);
+    });
+  });
+
+  it("L1: reads the server log the caller resolved from its instance options, not a second default", async () => {
+    writePid(String(FOREIGN_PID));
+    probe.mockRejectedValue(new Error("the database system is not yet accepting connections"));
+    const logDir = mkdtempSync(join(tmpdir(), "embedded-pg-log-"));
+    const logFile = join(logDir, "postgres.log");
+    writeFileSync(logFile, [
+      "LOG:  database system was not properly shut down; automatic recovery in progress",
+      "LOG:  syncing data directory (fsync), elapsed time: 10.01 s, current path: ./base/5/1259",
+    ].join("\r\n"));
+    // The same resolver the start wait uses, fed the same logFile option.
+    const serverLogPath = embeddedPostgresServerLogPath({ options: { logFile } }, dataDir);
+    expect(serverLogPath).toBe(resolve(logFile));
+    const owners = [{ pid: FOREIGN_PID, command: `postgres -D ${dataDir}` }];
+    const options = { readProcessName: async () => "postgres", listPostgresProcesses: async () => owners };
+    const error = await readRunning(dataDir, 55432, adminUrl, { ...options, serverLogPath }).catch((e) => e);
+    expect(error).toBeInstanceOf(EmbeddedPostgresLockRefusal);
+    expect(error.message).toContain("Do not stop it");
+    expect(error.message).toContain(serverLogPath);
+    // Without the resolved path the refusal falls back to <dataDir>/server.log, which does not
+    // exist here, and would advise a stop that restarts recovery: the caller must pass it.
+    const fallback = await readRunning(dataDir, 55432, adminUrl, options).catch((e) => e);
+    expect(fallback.message).not.toContain("Do not stop it");
+    rmSync(logDir, { recursive: true, force: true });
   });
 
   it("does not tell the operator to kill a PID that was never tied to this data directory", async () => {

@@ -34,7 +34,13 @@ All notable changes to this repository should be recorded here.
   that is still pending is awaited again rather than repeated. "resetting unlogged
   relations" progress lines count as recovery progress. While the server log
   shows unfinished recovery, the next start's refusal says to wait instead of
-  naming a stop command.
+  naming a stop command. Only the latest startup episode in the log counts, so
+  an earlier "ready to accept connections" line does not hide a newer recovery.
+  The refusal and the start wait read one server log path, resolved once from
+  the instance options. When the log already shows "ready" but the readiness
+  check keeps failing, the give-up says so. The wait logs its policy when it
+  starts and a heartbeat every 30 s without new progress, and each readiness
+  probe passes a connect timeout close to its deadline.
 
 - **Fix:** a second embedded PostgreSQL start on the same data directory no
   longer moves the first start's live `postmaster.pid` aside. The lock is
