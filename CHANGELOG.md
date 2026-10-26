@@ -49,7 +49,9 @@ All notable changes to this repository should be recorded here.
   error (and the ACP error and stop reason), never from quoted result text.
   Each `resets` or `try again at` candidate is validated before one is chosen,
   so an impossible clock or an unknown timezone no longer hides a later valid
-  reset. A clock must be a complete token: `9:000` is not read as `9:00`.
+  reset. A clock must be a complete token: `9:000` is not read as `9:00`, and
+  `9:00pm:30` or `9pm30` is not read as `9:00pm` or `9pm`, in the adapter and in
+  recovery.
   The Claude adapter now decides "provider quota" and "transient upstream", and
   extracts the retry time, only from provider error evidence: the `result` of a
   result event that the CLI marked as an error, its `errors` list, stderr, and

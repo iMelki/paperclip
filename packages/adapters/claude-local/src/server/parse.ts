@@ -16,7 +16,7 @@ const CLAUDE_PROVIDER_QUOTA_RE =
 const CLAUDE_MODEL_NOT_FOUND_RE =
   /(?:\b404\b[\s\S]{0,120})?(?:model[\s_-]*(?:not[\s_-]*found|does not exist|unknown|invalid)|unknown[\s_-]*model)/i;
 const CLAUDE_EXTRA_USAGE_RESET_RE =
-  /(?:you(?:'|’)ve\s+hit\s+your\s+session\s+limit|session\s+limit\s+(?:reached|exceeded)|out\s+of\s+extra\s+usage|extra\s+usage|usage\s+limit\s+reached|usage\s+cap\s+reached|5[-\s]?hour\s+limit\s+reached|weekly\s+limit\s+reached|claude\s+usage\s+limit\s+reached)[\s\S]{0,120}?\bresets?\s+(?:at\s+)?([^\n()]+?)(?:\s*\(([^)]+)\))?(?:[.!]|\n|$)/i;
+  /(?:you(?:'|’)ve\s+hit\s+your\s+session\s+limit|session\s+limit\s+(?:reached|exceeded)|out\s+of\s+extra\s+usage|extra\s+usage|usage\s+limit\s+reached|usage\s+cap\s+reached|5[-\s]?hour\s+limit\s+reached|weekly\s+limit\s+reached|claude\s+usage\s+limit\s+reached)[\s\S]{0,120}?\bresets?\s+(?:at\s+)?([^\n()]+?)(?:\s*\(([^)]+)\))?(?:[.!](?!\d)|\n|$)/i;
 
 const CLAUDE_EXTRA_USAGE_RESET_ALL_RE = new RegExp(CLAUDE_EXTRA_USAGE_RESET_RE.source, "gi");
 
@@ -456,6 +456,8 @@ function parseClaudeResetClockTime(clockText: string, now: Date, timeZoneHint?: 
   const normalized = clockText.trim().replace(/\s+/g, " ");
   const match = normalized.match(/^(\d{1,2})(?::(\d{2}))?\s*([ap])\.?\s*m\.?/i);
   if (!match) return null;
+  // Anything glued to the clock ("9:00pm:30", "9:00pm30", "9:00pm.30") means it is not a complete clock token.
+  if (/^[:.]?\d/.test(normalized.slice(match[0].length))) return null;
 
   const hour12 = Number.parseInt(match[1] ?? "", 10);
   const minute = Number.parseInt(match[2] ?? "0", 10);

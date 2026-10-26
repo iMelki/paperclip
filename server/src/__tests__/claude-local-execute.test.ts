@@ -1531,6 +1531,34 @@ describe("claude execute", () => {
       });
     });
 
+    it("refuses a clock with text glued to it and uses a later valid one, end to end", async () => {
+      const resultLine = (text: string) =>
+        line({ type: "result", subtype: "error", is_error: true, result: text, errors: [] });
+      const glued = "You've hit your session limit · resets 9:00pm:30 (UTC)";
+
+      // A full stop before the digits is not the end of the sentence; both parsers must refuse it.
+      const dotted = await runFailingClaude({
+        stdout: resultLine("You've hit your session limit · resets 9:00pm.30 (UTC)"),
+      });
+      expect(dotted.result.retryNotBefore).toBeNull();
+      expect(dotted.recovery).toMatchObject({ kind: "provider_quota", parsedResetTime: false });
+
+      const invalidOnly = await runFailingClaude({ stdout: resultLine(glued) });
+      expect(invalidOnly.result.errorCode).toBe("provider_quota");
+      expect(invalidOnly.result.retryNotBefore).toBeNull();
+      expect(invalidOnly.result.resultJson?.retryNotBeforeSource).toBeUndefined();
+      // Recovery agrees with the adapter: a quota wait on the default backoff, not 9:00pm.
+      expect(invalidOnly.recovery).toMatchObject({ kind: "provider_quota", parsedResetTime: false });
+
+      const invalidThenValid = await runFailingClaude({ stdout: resultLine(`${glued}\n${QUOTED}`) });
+      expect(invalidThenValid.result.retryNotBefore).toBe("2026-04-22T09:00:00.000Z");
+      expect(invalidThenValid.recovery).toEqual({
+        kind: "provider_quota",
+        retryAt: new Date("2026-04-22T09:00:00.000Z"),
+        parsedResetTime: true,
+      });
+    });
+
     it("trusts the CLI's stderr when no result event was produced", async () => {
       const { result, recovery } = await runFailingClaude({ stderr: QUOTED });
       expect(result.errorCode).toBe("provider_quota");

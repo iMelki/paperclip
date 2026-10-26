@@ -219,7 +219,7 @@ describe("classifyAdapterFailureForRecovery", () => {
 
     it("requires a complete clock token: trailing digits or colons make a candidate invalid", () => {
       for (const errorCode of ["adapter_failed", "acpx_turn_failed"]) {
-        for (const incomplete of ["9:000 (UTC)", "9:00:30 (UTC)", "123:45 (UTC)", "9:0000pm (UTC)"]) {
+        for (const incomplete of ["9:000 (UTC)", "9:00:30 (UTC)", "123:45 (UTC)", "9:0000pm (UTC)", "9:00pm:30 (UTC)", "9pm30 (UTC)", "9:00pm:30 UTC", "9:00pm.30 (UTC)", "9pm.30 UTC"]) {
           expect(classifyAdapterFailureForRecovery({
             errorCode,
             error: `You've hit your session limit · resets ${incomplete}`,
@@ -236,6 +236,35 @@ describe("classifyAdapterFailureForRecovery", () => {
           retryAt: new Date("2026-10-13T19:40:00.000Z"),
           parsedResetTime: true,
         });
+        expect(classifyAdapterFailureForRecovery({
+          errorCode,
+          error: "You've hit your session limit · resets 9:00pm:30 (UTC) · or resets 10:40pm (Asia/Jerusalem)",
+          resultJson: {},
+        }, now)).toEqual({
+          kind: "provider_quota",
+          retryAt: new Date("2026-10-13T19:40:00.000Z"),
+          parsedResetTime: true,
+        });
+      }
+    });
+
+    it("accepts a bare hour only when a parenthesised timezone follows it", () => {
+      // `resets 9` alone is prose ("cache resets 9 days ago"); the zone is what makes `9 (UTC)` a clock.
+      for (const errorCode of ["adapter_failed", "acpx_turn_failed"]) {
+        expect(classifyAdapterFailureForRecovery({
+          errorCode,
+          error: "You've hit your session limit · resets 9 (UTC)",
+          resultJson: {},
+        }, now)).toEqual({
+          kind: "provider_quota",
+          retryAt: new Date("2026-10-14T09:00:00.000Z"),
+          parsedResetTime: true,
+        });
+        expect(classifyAdapterFailureForRecovery({
+          errorCode,
+          error: "You've hit your session limit · resets 9",
+          resultJson: {},
+        }, now)).toEqual(defaultBackoff);
       }
     });
 
