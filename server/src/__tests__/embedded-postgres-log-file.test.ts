@@ -1,8 +1,9 @@
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
-import { resolveEmbeddedPostgresLogFile } from "../embedded-postgres-log-file.js";
+import { isPgCtlSafeLogPath, resolveEmbeddedPostgresLogFile } from "../embedded-postgres-log-file.js";
 
 const PER_INSTANCE_LOG = /^postgres-[0-9a-f]{8}\.log$/;
 
@@ -70,5 +71,73 @@ describe("resolveEmbeddedPostgresLogFile", () => {
     const log = resolveEmbeddedPostgresLogFile(path.join(tmpdir(), "pg-log-spelling-data"), alias);
     expect(path.dirname(log)).toBe(alias);
     expect(path.basename(log)).toMatch(PER_INSTANCE_LOG);
+  });
+
+  it("falls back beside the data directory when the dependency cannot take the preferred path", () => {
+    const data = path.join(root, "db");
+    const logs = path.join(root, "A & B", "logs");
+    const refuseAmpersand = (file: string) => !file.includes("&");
+    expect(resolveEmbeddedPostgresLogFile(data, logs, refuseAmpersand)).toBe(path.join(root, "db-postgres.log"));
+    expect(resolveEmbeddedPostgresLogFile(data, logs, () => true)).toContain("A & B");
+    expect(resolveEmbeddedPostgresLogFile(data, path.join(root, "logs"), refuseAmpersand)).toMatch(
+      new RegExp(`postgres-[0-9a-f]{8}\\.log$`),
+    );
+  });
+
+  it.runIf(process.platform === "win32")("on Windows, a UNC or ampersand log directory falls back beside the data directory", () => {
+    const data = "C:\\paperclip\\db";
+    const sibling = "C:\\paperclip\\db-postgres.log";
+    expect(resolveEmbeddedPostgresLogFile(data, "\\\\fileserver\\logs\\paperclip")).toBe(sibling);
+    expect(resolveEmbeddedPostgresLogFile(data, "C:\\Logs & Diagnostics")).toBe(sibling);
+    expect(path.dirname(resolveEmbeddedPostgresLogFile(data, "D:/Logs/paperclip"))).toBe("D:\\Logs\\paperclip");
+  });
+});
+
+describe("isPgCtlSafeLogPath", () => {
+  it("accepts absolute drive paths, including spaces, parentheses and apostrophes", () => {
+    for (const ok of [
+      "C:\\paperclip\\logs\\postgres-0123abcd.log",
+      "d:/paperclip/logs/postgres-0123abcd.log",
+      "C:\\Program Files (x86)\\Paperclip\\logs\\postgres.log",
+      "C:\\Users\\O'Neil\\logs\\postgres.log",
+    ]) {
+      expect(isPgCtlSafeLogPath(ok), ok).toBe(true);
+    }
+  });
+
+  it("rejects UNC paths, relative paths, metacharacters and extra colons", () => {
+    for (const bad of [
+      "\\\\fileserver\\logs\\postgres.log",
+      "//fileserver/logs/postgres.log",
+      "\\\\?\\C:\\logs\\postgres.log",
+      "logs\\postgres.log",
+      "C:logs\\postgres.log",
+      "C:\\Logs & Diagnostics\\postgres.log",
+      "C:\\logs\\100%\\postgres.log",
+      "C:\\logs\\a!b\\postgres.log",
+      "C:\\logs\\a|b\\postgres.log",
+      "C:\\logs\\a<b>\\postgres.log",
+      "C:\\logs\\a^b\\postgres.log",
+      "C:\\logs\\a;b\\postgres.log",
+      'C:\\logs\\a"b\\postgres.log',
+      "C:\\logs\\a\nb\\postgres.log",
+      "C:\\logs\\stream:ads\\postgres.log",
+    ]) {
+      expect(isPgCtlSafeLogPath(bad), bad).toBe(false);
+    }
+  });
+
+  it("matches the patched dependency's own check", () => {
+    const patch = readFileSync(
+      path.join(fileURLToPath(new URL("../../..", import.meta.url)), "patches", "embedded-postgres@18.1.0-beta.16.patch"),
+      "utf8",
+    );
+    for (const fragment of [
+      "/^[A-Za-z]:[\\\\/]/.test(value)",
+      "/[\\x00-\\x1f\\x7f\"%!&|<>^`;*?]/.test(value)",
+      "value.slice(2).includes(':')",
+    ]) {
+      expect(patch).toContain(fragment);
+    }
   });
 });

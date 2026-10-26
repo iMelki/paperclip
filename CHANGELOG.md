@@ -102,7 +102,9 @@ All notable changes to this repository should be recorded here.
   `PAPERCLIP_LOG_DIR`. Each data directory gets its own file, so instances that
   share a log directory never share one. When the data directory contains that
   directory, including through a symlink or junction, the log goes to a sibling
-  of the data directory. Server startup also
+  of the data directory, which is also where it goes when the configured
+  directory is a UNC share or contains a character (such as `&`) that the
+  dependency does not pass to `pg_ctl`. Server startup also
   allows up to 600 seconds to start when the last shutdown was unclean (a
   `postmaster.pid` was left behind); the CLI, worktree and migration paths that
   start the database still wait 60 seconds. An open log inside the data

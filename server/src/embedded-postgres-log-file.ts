@@ -30,12 +30,36 @@ function canonicalPath(target: string): string {
 }
 
 /**
+ * The patched dependency's Windows contract for the `-l` path it hands to pg_ctl
+ * (`requireSafePath`, patches/embedded-postgres@18.1.0-beta.16.patch): an absolute drive path,
+ * no control characters or cmd metacharacters, and no `:` after the drive. A UNC share or a
+ * directory such as `C:\Logs & Diagnostics` is a valid place to write but is refused there
+ * before PostgreSQL starts. The patch is unchanged; this mirrors it, and a test keeps the two
+ * in step.
+ */
+export function isPgCtlSafeLogPath(value: string): boolean {
+  return (
+    /^[A-Za-z]:[\\/]/.test(value) &&
+    !/[\x00-\x1f\x7f"%!&|<>^`;*?]/.test(value) &&
+    !value.slice(2).includes(":")
+  );
+}
+
+/**
  * Where the embedded PostgreSQL server log goes. The log must stay outside the data
  * directory (Windows pg_ctl keeps it open, so crash recovery cannot fsync it there), but a
  * custom data directory can be an ancestor of the default logs directory. In that case the
- * log moves to a sibling of the data directory instead of blocking startup.
+ * log moves to a sibling of the data directory instead of blocking startup. The same sibling is
+ * used when the preferred path is one the dependency cannot hand to pg_ctl on Windows (see
+ * `isPgCtlSafeLogPath`). It shares the data directory's parent and a name made of the data
+ * directory's own basename, so it is acceptable whenever the data directory is; a data directory
+ * the dependency refuses still fails closed there, unchanged.
  */
-export function resolveEmbeddedPostgresLogFile(dataDir: string, logsDir: string): string {
+export function resolveEmbeddedPostgresLogFile(
+  dataDir: string,
+  logsDir: string,
+  usable: (logFile: string) => boolean = process.platform === "win32" ? isPgCtlSafeLogPath : () => true,
+): string {
   const data = path.resolve(dataDir);
   // One file per data directory: two instances can share a log directory (PAPERCLIP_LOG_DIR), and
   // on Windows a shared name would be a file one instance's pg_ctl holds open.
@@ -50,6 +74,6 @@ export function resolveEmbeddedPostgresLogFile(dataDir: string, logsDir: string)
   // the resolved form; the returned path keeps the caller's spelling, because the native
   // resolver can rewrite a drive-letter path (mapped drive, folder redirection) to a UNC path
   // that the patched dependency refuses.
-  if (!isInside(identity, canonicalPath(preferred))) return preferred;
+  if (usable(preferred) && !isInside(identity, canonicalPath(preferred))) return preferred;
   return path.join(path.dirname(data), `${path.basename(data)}-postgres.log`);
 }
