@@ -4,6 +4,10 @@ import { closeSync, existsSync, linkSync, lstatSync, mkdirSync, openSync, readFi
 import { realpath } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { getPostgresDataDirectory } from "@paperclipai/db";
+import {
+  resolveEmbeddedPostgresServerLogPath,
+  serverLogShowsRecoveryInProgress,
+} from "./embedded-postgres-start-wait.js";
 import { logger } from "./middleware/logger.js";
 
 /** Builds the admin connection URL for a port, using the caller's embedded login. */
@@ -562,7 +566,21 @@ export type EmbeddedPostgresReuseOptions = {
   lockMoveHooks?: LockMoveHooks;
   /** True only while the caller holds the start lock (`acquireEmbeddedStartLock`). A lock is moved aside only then. */
   startLockHeld?: boolean;
+  /**
+   * The embedded PostgreSQL server log, resolved by the caller from the same options its instance
+   * uses (see `embeddedPostgresServerLogPath`). Defaults to `server.log` in the data directory.
+   */
+  serverLogPath?: string;
 };
+
+/** True when the server log shows crash recovery that has not reached "ready" yet. */
+function serverLogShowsRecovery(logPath: string): boolean {
+  try {
+    return serverLogShowsRecoveryInProgress(readFileSync(logPath, "utf8"));
+  } catch {
+    return false;
+  }
+}
 
 /**
  * A lock is only moved aside while this start holds the start lock for the data directory. Without
@@ -782,7 +800,13 @@ export async function readRunningEmbeddedPostgres(
     const undecided: PostgresProcess[] = [];
     const owners = await (options.listPostgresProcesses ?? listPostgresProcessesForDataDir)(dataDir, undecided);
     const verified = owners?.find((owner) => owner.pid === pid);
-    const action = verified
+    const serverLogPath = options.serverLogPath ?? resolveEmbeddedPostgresServerLogPath(dataDir, undefined);
+    // Stopping a server in crash recovery restarts recovery from the beginning, so say to wait instead.
+    const action = verified && serverLogShowsRecovery(serverLogPath)
+      ? `It is PostgreSQL for this data directory (${verified.command}), and its server log (${serverLogPath}) shows ` +
+        "crash recovery that has not finished. Do not stop it: a stop restarts recovery from the beginning. " +
+        "Wait until the log shows \"database system is ready to accept connections\", then start again."
+      : verified
       ? `It is PostgreSQL for this data directory (${verified.command}). Stop it with \`${stopCommand(pid)}\` and start again.`
       : `It was not confirmed to be PostgreSQL for this data directory${processName ? ` (the process is named ${processName})` : ""}. ` +
         `Check what process ${pid} is (\`${inspectCommand(pid)}\`) and stop it only if it is PostgreSQL using ${dataDir}, then start again.`;

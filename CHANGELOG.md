@@ -20,6 +20,28 @@ All notable changes to this repository should be recorded here.
 
 ## Unreleased
 
+- **Fix:** embedded PostgreSQL start-up now survives slow crash recovery on
+  Windows. When `pg_ctl` stops waiting (60 s) while the server log shows crash
+  recovery (fsync of the data directory, WAL redo, end-of-recovery checkpoint)
+  and the postmaster is alive, start-up keeps waiting for readiness while new
+  recovery progress lines appear. It gives up after 300 s without progress or
+  at an upper bound of 1800 s (set with
+  `PAPERCLIP_EMBEDDED_POSTGRES_RECOVERY_STALL_SEC` and
+  `PAPERCLIP_EMBEDDED_POSTGRES_RECOVERY_MAX_WAIT_SEC`). While it waits, and
+  after it gives up, the embedded-postgres exit hook cannot stop the server, so
+  recovery is not restarted from zero. The error names the server log path.
+  Each readiness probe has a deadline inside the remaining wait, and a probe
+  that is still pending is awaited again rather than repeated. "resetting unlogged
+  relations" progress lines count as recovery progress. While the server log
+  shows unfinished recovery, the next start's refusal says to wait instead of
+  naming a stop command. Only the latest startup episode in the log counts, so
+  an earlier "ready to accept connections" line does not hide a newer recovery.
+  The refusal and the start wait read one server log path, resolved once from
+  the instance options. When the log already shows "ready" but the readiness
+  check keeps failing, the give-up says so. The wait logs its policy when it
+  starts and a heartbeat every 30 s without new progress, and each readiness
+  probe passes a connect timeout close to its deadline.
+
 - **Fix:** a second embedded PostgreSQL start on the same data directory no
   longer moves the first start's live `postmaster.pid` aside. The lock is
   verified again just before `start()`. A live owner is reused, an owner that
