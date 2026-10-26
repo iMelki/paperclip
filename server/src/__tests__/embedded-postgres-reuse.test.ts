@@ -427,6 +427,28 @@ describe("embedded PostgreSQL reuse identity", () => {
     expect(error.message).toMatch(new RegExp(`\`(kill|taskkill /PID) ${FOREIGN_PID}\``));
   });
 
+  it("tells the operator to wait, not to stop, while the server log shows unfinished crash recovery", async () => {
+    writePid(String(FOREIGN_PID));
+    probe.mockRejectedValue(new Error("the database system is not yet accepting connections"));
+    const owners = [{ pid: FOREIGN_PID, command: `postgres -D ${dataDir}` }];
+    const logPath = join(dataDir, "server.log");
+    writeFileSync(logPath, [
+      "LOG:  database system was not properly shut down; automatic recovery in progress",
+      "LOG:  syncing data directory (fsync), elapsed time: 10.01 s, current path: ./base/5/1259",
+    ].join("\r\n"));
+    const error = await readRunningEmbeddedPostgres(dataDir, 55432, "postgres", owners).catch((e) => e);
+    expect(error).toBeInstanceOf(EmbeddedPostgresLockRefusal);
+    expect(error.message).toContain("Do not stop it");
+    expect(error.message).toContain(logPath);
+    expect(error.message).not.toMatch(/\`(kill|taskkill \/PID) \d+\`/);
+    expect(existsSync(pidFile)).toBe(true);
+
+    // Once the log shows readiness, the verified owner gets the normal stop advice again.
+    writeFileSync(logPath, `${readFileSync(logPath, "utf8")}\r\nLOG:  database system is ready to accept connections\r\n`);
+    const later = await readRunningEmbeddedPostgres(dataDir, 55432, "postgres", owners).catch((e) => e);
+    expect(later.message).toMatch(new RegExp(`\`(kill|taskkill /PID) ${FOREIGN_PID}\``));
+  });
+
   it("does not tell the operator to kill a PID that was never tied to this data directory", async () => {
     for (const [name, owners] of [["postgres", []], [null, []], ["postgres", null]] as const) {
       writePid(String(FOREIGN_PID));
@@ -706,7 +728,9 @@ describe("moveStaleLockAside", () => {
     }
   });
 
-  it("refuses with the lock exit code when the lock cannot be moved", () => {
+  // A path below a regular file fails with ENOTDIR on POSIX. Windows reports ENOENT there, which
+  // correctly means "no lock to move", so this cause of an unmovable lock exists only on POSIX.
+  it.skipIf(process.platform === "win32")("refuses with the lock exit code when the lock cannot be moved", () => {
     const dir = mkdtempSync(join(tmpdir(), "embedded-pg-aside-"));
     const notADirectory = join(dir, "a-file");
     writeFileSync(notADirectory, "x");
@@ -721,6 +745,10 @@ describe("moveStaleLockAside", () => {
     expect((thrown as EmbeddedPostgresLockRefusal).exitCode).toBe(EMBEDDED_POSTGRES_LOCK_REFUSAL_EXIT_CODE);
   });
 });
+
+// On Windows the start lock is keyed on the lower-cased physical path (physicalPathBeside), so the
+// refusal names that form; elsewhere the path is shown as given.
+const shownLockPath = (path: string) => (process.platform === "win32" ? path.toLowerCase() : path);
 
 describe("acquireEmbeddedStartLock", () => {
   let dataDir: string;
@@ -756,7 +784,7 @@ describe("acquireEmbeddedStartLock", () => {
     const held = readFileSync(lockPath, "utf8");
     const error = await acquireEmbeddedStartLock(dataDir, { pollMs: 5, timeoutMs: 40 }).catch((e) => e);
     expect(error).toBeInstanceOf(EmbeddedPostgresLockRefusal);
-    expect(error.message).toContain(lockPath);
+    expect(error.message).toContain(shownLockPath(lockPath));
     expect(error.message).toContain("Do not delete any data");
     expect(readFileSync(lockPath, "utf8")).toBe(held);
     release();
@@ -783,7 +811,7 @@ describe("acquireEmbeddedStartLock", () => {
     expect(kill).toHaveBeenCalledWith(424242, 0);
     expect(error).toBeInstanceOf(EmbeddedPostgresLockRefusal);
     expect(error.exitCode).toBe(EMBEDDED_POSTGRES_LOCK_REFUSAL_EXIT_CODE);
-    expect(error.message).toContain(lockPath);
+    expect(error.message).toContain(shownLockPath(lockPath));
     expect(error.message).toContain("process 424242, which is gone");
     expect(error.message).toContain("by hand");
     expect(error.message).toContain("Do not delete any data");
@@ -831,7 +859,7 @@ describe("acquireEmbeddedStartLock", () => {
     const release = await acquireEmbeddedStartLock(dataDir);
     const error = await acquireEmbeddedStartLock(alias, { pollMs: 5, timeoutMs: 40 }).catch((e) => e);
     expect(error).toBeInstanceOf(EmbeddedPostgresLockRefusal);
-    expect(error.message).toContain(lockPath);
+    expect(error.message).toContain(shownLockPath(lockPath));
     expect(readdirSync(dirname(dataDir)).filter((name) => name.endsWith(".paperclip-start.lock"))).toEqual([basename(lockPath)]);
     release();
   });

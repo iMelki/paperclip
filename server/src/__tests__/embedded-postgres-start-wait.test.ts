@@ -8,15 +8,17 @@ import {
   embeddedPostgresServerLogPath,
   isPostmasterPidAlive,
   resolveRecoveryWaitPolicy,
+  serverLogShowsRecoveryInProgress,
   startEmbeddedPostgresFollowingRecovery,
   type RecoveryWaitPolicy,
+  type StartFollowingRecoveryInput,
 } from "../embedded-postgres-start-wait.js";
 
 const LOG_PATH = "C:\\PaperclipData\\db\\server.log";
 const PG_CTL_TIMEOUT = new Error(
   "pg_ctl start exited with code 1. waiting for server to start.... stopped waiting\npg_ctl: server did not start in time",
 );
-const POLICY: RecoveryWaitPolicy = { maxWaitMs: 1_800_000, stallMs: 300_000, pollMs: 1000 };
+const POLICY: RecoveryWaitPolicy = { maxWaitMs: 1_800_000, stallMs: 300_000, pollMs: 1000, probeTimeoutMs: 10_000 };
 const RECOVERY_HEAD = [
   "LOG:  database system was interrupted; last known up at 2026-10-26 02:10:00 IST",
   "LOG:  database system was not properly shut down; automatic recovery in progress",
@@ -54,7 +56,14 @@ type Scenario = {
   pgCtlTimeout?: number;
 };
 
-function simulate(scenario: Scenario, policy = POLICY, waits: Array<{ progressLines: number; waitedMs: number }> = []) {
+type Clock = { seconds: () => number; advance: (ms: number) => void };
+
+function simulate(
+  scenario: Scenario,
+  policy = POLICY,
+  waits: Array<{ progressLines: number; waitedMs: number }> = [],
+  overrides: (clock: Clock) => Partial<StartFollowingRecoveryInput> = () => ({}),
+) {
   let clockMs = 0;
   const seconds = () => clockMs / 1000;
   const pgCtlTimeout = scenario.pgCtlTimeout ?? 60;
@@ -71,6 +80,12 @@ function simulate(scenario: Scenario, policy = POLICY, waits: Array<{ progressLi
     throw PG_CTL_TIMEOUT;
   });
   const exitHookRuns: number[] = [];
+  const clock: Clock = {
+    seconds,
+    advance: (ms) => {
+      clockMs += ms;
+    },
+  };
   const run = () =>
     startEmbeddedPostgresFollowingRecovery({
       instance,
@@ -90,6 +105,7 @@ function simulate(scenario: Scenario, policy = POLICY, waits: Array<{ progressLi
       sleep: async (ms) => {
         clockMs += ms;
       },
+      ...overrides(clock),
     });
   return { instance, run, exitHookRuns, seconds };
 }
@@ -182,6 +198,136 @@ describe("startEmbeddedPostgresFollowingRecovery", () => {
   });
 });
 
+describe("review round 1 fixes", () => {
+  /** A probe timer on the fake clock: it elapses at once after moving the clock by its duration. */
+  const fakeProbeTimer = (clock: Clock) => (ms: number) => {
+    clock.advance(ms);
+    return { elapsed: Promise.resolve(), cancel: () => {} };
+  };
+
+  it("F1: a readiness probe that never settles cannot hold the wait past the upper bound", { timeout: 2000 }, async () => {
+    const timeouts: number[] = [];
+    const policy = { ...POLICY, maxWaitMs: 600_000 };
+    const sim = simulate({ readyAt: null, log: steadyFsyncLog(3600) }, policy, [], (clock) => ({
+      isReady: (timeoutMs: number) => {
+        timeouts.push(timeoutMs);
+        return new Promise<boolean>(() => {}); // connected but stuck: never answers
+      },
+      probeTimer: fakeProbeTimer(clock),
+    }));
+    const error = (await sim.run().catch((err: unknown) => err)) as EmbeddedPostgresRecoveryIncomplete;
+    expect(error).toBeInstanceOf(EmbeddedPostgresRecoveryIncomplete);
+    expect(error.reason).toBe("upper-bound");
+    expect(sim.seconds()).toBeGreaterThanOrEqual(600);
+    expect(sim.seconds()).toBeLessThanOrEqual(611);
+    expect(Math.max(...timeouts)).toBeLessThanOrEqual(10_000);
+    // A stuck check is awaited again, not repeated: one connection at most.
+    expect(timeouts).toHaveLength(1);
+  });
+
+  it("F1: a slow readiness check that answers later is still used", { timeout: 2000 }, async () => {
+    let calls = 0;
+    let answer: (ready: boolean) => void = () => {};
+    const sim = simulate({ readyAt: null, log: steadyFsyncLog(3600) }, POLICY, [], (clock) => ({
+      isReady: () => {
+        calls += 1;
+        return new Promise<boolean>((resolve) => {
+          answer = resolve;
+        });
+      },
+      probeTimer: (ms: number) => {
+        if (clock.seconds() < 90) return fakeProbeTimer(clock)(ms);
+        answer(true); // the pending check answers during the 90 s poll, before its deadline
+        return { elapsed: new Promise<void>(() => {}), cancel: () => {} };
+      },
+    }));
+    await expect(sim.run()).resolves.toMatchObject({ followedRecovery: true });
+    expect(calls).toBe(1);
+  });
+
+  it("F1: a stuck probe cannot pass the stall deadline and is cut to the time left", { timeout: 2000 }, async () => {
+    const timeouts: Array<[number, number]> = [];
+    const sim = simulate({ readyAt: null, log: steadyFsyncLog(40) }, POLICY, [], (clock) => ({
+      isReady: () => new Promise<boolean>(() => {}),
+      probeTimer: (ms: number) => {
+        timeouts.push([clock.seconds(), ms]); // when the probe starts, and how long it may take
+        return fakeProbeTimer(clock)(ms);
+      },
+    }));
+    const error = (await sim.run().catch((err: unknown) => err)) as EmbeddedPostgresRecoveryIncomplete;
+    expect(error.reason).toBe("stalled");
+    expect(sim.seconds()).toBeGreaterThanOrEqual(360);
+    expect(sim.seconds()).toBeLessThanOrEqual(361);
+    // Stall deadline at 360 s: a probe never runs past it.
+    for (const [at, timeoutMs] of timeouts) expect(at * 1000 + timeoutMs).toBeLessThanOrEqual(360_000);
+  });
+
+  for (const phase of ["init", "cleanup"]) {
+    it(`F2: "resetting unlogged relations (${phase})" progress lines keep the wait going`, async () => {
+      const log: Array<[number, string]> = RECOVERY_HEAD.map((line) => [0, line]);
+      for (let at = 10; at <= 400; at += 10) {
+        log.push([at, `LOG:  resetting unlogged relations (${phase}), elapsed time: ${at}.00 s, current path: base/${at}`]);
+      }
+      const sim = simulate({ readyAt: 400, log });
+      await expect(sim.run()).resolves.toMatchObject({ followedRecovery: true });
+      expect(sim.seconds()).toBe(400);
+    });
+  }
+
+  it("F2: counts every PostgreSQL 18 startup progress format", () => {
+    for (const line of [
+      "LOG:  syncing data directory (syncfs), elapsed time: 10.00 s, current path: base",
+      "LOG:  syncing data directory (pre-fsync), elapsed time: 10.00 s, current path: ./base/1/2",
+      "LOG:  syncing data directory (fsync), elapsed time: 10.00 s, current path: ./base/1/2",
+      "LOG:  resetting unlogged relations (init), elapsed time: 10.00 s, current path: base/5",
+      "LOG:  resetting unlogged relations (cleanup), elapsed time: 10.00 s, current path: base/5",
+      "LOG:  redo in progress, elapsed time: 10.00 s, current LSN: 0/1A2B3C4",
+    ]) {
+      expect(countRecoveryProgressLines(line), line).toBe(1);
+    }
+  });
+
+  it("F4: a liveness probe that throws counts as alive and does not replace the start error", async () => {
+    const sim = simulate({ readyAt: 95, log: steadyFsyncLog(90) }, POLICY, [], () => ({
+      isPostmasterAlive: async () => {
+        throw Object.assign(new Error("EBUSY: resource busy"), { code: "EBUSY" });
+      },
+    }));
+    await expect(sim.run()).resolves.toMatchObject({ followedRecovery: true });
+    await sim.instance.stop();
+    expect(sim.instance.pgCtlStops).toEqual(["pg_ctl stop -m fast -w"]);
+  });
+
+  it("F4: a probe that throws synchronously rethrows the original start error with stop() armed", async () => {
+    const sim = simulate({ readyAt: null, log: steadyFsyncLog(40) }, POLICY, [], () => ({
+      readServerLog: () => {
+        throw new Error("probe bug");
+      },
+    }));
+    await expect(sim.run()).rejects.toBe(PG_CTL_TIMEOUT);
+    await sim.instance.stop();
+    expect(sim.instance.pgCtlStops).toEqual(["pg_ctl stop -m fast -w"]);
+  });
+
+  it("F4: a reporting callback that throws does not end the wait", async () => {
+    const sim = simulate({ readyAt: 95, log: steadyFsyncLog(90) }, POLICY, [], () => ({
+      onRecoveryWait: () => {
+        throw new Error("logger down");
+      },
+    }));
+    await expect(sim.run()).resolves.toMatchObject({ followedRecovery: true });
+  });
+
+  it("serverLogShowsRecoveryInProgress is false once the ready line appears", () => {
+    const recovering = `${RECOVERY_HEAD.join("\n")}\n${fsyncLine(10)}`;
+    expect(serverLogShowsRecoveryInProgress(recovering)).toBe(true);
+    expect(serverLogShowsRecoveryInProgress(`${recovering}\nLOG:  database system is ready to accept connections`))
+      .toBe(false);
+    expect(serverLogShowsRecoveryInProgress("LOG:  database system is ready to accept connections")).toBe(false);
+    expect(serverLogShowsRecoveryInProgress(null)).toBe(false);
+  });
+});
+
 describe("countRecoveryProgressLines", () => {
   it("counts recovery lines and ignores connection refusals from readiness probes", () => {
     const log = [
@@ -199,7 +345,9 @@ describe("countRecoveryProgressLines", () => {
 
 describe("resolveRecoveryWaitPolicy", () => {
   it("defaults to 1800 s upper bound and 300 s stall window", () => {
-    expect(resolveRecoveryWaitPolicy({})).toEqual({ maxWaitMs: 1_800_000, stallMs: 300_000, pollMs: 1000 });
+    expect(resolveRecoveryWaitPolicy({})).toEqual({
+      maxWaitMs: 1_800_000, stallMs: 300_000, pollMs: 1000, probeTimeoutMs: 10_000,
+    });
   });
 
   it("accepts in-range overrides and ignores invalid ones", () => {
@@ -230,6 +378,13 @@ describe("isPostmasterPidAlive", () => {
   const esrch = () => {
     throw Object.assign(new Error("kill ESRCH"), { code: "ESRCH" });
   };
+
+  it("F3: presumes alive when the pid file exists but cannot be read (not ENOENT)", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "pg-start-wait-"));
+    dirs.push(dir);
+    // Reading a directory fails with EISDIR (or EPERM on some Windows builds), never ENOENT.
+    expect(await isPostmasterPidAlive(dir, () => undefined)).toBe(true);
+  });
 
   it("is false without a pid file or with a malformed pid", async () => {
     expect(await isPostmasterPidAlive(pidFile(null))).toBe(false);

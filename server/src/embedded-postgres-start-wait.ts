@@ -19,11 +19,18 @@
 import { readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 
-/** Server log lines that show crash recovery has started or moved forward. */
+/**
+ * Server log lines that show crash recovery has started or moved forward.
+ * PostgreSQL 18 writes a `log_startup_progress_interval` line (default every
+ * 10 s) during each long startup phase: "syncing data directory (syncfs |
+ * pre-fsync | fsync)" (fd.c), "resetting unlogged relations (init | cleanup)"
+ * (reinit.c), and "redo in progress" (xlogrecovery.c).
+ */
 export const RECOVERY_PROGRESS_PATTERNS: readonly RegExp[] = [
   /database system was interrupted/i,
   /database system was not properly shut down; automatic recovery in progress/i,
   /syncing data directory/i,
+  /resetting unlogged relations/i,
   /redo starts at/i,
   /redo in progress/i,
   /redo done at/i,
@@ -33,6 +40,8 @@ export const RECOVERY_PROGRESS_PATTERNS: readonly RegExp[] = [
 export const DEFAULT_RECOVERY_MAX_WAIT_SECONDS = 1800;
 export const DEFAULT_RECOVERY_STALL_SECONDS = 300;
 const DEFAULT_POLL_MS = 1000;
+const DEFAULT_PROBE_TIMEOUT_MS = 10_000;
+const READY_LINE = /database system is ready to accept connections/i;
 
 export type RecoveryWaitPolicy = {
   /** Hard upper bound, measured from the start of `start()`. */
@@ -40,6 +49,8 @@ export type RecoveryWaitPolicy = {
   /** Give up when no new recovery progress line appears for this long. */
   stallMs: number;
   pollMs: number;
+  /** Upper limit for one readiness probe; it is also cut to the remaining budget. */
+  probeTimeoutMs: number;
 };
 
 export type RecoveryGiveUpReason = "upper-bound" | "stalled" | "exited";
@@ -71,11 +82,17 @@ export type StartFollowingRecoveryInput = {
   policy: RecoveryWaitPolicy;
   readServerLog: () => Promise<string | null>;
   isPostmasterAlive: () => Promise<boolean>;
-  isReady: () => Promise<boolean>;
+  /**
+   * Readiness check. The helper stops waiting for it after `timeoutMs` (the
+   * probe deadline) and does not start another check while one is still pending.
+   */
+  isReady: (timeoutMs: number) => Promise<boolean>;
   /** Called when the wait begins and each time a new recovery progress line appears. */
   onRecoveryWait?: (info: { progressLines: number; waitedMs: number }) => void;
   now?: () => number;
   sleep?: (ms: number) => Promise<void>;
+  /** Timer that bounds one readiness probe. Test seam; defaults to `setTimeout`. */
+  probeTimer?: (ms: number) => { elapsed: Promise<void>; cancel: () => void };
 };
 
 export type StartFollowingRecoveryResult = { followedRecovery: boolean; waitedMs: number };
@@ -87,10 +104,16 @@ export function countRecoveryProgressLines(log: string | null): number {
     .filter((line) => RECOVERY_PROGRESS_PATTERNS.some((pattern) => pattern.test(line))).length;
 }
 
+/** True when the log shows crash recovery and no "ready to accept connections" line yet. */
+export function serverLogShowsRecoveryInProgress(log: string | null): boolean {
+  return countRecoveryProgressLines(log) > 0 && !READY_LINE.test(log ?? "");
+}
+
 /**
- * True while the PID in `postmaster.pid` is a live process. A missing or
- * unreadable file, a malformed PID, or ESRCH means it is gone; any other probe
- * error (for example EPERM) leaves it presumed alive.
+ * True while the PID in `postmaster.pid` is a live process. Only a missing
+ * file (ENOENT), a malformed PID, or ESRCH means it is gone. Any other read
+ * error (for example EBUSY or EPERM from a scanner holding the file) and any
+ * other probe error leave it presumed alive.
  */
 export async function isPostmasterPidAlive(
   pidFile: string,
@@ -99,8 +122,8 @@ export async function isPostmasterPidAlive(
   let contents: string;
   try {
     contents = await readFile(pidFile, "utf8");
-  } catch {
-    return false;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code !== "ENOENT";
   }
   const pid = Number(contents.split(/\r?\n/)[0]?.trim());
   if (!Number.isSafeInteger(pid) || pid <= 0) return false;
@@ -151,7 +174,12 @@ export function resolveRecoveryWaitPolicy(env: NodeJS.ProcessEnv = process.env):
     30,
     3600,
   );
-  return { maxWaitMs: maxSeconds * 1000, stallMs: stallSeconds * 1000, pollMs: DEFAULT_POLL_MS };
+  return {
+    maxWaitMs: maxSeconds * 1000,
+    stallMs: stallSeconds * 1000,
+    pollMs: DEFAULT_POLL_MS,
+    probeTimeoutMs: DEFAULT_PROBE_TIMEOUT_MS,
+  };
 }
 
 function giveUp(
@@ -179,6 +207,52 @@ function giveUp(
   );
 }
 
+function defaultProbeTimer(ms: number): { elapsed: Promise<void>; cancel: () => void } {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const elapsed = new Promise<void>((resolve) => {
+    timer = setTimeout(resolve, ms);
+  });
+  return { elapsed, cancel: () => clearTimeout(timer) };
+}
+
+/** The readiness check still pending from an earlier poll, if any. */
+type ProbeState = { inflight: Promise<boolean> | null };
+
+/**
+ * One readiness poll, bounded by the policy limit and by the time left before
+ * the nearer deadline. A check that hangs, rejects, or throws counts as "not
+ * ready". A check that is still pending is awaited again instead of opening a
+ * new connection, so a stuck backend holds at most one probe connection.
+ */
+async function probeReady(input: StartFollowingRecoveryInput, budgetMs: number, state: ProbeState): Promise<boolean> {
+  const timeoutMs = Math.max(1, Math.min(input.policy.probeTimeoutMs, budgetMs));
+  if (state.inflight === null) {
+    const probe = Promise.resolve().then(() => input.isReady(timeoutMs)).catch(() => false);
+    state.inflight = probe;
+    void probe.then(() => {
+      if (state.inflight === probe) state.inflight = null;
+    });
+  }
+  const timer = (input.probeTimer ?? defaultProbeTimer)(timeoutMs);
+  try {
+    return await Promise.race([state.inflight, timer.elapsed.then(() => false)]);
+  } finally {
+    timer.cancel();
+  }
+}
+
+/** A liveness probe that throws leaves the postmaster presumed alive. */
+const presumedAlive = (input: StartFollowingRecoveryInput) =>
+  Promise.resolve().then(() => input.isPostmasterAlive()).catch(() => true);
+
+function report(input: StartFollowingRecoveryInput, info: { progressLines: number; waitedMs: number }): void {
+  try {
+    input.onRecoveryWait?.(info);
+  } catch {
+    // A reporting failure must not end the wait.
+  }
+}
+
 async function followRecovery(
   input: StartFollowingRecoveryInput,
   startedAt: number,
@@ -187,21 +261,24 @@ async function followRecovery(
 ): Promise<number> {
   const now = input.now ?? Date.now;
   const sleep = input.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+  const { maxWaitMs, stallMs } = input.policy;
   let progress = progressLines;
   let lastProgressAt = now();
-  input.onRecoveryWait?.({ progressLines: progress, waitedMs: lastProgressAt - startedAt });
+  const probes: ProbeState = { inflight: null };
+  report(input, { progressLines: progress, waitedMs: lastProgressAt - startedAt });
   for (;;) {
+    const budgetMs = Math.min(startedAt + maxWaitMs, lastProgressAt + stallMs) - now();
+    if (await probeReady(input, budgetMs, probes)) return now() - startedAt;
     const waitedMs = now() - startedAt;
-    if (await input.isReady().catch(() => false)) return waitedMs;
-    if (!(await input.isPostmasterAlive())) throw giveUp("exited", input, waitedMs, startError);
+    if (!(await presumedAlive(input))) throw giveUp("exited", input, waitedMs, startError);
     const current = countRecoveryProgressLines(await input.readServerLog().catch(() => null));
     if (current > progress) {
       progress = current;
       lastProgressAt = now();
-      input.onRecoveryWait?.({ progressLines: progress, waitedMs });
+      report(input, { progressLines: progress, waitedMs });
     }
-    if (now() - lastProgressAt >= input.policy.stallMs) throw giveUp("stalled", input, waitedMs, startError);
-    if (waitedMs >= input.policy.maxWaitMs) throw giveUp("upper-bound", input, waitedMs, startError);
+    if (now() - lastProgressAt >= stallMs) throw giveUp("stalled", input, waitedMs, startError);
+    if (waitedMs >= maxWaitMs) throw giveUp("upper-bound", input, waitedMs, startError);
     await sleep(input.policy.pollMs);
   }
 }
@@ -210,8 +287,9 @@ async function followRecovery(
  * Runs `instance.start()`. When it fails while the server log shows crash
  * recovery and the postmaster is alive, keeps waiting for readiness as long as
  * recovery makes progress, up to the hard upper bound. Any other failure is
- * rethrown unchanged. A give-up during recovery leaves PostgreSQL running and
- * its `stop()` disarmed, and throws `EmbeddedPostgresRecoveryIncomplete`.
+ * rethrown unchanged with `stop()` armed as before. A give-up during recovery
+ * leaves PostgreSQL running and its `stop()` disarmed, and throws
+ * `EmbeddedPostgresRecoveryIncomplete`.
  */
 export async function startEmbeddedPostgresFollowingRecovery(
   input: StartFollowingRecoveryInput,
@@ -225,13 +303,18 @@ export async function startEmbeddedPostgresFollowingRecovery(
     // Disarm first: until readiness is known, a process-exit hook must not stop the server.
     const handle = input.instance.process;
     input.instance.process = undefined;
-    const progressLines = countRecoveryProgressLines(await input.readServerLog().catch(() => null));
-    if (progressLines === 0 || !(await input.isPostmasterAlive())) {
+    try {
+      const progressLines = countRecoveryProgressLines(await input.readServerLog().catch(() => null));
+      if (progressLines === 0 || !(await presumedAlive(input))) throw startError;
+      const waitedMs = await followRecovery(input, startedAt, progressLines, startError);
+      input.instance.process = handle;
+      return { followedRecovery: true, waitedMs };
+    } catch (error) {
+      // Only a give-up during recovery keeps stop() disarmed. Anything else
+      // restores it and surfaces the original start error.
+      if (error instanceof EmbeddedPostgresRecoveryIncomplete) throw error;
       input.instance.process = handle;
       throw startError;
     }
-    const waitedMs = await followRecovery(input, startedAt, progressLines, startError);
-    input.instance.process = handle;
-    return { followedRecovery: true, waitedMs };
   }
 }

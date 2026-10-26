@@ -30,6 +30,11 @@ All notable changes to this repository should be recorded here.
   `PAPERCLIP_EMBEDDED_POSTGRES_RECOVERY_MAX_WAIT_SEC`). While it waits, and
   after it gives up, the embedded-postgres exit hook cannot stop the server, so
   recovery is not restarted from zero. The error names the server log path.
+  Each readiness probe has a deadline inside the remaining wait, and a probe
+  that is still pending is awaited again rather than repeated. "resetting unlogged
+  relations" progress lines count as recovery progress. While the server log
+  shows unfinished recovery, the next start's refusal says to wait instead of
+  naming a stop command.
 
 - **Fix:** a second embedded PostgreSQL start on the same data directory no
   longer moves the first start's live `postmaster.pid` aside. The lock is
