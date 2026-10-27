@@ -6,7 +6,7 @@ import { resolveDefaultLogsDir, resolveHomeAwarePath } from "../home-paths.js";
 import { HTTP_LOG_REDACT_PATHS } from "./http-log-redaction.js";
 import { createHttpLogger } from "./http-logger.js";
 
-function resolveServerLogDir(): string {
+export function resolveServerLogDir(): string {
   const envOverride = process.env.PAPERCLIP_LOG_DIR?.trim();
   if (envOverride) return resolveHomeAwarePath(envOverride);
 

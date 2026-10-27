@@ -1,6 +1,6 @@
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   EmbeddedPostgresRecoveryIncomplete,
@@ -18,7 +18,7 @@ import {
   type StartFollowingRecoveryInput,
 } from "../embedded-postgres-start-wait.js";
 
-const LOG_PATH = "C:\\PaperclipData\\db\\server.log";
+const LOG_PATH = "C:\\PaperclipData\\db-postgres.log";
 const PG_CTL_TIMEOUT = new Error(
   "pg_ctl start exited with code 1. waiting for server to start.... stopped waiting\npg_ctl: server did not start in time",
 );
@@ -517,10 +517,11 @@ describe("isPostmasterPidAlive", () => {
 });
 
 describe("embeddedPostgresServerLogPath", () => {
-  it("uses the instance logFile option when set, else server.log in the data directory", () => {
+  it("uses the instance logFile option when set, else <data directory>-postgres.log beside it", () => {
     const dataDir = resolve(tmpdir(), "pc-db");
-    expect(embeddedPostgresServerLogPath({}, dataDir)).toBe(join(dataDir, "server.log"));
-    expect(embeddedPostgresServerLogPath({ options: { logFile: "" } }, dataDir)).toBe(join(dataDir, "server.log"));
+    const sibling = join(dirname(dataDir), "pc-db-postgres.log");
+    expect(embeddedPostgresServerLogPath({}, dataDir)).toBe(sibling);
+    expect(embeddedPostgresServerLogPath({ options: { logFile: "" } }, dataDir)).toBe(sibling);
     const custom = resolve(tmpdir(), "logs", "postgres.log");
     expect(embeddedPostgresServerLogPath({ options: { logFile: custom } }, dataDir)).toBe(custom);
   });

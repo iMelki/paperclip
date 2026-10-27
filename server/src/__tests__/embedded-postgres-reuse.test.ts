@@ -432,7 +432,7 @@ describe("embedded PostgreSQL reuse identity", () => {
     writePid(String(FOREIGN_PID));
     probe.mockRejectedValue(new Error("the database system is not yet accepting connections"));
     const owners = [{ pid: FOREIGN_PID, command: `postgres -D ${dataDir}` }];
-    const logPath = join(dataDir, "server.log");
+    const logPath = embeddedPostgresServerLogPath({}, dataDir);
     writeFileSync(logPath, [
       "LOG:  database system was not properly shut down; automatic recovery in progress",
       "LOG:  syncing data directory (fsync), elapsed time: 10.01 s, current path: ./base/5/1259",
@@ -461,7 +461,7 @@ describe("embedded PostgreSQL reuse identity", () => {
     const refuse = async (lines: string[]) => {
       writePid(String(FOREIGN_PID));
       probe.mockRejectedValue(new Error("the database system is not yet accepting connections"));
-      writeFileSync(join(dataDir, "server.log"), lines.join("\r\n"));
+      writeFileSync(embeddedPostgresServerLogPath({}, dataDir), lines.join("\r\n"));
       const error = await readRunningEmbeddedPostgres(dataDir, 55432, "postgres", owners()).catch((e) => e);
       expect(error).toBeInstanceOf(EmbeddedPostgresLockRefusal);
       expect(existsSync(pidFile)).toBe(true);
@@ -506,7 +506,7 @@ describe("embedded PostgreSQL reuse identity", () => {
     expect(error).toBeInstanceOf(EmbeddedPostgresLockRefusal);
     expect(error.message).toContain("Do not stop it");
     expect(error.message).toContain(serverLogPath);
-    // Without the resolved path the refusal falls back to <dataDir>/server.log, which does not
+    // Without the resolved path the refusal falls back to <dataDir>-postgres.log, which does not
     // exist here, and would advise a stop that restarts recovery: the caller must pass it.
     const fallback = await readRunning(dataDir, 55432, adminUrl, options).catch((e) => e);
     expect(fallback.message).not.toContain("Do not stop it");

@@ -37,6 +37,7 @@ function harness(outcome = { code: 0 }, platform = 'win32') {
   const mutations = [];
   const probes = [];
   const state = { postmasterPidPresent: true };
+  const realpaths = new Map();
   const context = {
     path: path.win32, platform: () => platform,
     postgres: 'C:\\Postgres Bin\\postgres.exe', pg_ctl: 'C:\\Postgres Bin\\pg_ctl.exe',
@@ -47,6 +48,13 @@ function harness(outcome = { code: 0 }, platform = 'win32') {
     __awaiter: (self, args, ignored, generator) => runGenerator(generator.call(self)),
     fs: {
       async rm(file) { mutations.push(['rm', file]); },
+      async mkdir(dir, options) { mutations.push(['mkdir', dir, options]); },
+      // Identity unless a test maps a path (a symlink or junction alias) to its physical location.
+      async realpath(file) {
+        const target = realpaths.get(file);
+        if (target === 'ENOENT') throw Object.assign(new Error(`ENOENT: ${file}`), { code: 'ENOENT' });
+        return target ?? file;
+      },
       async access(file) {
         probes.push(file);
         if (!state.postmasterPidPresent) {
@@ -84,7 +92,7 @@ function harness(outcome = { code: 0 }, platform = 'win32') {
   const execute = (source) => runGenerator(
     new vm.Script(`(function* () { ${source} })`).runInNewContext(context).call(instance),
   );
-  return { calls, reads, probes, state, logs, errors, mutations, context, instance,
+  return { calls, reads, probes, state, logs, errors, mutations, context, instance, realpaths,
     start: () => execute(startSource), stop: () => execute(stopSource) };
 }
 
@@ -110,7 +118,7 @@ test('start without custom flags preserves spaces and recovers the server PID', 
   await subject.start();
   const call = subject.calls[0];
   assert.equal(call.file, 'C:\\Postgres Bin\\pg_ctl.exe');
-  assert.deepEqual(call.args.slice(0, 9), ['start', '-D', 'C:\\DB Dir', '-l', 'C:\\DB Dir\\server.log', '-w', '-t', '60', '-o']);
+  assert.deepEqual(call.args.slice(0, 9), ['start', '-D', 'C:\\DB Dir', '-l', 'C:\\DB Dir-postgres.log', '-w', '-t', '600', '-o']);
   assert.equal(call.args[9], '-p 54329');
   assert.deepEqual(call.args.slice(10), ['-p', 'C:\\Postgres Bin\\postgres.exe']);
   assert.equal(call.options.windowsHide, true, 'start must set windowsHide');
@@ -160,6 +168,88 @@ test('Windows guard rejects unsafe path characters and types before side effects
   }
 });
 
+test('start keeps the server log outside the data directory and the 60s wait after a clean shutdown', async () => {
+  const subject = harness();
+  subject.state.postmasterPidPresent = false;
+  await subject.start();
+  const args = subject.calls[0].args;
+  const log = args[args.indexOf('-l') + 1];
+  assert.equal(log, 'C:\\DB Dir-postgres.log');
+  assert.ok(path.win32.relative('C:\\DB Dir', log).startsWith('..'), 'log must not be inside the data directory');
+  assert.equal(args[args.indexOf('-t') + 1], '60');
+  const mkdirs = subject.mutations.filter(([kind]) => kind === 'mkdir');
+  assert.equal(mkdirs.length, 1);
+  assert.equal(mkdirs[0][1], 'C:\\');
+  assert.equal(mkdirs[0][2].recursive, true);
+});
+
+test('start uses a caller-supplied log file and creates its directory first', async () => {
+  const subject = harness();
+  subject.instance.options.logFile = 'C:\\Instance\\logs\\postgres.log';
+  await subject.start();
+  const args = subject.calls[0].args;
+  assert.equal(args[args.indexOf('-l') + 1], 'C:\\Instance\\logs\\postgres.log');
+  const kinds = subject.mutations.map(([kind, target]) => `${kind}:${target}`);
+  const mkdirAt = kinds.indexOf('mkdir:C:\\Instance\\logs');
+  assert.ok(mkdirAt >= 0, 'log directory must be created');
+  assert.equal(kinds[mkdirAt + 1], 'rm:C:\\Instance\\logs\\postgres.log');
+});
+
+test('start allows crash recovery up to 600s when a postmaster.pid was left behind', async () => {
+  const subject = harness();
+  subject.state.postmasterPidPresent = true;
+  await subject.start();
+  const args = subject.calls[0].args;
+  assert.equal(args[args.indexOf('-t') + 1], '600');
+  assert.ok(subject.probes.some((file) => file.endsWith('postmaster.pid')));
+});
+
+test('start honours an explicit startTimeoutSeconds even when the lock was already removed', async () => {
+  const subject = harness();
+  subject.state.postmasterPidPresent = false;
+  subject.instance.options.startTimeoutSeconds = 600;
+  await subject.start();
+  const args = subject.calls[0].args;
+  assert.equal(args[args.indexOf('-t') + 1], '600');
+});
+
+test('start rejects an invalid startTimeoutSeconds before spawning pg_ctl', async () => {
+  for (const value of [0, -5, 1.5, 3601, '60', Number.NaN]) {
+    const subject = harness();
+    subject.instance.options.startTimeoutSeconds = value;
+    await assert.rejects(subject.start(), /^Error: startTimeoutSeconds must be an integer from 1 to 3600$/);
+    assert.deepEqual(subject.calls, [], 'must reject before spawn');
+  }
+});
+
+test('start rejects a log file inside the data directory before any effect', async () => {
+  for (const logFile of ['C:\\DB Dir\\server.log', 'C:\\DB Dir\\logs\\postgres.log', 'C:\\DB Dir\\..logs\\postgres.log', 'C:\\DB Dir']) {
+    const subject = harness();
+    subject.instance.options.logFile = logFile;
+    await rejectsBeforeEffects(subject, /^Error: The PostgreSQL log file must be outside the data directory$/);
+  }
+});
+
+test('start rejects a log file that is physically inside a data directory reached through an alias', async () => {
+  const subject = harness();
+  subject.instance.options.databaseDir = 'C:\\Link';
+  subject.instance.options.logFile = 'C:\\Real\\Data\\logs\\postgres.log';
+  subject.realpaths.set('C:\\Link', 'C:\\Real\\Data');
+  // The log directory does not exist yet, so it resolves through its nearest existing ancestor.
+  subject.realpaths.set('C:\\Real\\Data\\logs\\postgres.log', 'ENOENT');
+  subject.realpaths.set('C:\\Real\\Data\\logs', 'ENOENT');
+  await rejectsBeforeEffects(subject, /^Error: The PostgreSQL log file must be outside the data directory$/);
+});
+
+test('start accepts a log file outside a data directory reached through an alias', async () => {
+  const subject = harness();
+  subject.instance.options.databaseDir = 'C:\\Link';
+  subject.instance.options.logFile = 'C:\\Real\\logs\\postgres.log';
+  subject.realpaths.set('C:\\Link', 'C:\\Real\\Data');
+  await subject.start();
+  assert.equal(subject.calls[0].args[subject.calls[0].args.indexOf('-l') + 1], 'C:\\Real\\logs\\postgres.log');
+});
+
 test('Windows guard accepts parentheses and apostrophes, which are inert in pg_ctl\'s quoted cmd string', async () => {
   const subject = harness();
   subject.context.postgres = 'C:\\Program Files (x86)\\PostgreSQL\\bin\\postgres.exe';
@@ -169,7 +259,7 @@ test('Windows guard accepts parentheses and apostrophes, which are inert in pg_c
   const call = subject.calls[0];
   assert.equal(call.file, 'C:\\Program Files (x86)\\PostgreSQL\\bin\\pg_ctl.exe');
   assert.deepEqual(call.args.slice(1, 5), ['-D', "C:\\Users\\O'Test\\AppData\\Local\\Temp\\db",
-    '-l', "C:\\Users\\O'Test\\AppData\\Local\\Temp\\db\\server.log"]);
+    '-l', "C:\\Users\\O'Test\\AppData\\Local\\Temp\\db-postgres.log"]);
   assert.deepEqual(call.args.slice(-2), ['-p', 'C:\\Program Files (x86)\\PostgreSQL\\bin\\postgres.exe']);
   // The relaxed class must still reject characters that carry meaning in cmd.exe.
   for (const value of ['C:\\Program Files (x86) & Co\\pg_ctl.exe', 'C:\\Program Files (x86)|pg_ctl.exe',

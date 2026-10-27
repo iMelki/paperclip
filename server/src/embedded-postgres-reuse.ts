@@ -568,7 +568,7 @@ export type EmbeddedPostgresReuseOptions = {
   startLockHeld?: boolean;
   /**
    * The embedded PostgreSQL server log, resolved by the caller from the same options its instance
-   * uses (see `embeddedPostgresServerLogPath`). Defaults to `server.log` in the data directory.
+   * uses (see `embeddedPostgresServerLogPath`). Defaults to `<data directory>-postgres.log` beside the data directory.
    */
   serverLogPath?: string;
 };
