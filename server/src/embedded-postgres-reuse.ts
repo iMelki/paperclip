@@ -245,13 +245,20 @@ export async function acquireEmbeddedStartLock(
   for (;;) {
     try {
       createExclusively(lockPath);
-      return () => {
+      const release = () => {
+        process.removeListener("exit", release);
         try {
           if (readOwner(lockPath)?.text.includes(token)) unlinkSync(lockPath);
         } catch {
           // Already gone.
         }
       };
+      // An interrupted start leaves through process.exit() (the embedded-postgres exit hooks call it)
+      // without running the caller's `finally`. The synchronous exit handler removes this start's own
+      // lock then. It cannot run when the process is killed outright (TerminateProcess, taskkill /F);
+      // that case keeps the refusal above and its manual step.
+      process.once("exit", release);
+      return release;
     } catch (error) {
       const code = (error as NodeJS.ErrnoException).code;
       // Anything but "already exists" is a permanent problem: starting without the lock would leave
