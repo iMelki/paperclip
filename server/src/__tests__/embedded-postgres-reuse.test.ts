@@ -989,6 +989,53 @@ describe("acquireEmbeddedStartLock", () => {
     release();
     expect(existsSync(lockPath)).toBe(true);
   });
+
+  // process.exit() from a vendor exit hook skips the caller's `finally`, so the lock must be
+  // removed by a synchronous exit handler. The handler is called directly: emitting "exit" would
+  // run the test runner's own handlers.
+  const exitListenersSince = (before: Function[]) => process.listeners("exit").filter((l) => !before.includes(l));
+
+  it("releases its own lock when the process exits without calling release", async () => {
+    const before = process.listeners("exit");
+    const release = await acquireEmbeddedStartLock(dataDir);
+    const added = exitListenersSince(before);
+    expect(added).toHaveLength(1);
+    expect(existsSync(lockPath)).toBe(true);
+    added[0]();
+    expect(existsSync(lockPath)).toBe(false);
+    release();
+    expect(exitListenersSince(before)).toHaveLength(0);
+  });
+
+  it("does not remove a lock that another start has replaced when the process exits", async () => {
+    const before = process.listeners("exit");
+    const release = await acquireEmbeddedStartLock(dataDir);
+    const [onExit] = exitListenersSince(before);
+    rmSync(lockPath);
+    const other = JSON.stringify({ pid: process.pid, token: "someone-else" });
+    writeFileSync(lockPath, other);
+    onExit();
+    expect(readFileSync(lockPath, "utf8")).toBe(other);
+    release();
+  });
+
+  it("removes the exit handler on a normal release", async () => {
+    const before = process.listeners("exit");
+    const release = await acquireEmbeddedStartLock(dataDir);
+    expect(exitListenersSince(before)).toHaveLength(1);
+    release();
+    expect(existsSync(lockPath)).toBe(false);
+    expect(exitListenersSince(before)).toHaveLength(0);
+    release(); // releasing twice stays harmless
+  });
+
+  it("registers no exit handler when the lock is refused", async () => {
+    const held = await acquireEmbeddedStartLock(dataDir);
+    const before = process.listeners("exit");
+    await acquireEmbeddedStartLock(dataDir, { pollMs: 5, timeoutMs: 30 }).catch(() => undefined);
+    expect(exitListenersSince(before)).toHaveLength(0);
+    held();
+  });
 });
 
 describe("commandReferencesPath", () => {
