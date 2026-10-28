@@ -25,7 +25,7 @@ patchedDependencies:
     hash: ae3a3qz4d26wxkaqdiebydfjji
     path: patches/acpx@0.12.0.patch
   embedded-postgres@18.1.0-beta.16:
-    hash: jz3l2ynqli5kwbdo2wv3soydpu
+    hash: ec6g76a3evavrbslihxp3nblui
     path: patches/embedded-postgres@18.1.0-beta.16.patch
 
 importers:
@@ -106,7 +106,7 @@ importers:
         version: 0.45.2(@electric-sql/pglite@0.3.15)(@opentelemetry/api@1.9.1)(kysely@0.29.4)(pg@8.18.0)(postgres@3.4.9)
       embedded-postgres:
         specifier: ^18.1.0-beta.16
-        version: 18.1.0-beta.16(patch_hash=jz3l2ynqli5kwbdo2wv3soydpu)
+        version: 18.1.0-beta.16(patch_hash=ec6g76a3evavrbslihxp3nblui)
       picocolors:
         specifier: ^1.1.1
         version: 1.1.1
@@ -341,7 +341,7 @@ importers:
         version: 0.45.2(@electric-sql/pglite@0.3.15)(@opentelemetry/api@1.9.1)(kysely@0.29.4)(pg@8.18.0)(postgres@3.4.9)
       embedded-postgres:
         specifier: ^18.1.0-beta.16
-        version: 18.1.0-beta.16(patch_hash=jz3l2ynqli5kwbdo2wv3soydpu)
+        version: 18.1.0-beta.16(patch_hash=ec6g76a3evavrbslihxp3nblui)
       postgres:
         specifier: ^3.4.9
         version: 3.4.9
@@ -800,7 +800,7 @@ importers:
         version: 0.45.2(@electric-sql/pglite@0.3.15)(@opentelemetry/api@1.9.1)(kysely@0.29.4)(pg@8.18.0)(postgres@3.4.9)
       embedded-postgres:
         specifier: ^18.1.0-beta.16
-        version: 18.1.0-beta.16(patch_hash=jz3l2ynqli5kwbdo2wv3soydpu)
+        version: 18.1.0-beta.16(patch_hash=ec6g76a3evavrbslihxp3nblui)
       express:
         specifier: ^5.1.0
         version: 5.2.1
@@ -12916,7 +12916,7 @@ snapshots:
 
   electron-to-chromium@1.5.286: {}
 
-  embedded-postgres@18.1.0-beta.16(patch_hash=jz3l2ynqli5kwbdo2wv3soydpu):
+  embedded-postgres@18.1.0-beta.16(patch_hash=ec6g76a3evavrbslihxp3nblui):
     dependencies:
       async-exit-hook: 2.0.1
       pg: 8.18.0
