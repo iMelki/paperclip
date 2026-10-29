@@ -5,12 +5,19 @@ export const label = "Codex";
 
 export const SANDBOX_INSTALL_COMMAND = "npm install -g @openai/codex";
 
-// Use the concrete `gpt-5.6-sol` slug (Codex's own default for the 5.6 family) rather than the
-// bare `gpt-5.6` alias: OpenAI ships no model metadata for the bare slug, so passing it makes the
-// Codex CLI warn ("Model metadata for `gpt-5.6` not found") and fall back to generic context limits.
+// The concrete `gpt-5.6-sol` slug (Codex's own default for the 5.6 family) rather than the bare
+// `gpt-5.6` alias: OpenAI ships no model metadata for the bare slug, so passing it makes the Codex
+// CLI warn ("Model metadata for `gpt-5.6` not found") and fall back to generic context limits.
+// This constant only supplies an entry of the model dropdown list below; it is not applied when an
+// agent is created or run. An agent whose model field is empty runs without --model, so the Codex
+// CLI uses the `model` key of its company's Codex home config.toml.
 export const DEFAULT_CODEX_LOCAL_MODEL = "gpt-5.6-sol";
 export const DEFAULT_CODEX_LOCAL_BYPASS_APPROVALS_AND_SANDBOX = false;
 export const CODEX_LOCAL_FAST_MODE_SUPPORTED_MODELS = [
+  "gpt-6-astra",
+  "gpt-6.1-sol",
+  "gpt-6-sol",
+  "gpt-6-luna",
   "gpt-5.6-sol",
   "gpt-5.6-terra",
   "gpt-5.6-luna",
@@ -58,8 +65,16 @@ export function isCodexLocalFastModeSupported(model: string | null | undefined):
   );
 }
 
+// Newest model version first, then by decreasing capability inside each version, older models at
+// the end. The GPT-6 ids lead the list. This order only drives the model dropdown; the model a
+// new agent actually uses when its model field is empty is the `model` key of its company's Codex
+// home config.toml.
 export const models = [
-  // DEFAULT_CODEX_LOCAL_MODEL is gpt-5.6-sol, so it doubles as the first (default) 5.6 entry.
+  { id: "gpt-6.1-sol", label: "gpt-6.1-sol" },
+  { id: "gpt-6-astra", label: "gpt-6-astra" },
+  { id: "gpt-6-sol", label: "gpt-6-sol" },
+  { id: "gpt-6-luna", label: "gpt-6-luna" },
+  // DEFAULT_CODEX_LOCAL_MODEL is gpt-5.6-sol, so it doubles as the first 5.6 entry in the list.
   { id: DEFAULT_CODEX_LOCAL_MODEL, label: DEFAULT_CODEX_LOCAL_MODEL },
   { id: "gpt-5.6-terra", label: "gpt-5.6-terra" },
   { id: "gpt-5.6-luna", label: "gpt-5.6-luna" },
@@ -93,10 +108,10 @@ Core fields:
 - cwd (string, optional): default absolute working directory fallback for the agent process (created if missing when possible)
 - instructionsFilePath (string, optional): absolute path to a markdown instructions file prepended to stdin prompt at runtime
 - model (string, optional): Codex model id
-- modelReasoningEffort (string, optional): reasoning effort override (minimal|low|medium|high|xhigh) passed via -c model_reasoning_effort=...
+- modelReasoningEffort (string, optional): reasoning effort override (minimal|low|medium|high|xhigh) passed via -c model_reasoning_effort=...; GPT-6 Astra, GPT-6.1 Sol, GPT-6 Sol, and GPT-5.6 Sol/Terra also accept max|ultra; GPT-6 Luna and GPT-5.6 Luna also accept max
 - promptTemplate (string, optional): run prompt template
 - search (boolean, optional): run codex with --search
-- fastMode (boolean, optional): enable Codex Fast mode; supported on GPT-5.6 (sol/terra/luna), GPT-5.5, GPT-5.4 and passed through for manual model IDs
+- fastMode (boolean, optional): enable Codex Fast mode; supported on GPT-6 (astra/sol/luna), GPT-6.1 Sol, GPT-5.6 (sol/terra/luna), GPT-5.5, GPT-5.4 and passed through for manual model IDs
 - sandboxMode (string, optional): structured Codex CLI sandbox mode; read-only, workspace-write, or danger-full-access
 - approvalPolicy (string, optional): structured Codex CLI approval policy; untrusted, on-request, or never
 - networkAccess (boolean, optional): Codex workspace-write network access; Paperclip networkScope remains the outer confinement boundary
@@ -133,7 +148,7 @@ Notes:
 - Paperclip injects desired local skills into the effective CODEX_HOME/skills/ directory at execution time so Codex can discover "$paperclip" and related skills without polluting the project working directory. For new and updated agents, Paperclip assigns an isolated managed home at ~/.paperclip/instances/<id>/companies/<companyId>/agents/<agentId>/codex-home/skills/; when CODEX_HOME is explicitly overridden in adapter config, that override is used instead.
 - New and updated codex_local agents persist an empty OPENAI_API_KEY override by default so a host-level OPENAI_API_KEY cannot leak into Codex runs through process inheritance. Explicit CODEX_HOME overrides must not point at the shared company codex-home, $CODEX_HOME, or ~/.codex.
 - Some model/tool combinations reject certain effort levels (for example minimal with web search enabled).
-- Fast mode is supported on GPT-5.6 (sol/terra/luna), GPT-5.5, GPT-5.4 and manual model IDs. When enabled for those models, Paperclip applies \`service_tier="fast"\` and \`features.fast_mode=true\`.
+- Fast mode is supported on GPT-6 (astra/sol/luna), GPT-6.1 Sol, GPT-5.6 (sol/terra/luna), GPT-5.5, GPT-5.4 and manual model IDs. When enabled for those models, Paperclip applies \`service_tier="fast"\` and \`features.fast_mode=true\`.
 - When Paperclip realizes a workspace/runtime for a run, it injects PAPERCLIP_WORKSPACE_* and PAPERCLIP_RUNTIME_* env vars for agent-side tooling.
 - Codex ACP is the preferred auto lane when Node >=24.11.0 and the Codex ACP server are available. It reuses shared ACP prompt/runtime guidance, selected skill materialization into CODEX_HOME/skills, model/reasoning/fast-mode session config, and existing quota-window reporting. Auto selection falls back to CLI when ACP prerequisites are unavailable; explicit engine="acp" fails loudly.
 `;

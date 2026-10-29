@@ -113,14 +113,24 @@ rl.on("line", (line) => {
       id: message.id,
       result: {
         ok: true,
-        supportedMethods: ["getData", "performAction"],
+        supportedMethods: ["getData", "performAction", "runJob"],
       },
     });
     return;
   }
 
-  if (method === "getData" || method === "performAction") {
+  if (method === "getData" || method === "performAction" || method === "runJob") {
     const mode = message.params?.params?.mode;
+    if (mode === "slow") {
+      // Model a long-running handler that answers only after slowDelayMs,
+      // possibly after the host has stopped waiting (RPC timeout).
+      const requestedDelay = Number(message.params?.params?.slowDelayMs);
+      const delayMs = Number.isFinite(requestedDelay) && requestedDelay >= 0 ? requestedDelay : 200;
+      setTimeout(() => {
+        send({ jsonrpc: "2.0", id: message.id, result: { done: true } });
+      }, delayMs);
+      return;
+    }
     if (mode === "late" || mode === "late-forged" || mode === "late-failed" || mode === "late-omit") {
       // Model a non-blocking action which returns immediately while an async
       // continuation later calls the host with the now-stale invocation id.

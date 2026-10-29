@@ -42,6 +42,34 @@ export interface DashboardSummary {
     monthSpendCents: number;
     monthBudgetCents: number;
     monthUtilizationPercent: number;
+    /**
+     * Token usage for the same UTC month. Subscription-billed runs book
+     * `costCents = 0` (see normalizeBilledCostCents), so tokens are the only
+     * signal of how much such a fleet consumed. Input is exclusive of cache
+     * reads for every producer (see toExclusiveTokenCounts).
+     */
+    monthInputTokens: number;
+    monthCachedInputTokens: number;
+    monthOutputTokens: number;
+    /**
+     * API-equivalent cost of `subscription_included` events, priced from the
+     * shared MODEL_PRICING table at read time. Fractional cents (round only
+     * for display). An estimate: never stored, never counted against budgets.
+     */
+    monthEstimatedCents: number;
+    /** Tokens covered by monthEstimatedCents. */
+    monthEstimatedTokens: number;
+    /**
+     * Tokens with neither a billed amount nor an estimate: subscription usage
+     * on a model with no known rate, or events the ledger marks `unpriced`.
+     */
+    monthUnpricedTokens: number;
+    /** Billed and estimated spend per UTC day over the run-activity window. */
+    spendDays: DashboardSpendDay[];
+    /** This month's spend by agent, largest first (top entries only). */
+    byAgent: DashboardSpendBreakdownRow[];
+    /** This month's spend by model, largest first (top entries only). */
+    byModel: DashboardSpendBreakdownRow[];
   };
   pendingApprovals: number;
   budgets: {
@@ -51,4 +79,25 @@ export interface DashboardSummary {
     pausedProjects: number;
   };
   runActivity: DashboardRunActivityDay[];
+}
+
+export interface DashboardSpendDay {
+  date: string;
+  /** Cents booked in the cost ledger (metered API billing). */
+  billedCents: number;
+  /** API-equivalent estimate for subscription usage (see monthEstimatedCents). */
+  estimatedCents: number;
+  tokens: number;
+  /** Tokens with neither a billed amount nor an estimate (see monthUnpricedTokens). */
+  unpricedTokens: number;
+}
+
+export interface DashboardSpendBreakdownRow {
+  /** Agent id or model id, depending on the breakdown. */
+  key: string;
+  label: string;
+  billedCents: number;
+  estimatedCents: number;
+  tokens: number;
+  unpricedTokens: number;
 }

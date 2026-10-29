@@ -28,7 +28,7 @@ diff --git a/dist/index.js b/dist/index.js
              // Optionally retrieve the uid and gid
              const permissionIds = yield this.getUidAndGid()
                  .catch(() => {
-@@ -168,6 +168,129 @@ class EmbeddedPostgres {
+@@ -168,6 +168,177 @@ class EmbeddedPostgres {
              });
              // Make the file executable, in case it is not
 -            ensureBinIsExecutable(postgres);
@@ -67,8 +67,40 @@ diff --git a/dist/index.js b/dist/index.js
 +                requireSafePath(postgres, 'postgres path');
 +                requireSafePath(pg_ctl, 'pg_ctl path');
 +                const systemRoot = requireSafePath(globalThis.process.env.SystemRoot, 'SystemRoot');
-+                const logFile = path.join(this.options.databaseDir, 'server.log');
++                // GUARD: the log must live OUTSIDE the data directory. pg_ctl
++                // keeps `-l` open for the server's lifetime, and after an
++                // unclean shutdown crash recovery fsyncs every file under the
++                // data directory; an open log inside it fails there with a
++                // sharing violation, which retries until pg_ctl's wait runs
++                // out and the server never comes up. Callers should pass
++                // `logFile`; the fallback is a sibling of the data directory.
++                const logFile = this.options.logFile
++                    || path.join(path.dirname(this.options.databaseDir), `${path.basename(this.options.databaseDir)}-postgres.log`);
 +                requireSafePath(logFile, 'log path');
++                {
++                    // Compare physical locations: a symlink or junction alias of the data
++                    // directory must not hide a log that is physically inside it. A path
++                    // that does not exist yet resolves through its nearest existing ancestor.
++                    const canonical = async (target) => {
++                        const pending = [];
++                        let current = path.resolve(target);
++                        for (;;) {
++                            try {
++                                return path.join(await fs.realpath(current), ...pending.reverse());
++                            }
++                            catch (_c) {
++                                const parent = path.dirname(current);
++                                if (parent === current) return path.resolve(target);
++                                pending.push(path.basename(current));
++                                current = parent;
++                            }
++                        }
++                    };
++                    const relative = path.relative(yield canonical(this.options.databaseDir), yield canonical(logFile));
++                    if (relative === '' || (relative !== '..' && !relative.startsWith('..' + path.sep) && !path.isAbsolute(relative))) {
++                        throw new Error('The PostgreSQL log file must be outside the data directory');
++                    }
++                }
 +                const comspec = requireSafePath(path.join(systemRoot, 'System32', 'cmd.exe'), 'COMSPEC path');
 +                const env = Object.assign({}, globalThis.process.env);
 +                for (const key of Object.keys(env)) {
@@ -83,7 +115,22 @@ diff --git a/dist/index.js b/dist/index.js
 +                // `-l` appends rather than truncates, so on a persistent
 +                // (not wiped) data directory a prior run's log would
 +                // otherwise get re-emitted through onLog on every restart.
++                yield fs.mkdir(path.dirname(logFile), { recursive: true });
 +                yield fs.rm(logFile, { force: true });
++                // A postmaster.pid left in place means the last shutdown was
++                // unclean, so startup includes crash recovery, which can take
++                // far longer than a clean start. Allow it extra time; a clean
++                // start keeps the 60s bound.
++                // Callers that remove a stale postmaster.pid before start() hide
++                // that signal, so they pass `startTimeoutSeconds` instead.
++                const recovering = yield fs.access(path.join(this.options.databaseDir, 'postmaster.pid'))
++                    .then(() => true, () => false);
++                const requestedTimeout = this.options.startTimeoutSeconds;
++                if (requestedTimeout !== undefined
++                    && (!Number.isInteger(requestedTimeout) || requestedTimeout < 1 || requestedTimeout > 3600)) {
++                    throw new Error('startTimeoutSeconds must be an integer from 1 to 3600');
++                }
++                const startTimeoutSeconds = requestedTimeout !== undefined ? requestedTimeout : (recovering ? 600 : 60);
 +                yield new Promise((resolve, reject) => {
 +                    var _a, _b;
 +                    // pg_ctl backgrounds postgres via CreateRestrictedProcess()
@@ -101,7 +148,8 @@ diff --git a/dist/index.js b/dist/index.js
 +                        // holds while PGCTLTIMEOUT is unset, and the parent's
 +                        // full environment is forwarded above. Matches the
 +                        // Windows EMBEDDED_POSTGRES_TEST_SETUP_TIMEOUT_MS.
-+                        '-t', '60',
++                        // Extended when crash recovery is expected (above).
++                        '-t', String(startTimeoutSeconds),
 +                        '-o', serverOptions,
 +                        '-p', postgres,
 +                    ], Object.assign(Object.assign({}, permissionIds), { windowsHide: true, env }));
@@ -159,7 +207,7 @@ diff --git a/dist/index.js b/dist/index.js
              yield new Promise((resolve, reject) => {
                  var _a;
                  // Spawn a postgres server
-@@ -177,7 +300,7 @@ class EmbeddedPostgres {
+@@ -177,7 +348,7 @@ class EmbeddedPostgres {
                      '-p',
                      this.options.port.toString(),
                      ...this.options.postgresFlags,
@@ -168,7 +216,7 @@ diff --git a/dist/index.js b/dist/index.js
                  // Connect to stderr, as that is where the messages get sent
                  (_a = this.process.stderr) === null || _a === void 0 ? void 0 : _a.on('data', (chunk) => {
                      // Parse the data as a string and log it
-@@ -208,26 +331,64 @@ class EmbeddedPostgres {
+@@ -208,26 +379,64 @@ class EmbeddedPostgres {
                  return;
              }
              // Kill the existing postgres process
@@ -251,3 +299,21 @@ diff --git a/dist/index.js b/dist/index.js
              // GUARD: Additional work if database is not persistent
              if (this.options.persistent === false) {
                  // Delete the data directory
+diff --git a/dist/types.d.ts b/dist/types.d.ts
+--- a/dist/types.d.ts
++++ b/dist/types.d.ts
+@@ -43,6 +43,14 @@ export interface PostgresOptions {
+      * Defaults to `false`.
+      */
+     createPostgresUser: boolean;
++    /** Windows only: where pg_ctl writes the server log. Must be outside
++     * `databaseDir`; an open log inside the data directory breaks crash
++     * recovery. Defaults to a sibling of `databaseDir`. */
++    logFile?: string;
++    /** Windows only: seconds pg_ctl waits for the server to become ready.
++     * Defaults to 60, or 600 when a postmaster.pid is still present
++     * (crash recovery). Pass it when removing the lock before start(). */
++    startTimeoutSeconds?: number;
+     /** Pass in a custom logging handler. This will relay and console messages
+      * that are generated by the postgres and initdb processes. Defaults to
+      * `console.log` */

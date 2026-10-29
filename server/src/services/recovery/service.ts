@@ -161,6 +161,7 @@ type LatestIssueRun = Pick<
   | "createdAt"
 > & {
   resultJson?: unknown;
+  finishedAt?: Date | null;
 } | null;
 type SuccessfulLatestIssueRun = NonNullable<LatestIssueRun> & { status: "succeeded" };
 
@@ -372,8 +373,22 @@ const CONTINUATION_RECOVERY_DEFAULT_MAX_ATTEMPTS = 1;
 const CONTINUATION_RECOVERY_TRANSIENT_BASE_BACKOFF_MS = 60_000;
 export const PROVIDER_QUOTA_RECOVERY_DEFAULT_BACKOFF_MS = 60 * 60 * 1000;
 
+// Session-limit wording counts only as Claude's own statement ("You've hit your
+// session limit · resets …"); bare "session limit" also appears in unrelated
+// tool, MCP and terminal failures and must not enter quota recovery. It is read
+// from the ACP error and stop reason, or from a non-ACP run's own error field,
+// never from the rest of the result (summaries and stdout can quote it).
 const PROVIDER_QUOTA_ERROR_RE =
   /(?:you(?:'|’)ve hit your usage limit|usage limit(?: reached| exceeded)?|provider quota|quota (?:limit )?exceeded|model (?:is )?at capacity)/i;
+const CLAUDE_SESSION_LIMIT_RE = /you(?:'|’)ve hit your (?:usage|session) limit/i;
+// On the ACP path a reset clock only counts when it sits right next to the quota statement.
+const PROVIDER_QUOTA_RESET_WINDOW_CHARS = 120;
+// A reset clock that passed moments ago (clock skew, a slow failure report) means the limit is
+// already lifting, so retry now instead of waiting a full day for the next occurrence.
+const PROVIDER_QUOTA_RESET_ELAPSED_GRACE_MS = 30 * 60 * 1000;
+// `scope` is the span right after the quota statement. On the ACP path every clock must start
+// inside it; elsewhere `try again at` is read anywhere and only `resets` is tied to the span.
+type ProviderQuotaResetScope = { start: number; end: number; acp: boolean };
 const CONFIGURATION_INCOMPLETE_ERROR_RE =
   /(?:model_not_found|model [^\n]{0,120} not found|missing (?:api )?(?:key|credentials?)|credentials? (?:are |is )?missing|no (?:api )?(?:key|credentials?) (?:was |were )?(?:found|configured|provided)|api key (?:is )?(?:not set|unavailable))/i;
 
@@ -382,12 +397,55 @@ export type AdapterFailureRecoveryClassification =
   | { kind: "configuration_incomplete" }
   | null;
 
-function parseProviderQuotaClockReset(error: string, now: Date) {
-  const match = error.match(
-    /try again at\s+(\d{1,2})(?::(\d{2}))?\s*(?:([ap])\.?\s*m\.?)?(?:\s*\(([^)]+)\)|\s+([A-Z]{2,5}))?/i,
-  );
-  if (!match) return null;
+/**
+ * A timezone written after the clock without parentheses ("resets 21:30 UTC"). The pattern is
+ * case-insensitive, so ordinary prose after a clock ("try again at 10:40pm or upgrade your plan")
+ * is captured too; only a token written entirely in capitals is a timezone candidate. Whether it
+ * is a real zone is decided later, and an unknown one makes the candidate unusable.
+ */
+function readBareZone(match: RegExpMatchArray): string | undefined {
+  const token = match[6];
+  return token !== undefined && /^[A-Z]{2,5}$/.test(token) ? token : undefined;
+}
 
+function parseProviderQuotaClockReset(error: string, now: Date, scope?: ProviderQuotaResetScope, failedAt?: Date | null) {
+  const matches = error.matchAll(
+    /\b(?:try again at|resets(?: at)?)\s+(\d{1,2})(?::(\d{2}))?(?![\d:])(?:\s*([ap])\.?\s*m\.?)?(?=(:?\d)?)(?:\s*\(([^)]+)\)|\s+([A-Z]{2,5}))?/gi,
+  );
+  const inScope = (candidate: RegExpMatchArray) =>
+    scope !== undefined && candidate.index! >= scope.start && candidate.index! <= scope.end;
+  // A bare `resets N` is ordinary prose ("cache resets 7 days ago"); as a quota clock it needs
+  // minutes, a meridiem or a timezone.
+  const clockLike = (candidate: RegExpMatchArray) =>
+    candidate[2] !== undefined || candidate[3] !== undefined || candidate[5] !== undefined || readBareZone(candidate) !== undefined;
+  const accepts = (candidate: RegExpMatchArray) => {
+    if (scope?.acp) return inScope(candidate) && (/^try again at/i.test(candidate[0]) || clockLike(candidate));
+    if (/^try again at/i.test(candidate[0])) return true;
+    return inScope(candidate) && clockLike(candidate);
+  };
+  // Every accepted candidate is validated before one is chosen: an impossible clock ("resets 25:99")
+  // or an unknown timezone must not hide a later, valid reset in the same text.
+  for (const match of matches) {
+    if (!accepts(match)) continue;
+    const resolved = resolveProviderQuotaClock(match, now, failedAt);
+    if (resolved) return resolved;
+  }
+  return null;
+}
+
+function resolveProviderQuotaClock(match: RegExpMatchArray, now: Date, failedAt?: Date | null): Date | null {
+  // The clock is read relative to when the run failed (never later than now), so a failure
+  // examined hours after its reset sees that reset as already due instead of tomorrow's.
+  // A clock within the grace window before that moment still counts as that moment's reset.
+  const anchorMs = failedAt && !Number.isNaN(failedAt.getTime()) ? Math.min(failedAt.getTime(), now.getTime()) : now.getTime();
+  const base = new Date(anchorMs - PROVIDER_QUOTA_RESET_ELAPSED_GRACE_MS);
+  const settle = (candidate: Date, next: () => Date) => {
+    const occurrence = candidate.getTime() >= base.getTime() ? candidate : next();
+    return occurrence.getTime() > now.getTime() ? occurrence : new Date(now);
+  };
+
+  // A digit or ":digit" right after the clock ("9:00pm:30") means the token is not a clock.
+  if (match[4] !== undefined) return null;
   const hourValue = Number.parseInt(match[1] ?? "", 10);
   const minute = Number.parseInt(match[2] ?? "0", 10);
   const meridiem = (match[3] ?? "").toLowerCase();
@@ -397,12 +455,14 @@ function parseProviderQuotaClockReset(error: string, now: Date) {
 
   let hour = meridiem ? hourValue % 12 : hourValue;
   if (meridiem === "p") hour += 12;
-  const timeZone = (match[4] ?? match[5])?.trim();
+  const timeZone = (match[5] ?? readBareZone(match))?.trim();
   if (!timeZone) {
-    const retryAt = new Date(now);
+    const retryAt = new Date(base);
     retryAt.setUTCHours(hour, minute, 0, 0);
-    if (retryAt.getTime() <= now.getTime()) retryAt.setUTCDate(retryAt.getUTCDate() + 1);
-    return retryAt;
+    return settle(retryAt, () => {
+      retryAt.setUTCDate(retryAt.getUTCDate() + 1);
+      return retryAt;
+    });
   }
 
   try {
@@ -417,7 +477,7 @@ function parseProviderQuotaClockReset(error: string, now: Date) {
         minute: "2-digit",
       }).formatToParts(date).map((part) => [part.type, part.value]),
     );
-    const nowParts = wallClock(now);
+    const nowParts = wallClock(base);
     const buildRetryAt = (dayOffset: number) => {
       const targetDay = new Date(Date.UTC(
         Number(nowParts.year),
@@ -444,30 +504,74 @@ function parseProviderQuotaClockReset(error: string, now: Date) {
       return candidate;
     };
     const sameDay = buildRetryAt(0);
-    return sameDay.getTime() > now.getTime() ? sameDay : buildRetryAt(1);
+    return settle(sameDay, () => buildRetryAt(1));
   } catch {
     return null;
   }
 }
 
 export function classifyAdapterFailureForRecovery(
-  latestRun: Pick<NonNullable<LatestIssueRun>, "error" | "errorCode" | "resultJson">,
+  latestRun: Pick<NonNullable<LatestIssueRun>, "error" | "errorCode" | "resultJson"> &
+    Partial<Pick<NonNullable<LatestIssueRun>, "startedAt" | "createdAt" | "finishedAt">>,
   now = new Date(),
 ): AdapterFailureRecoveryClassification {
   if (
     latestRun.errorCode !== "adapter_failed" &&
+    latestRun.errorCode !== "acpx_turn_failed" &&
     latestRun.errorCode !== "provider_quota" &&
     latestRun.errorCode !== "configuration_incomplete"
   ) {
     return null;
   }
   const resultJson = parseObject(latestRun.resultJson);
-  const error = [latestRun.errorCode ?? "", latestRun.error ?? "", JSON.stringify(resultJson)].join("\n");
+  const failedAt = latestRun.finishedAt ?? latestRun.startedAt ?? latestRun.createdAt ?? null;
+  if (latestRun.errorCode === "acpx_turn_failed") {
+    // Every failed ACP turn carries this code, so only Claude's own statement in the
+    // error or stop reason counts; transcript text elsewhere in the result
+    // must not park the issue in quota wait or mark it blocked.
+    const evidence = [latestRun.error, resultJson.stopReason]
+      .filter((value): value is string => typeof value === "string")
+      .join("\n");
+    if (!CLAUDE_SESSION_LIMIT_RE.test(evidence)) return null;
+    return buildProviderQuotaClassification(resultJson, evidence, now, {
+      boundResetWindow: true,
+      failedAt,
+      acceptSessionLimit: true,
+    });
+  }
+  // Only the run's own error counts, for the quota verdict and for the reset clock alike. The
+  // result JSON holds summaries, output and transcripts, where an agent can quote any wording
+  // ("usage limit reached", "resets 10:40pm", "try again at"); that text neither parks the run
+  // as a quota wait nor sets when it retries. The marker an adapter records after it judged
+  // provider error evidence itself (`errorFamily`) is trusted.
+  const ownErrorText = [latestRun.errorCode ?? "", latestRun.error ?? ""].join("\n");
+  const error = [ownErrorText, JSON.stringify(resultJson)].join("\n");
   if (latestRun.errorCode === "configuration_incomplete" || CONFIGURATION_INCOMPLETE_ERROR_RE.test(error)) {
     return { kind: "configuration_incomplete" };
   }
-  if (latestRun.errorCode !== "provider_quota" && !PROVIDER_QUOTA_ERROR_RE.test(error)) return null;
+  const sessionLimitInOwnError = typeof latestRun.error === "string" && CLAUDE_SESSION_LIMIT_RE.test(latestRun.error);
+  if (
+    latestRun.errorCode !== "provider_quota" &&
+    resultJson.errorFamily !== "provider_quota" &&
+    !PROVIDER_QUOTA_ERROR_RE.test(ownErrorText) &&
+    !sessionLimitInOwnError
+  ) {
+    return null;
+  }
 
+  return buildProviderQuotaClassification(resultJson, ownErrorText, now, {
+    failedAt,
+    acceptSessionLimit: sessionLimitInOwnError,
+  });
+}
+
+function buildProviderQuotaClassification(
+  resultJson: Record<string, unknown>,
+  // Trusted evidence only: the run's own error (and stop reason on the ACP path).
+  error: string,
+  now: Date,
+  options: { boundResetWindow?: boolean; failedAt?: Date | null; acceptSessionLimit?: boolean } = {},
+): AdapterFailureRecoveryClassification {
   const persistedRetryAt = readNonEmptyString(resultJson.retryNotBefore) ??
     readNonEmptyString(resultJson.transientRetryNotBefore) ??
     readNonEmptyString(resultJson.providerQuotaRetryNotBefore);
@@ -476,7 +580,24 @@ export function classifyAdapterFailureForRecovery(
     return { kind: "provider_quota", retryAt: parsedPersistedRetryAt, parsedResetTime: true };
   }
 
-  const parsedClockReset = parseProviderQuotaClockReset(error, now);
+  const genericMatch = PROVIDER_QUOTA_ERROR_RE.exec(error);
+  const sessionMatch = options.acceptSessionLimit ? CLAUDE_SESSION_LIMIT_RE.exec(error) : null;
+  const quotaMatch = genericMatch && sessionMatch
+    ? (sessionMatch.index < genericMatch.index ? sessionMatch : genericMatch)
+    : (genericMatch ?? sessionMatch);
+  // The ACP path only reads a clock that sits right after Claude's statement: its evidence
+  // joins several fields, so a clock far from it belongs to something else. Other adapters
+  // (for example Codex's "...or try again at 3:42 PM") put `try again at` after long upgrade
+  // text, so it is read anywhere; `resets` is only trusted next to the quota statement. The
+  // clock is always parsed whole, so a timezone suffix is never cut off.
+  const scope: ProviderQuotaResetScope | undefined = quotaMatch
+    ? {
+      start: quotaMatch.index,
+      end: quotaMatch.index + quotaMatch[0].length + PROVIDER_QUOTA_RESET_WINDOW_CHARS,
+      acp: options.boundResetWindow === true,
+    }
+    : undefined;
+  const parsedClockReset = parseProviderQuotaClockReset(error, now, scope, options.failedAt);
   if (parsedClockReset) {
     return { kind: "provider_quota", retryAt: parsedClockReset, parsedResetTime: true };
   }
@@ -800,6 +921,7 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
         resultJson: heartbeatRuns.resultJson,
         startedAt: heartbeatRuns.startedAt,
         createdAt: heartbeatRuns.createdAt,
+        finishedAt: heartbeatRuns.finishedAt,
       })
       .from(heartbeatRuns)
       .where(
@@ -830,6 +952,7 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
         resultJson: heartbeatRuns.resultJson,
         startedAt: heartbeatRuns.startedAt,
         createdAt: heartbeatRuns.createdAt,
+        finishedAt: heartbeatRuns.finishedAt,
       })
       .from(heartbeatRuns)
       .where(
@@ -1069,6 +1192,7 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
         resultJson: heartbeatRuns.resultJson,
         startedAt: heartbeatRuns.startedAt,
         createdAt: heartbeatRuns.createdAt,
+        finishedAt: heartbeatRuns.finishedAt,
       })
       .from(heartbeatRuns)
       .where(

@@ -9,7 +9,7 @@ import type { Agent, Environment, UserSecretDefinition } from "@paperclipai/shar
 import { getEnvironmentCapabilities } from "@paperclipai/shared";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { ToastProvider } from "../context/ToastContext";
-import { AgentConfigForm, AdapterLoginPanel, type AdapterLoginDescriptor } from "./AgentConfigForm";
+import { AgentConfigForm, AdapterLoginPanel, ModelDropdown, type AdapterLoginDescriptor } from "./AgentConfigForm";
 import { defaultCreateValues } from "./agent-config-defaults";
 import { buildNewAgentHirePayload } from "../lib/new-agent-hire-payload";
 import { ApiError } from "../api/client";
@@ -2841,5 +2841,117 @@ describe("AgentConfigForm managed-sandbox-only host surfaces", () => {
     const adapterFields = result.container.querySelector('[data-testid="adapter-config-fields"]');
     expect(adapterFields?.getAttribute("data-managed-sandbox-only")).toBe("true");
     expect(adapterFields?.getAttribute("data-hide-instructions-file")).toBe("true");
+  });
+});
+
+
+describe("ModelDropdown model order", () => {
+  let roots: Root[] = [];
+
+  afterEach(async () => {
+    for (const root of roots) {
+      await act(async () => { root.unmount(); });
+    }
+    roots = [];
+    document.body.innerHTML = "";
+  });
+
+  async function renderDropdown(options: {
+    models: Array<{ id: string; label: string }>;
+    value?: string;
+    groupByProvider?: boolean;
+    detectedModel?: string;
+    detectedModelCandidates?: string[];
+    creatable?: boolean;
+  }) {
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    roots.push(root);
+    const onChange = vi.fn();
+    await act(async () => {
+      root.render(
+        <TooltipProvider>
+          <ModelDropdown
+            {...options}
+            value={options.value ?? ""}
+            groupByProvider={options.groupByProvider ?? false}
+            onChange={onChange}
+            open
+            onOpenChange={vi.fn()}
+            allowDefault
+            required={false}
+          />
+        </TooltipProvider>,
+      );
+    });
+    await flushReact();
+    const popover = document.querySelector('[data-slot="popover-content"]');
+    expect(popover).not.toBeNull();
+    return { popover: popover!, onChange };
+  }
+
+  function modelIds(popover: Element) {
+    return Array.from(popover.querySelectorAll("span[title]")).map(
+      (span) => span.getAttribute("title"),
+    );
+  }
+
+  it("keeps the adapter's newest-first ordinary order including unknown IDs", async () => {
+    const ids = ["gpt-6.1-sol", "gpt-6-astra", "custom-local-v2", "gpt-5.6-sol", "codex-mini-latest"];
+    const { popover } = await renderDropdown({
+      models: ids.map((id) => ({ id, label: id })),
+    });
+    expect(modelIds(popover)).toEqual(ids);
+    expect(Array.from(popover.querySelectorAll("button"))[0].textContent?.trim()).toBe("Default");
+  });
+
+  it("promotes detected candidates exactly once while preserving the remaining order", async () => {
+    const ids = ["gpt-6.1-sol", "gpt-6-astra", "gpt-5.6-sol", "codex-mini-latest"];
+    const { popover } = await renderDropdown({
+      models: ids.map((id) => ({ id, label: id })),
+      detectedModel: "gpt-6.1-sol",
+      detectedModelCandidates: ["gpt-6-astra"],
+    });
+    expect(modelIds(popover)).toEqual(ids);
+    expect(popover.textContent).toContain("detected");
+    expect(popover.textContent).toContain("config");
+    for (const id of ids) {
+      expect(modelIds(popover).filter((entry) => entry === id)).toHaveLength(1);
+    }
+  });
+
+  it("retains alphabetical provider grouping and ordering", async () => {
+    const ids = ["zeta/newest", "openai/gpt-6.1-sol", "openai/gpt-5.4", "zeta/older"];
+    const { popover } = await renderDropdown({
+      models: ids.map((id) => ({ id, label: id })),
+      groupByProvider: true,
+    });
+    expect(modelIds(popover)).toEqual([
+      "openai/gpt-5.4", "openai/gpt-6.1-sol", "zeta/newest", "zeta/older",
+    ]);
+    expect(popover.textContent).toContain("openai (2)");
+    expect(popover.textContent).toContain("zeta (2)");
+  });
+
+  it("retains unknown current and manual-create rows without changing selection until clicked", async () => {
+    const { popover, onChange } = await renderDropdown({
+      models: [{ id: "gpt-6.1-sol", label: "gpt-6.1-sol" }],
+      value: "operator-custom-current",
+      creatable: true,
+    });
+    expect(modelIds(popover)).toEqual(["operator-custom-current", "gpt-6.1-sol"]);
+    expect(popover.textContent).toContain("current");
+    expect(onChange).not.toHaveBeenCalled();
+    const input = popover.querySelector("input")!;
+    await act(async () => { setInputValue(input, "operator-custom-next"); });
+    await flushReact();
+    const manual = Array.from(popover.querySelectorAll("button")).find(
+      (button) => button.textContent?.includes("Use manual model"),
+    );
+    expect(manual).toBeTruthy();
+    await act(async () => { manual!.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
+    expect(onChange).toHaveBeenCalledTimes(1);
+    expect(onChange).toHaveBeenCalledWith("operator-custom-next");
   });
 });

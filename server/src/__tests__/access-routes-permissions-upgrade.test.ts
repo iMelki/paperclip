@@ -27,11 +27,11 @@ const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
 
 type Db = ReturnType<typeof createDb>;
+let accessRoutes: typeof import("../routes/access.js").accessRoutes;
 
-async function createApp(db: Db, companyId: string, userId: string) {
+function createApp(db: Db, companyId: string, userId: string) {
   process.env.PAPERCLIP_LOG_DIR = "/tmp/paperclip-test-home/logs";
   process.env.PAPERCLIP_IN_WORKTREE = "false";
-  const { accessRoutes } = await import("../routes/access.js");
   const app = express();
   app.use(express.json());
   app.use((req, _res, next) => {
@@ -89,6 +89,11 @@ describeEmbeddedPostgres("access routes permissions upgrade compatibility", () =
     db = createDb(tempDb.connectionString);
   }, EMBEDDED_POSTGRES_TEST_SETUP_TIMEOUT_MS);
 
+  // Route-module transformation is one-time setup, not part of either request assertion.
+  beforeAll(async () => {
+    ({ accessRoutes } = await import("../routes/access.js"));
+  }, EMBEDDED_POSTGRES_TEST_SETUP_TIMEOUT_MS);
+
   afterEach(async () => {
     await db.delete(activityLog);
     await db.delete(principalPermissionGrants);
@@ -103,7 +108,7 @@ describeEmbeddedPostgres("access routes permissions upgrade compatibility", () =
   it("rejects owner self-lockout through the member route after the permissions upgrade", async () => {
     const { company, owner } = await createCompanyWithOwner(db);
 
-    const res = await request(await createApp(db, company.id, owner.principalId))
+    const res = await request(createApp(db, company.id, owner.principalId))
       .patch(`/api/companies/${company.id}/members/${owner.id}`)
       .send({ membershipRole: "admin" });
 
@@ -141,7 +146,7 @@ describeEmbeddedPostgres("access routes permissions upgrade compatibility", () =
       grantedByUserId: owner.principalId,
     });
 
-    const res = await request(await createApp(db, company.id, owner.principalId))
+    const res = await request(createApp(db, company.id, owner.principalId))
       .patch(`/api/companies/${company.id}/members/${member.id}`)
       .send({ membershipRole: "operator" });
 

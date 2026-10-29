@@ -18,6 +18,7 @@ import { promisify } from "node:util";
 import { HERMES_CLI, DEFAULT_MODEL, ADAPTER_TYPE, VALID_PROVIDERS } from "../shared/constants.js";
 import { detectModel, resolveProvider, inferProviderFromModel } from "./detect-model.js";
 import { resolveHermesCommand } from "./execute.js";
+import { resolveStrictHermesIsolation } from "./strict-isolation.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -331,6 +332,26 @@ export async function testEnvironment(
   const config = (ctx.config ?? {}) as Record<string, unknown>;
   const command = resolveHermesCommand(config);
   const checks: AdapterEnvironmentCheck[] = [];
+
+  if (config.strictIsolation === true) {
+    try {
+      await resolveStrictHermesIsolation(config);
+    } catch (err) {
+      checks.push({
+        level: "error",
+        code: "hermes_strict_isolation_invalid",
+        message: err instanceof Error ? err.message : "Strict Hermes isolation is invalid",
+      });
+      return { adapterType: ADAPTER_TYPE, status: "fail", checks, testedAt: new Date().toISOString() };
+    }
+    checks.push({
+      level: "warn",
+      code: "hermes_strict_effective_auth_unverified",
+      message: "Isolated launch inputs passed, but effective Hermes credentials and provider hard spending limit are not verified",
+      hint: "Run synthetic effective-auth tests and prove the provider-side hard stop before a live assignment. This check did not launch Hermes or read host credentials.",
+    });
+    return { adapterType: ADAPTER_TYPE, status: "warn", checks, testedAt: new Date().toISOString() };
+  }
 
   // 1. CLI installed?
   const cliCheck = await checkCliInstalled(command);

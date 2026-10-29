@@ -6,7 +6,7 @@ import { models as cursorFallbackModels } from "@paperclipai/adapter-cursor-loca
 import { models as opencodeFallbackModels } from "@paperclipai/adapter-opencode-local";
 import { resetOpenCodeModelsCacheForTests } from "@paperclipai/adapter-opencode-local/server";
 import { listAdapterModels, listServerAdapters, refreshAdapterModels } from "../adapters/index.js";
-import { resetCodexModelsCacheForTests } from "../adapters/codex-models.js";
+import { listCodexModels, refreshCodexModels, resetCodexModelsCacheForTests } from "../adapters/codex-models.js";
 import { resetCursorModelsCacheForTests, setCursorModelsRunnerForTests } from "../adapters/cursor-models.js";
 
 vi.mock("acpx/runtime", () => ({
@@ -50,6 +50,13 @@ describe("adapter model listing", () => {
     expect(models).toEqual(codexFallbackModels);
     // The bare gpt-5.6 alias is intentionally not advertised (Codex has no metadata for it).
     expect(models.some((model) => model.id === "gpt-5.6")).toBe(false);
+    // The GPT-6 ids lead the fixed list (newest version first); gpt-5.6-sol stays the default.
+    expect(models.slice(0, 4).map((model) => model.id)).toEqual([
+      "gpt-6.1-sol",
+      "gpt-6-astra",
+      "gpt-6-sol",
+      "gpt-6-luna",
+    ]);
     expect(models.some((model) => model.id === "gpt-5.6-sol")).toBe(true);
     expect(models.some((model) => model.id === "gpt-5.6-terra")).toBe(true);
     expect(models.some((model) => model.id === "gpt-5.6-luna")).toBe(true);
@@ -149,6 +156,9 @@ describe("adapter model listing", () => {
     expect(first).toEqual(second);
     expect(first.some((model) => model.id === "gpt-5-pro")).toBe(true);
     expect(first.some((model) => model.id === "codex-mini-latest")).toBe(true);
+    for (const id of ["gpt-6.1-sol", "gpt-6-astra", "gpt-6-sol", "gpt-6-luna"]) {
+      expect(first.some((model) => model.id === id)).toBe(true);
+    }
   });
 
   it("refreshes cached codex models on demand", async () => {
@@ -163,7 +173,7 @@ describe("adapter model listing", () => {
       .mockResolvedValueOnce({
         ok: true,
         json: async () => ({
-          data: [{ id: "gpt-5.6-terra" }],
+          data: [{ id: "gpt-5.6-terra" }, { id: "gpt-6.2-preview" }],
         }),
       } as Response);
 
@@ -174,6 +184,10 @@ describe("adapter model listing", () => {
     expect(initial.some((model) => model.id === "gpt-5")).toBe(true);
     expect(refreshed.some((model) => model.id === "gpt-5.6-terra")).toBe(true);
     expect(refreshed.some((model) => model.id === "gpt-5.6-luna")).toBe(true);
+    expect(refreshed.some((model) => model.id === "gpt-6.1-sol")).toBe(true);
+    expect(refreshed.some((model) => model.id === "gpt-6-luna")).toBe(true);
+    // An unknown id returned by discovery is kept as written.
+    expect(refreshed.some((model) => model.id === "gpt-6.2-preview")).toBe(true);
   });
 
   it("falls back to static codex models when OpenAI model discovery fails", async () => {
@@ -188,6 +202,93 @@ describe("adapter model listing", () => {
     expect(models).toEqual(codexFallbackModels);
   });
 
+
+  it("keeps declared Codex order while retaining and deduplicating discovered IDs", async () => {
+    process.env.OPENAI_API_KEY = "sk-test";
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        data: [
+          { id: "custom/10" }, { id: "gpt-5" }, { id: "custom/2" },
+          { id: " gpt-6.1-sol " }, { id: "gpt-6.1-sol" },
+          { id: "gpt-6.2-preview" }, { id: "custom/2" }, { id: "" },
+        ],
+      }),
+    } as Response);
+
+    const first = await listCodexModels();
+    const second = await listCodexModels();
+    const ids = first.map((model) => model.id);
+    expect(ids).toEqual([
+      ...codexFallbackModels.map((model) => model.id),
+      "custom/2", "custom/10", "gpt-6.2-preview",
+    ]);
+    expect(ids[0]).toBe("gpt-6.1-sol");
+    expect(ids.filter((id) => id === "gpt-6.1-sol")).toHaveLength(1);
+    expect(new Set(ids).size).toBe(ids.length);
+    expect(second).toEqual(first);
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("refreshes discovery without losing declared order or new custom IDs", async () => {
+    process.env.OPENAI_API_KEY = "sk-test";
+    const fetchSpy = vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce({
+        ok: true, json: async () => ({ data: [{ id: "custom/old" }] }),
+      } as Response)
+      .mockResolvedValueOnce({
+        ok: true, json: async () => ({ data: [{ id: "custom/new" }, { id: "gpt-5" }] }),
+      } as Response);
+
+    await listCodexModels();
+    const refreshed = await refreshCodexModels();
+    expect(refreshed.map((model) => model.id)).toEqual([
+      ...codexFallbackModels.map((model) => model.id), "custom/new",
+    ]);
+    expect(refreshed.some((model) => model.id === "custom/old")).toBe(false);
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+  });
+
+  it("retains the ordered cached list when discovery fails after cache expiry", async () => {
+    process.env.OPENAI_API_KEY = "sk-test";
+    let now = 1000;
+    vi.spyOn(Date, "now").mockImplementation(() => now);
+    const fetchSpy = vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce({
+        ok: true, json: async () => ({ data: [{ id: "custom/retained" }] }),
+      } as Response)
+      .mockResolvedValueOnce({
+        ok: false, status: 503, json: async () => ({}),
+      } as Response);
+
+    const first = await listCodexModels();
+    now = 62000;
+    const afterFailure = await listCodexModels();
+    expect(afterFailure).toEqual(first);
+    expect(afterFailure[0]?.id).toBe("gpt-6.1-sol");
+    expect(afterFailure.some((model) => model.id === "custom/retained")).toBe(true);
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+  });
+
+  it("orders unknown IDs deterministically when natural comparisons tie", async () => {
+    process.env.OPENAI_API_KEY = "sk-test";
+    const discovered = ["custom/2", "custom/02", "custom/a", "Custom/A"];
+    vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce({
+        ok: true, json: async () => ({ data: discovered.map((id) => ({ id })) }),
+      } as Response)
+      .mockResolvedValueOnce({
+        ok: true, json: async () => ({ data: [...discovered].reverse().map((id) => ({ id })) }),
+      } as Response);
+
+    const first = await listCodexModels();
+    const reversed = await refreshCodexModels();
+    expect(reversed.map((model) => model.id)).toEqual(first.map((model) => model.id));
+    expect(first.slice(0, codexFallbackModels.length)).toEqual(codexFallbackModels);
+    expect(new Set(first.map((model) => model.id))).toEqual(
+      new Set([...codexFallbackModels.map((model) => model.id), ...discovered]),
+    );
+  });
 
   it("returns cursor fallback models when CLI discovery is unavailable", async () => {
     setCursorModelsRunnerForTests(() => ({

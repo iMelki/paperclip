@@ -93,6 +93,28 @@ test("selects exact declared contract tests without widening to an import graph"
   });
 });
 
+test("selects the server startup contract for the server entry point", () => {
+  withFixture(({ repoRoot, trackedFiles, write }) => {
+    write("server/src/index.ts", "export async function startServer() {}\n");
+    write("server/src/__tests__/server-startup-feedback-export.test.ts", "test('startup', () => {});\n");
+    write("server/src/__tests__/unrelated.test.ts", "test('other', () => {});\n");
+    const result = selectPrePushTests({ repoRoot, changedFiles: ["server/src/index.ts"], trackedFiles });
+    assert.deepEqual(result.vitestFiles, ["server/src/__tests__/server-startup-feedback-export.test.ts"]);
+    assert.deepEqual(result.coverage[0].declaredTests, ["server/src/__tests__/server-startup-feedback-export.test.ts"]);
+    assert.deepEqual(result.selectionErrors, []);
+  });
+});
+
+test("rejects server startup coverage when its declared contract is missing", () => {
+  withFixture(({ repoRoot, trackedFiles, write }) => {
+    write("server/src/index.ts", "export async function startServer() {}\n");
+    write("server/src/__tests__/unrelated.test.ts", "test('other', () => {});\n");
+    const result = selectPrePushTests({ repoRoot, changedFiles: ["server/src/index.ts"], trackedFiles });
+    assert.deepEqual(result.vitestFiles, []);
+    assert.match(result.selectionErrors.join("\n"), /server-startup-feedback-export\.test\.ts/);
+  });
+});
+
 test("selects the DB coordination contract for the shared issues schema", () => {
   withFixture(({ repoRoot, trackedFiles, write }) => {
     write("packages/db/src/schema/issues.ts", "export const issues = true;\n");
@@ -109,6 +131,20 @@ test("selects the DB coordination contract for the shared issues schema", () => 
     assert.deepEqual(result.coverage[0].declaredTests, [
       "packages/db/src/coordination-schema.test.ts",
     ]);
+    assert.deepEqual(result.selectionErrors, []);
+  });
+});
+
+test("selects the DB discovery contract when its vendored scratch helper changes", () => {
+  withFixture(({ repoRoot, trackedFiles, write }) => {
+    write("scripts/lib/ephemeral-scratch.mjs", "export const scratch = true;\n");
+    write("packages/db/src/test-discovery.test.ts", "test('discovery', () => {});\n");
+    const result = selectPrePushTests({
+      repoRoot,
+      changedFiles: ["scripts/lib/ephemeral-scratch.mjs"],
+      trackedFiles,
+    });
+    assert.deepEqual(result.vitestFiles, ["packages/db/src/test-discovery.test.ts"]);
     assert.deepEqual(result.selectionErrors, []);
   });
 });
@@ -158,6 +194,7 @@ test("routes each test family to its real runner", () => {
   assert.equal(classifyTestRunner("scripts/check-no-git-push.test.mjs"), "node-test");
   assert.equal(classifyTestRunner("tests/e2e/onboarding.spec.ts"), "hosted-playwright");
   assert.equal(classifyTestRunner("packages/adapter-utils/src/execution.test.ts"), "vitest");
+  assert.equal(classifyTestRunner("packages/adapters/hermes/src/server/test.test.ts"), "vitest");
   assert.equal(
     classifyTestRunner("packages/plugins/plugin-workspace-diff/tests/contracts.spec.ts"),
     "hosted-unregistered",

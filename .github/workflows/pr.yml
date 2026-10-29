@@ -25,6 +25,8 @@ jobs:
       - name: Block manual lockfile edits
         if: >-
           github.head_ref != 'chore/refresh-lockfile' &&
+          !(github.event.pull_request.user.login == 'github-actions[bot]' &&
+            github.head_ref == format('chore/refresh-lockfile-{0}', github.base_ref)) &&
           github.event.pull_request.user.login != 'dependabot[bot]'
         run: |
           # Diff the PR branch against its merge base so recent base-branch commits
@@ -70,6 +72,25 @@ jobs:
           ./scripts/check-no-git-push-source.test.mjs
           ./scripts/git-push-scan-integrity.test.mjs
           ./scripts/check-no-git-push.test.mjs
+
+      - name: Validate PR workflow trigger policy
+        run: node ./scripts/check-pr-workflow-trigger.mjs
+
+      - name: Test PR workflow trigger policy
+        run: node --test ./scripts/check-pr-workflow-trigger.test.mjs
+
+      - name: Test lockfile refresh routing
+        run: >-
+          node --test ./scripts/refresh-lockfile.test.mjs
+          ./.github/scripts/tests/check-pr-lockfile.test.mjs
+
+      - name: Test deterministic pre-push selection and protocol
+        run: >-
+          node --test
+          ./scripts/is-main-module.test.mjs
+          ./scripts/pre-push-callers.test.mjs
+          ./scripts/pre-push-test-selection.test.mjs
+          ./scripts/run-vitest-direct.test.mjs
           ./scripts/scan-pre-push-secrets.test.mjs
           ./scripts/run-pre-push-tests.test.mjs
           ./scripts/verify-gitleaks.test.mjs

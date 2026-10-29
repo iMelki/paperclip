@@ -24,6 +24,7 @@ const ROOT_VITEST_PROJECTS = [
   "packages/adapters/cursor-local",
   "packages/adapters/gemini-local",
   "packages/adapters/grok-local",
+  "packages/adapters/hermes",
   "packages/adapters/openclaw-gateway",
   "packages/adapters/opencode-local",
   "packages/adapters/pi-local",
@@ -55,6 +56,14 @@ const NON_PRODUCTION_PATH_PATTERNS = [
 // an unbounded import-graph scan.
 const DECLARED_SOURCE_TESTS = new Map([
   [
+    "server/src/index.ts",
+    ["server/src/__tests__/server-startup-feedback-export.test.ts"],
+  ],
+  [
+    "scripts/lib/ephemeral-scratch.mjs",
+    ["packages/db/src/test-discovery.test.ts"],
+  ],
+  [
     "tests/e2e/onboarding-hire-route.ts",
     ["tests/e2e/onboarding-hire-route.spec.ts"],
   ],
@@ -85,6 +94,14 @@ const DECLARED_SOURCE_TESTS = new Map([
   [
     "packages/db/src/schema/issues.ts",
     ["packages/db/src/coordination-schema.test.ts"],
+  ],
+  [
+    // The job warden's contract is Job Object custody of a test-owned process
+    // tree, so it is exercised through the process-tree contract test rather
+    // than a sibling of its own: that suite imports acquireWindowsTestJobCustody
+    // directly and drives a real warden against a live grandchild.
+    "packages/db/src/windows-test-job-warden.ts",
+    ["packages/db/src/test-windows-process-tree.test.ts"],
   ],
   [
     "scripts/prepare-package-for-publish.mjs",

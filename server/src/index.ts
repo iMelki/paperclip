@@ -5,7 +5,8 @@
 // HTTP server, so trace coverage does not depend on incidental timing.
 import { instrumentationReady, shutdownInstrumentation } from "./instrumentation.js";
 import { sentryReady, shutdownSentry, captureException } from "./sentry.js";
-import { existsSync, readFileSync, rmSync } from "node:fs";
+import { existsSync } from "node:fs";
+import { readFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
@@ -34,7 +35,18 @@ import {
 import detectPort from "detect-port";
 import { createApp } from "./app.js";
 import { loadConfig } from "./config.js";
-import { logger } from "./middleware/logger.js";
+import { resolveListenPort } from "./listen-port.js";
+import { resolveEmbeddedPostgresLogFile } from "./embedded-postgres-log-file.js";
+import {
+  embeddedPostgresServerLogPath,
+  isPostmasterPidAlive,
+  readinessProbeUrl,
+  type RecoveryWaitInfo,
+  resolveRecoveryWaitPolicy,
+  startEmbeddedPostgresFollowingRecovery,
+} from "./embedded-postgres-start-wait.js";
+import { EmbeddedPostgresLockRefusal, acquireEmbeddedStartLock, isSameDataDirectory, moveStaleLockAside, readLockIdentity, readRunningEmbeddedPostgres } from "./embedded-postgres-reuse.js";
+import { logger, resolveServerLogDir } from "./middleware/logger.js";
 import {
   getManagedInstanceConfig,
   type ManagedInstanceConfig,
@@ -132,6 +144,11 @@ type BetterAuthSessionResult = {
 
 type EmbeddedPostgresInstance = SupervisedEmbeddedPostgres & {
   initialise(): Promise<void>;
+  start(): Promise<void>;
+  stop(): Promise<void>;
+  /** Vendor fields the crash-recovery start wait reads and disarms. */
+  process?: unknown;
+  options?: { logFile?: unknown };
 };
 
 type EmbeddedPostgresCtor = new (opts: {
@@ -140,10 +157,36 @@ type EmbeddedPostgresCtor = new (opts: {
   password: string;
   port: number;
   persistent: boolean;
+  /** Windows: how long pg_ctl waits for the server to start. Unset = the dependency default. */
+  startTimeoutSeconds?: number;
   initdbFlags?: string[];
+  /** Windows: where pg_ctl writes the server log. Unset = the dependency default. */
+  logFile?: string;
   onLog?: (message: unknown) => void;
   onError?: (message: unknown) => void;
 }) => EmbeddedPostgresInstance;
+
+/** Constructor options that do not depend on the selected port. */
+type EmbeddedPostgresFixedOptions = Omit<ConstructorParameters<EmbeddedPostgresCtor>[0], "port">;
+
+/** One log line per crash-recovery wait event: the policy when it starts, then progress and heartbeats. */
+function logRecoveryWait(
+  info: RecoveryWaitInfo,
+  serverLogPath: string,
+  policy: { maxWaitMs: number; stallMs: number },
+): void {
+  const fields = { ...info, serverLogPath };
+  if (info.event === "started") {
+    logger.warn(
+      { ...fields, maxWaitMs: policy.maxWaitMs, stallMs: policy.stallMs },
+      "Embedded PostgreSQL start timed out during crash recovery; waiting while the server log shows progress",
+    );
+  } else if (info.event === "heartbeat") {
+    logger.warn(fields, "Embedded PostgreSQL crash recovery: still waiting, no new progress line yet");
+  } else {
+    logger.warn(fields, "Embedded PostgreSQL crash recovery in progress; waiting");
+  }
+}
 
 
 export interface StartedServer {
@@ -426,132 +469,194 @@ export async function startServer(): Promise<StartedServer> {
     const clusterVersionFile = resolve(dataDir, "PG_VERSION");
     const clusterAlreadyInitialized = existsSync(clusterVersionFile);
     const postmasterPidFile = resolve(dataDir, "postmaster.pid");
-    const isPidRunning = (pid: number): boolean => {
-      try {
-        process.kill(pid, 0);
-        return true;
-      } catch {
-        return false;
-      }
+    // Recorded before anything inspects or removes the lock (the reuse check can move a
+    // stale one aside), so the crash-recovery wait below sees what the last shutdown left.
+    const leftoverLockAtStart = existsSync(postmasterPidFile);
+    // One embedded login for init, identity probes, and database access.
+    const embeddedPostgresUser = "paperclip";
+    const embeddedPostgresPassword = "paperclip";
+    const embeddedPostgresUrl = (targetPort: number, database: string) =>
+      `postgres://${encodeURIComponent(embeddedPostgresUser)}:${encodeURIComponent(embeddedPostgresPassword)}@127.0.0.1:${targetPort}/${database}`;
+    const embeddedAdminUrl = (targetPort: number) => embeddedPostgresUrl(targetPort, "postgres");
+    const embeddedPostgresOptions: EmbeddedPostgresFixedOptions = {
+      databaseDir: dataDir,
+      user: embeddedPostgresUser,
+      password: embeddedPostgresPassword,
+      persistent: true,
+      // Windows: pg_ctl keeps this file open, so it must stay outside the data
+      // directory or crash recovery cannot fsync it (sharing violation). It uses the server
+      // log directory; a data directory that contains it gets a sibling log file.
+      logFile: resolveEmbeddedPostgresLogFile(dataDir, resolveServerLogDir()),
+      // A leftover lock means the last shutdown was unclean, so start-up runs crash
+      // recovery. The lock is removed just before start(), which would hide that from
+      // the patch, so the wait is decided from the flag recorded at the top.
+      ...(leftoverLockAtStart ? { startTimeoutSeconds: 600 } : {}),
+      initdbFlags: ["--encoding=UTF8", "--locale=C", "--lc-messages=C"],
+      onLog: appendEmbeddedPostgresLog,
+      onError: appendEmbeddedPostgresLog,
     };
-  
-    const getRunningPid = (): number | null => {
-      if (!existsSync(postmasterPidFile)) return null;
-      try {
-        const pidLine = readFileSync(postmasterPidFile, "utf8").split("\n")[0]?.trim();
-        const pid = Number(pidLine);
-        if (!Number.isInteger(pid) || pid <= 0) return null;
-        if (!isPidRunning(pid)) return null;
-        return pid;
-      } catch {
-        return null;
-      }
-    };
-  
-    const runningPid = getRunningPid();
-    if (runningPid) {
-      logger.warn(`Embedded PostgreSQL already running; reusing existing process (pid=${runningPid}, port=${port})`);
-    } else {
-      const configuredAdminConnectionString = `postgres://paperclip:paperclip@127.0.0.1:${configuredPort}/postgres`;
-      try {
-        const actualDataDir = await getPostgresDataDirectory(configuredAdminConnectionString);
-        if (
-          typeof actualDataDir !== "string" ||
-          resolve(actualDataDir) !== resolve(dataDir)
-        ) {
-          throw new Error("reachable postgres does not use the expected embedded data directory");
-        }
-        await ensurePostgresDatabase(configuredAdminConnectionString, "paperclip");
-        logger.warn(
-          `Embedded PostgreSQL appears to already be reachable without a pid file; reusing existing server on configured port ${configuredPort}`,
-        );
-      } catch {
-        const detectedPort = await detectPort(configuredPort);
-        if (detectedPort !== configuredPort) {
-          logger.warn(`Embedded PostgreSQL port is in use; using next free port (requestedPort=${configuredPort}, selectedPort=${detectedPort})`);
-        }
-        port = detectedPort;
-        logger.info(`Using embedded PostgreSQL because no DATABASE_URL set (dataDir=${dataDir}, port=${port})`);
-        const createEmbeddedPostgres = () => new EmbeddedPostgres({
-          databaseDir: dataDir,
-          user: "paperclip",
-          password: "paperclip",
-          port,
-          persistent: true,
-          initdbFlags: ["--encoding=UTF8", "--locale=C", "--lc-messages=C"],
-          onLog: appendEmbeddedPostgresLog,
-          onError: appendEmbeddedPostgresLog,
-        });
-        embeddedPostgres = createEmbeddedPostgres();
+    // Resolved once from the options the instance is built with: the lock refusals and the
+    // crash-recovery start wait must read the same server log.
+    const serverLogPath = embeddedPostgresServerLogPath({ options: embeddedPostgresOptions }, dataDir);
+    // One start at a time on this data directory: the lock check, the stale-lock move and start()
+    // below must not interleave with another Paperclip start on the same directory.
+    const releaseStartLock = await acquireEmbeddedStartLock(dataDir);
+    try {
+      const runningPostgres = await readRunningEmbeddedPostgres(dataDir, configuredPort, embeddedAdminUrl, {
+        startLockHeld: true,
+        serverLogPath,
+      });
+      if (runningPostgres) {
+        port = runningPostgres.port;
+        logger.warn(`Embedded PostgreSQL already running; reusing existing process (pid=${runningPostgres.pid}, port=${port})`);
+      } else {
+        const configuredAdminConnectionString = embeddedAdminUrl(configuredPort);
+        try {
+          const actualDataDir = await getPostgresDataDirectory(configuredAdminConnectionString);
+          if (
+            typeof actualDataDir !== "string" ||
+            !(await isSameDataDirectory(actualDataDir, dataDir))
+          ) {
+            throw new Error("reachable postgres does not use the expected embedded data directory");
+          }
+          await ensurePostgresDatabase(configuredAdminConnectionString, "paperclip");
+          logger.warn(
+            `Embedded PostgreSQL appears to already be reachable without a pid file; reusing existing server on configured port ${configuredPort}`,
+          );
+        } catch {
+          const detectedPort = await detectPort(configuredPort);
+          if (detectedPort !== configuredPort) {
+            logger.warn(`Embedded PostgreSQL port is in use; using next free port (requestedPort=${configuredPort}, selectedPort=${detectedPort})`);
+          }
+          port = detectedPort;
+          logger.info(`Using embedded PostgreSQL because no DATABASE_URL set (dataDir=${dataDir}, port=${port})`);
+          embeddedPostgres = new EmbeddedPostgres({ ...embeddedPostgresOptions, port });
 
-        if (!clusterAlreadyInitialized) {
-          try {
-            await embeddedPostgres.initialise();
-          } catch (err) {
-            logEmbeddedPostgresFailure("initialise", err);
-            throw formatEmbeddedPostgresError(err, {
-              fallbackMessage: `Failed to initialize embedded PostgreSQL cluster in ${dataDir} on port ${port}`,
-              recentLogs: logBuffer.getRecentLogs(),
+          if (!clusterAlreadyInitialized) {
+            try {
+              await embeddedPostgres.initialise();
+            } catch (err) {
+              logEmbeddedPostgresFailure("initialise", err);
+              throw formatEmbeddedPostgresError(err, {
+                fallbackMessage: `Failed to initialize embedded PostgreSQL cluster in ${dataDir} on port ${port}`,
+                recentLogs: logBuffer.getRecentLogs(),
+              });
+            }
+          } else {
+            logger.info(`Embedded PostgreSQL cluster already exists (${clusterVersionFile}); skipping init`);
+          }
+
+          // Port detection and initialise() can take seconds, so a second start on this data directory
+          // may have written a live lock since the check above. Verify it again; only a lock that is
+          // still affirmatively stale is moved aside, and a live owner is reused or refused instead.
+          let racingPostgres: { pid: number; port: number } | null = null;
+          if (existsSync(postmasterPidFile)) {
+            // The lock that is examined is the lock that may be moved: a file that replaces it in
+            // between is put back and startup refuses.
+            const examinedLock = readLockIdentity(postmasterPidFile);
+            racingPostgres = await readRunningEmbeddedPostgres(dataDir, configuredPort, embeddedAdminUrl, {
+              startLockHeld: true,
+              serverLogPath,
+            });
+            if (!racingPostgres && existsSync(postmasterPidFile)) {
+              const aside = moveStaleLockAside(postmasterPidFile, examinedLock);
+              logger.warn({ aside }, "Moved stale embedded PostgreSQL lock file aside");
+            }
+          }
+          if (racingPostgres) {
+            embeddedPostgres = null;
+            port = racingPostgres.port;
+            logger.warn(
+              `Embedded PostgreSQL was started concurrently; reusing it (pid=${racingPostgres.pid}, port=${port})`,
+            );
+          } else {
+            try {
+              // pg_ctl on Windows stops waiting after 60 s, but crash recovery after an unclean
+              // shutdown can take longer on a loaded host. Keep waiting while the server log shows
+              // recovery progress, and never stop PostgreSQL in the middle of recovery.
+              const readyPort = port;
+              const recoveryPolicy = resolveRecoveryWaitPolicy();
+              const startWait = await startEmbeddedPostgresFollowingRecovery({
+                instance: embeddedPostgres,
+                serverLogPath,
+                policy: recoveryPolicy,
+                readServerLog: () => readFile(serverLogPath, "utf8"),
+                isPostmasterAlive: () => isPostmasterPidAlive(postmasterPidFile),
+                isReady: async (timeoutMs) => {
+                  const probeUrl = readinessProbeUrl(embeddedAdminUrl(readyPort), timeoutMs);
+                  const actual = await getPostgresDataDirectory(probeUrl);
+                  return typeof actual === "string" && (await isSameDataDirectory(actual, dataDir));
+                },
+                onRecoveryWait: (info) => logRecoveryWait(info, serverLogPath, recoveryPolicy),
+              });
+              if (startWait.followedRecovery) {
+                logger.warn({ waitedMs: startWait.waitedMs }, "Embedded PostgreSQL became ready after crash recovery");
+              }
+            } catch (err) {
+              logEmbeddedPostgresFailure("start", err);
+              throw formatEmbeddedPostgresError(err, {
+                fallbackMessage: `Failed to start embedded PostgreSQL on port ${port}`,
+                recentLogs: logBuffer.getRecentLogs(),
+              });
+            }
+            embeddedPostgresStartedByThisProcess = true;
+            const supervisedPort = port;
+            embeddedPostgresSupervisor = createEmbeddedPostgresSupervisor({
+              initialInstance: embeddedPostgres,
+              createInstance: () => new EmbeddedPostgres({ ...embeddedPostgresOptions, port: supervisedPort }),
+              // Recovery follows the same lock rules as start-up: a live or unproven owner is
+              // refused, and a stale lock is moved aside (never deleted) only under the start lock.
+              beforeRestart: async () => {
+                const releaseRestartLock = await acquireEmbeddedStartLock(dataDir);
+                try {
+                  const live = await readRunningEmbeddedPostgres(dataDir, supervisedPort, embeddedAdminUrl, {
+                    startLockHeld: true,
+                    serverLogPath,
+                  });
+                  if (live) {
+                    throw new Error(`Refusing embedded PostgreSQL recovery because the data directory reports a live process (pid=${live.pid})`);
+                  }
+                  if (existsSync(postmasterPidFile)) {
+                    moveStaleLockAside(postmasterPidFile, readLockIdentity(postmasterPidFile));
+                  }
+                } finally {
+                  releaseRestartLock();
+                }
+              },
+              onUnexpectedExit: (code, signal) => logger.error(
+                { code, signal, recentLogs: logBuffer.getRecentLogs() },
+                "Embedded PostgreSQL exited unexpectedly; attempting recovery",
+              ),
+              onRestartAttemptFailed: (err, attempt) => logger.error(
+                { err, attempt, recentLogs: logBuffer.getRecentLogs() },
+                "Embedded PostgreSQL recovery attempt failed",
+              ),
+              onRestarted: (attempt) => logger.info(
+                { attempt, port: supervisedPort },
+                "Embedded PostgreSQL recovered after unexpected exit",
+              ),
+              onRecoveryExhausted: (err) => {
+                logger.fatal(
+                  { err, recentLogs: logBuffer.getRecentLogs() },
+                  "Embedded PostgreSQL recovery exhausted; stopping the unhealthy server",
+                );
+                process.kill(process.pid, "SIGTERM");
+              },
             });
           }
-        } else {
-          logger.info(`Embedded PostgreSQL cluster already exists (${clusterVersionFile}); skipping init`);
         }
-
-        if (existsSync(postmasterPidFile)) {
-          logger.warn("Removing stale embedded PostgreSQL lock file");
-          rmSync(postmasterPidFile, { force: true });
-        }
-        try {
-          await embeddedPostgres.start();
-        } catch (err) {
-          logEmbeddedPostgresFailure("start", err);
-          throw formatEmbeddedPostgresError(err, {
-            fallbackMessage: `Failed to start embedded PostgreSQL on port ${port}`,
-            recentLogs: logBuffer.getRecentLogs(),
-          });
-        }
-        embeddedPostgresStartedByThisProcess = true;
-        embeddedPostgresSupervisor = createEmbeddedPostgresSupervisor({
-          initialInstance: embeddedPostgres,
-          createInstance: createEmbeddedPostgres,
-          beforeRestart: () => {
-            const runningPostgresPid = getRunningPid();
-            if (runningPostgresPid) {
-              throw new Error(`Refusing embedded PostgreSQL recovery because the data directory reports a live process (pid=${runningPostgresPid})`);
-            }
-            if (existsSync(postmasterPidFile)) rmSync(postmasterPidFile, { force: true });
-          },
-          onUnexpectedExit: (code, signal) => logger.error(
-            { code, signal, recentLogs: logBuffer.getRecentLogs() },
-            "Embedded PostgreSQL exited unexpectedly; attempting recovery",
-          ),
-          onRestartAttemptFailed: (err, attempt) => logger.error(
-            { err, attempt, recentLogs: logBuffer.getRecentLogs() },
-            "Embedded PostgreSQL recovery attempt failed",
-          ),
-          onRestarted: (attempt) => logger.info(
-            { attempt, port },
-            "Embedded PostgreSQL recovered after unexpected exit",
-          ),
-          onRecoveryExhausted: (err) => {
-            logger.fatal(
-              { err, recentLogs: logBuffer.getRecentLogs() },
-              "Embedded PostgreSQL recovery exhausted; stopping the unhealthy server",
-            );
-            process.kill(process.pid, "SIGTERM");
-          },
-        });
       }
+    } finally {
+      releaseStartLock();
     }
   
-    const embeddedAdminConnectionString = `postgres://paperclip:paperclip@127.0.0.1:${port}/postgres`;
+    const embeddedAdminConnectionString = embeddedAdminUrl(port);
     const dbStatus = await ensurePostgresDatabase(embeddedAdminConnectionString, "paperclip");
     if (dbStatus === "created") {
       logger.info("Created embedded PostgreSQL database: paperclip");
     }
   
-    const embeddedConnectionString = `postgres://paperclip:paperclip@127.0.0.1:${port}/paperclip`;
+    const embeddedConnectionString = embeddedPostgresUrl(port, "paperclip");
     const shouldAutoApplyFirstRunMigrations = !clusterAlreadyInitialized || dbStatus === "created";
     if (shouldAutoApplyFirstRunMigrations) {
       logger.info("Detected first-run embedded PostgreSQL setup; applying pending migrations automatically");
@@ -594,7 +699,11 @@ export async function startServer(): Promise<StartedServer> {
   }
 
   const requestedListenPort = config.port;
-  const listenPort = await detectPort(requestedListenPort);
+  const listenPort = await resolveListenPort({
+    port: requestedListenPort,
+    host: config.host,
+    strictPort: config.strictPort,
+  });
   if (config.authBaseUrlMode === "explicit" && config.authPublicBaseUrl) {
     config.authPublicBaseUrl = rewriteLoopbackUrlPort(config.authPublicBaseUrl, listenPort);
   }
@@ -1862,6 +1971,8 @@ if (isMainModule(import.meta.url)) {
     logger.error({ err }, "Paperclip server failed to start");
     captureException(err);
     await shutdownSentry();
-    process.exit(1);
+    // A distinct code lets service managers and health checks tell "an existing
+    // PostgreSQL may own the data directory" apart from other startup failures.
+    process.exit(err instanceof EmbeddedPostgresLockRefusal ? err.exitCode : 1);
   });
 }

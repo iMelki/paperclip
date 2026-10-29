@@ -1,6 +1,3 @@
-import os from "node:os";
-import path from "node:path";
-import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { expect, test } from "vitest";
 
 import { HERMES_CLI } from "../shared/constants.js";
@@ -18,31 +15,16 @@ test("resolveHermesCommand falls back to command before default hermes binary", 
 });
 
 test("testEnvironment accepts config.command when hermesCommand is absent", async () => {
-  const tempDir = await mkdtemp(path.join(os.tmpdir(), "hermes-command-resolution-"));
-  const cliPath = path.join(tempDir, "fake-hermes");
+  // Node is an inert cross-platform executable with a stable --version flag.
+  const result = await testEnvironment({
+    companyId: "company-test",
+    adapterType: "hermes_local",
+    config: { command: process.execPath },
+  });
 
-  try {
-    await writeFile(
-      cliPath,
-      "#!/bin/sh\necho fake-hermes 1.2.3\n",
-      "utf8",
-    );
-    await chmod(cliPath, 0o755);
-
-    const result = await testEnvironment({
-      companyId: "company-test",
-      adapterType: "hermes_local",
-      config: {
-        command: cliPath,
-      },
-    });
-
-    expect(result.status).not.toBe("fail");
-    expect(result.checks.some((check) => check.code === "hermes_cli_not_found")).toBe(false);
-    expect(result.checks.some(
-      (check) => check.code === "hermes_version" && check.message.includes("fake-hermes 1.2.3"),
-    )).toBe(true);
-  } finally {
-    await rm(tempDir, { recursive: true, force: true });
-  }
+  expect(result.status).not.toBe("fail");
+  expect(result.checks.some((check) => check.code === "hermes_cli_not_found")).toBe(false);
+  expect(result.checks.some(
+    (check) => check.code === "hermes_version" && check.message.includes(process.version),
+  )).toBe(true);
 });

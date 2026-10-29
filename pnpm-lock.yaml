@@ -5,16 +5,17 @@ settings:
   excludeLinksFromLockfile: false
 
 overrides:
+  '@agentclientprotocol/codex-acp@1.1.14>@openai/codex': 0.160.0
   rollup: '>=4.59.0'
   react: ^19.2.8
   react-dom: ^19.2.8
 
 patchedDependencies:
   acpx@0.12.0:
-    hash: x3fethhotv43zektyl5prdwf54
+    hash: ae3a3qz4d26wxkaqdiebydfjji
     path: patches/acpx@0.12.0.patch
   embedded-postgres@18.1.0-beta.16:
-    hash: jz3l2ynqli5kwbdo2wv3soydpu
+    hash: ec6g76a3evavrbslihxp3nblui
     path: patches/embedded-postgres@18.1.0-beta.16.patch
 
 importers:
@@ -98,7 +99,7 @@ importers:
         version: 0.45.2(@opentelemetry/api@1.9.1)(kysely@0.29.5)(pg@8.18.0)(postgres@3.4.9)
       embedded-postgres:
         specifier: ^18.1.0-beta.16
-        version: 18.1.0-beta.16(patch_hash=jz3l2ynqli5kwbdo2wv3soydpu)
+        version: 18.1.0-beta.16(patch_hash=ec6g76a3evavrbslihxp3nblui)
       picocolors:
         specifier: ^1.1.1
         version: 1.1.1
@@ -117,7 +118,7 @@ importers:
     dependencies:
       acpx:
         specifier: 0.12.0
-        version: 0.12.0(patch_hash=x3fethhotv43zektyl5prdwf54)
+        version: 0.12.0(patch_hash=ae3a3qz4d26wxkaqdiebydfjji)
       picocolors:
         specifier: ^1.1.1
         version: 1.1.1
@@ -358,7 +359,7 @@ importers:
         version: 0.45.2(@opentelemetry/api@1.9.1)(kysely@0.29.5)(pg@8.18.0)(postgres@3.4.9)
       embedded-postgres:
         specifier: ^18.1.0-beta.16
-        version: 18.1.0-beta.16(patch_hash=jz3l2ynqli5kwbdo2wv3soydpu)
+        version: 18.1.0-beta.16(patch_hash=ec6g76a3evavrbslihxp3nblui)
       postgres:
         specifier: ^3.4.9
         version: 3.4.9
@@ -841,7 +842,7 @@ importers:
         version: 0.45.2(@opentelemetry/api@1.9.1)(kysely@0.29.5)(pg@8.18.0)(postgres@3.4.9)
       embedded-postgres:
         specifier: ^18.1.0-beta.16
-        version: 18.1.0-beta.16(patch_hash=jz3l2ynqli5kwbdo2wv3soydpu)
+        version: 18.1.0-beta.16(patch_hash=ec6g76a3evavrbslihxp3nblui)
       express:
         specifier: ^5.1.0
         version: 5.2.1
@@ -12083,7 +12084,7 @@ snapshots:
 
   acorn@8.18.0: {}
 
-  acpx@0.12.0(patch_hash=x3fethhotv43zektyl5prdwf54):
+  acpx@0.12.0(patch_hash=ae3a3qz4d26wxkaqdiebydfjji):
     dependencies:
       '@agentclientprotocol/sdk': 1.2.1(zod@4.4.3)
       commander: 15.0.0
@@ -12777,7 +12778,7 @@ snapshots:
 
   electron-to-chromium@1.5.409: {}
 
-  embedded-postgres@18.1.0-beta.16(patch_hash=jz3l2ynqli5kwbdo2wv3soydpu):
+  embedded-postgres@18.1.0-beta.16(patch_hash=ec6g76a3evavrbslihxp3nblui):
     dependencies:
       async-exit-hook: 2.0.1
       pg: 8.18.0

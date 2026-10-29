@@ -850,7 +850,12 @@ export type {
   InstanceSchedulerHeartbeatAgent,
 } from "./heartbeat.js";
 export type { LiveEvent } from "./live.js";
-export type { DashboardRunActivityDay, DashboardSummary } from "./dashboard.js";
+export type {
+  DashboardRunActivityDay,
+  DashboardSpendBreakdownRow,
+  DashboardSpendDay,
+  DashboardSummary,
+} from "./dashboard.js";
 export type {
   TimelineActorType,
   TimelineEventKind,
@@ -963,6 +968,7 @@ export type {
 export type {
   JsonSchema,
   PluginJobDeclaration,
+  PluginJobScope,
   PluginWebhookDeclaration,
   PluginToolDeclaration,
   PluginEnvironmentDriverDeclaration,

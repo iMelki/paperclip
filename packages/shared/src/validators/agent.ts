@@ -57,11 +57,19 @@ export const createAgentInstructionsBundleSchema = z.object({
   }),
 });
 
-const agentModelProfileConfigSchema = z.object({
+const agentModelProfileConfigSchema = z.preprocess((value) => {
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    const profile = value as Record<string, unknown>;
+    if (profile.enabled === false && profile.adapterConfig === undefined) {
+      return { ...profile, adapterConfig: {} };
+    }
+  }
+  return value;
+}, z.object({
   enabled: z.boolean().optional(),
   label: z.string().trim().min(1).optional(),
   adapterConfig: adapterConfigSchema,
-}).strict();
+}).strict());
 
 export const agentRuntimeConfigSchema = z.object({
   modelProfiles: z.object({
@@ -117,8 +125,9 @@ export const builtInAgentResetSchema = z.object({
 export type BuiltInAgentReset = z.infer<typeof builtInAgentResetSchema>;
 
 export const createAgentHireSchema = createAgentSchema.extend({
-  sourceIssueId: z.string().guid().optional().nullable(),
-  sourceIssueIds: z.array(z.string().guid()).optional(),
+  idempotencyKey: z.string().trim().min(1).max(255).regex(/^[\x21-\x7e]+$/).optional(),
+  sourceIssueId: z.string().uuid().optional().nullable(),
+  sourceIssueIds: z.array(z.string().uuid()).optional(),
 });
 
 export type CreateAgentHire = z.infer<typeof createAgentHireSchema>;

@@ -220,10 +220,36 @@ Create issues in Paperclip and assign them to your Hermes agent. On each heartbe
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `model` | string | `anthropic/claude-sonnet-4` | Model in `provider/model` format |
+| `model` | string | `auto` | Model name; strict mode requires an explicit value |
 | `provider` | string | *(auto-detected)* | API provider: `auto`, `openrouter`, `nous`, `openai-codex`, `zai`, `kimi-coding`, `minimax`, `minimax-cn` |
-| `timeoutSec` | number | `300` | Execution timeout in seconds |
+| `timeoutSec` | number | `1800` | Execution timeout in seconds |
 | `graceSec` | number | `10` | Grace period before SIGKILL |
+
+For a bounded three-turn job, the UI now sets `timeoutSec: 900`. The local
+adapter never passes Hermes `--yolo`; unattended commands that need human
+approval may be denied. `extraArgs` cannot re-enable `--yolo`.
+
+`strictIsolation: true` is an opt-in, fail-closed launch mode. It requires an
+absolute `hermesHome`, an existing named `hermesProfile`, absolute
+`hermesCommand`, explicit `paperclipApiUrl`, model and provider,
+`persistSession: false`, `timeoutSec` from 1 to 900, and
+`maxTurnsPerRun` from 1 to 3. It rejects adapter `env` overrides and
+`extraArgs`, selects the named profile before Hermes imports its configuration,
+and passes only portable operating-system variables plus isolated home paths
+and Paperclip run identity to the child. The strict API URL must use a literal
+loopback host (`localhost`, `127.0.0.1`, or `[::1]`) so the run token is not sent
+to a hosted endpoint. This is **source-level containment**, not proof that
+Hermes cannot resolve credentials from its root, pool, provider
+configuration, or ambient state. Verify effective credential resolution with
+synthetic canaries before using a real provider. The harness-minted Paperclip
+API run token is still passed to the child; its scope must be reviewed
+separately before enrollment.
+
+The wall-clock and turn bounds do **not** enforce a provider-side spending cap
+or suppress Paperclip-level retry scheduling. A paid or unattended pilot still
+requires an independent upstream hard usage limit, zero-retry configuration,
+an attested execution sandbox or restricted tool policy, and a reviewed live
+run receipt.
 
 ### Tools
 
@@ -246,6 +272,9 @@ Available toolsets: `terminal`, `file`, `web`, `browser`, `code_execution`, `vis
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `hermesCommand` | string | `hermes` | Custom CLI binary path |
+| `strictIsolation` | boolean | `false` | Require the isolated launch contract above |
+| `hermesHome` | string | *(required in strict mode)* | Absolute isolated Hermes root |
+| `hermesProfile` | string | *(required in strict mode)* | Existing named profile under that root |
 | `verbose` | boolean | `false` | Enable verbose output |
 | `quiet` | boolean | `true` | Quiet mode (clean output, no banner/spinner) |
 | `extraArgs` | string[] | `[]` | Additional CLI arguments |

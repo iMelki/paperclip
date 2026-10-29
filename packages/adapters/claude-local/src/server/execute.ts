@@ -65,9 +65,10 @@ import {
   parseClaudeStreamJson,
   describeClaudeFailure,
   detectClaudeLoginRequired,
-  extractClaudeRetryNotBefore,
   isClaudeMaxTurnsResult,
   isClaudeProviderQuotaError,
+  findClaudeProviderQuotaEvidenceSource,
+  extractClaudeRetryNotBeforeWithSource,
   isClaudeRefusalResult,
   isClaudeTransientUpstreamError,
   isClaudeUnknownSessionError,
@@ -1028,14 +1029,17 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
           stderr: proc.stderr,
           errorMessage: fallbackErrorMessage,
         });
-      const transientRetryNotBefore = providerQuota || transientUpstream
-        ? extractClaudeRetryNotBefore({
-            parsed: null,
-            stdout: proc.stdout,
-            stderr: proc.stderr,
-            errorMessage: fallbackErrorMessage,
-          })
+      const providerErrorInput = {
+        parsed: null,
+        stdout: proc.stdout,
+        stderr: proc.stderr,
+        errorMessage: fallbackErrorMessage,
+      };
+      const retryEvidence = providerQuota || transientUpstream
+        ? extractClaudeRetryNotBeforeWithSource(providerErrorInput)
         : null;
+      const transientRetryNotBefore = retryEvidence?.retryAt ?? null;
+      const providerQuotaEvidenceSource = providerQuota ? findClaudeProviderQuotaEvidenceSource(providerErrorInput) : null;
       const errorCode = proc.errorCode
         // Forward the transport-level error code from the run-disposition seam
         // first, even on the unparsed path. A lost duplex control channel
@@ -1070,6 +1074,8 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
           stdout: proc.stdout,
           stderr: proc.stderr,
           ...(errorFamily ? { errorFamily } : {}),
+          ...(providerQuotaEvidenceSource ? { providerQuotaEvidenceSource } : {}),
+          ...(retryEvidence ? { retryNotBeforeSource: retryEvidence.source } : {}),
           ...(transientRetryNotBefore
             ? { retryNotBefore: transientRetryNotBefore.toISOString() }
             : {}),
@@ -1142,7 +1148,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       } as Record<string, unknown>)
       : null;
     const errorMessage = failed
-      ? describeClaudeFailure(parsed) ?? `Claude exited with code ${proc.exitCode ?? -1}`
+      ? describeClaudeFailure(parsed, { trustedOnly: true }) ?? `Claude exited with code ${proc.exitCode ?? -1}`
       : null;
     const providerQuota =
       failed &&
@@ -1167,14 +1173,12 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         stderr: proc.stderr,
         errorMessage,
       });
-    const transientRetryNotBefore = providerQuota || transientUpstream
-      ? extractClaudeRetryNotBefore({
-          parsed,
-          stdout: proc.stdout,
-          stderr: proc.stderr,
-          errorMessage,
-        })
+    const providerErrorInput = { parsed, stdout: proc.stdout, stderr: proc.stderr, errorMessage };
+    const retryEvidence = providerQuota || transientUpstream
+      ? extractClaudeRetryNotBeforeWithSource(providerErrorInput)
       : null;
+    const transientRetryNotBefore = retryEvidence?.retryAt ?? null;
+    const providerQuotaEvidenceSource = providerQuota ? findClaudeProviderQuotaEvidenceSource(providerErrorInput) : null;
     const resolvedErrorCode = proc.errorCode
       // Forward the transport-level error code from the run-disposition seam
       // first. A lost duplex control channel surfaces the typed
@@ -1213,6 +1217,8 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       ...(failed && poisonedPreviousMessageId ? { stopReason: "claude_poisoned_previous_message_id" } : {}),
       ...(claudeRefusal ? { stopReason: "refusal", errorFamily: "model_refusal" } : {}),
       ...(errorFamily ? { errorFamily } : {}),
+      ...(providerQuotaEvidenceSource ? { providerQuotaEvidenceSource } : {}),
+      ...(retryEvidence ? { retryNotBeforeSource: retryEvidence.source } : {}),
       ...(transientRetryNotBefore ? { retryNotBefore: transientRetryNotBefore.toISOString() } : {}),
       ...(transientRetryNotBefore ? { transientRetryNotBefore: transientRetryNotBefore.toISOString() } : {}),
       ...(providerQuota && transientRetryNotBefore ? { providerQuotaRetryNotBefore: transientRetryNotBefore.toISOString() } : {}),

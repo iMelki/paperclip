@@ -23,6 +23,9 @@ vi.mock("node:net", () => ({ default: {
   }),
 } }));
 
+// The forced-cleanup branch under test is guarded by process.platform.
+const windowsOnly = process.platform === "win32" ? it : it.skip;
+
 function instance(stop: () => Promise<void>) {
   return { initialise: async () => {}, start: async () => {}, stop };
 }
@@ -63,9 +66,100 @@ describe("bounded embedded PostgreSQL cleanup", () => {
     expect(cleanup).toHaveBeenCalledTimes(success ? 1 : 0);
   });
 
+  // This caller can never hold Job Object custody of a postmaster that
+  // embedded-postgres spawned, so confirmedStopped is unreachable for it. The
+  // reclaim decision therefore rides on the advisory observation, and both of
+  // its outcomes need to be pinned: neither was covered before, which is how
+  // the no-custody regression reached review.
+  windowsOnly.each([
+    { observed: true, reclaims: true, reason: "no_owned_processes" },
+    { observed: false, reclaims: false, reason: "advisory_only_without_job_object" },
+  ])(
+    "reclaims the data dir only when no owned process is still observable: $observed",
+    async ({ observed, reclaims, reason }) => {
+      const cleanup = vi.fn();
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      effects.reap.mockResolvedValue({
+        confirmedStopped: false,
+        observedNoOwnedProcesses: observed,
+        stopEvidence: "advisory",
+        reason,
+        remainingPids: observed ? [] : [4242],
+      });
+
+      const result = await stopBounded(
+        instance(() => Promise.reject(new Error("stop failed"))),
+        "C:\\synthetic-test-only\\cluster",
+        cleanup,
+      );
+
+      expect(effects.reap).toHaveBeenCalledTimes(1);
+      // By default nothing is forced: force is an explicit, named opt-in.
+      // Ownership is always scoped to this cluster's own data directory.
+      expect(effects.reap).toHaveBeenCalledWith(expect.objectContaining({
+        ownerMarkers: ["C:\\synthetic-test-only\\cluster"],
+        forceWithoutCustody: false,
+      }));
+      expect(result).toBe(reclaims);
+      await Promise.resolve();
+      expect(cleanup).toHaveBeenCalledTimes(reclaims ? 1 : 0);
+      // An unstopped cluster is reported loudly, by name, with PIDs and reason.
+      // A reclaimable one is not reported as a problem.
+      if (reclaims) {
+        expect(warn).not.toHaveBeenCalled();
+      } else {
+        expect(warn).toHaveBeenCalledTimes(1);
+        const message = String(warn.mock.calls[0]![0]);
+        expect(message).toContain("NOT stopped");
+        expect(message).toContain("C:\\synthetic-test-only\\cluster");
+        expect(message).toContain("PIDs=4242");
+        expect(message).toContain(`reason=${reason}`);
+        expect(message).toContain("force=not requested");
+      }
+      warn.mockRestore();
+    },
+  );
+
+  windowsOnly(
+    "forces a stop only when the caller asks for it by name, and reports it as forced",
+    async () => {
+      const cleanup = vi.fn();
+      effects.reap.mockResolvedValue({
+        confirmedStopped: false,
+        observedNoOwnedProcesses: true,
+        stopEvidence: "forced",
+        reason: "forced_none_observed",
+        remainingPids: [],
+      });
+
+      const result = await stopBounded(
+        instance(() => Promise.reject(new Error("stop failed"))),
+        "C:\\synthetic-test-only\\cluster",
+        cleanup,
+        { forceStopWithoutCustody: true },
+      );
+
+      expect(effects.reap).toHaveBeenCalledWith(expect.objectContaining({
+        ownerMarkers: ["C:\\synthetic-test-only\\cluster"],
+        forceWithoutCustody: true,
+      }));
+      expect(result).toBe(true);
+      expect(cleanup).toHaveBeenCalledTimes(1);
+    },
+  );
+
   it("does not retry or remove data when failed-start cleanup is unresolved", async () => {
     let constructed = 0;
-    effects.reap.mockResolvedValue({ confirmedStopped: false });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    // A full result, matching ReapWindowsTestProcessTreeResult: a cluster that
+    // is still observably running and was not forced.
+    effects.reap.mockResolvedValue({
+      confirmedStopped: false,
+      observedNoOwnedProcesses: false,
+      stopEvidence: "advisory",
+      reason: "advisory_only_without_job_object",
+      remainingPids: [12345],
+    });
     class Fake {
       constructor() { constructed += 1; }
       async initialise() {}
@@ -79,5 +173,10 @@ describe("bounded embedded PostgreSQL cleanup", () => {
     await Promise.resolve();
     expect(constructed).toBe(1);
     expect(effects.remove).not.toHaveBeenCalled();
+    if (process.platform === "win32") {
+      // The unresolved cluster is named, with its PID, not silently left.
+      expect(String(warn.mock.calls[0]?.[0])).toContain("PIDs=12345");
+    }
+    warn.mockRestore();
   });
 });

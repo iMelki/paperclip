@@ -2,7 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { flipCurrentAtomic, initializeInstallStore, payloadPathFor, readInstallManifest, resolveInstallStorePaths, writeInstallManifestAtomic, type InstallManifest, type InstallRecord } from "../install-store.js";
+import { flipCurrent, initializeInstallStore, payloadPathFor, readInstallManifest, resolveInstallStorePaths, writeInstallManifestAtomic, type InstallManifest, type InstallRecord } from "../install-store.js";
 import type { CommandRunner } from "../commands/install.js";
 import { compareVersions, detectInstallMode, resolveUpdateRequest, rollbackManagedInstall, updateCommand } from "../commands/update.js";
 
@@ -45,7 +45,7 @@ describe("update command", () => {
   it("detects managed, global npm, npx, and source modes", () => {
     const paths = resolveInstallStorePaths(); initializeInstallStore(paths);
     const payload = payloadPathFor(paths, "npm", "1.0.0"); const entrypoint = createPayload(payload, "1.0.0");
-    flipCurrentAtomic(payload, paths);
+    flipCurrent(payload, paths);
     writeInstallManifestAtomic({ schemaVersion: 1, ...record(payload, "1.0.0"), previous: [] }, paths);
     expect(detectInstallMode(entrypoint, paths)).toBe("managed");
     expect(detectInstallMode(path.join(root, "lib", "node_modules", "paperclipai", "dist", "index.js"), paths)).toBe("global-npm");
@@ -70,7 +70,7 @@ describe("update command", () => {
     const newPayload = payloadPathFor(paths, "git", newSha.slice(0, 12));
     createPayload(newPayload, "0.3.1");
     fs.writeFileSync(path.join(newPayload, "node_modules", "paperclipai", "package.json"), JSON.stringify({ version: "0.3.1" }));
-    flipCurrentAtomic(oldPayload, paths);
+    flipCurrent(oldPayload, paths);
     writeInstallManifestAtomic({ schemaVersion: 1, source: "git", version: "0.3.1", channel: "pinned", repo: "paperclipai/paperclip", ref: "master", sha: oldSha, payloadPath: oldPayload, installedAt: "2026-07-22T00:00:00.000Z", previous: [] }, paths);
     const backup = vi.fn(async () => undefined);
     const confirm = vi.fn(async () => true);
@@ -87,7 +87,7 @@ describe("update command", () => {
   it("reports SHA git installs as pinned without resolving again", async () => {
     const paths = resolveInstallStorePaths(); initializeInstallStore(paths);
     const sha = "3".repeat(40); const payload = payloadPathFor(paths, "git", sha.slice(0, 12)); const executable = createPayload(payload, "0.3.1");
-    flipCurrentAtomic(payload, paths);
+    flipCurrent(payload, paths);
     writeInstallManifestAtomic({ schemaVersion: 1, source: "git", version: "0.3.1", channel: "pinned", repo: "paperclipai/paperclip", ref: sha.slice(0, 12), sha, payloadPath: payload, installedAt: "2026-07-22T00:00:00.000Z", previous: [] }, paths);
     const runCommand = vi.fn(async () => ({ stdout: "", stderr: "" }));
     await updateCommand({}, { paths, executablePath: executable, runCommand });
@@ -96,7 +96,7 @@ describe("update command", () => {
 
   it("requires explicit confirmation before downgrading", async () => {
     const paths = resolveInstallStorePaths(); initializeInstallStore(paths);
-    const payload = payloadPathFor(paths, "npm", "2.0.0"); const entrypoint = createPayload(payload, "2.0.0"); flipCurrentAtomic(payload, paths);
+    const payload = payloadPathFor(paths, "npm", "2.0.0"); const entrypoint = createPayload(payload, "2.0.0"); flipCurrent(payload, paths);
     writeInstallManifestAtomic({ schemaVersion: 1, ...record(payload, "2.0.0"), previous: [] }, paths);
     const runCommand = vi.fn(async () => ({ stdout: '"1.0.0"\n', stderr: "" }));
     await expect(updateCommand({ version: "1.0.0", dryRun: true }, { paths, executablePath: entrypoint, runCommand, confirm: async () => false })).rejects.toThrow("Downgrade cancelled");
@@ -132,7 +132,7 @@ describe("update command", () => {
 
   it("backs up, installs side-by-side, flips, and rolls back instantly", async () => {
     const paths = resolveInstallStorePaths(); initializeInstallStore(paths);
-    const oldPayload = payloadPathFor(paths, "npm", "1.0.0"); const executable = createPayload(oldPayload, "1.0.0"); flipCurrentAtomic(oldPayload, paths);
+    const oldPayload = payloadPathFor(paths, "npm", "1.0.0"); const executable = createPayload(oldPayload, "1.0.0"); flipCurrent(oldPayload, paths);
     writeInstallManifestAtomic({ schemaVersion: 1, ...record(oldPayload, "1.0.0"), previous: [] }, paths);
     const backup = vi.fn(async () => undefined);
     const restartActiveService = vi.fn(async () => true);
@@ -153,7 +153,7 @@ describe("update command", () => {
 
   it("explains how to recover when the pre-update database is unreachable", async () => {
     const paths = resolveInstallStorePaths(); initializeInstallStore(paths);
-    const oldPayload = payloadPathFor(paths, "npm", "1.0.0"); const executable = createPayload(oldPayload, "1.0.0"); flipCurrentAtomic(oldPayload, paths);
+    const oldPayload = payloadPathFor(paths, "npm", "1.0.0"); const executable = createPayload(oldPayload, "1.0.0"); flipCurrent(oldPayload, paths);
     writeInstallManifestAtomic({ schemaVersion: 1, ...record(oldPayload, "1.0.0"), previous: [] }, paths);
     const backupError = Object.assign(new Error("connect ECONNREFUSED 127.0.0.1:54329"), { code: "ECONNREFUSED" });
     const backup = vi.fn(async () => { throw backupError; });
@@ -168,7 +168,7 @@ describe("update command", () => {
 
   it("skips the pre-update backup when there is no onboarded instance data", async () => {
     const paths = resolveInstallStorePaths(); initializeInstallStore(paths);
-    const oldPayload = payloadPathFor(paths, "npm", "1.0.0"); const executable = createPayload(oldPayload, "1.0.0"); flipCurrentAtomic(oldPayload, paths);
+    const oldPayload = payloadPathFor(paths, "npm", "1.0.0"); const executable = createPayload(oldPayload, "1.0.0"); flipCurrent(oldPayload, paths);
     writeInstallManifestAtomic({ schemaVersion: 1, ...record(oldPayload, "1.0.0"), previous: [] }, paths);
     const backup = vi.fn(async () => undefined);
     const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
@@ -197,7 +197,7 @@ describe("update command", () => {
 
   it("rolls back the active payload when restart validation fails", async () => {
     const paths = resolveInstallStorePaths(); initializeInstallStore(paths);
-    const oldPayload = payloadPathFor(paths, "npm", "1.0.0"); const executable = createPayload(oldPayload, "1.0.0"); flipCurrentAtomic(oldPayload, paths);
+    const oldPayload = payloadPathFor(paths, "npm", "1.0.0"); const executable = createPayload(oldPayload, "1.0.0"); flipCurrent(oldPayload, paths);
     writeInstallManifestAtomic({ schemaVersion: 1, ...record(oldPayload, "1.0.0"), previous: [] }, paths);
     const runCommand = vi.fn(async (file: string, args: string[]) => {
       if (args[0] === "view") return { stdout: '"2.0.0"\n', stderr: "" };
@@ -213,7 +213,7 @@ describe("update command", () => {
 
   it("surfaces a failure to restart the rolled-back payload", async () => {
     const paths = resolveInstallStorePaths(); initializeInstallStore(paths);
-    const oldPayload = payloadPathFor(paths, "npm", "1.0.0"); const executable = createPayload(oldPayload, "1.0.0"); flipCurrentAtomic(oldPayload, paths);
+    const oldPayload = payloadPathFor(paths, "npm", "1.0.0"); const executable = createPayload(oldPayload, "1.0.0"); flipCurrent(oldPayload, paths);
     writeInstallManifestAtomic({ schemaVersion: 1, ...record(oldPayload, "1.0.0"), previous: [] }, paths);
     const runCommand = vi.fn(async (file: string, args: string[]) => {
       if (args[0] === "view") return { stdout: '"2.0.0"\n', stderr: "" };

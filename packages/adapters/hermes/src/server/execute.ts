@@ -53,6 +53,7 @@ import {
   resolveProvider,
 } from "./detect-model.js";
 import { reconcileHermesPaperclipSkills } from "./skills.js";
+import { resolveStrictHermesIsolation } from "./strict-isolation.js";
 
 // ---------------------------------------------------------------------------
 // Config helpers
@@ -335,13 +336,16 @@ export async function execute(
   ctx: AdapterExecutionContext,
 ): Promise<AdapterExecutionResult> {
   const config = (ctx.config ?? ctx.agent?.adapterConfig ?? {}) as Record<string, unknown>;
+  const strictIsolation = config.strictIsolation === true
+    ? await resolveStrictHermesIsolation(config)
+    : null;
 
   // ── Resolve configuration ──────────────────────────────────────────────
   const hermesCmd = resolveHermesCommand(config);
   const model = cfgString(config.model) || DEFAULT_MODEL;
-  const timeoutSec = cfgNumber(config.timeoutSec) || DEFAULT_TIMEOUT_SEC;
+  const timeoutSec = strictIsolation?.timeoutSec ?? (cfgNumber(config.timeoutSec) || DEFAULT_TIMEOUT_SEC);
   const graceSec = cfgNumber(config.graceSec) || DEFAULT_GRACE_SEC;
-  const maxTurns = cfgNumber(config.maxTurnsPerRun);
+  const maxTurns = strictIsolation?.maxTurns ?? cfgNumber(config.maxTurnsPerRun);
   const toolsets = cfgString(config.toolsets) || cfgStringArray(config.enabledToolsets)?.join(",");
   const extraArgs = cfgStringArray(config.extraArgs);
   const persistSession = cfgBoolean(config.persistSession) !== false;
@@ -350,6 +354,7 @@ export async function execute(
   const prevSessionId = cfgString(
     (ctx.runtime?.sessionParams as Record<string, unknown> | null)?.sessionId,
   );
+  const canResumeSession = persistSession && Boolean(prevSessionId);
 
   // The server adds this runtime inventory at the run boundary. Requiring the
   // marker avoids touching a developer's real Hermes home in direct unit or
@@ -383,7 +388,7 @@ export async function execute(
   let detectedConfig: Awaited<ReturnType<typeof detectModel>> | null = null;
   const explicitProvider = cfgString(config.provider);
 
-  if (!explicitProvider) {
+  if (!explicitProvider && !strictIsolation) {
     try {
       detectedConfig = await detectModel();
     } catch {
@@ -429,7 +434,7 @@ export async function execute(
   }
 
   // ── Build prompt ───────────────────────────────────────────────────────
-  let prompt = buildPrompt(ctx, config, { resumedSession: Boolean(prevSessionId) });
+  let prompt = buildPrompt(ctx, config, { resumedSession: canResumeSession });
   if (agentInstructions) {
     prompt = agentInstructions + "\n\n---\n\n" + prompt;
   }
@@ -437,7 +442,9 @@ export async function execute(
   // ── Build command args ─────────────────────────────────────────────────
   // Use -Q (quiet) to get clean output: just response + session_id line
   const useQuiet = cfgBoolean(config.quiet) === true; // default false
-  const args: string[] = ["chat", "-q", prompt];
+  const args: string[] = strictIsolation
+    ? ["--profile", strictIsolation.profile, "chat", "-q", prompt]
+    : ["chat", "-q", prompt];
   if (useQuiet) args.push("-Q");
 
   if (model) {
@@ -466,17 +473,19 @@ export async function execute(
   // Requires hermes-agent >= PR #3255 (feat/session-source-tag).
   args.push("--source", "tool");
 
-  // Bypass Hermes dangerous-command approval prompts.
-  // Paperclip agents run as non-interactive subprocesses with no TTY,
-  // so approval prompts would always timeout and deny legitimate commands
-  // (curl, python3 -c, etc.). Agents operate in a sandbox — the approval
-  // system is designed for human-attended interactive sessions.
-  args.push("--yolo");
+  // Do not bypass dangerous-command approval in an unattended process.
+  // A caller-supplied extraArgs bypass is also rejected below.
 
-  if (persistSession && prevSessionId) {
+  if (canResumeSession && prevSessionId) {
     args.push("--resume", prevSessionId);
   }
 
+  if (extraArgs?.some((arg) => {
+    const flag = arg.split("=", 1)[0];
+    return flag.length > 2 && "--yolo".startsWith(flag);
+  })) {
+    throw new Error("Hermes adapter forbids --yolo in extraArgs");
+  }
   if (extraArgs?.length) {
     args.push(...extraArgs);
   }
@@ -484,10 +493,17 @@ export async function execute(
   // ── Build environment ──────────────────────────────────────────────────
   const userEnv = config.env as Record<string, string> | undefined;
   const env: Record<string, string> = {
-    ...(process.env as Record<string, string>),
-    ...(userEnv && typeof userEnv === "object" ? userEnv : {}),
-    ...buildPaperclipEnv(ctx.agent),
+    ...(strictIsolation?.env ?? (process.env as Record<string, string>)),
+    ...(!strictIsolation && userEnv && typeof userEnv === "object" ? userEnv : {}),
+    ...(strictIsolation ? {
+      PAPERCLIP_AGENT_ID: ctx.agent.id,
+      PAPERCLIP_COMPANY_ID: ctx.agent.companyId,
+      PAPERCLIP_API_URL: strictIsolation.paperclipApiUrl,
+    } : buildPaperclipEnv(ctx.agent)),
   };
+  for (const key of Object.keys(env)) {
+    if (key.toUpperCase() === "HERMES_YOLO_MODE") delete env[key];
+  }
 
   if (ctx.runId) env.PAPERCLIP_RUN_ID = ctx.runId;
 
@@ -521,7 +537,7 @@ export async function execute(
     "stdout",
     `[hermes] Starting Hermes Agent (model=${model}, provider=${resolvedProvider} [${resolvedFrom}], timeout=${timeoutSec}s${maxTurns ? `, max_turns=${maxTurns}` : ""})\n`,
   );
-  if (prevSessionId) {
+  if (canResumeSession && prevSessionId) {
     await ctx.onLog(
       "stdout",
       `[hermes] Resuming session: ${prevSessionId}\n`,

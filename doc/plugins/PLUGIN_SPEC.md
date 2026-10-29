@@ -592,6 +592,15 @@ The host provides:
 - run id
 - schedule metadata
 
+For a job without an explicit company envelope, the worker manager registers a
+company invocation when the plugin has exactly one host-authorized configured
+company. Nested `config.get()` calls can then resolve that company's config,
+and explicit reads for another company remain denied. Zero or multiple configured
+companies leave the job unscoped; the host does not choose a company from plugin
+state or an instance-wide company list. This does not add a company field to
+`PluginJobContext` or turn one job into per-company runs. Job handlers must await
+their scoped work before returning, because the invocation ends with the RPC.
+
 ### 13.7 `handleWebhook`
 
 Receives inbound webhook payload routed by the host.
@@ -1013,6 +1022,10 @@ Job rules:
 4. Every job run is recorded in Postgres.
 5. Failed jobs are retryable.
 6. For recurring business workflows that should create visible Paperclip work, prefer managed routines and managed resources over jobs. Jobs remain useful for private plugin-runtime maintenance tasks.
+7. A job may declare `scope: "company" | "instance"`. Undeclared jobs are `"instance"`.
+   - `"instance"` jobs run once per trigger, with one run record. They get a company scope only when exactly one company has configured the plugin.
+   - `"company"` jobs run once per company that has configured the plugin, sequentially in sorted company order. Each company run has its own run record (with that `companyId`), its own `runId`, `job.companyId`, and that company's invocation scope. With no configured company the job runs once unscoped.
+   - A manual trigger of a `"company"` job may name one configured `companyId` to run or retry only that company.
 
 ## 18. Webhooks
 

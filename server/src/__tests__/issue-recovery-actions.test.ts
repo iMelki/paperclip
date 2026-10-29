@@ -692,16 +692,22 @@ describeEmbeddedPostgres("issue recovery actions", () => {
   it("schedules a provider-quota monitor for the original assignee without creating recovery work", async () => {
     const { companyId, coderId, sourceIssueId } = await seedCompany();
     const runId = randomUUID();
+    // Failure is recent and the reset is ~3h ahead, so the monitor is pending
+    // (not already due) on the second reconcile.
+    const failedAt = new Date(Date.now() - 60_000);
+    const resetAt = new Date(failedAt.getTime() + 3 * 60 * 60_000);
+    const resetHour24 = resetAt.getUTCHours();
+    const resetClock = `${resetHour24 % 12 === 0 ? 12 : resetHour24 % 12}:${String(resetAt.getUTCMinutes()).padStart(2, "0")} ${resetHour24 < 12 ? "AM" : "PM"} (UTC)`;
     await db.insert(heartbeatRuns).values({
       id: runId,
       companyId,
       agentId: coderId,
       invocationSource: "manual",
       status: "failed",
-      error: "You've hit your usage limit for GPT-5. Try again at 12:00 AM (UTC).",
+      error: `You've hit your usage limit for GPT-5. Try again at ${resetClock}.`,
       errorCode: "adapter_failed",
-      startedAt: new Date("2026-07-15T20:00:00.000Z"),
-      finishedAt: new Date("2026-07-15T20:01:00.000Z"),
+      startedAt: new Date(failedAt.getTime() - 60_000),
+      finishedAt: failedAt,
       contextSnapshot: { issueId: sourceIssueId },
     });
     const enqueueWakeup = vi.fn(async () => null);

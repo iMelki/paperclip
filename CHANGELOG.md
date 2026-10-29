@@ -1,5 +1,19 @@
 # Changelog
 
+- **[#162]** The patched acpx 0.12.0 client now advertises AIR `sessionFailure`
+  support and fails error-severity typed terminal turns even when the agent
+  returns `end_turn`. A record with no severity counts as an error, as the AIR
+  contract defines. Only an explicit warning stays successful. Per-turn callbacks receive the
+  complete title and details for later diagnostic handling. The current
+  codex-acp 1.1.14 ignores this capability; its existing behavior is unchanged.
+  A warning or incident that an agent sends on `session_info_update` is shown as
+  status text (its title, else the category) instead of the generic "session
+  updated". The failed run result records the typed category as
+  `resultJson.sessionFailureCategory`; mapping it to quota or retry handling is
+  left to the recovery changes.
+  Prompt-response usage is recorded once per turn, including failed turns.
+  Refresh the lockfile patch hash in a separate dependency pull request.
+
 - Preserve historical browser proof variants in a verified private archive and dated index without replacing current gauntlet images or receipts.
 
 All notable changes to this repository should be recorded here.
@@ -11,6 +25,202 @@ All notable changes to this repository should be recorded here.
   ownership safeguards. Add regression proof for the restored Git Bash fallback
   and verified runtime shutdown. Live migration and deployment remain gated;
   see the dated Factory host integration qualification checkpoint.
+- **Fix:** embedded PostgreSQL start-up now survives slow crash recovery on
+  Windows. When `pg_ctl` stops waiting (60 s) while the server log shows crash
+  recovery (fsync of the data directory, WAL redo, end-of-recovery checkpoint)
+  and the postmaster is alive, start-up keeps waiting for readiness while new
+  recovery progress lines appear. It gives up after 300 s without progress or
+  at an upper bound of 1800 s (set with
+  `PAPERCLIP_EMBEDDED_POSTGRES_RECOVERY_STALL_SEC` and
+  `PAPERCLIP_EMBEDDED_POSTGRES_RECOVERY_MAX_WAIT_SEC`). While it waits, and
+  after it gives up, the embedded-postgres exit hook cannot stop the server, so
+  recovery is not restarted from zero. The error names the server log path.
+  Each readiness probe has a deadline inside the remaining wait, and a probe
+  that is still pending is awaited again rather than repeated. "resetting unlogged
+  relations" progress lines count as recovery progress. While the server log
+  shows unfinished recovery, the next start's refusal says to wait instead of
+  naming a stop command. Only the latest startup episode in the log counts, so
+  an earlier "ready to accept connections" line does not hide a newer recovery.
+  The refusal and the start wait read one server log path, resolved once from
+  the instance options. When the log already shows "ready" but the readiness
+  check keeps failing, the give-up says so. The wait logs its policy when it
+  starts and a heartbeat every 30 s without new progress, and each readiness
+  probe passes a connect timeout close to its deadline.
+
+- **Fix:** a second embedded PostgreSQL start on the same data directory no
+  longer moves the first start's live `postmaster.pid` aside. The lock is
+  verified again just before `start()`. A live owner is reused, an owner that
+  cannot be verified makes startup refuse, and only a lock that is still stale
+  is moved aside.
+
+- Embedded PostgreSQL process discovery reads `-c data_directory=<path>` and
+  `--data_directory=<path>` as the effective data directory, ahead of `-D`. A
+  readable working directory of a server now decides ownership first. A `-D`
+  that names another cluster no longer proves that the server stores a
+  different one, because a configuration file or an include can replace it; such
+  a server is "unknown", and startup refuses instead of moving the lock aside.
+  A lock is moved aside only if it is the file that was examined: the file is
+  verified through a hard link before anything is moved, an unknown identity
+  fails closed, and a file that replaces it in the last instant is put back
+  without overwriting a newer file. A start lock beside the data directory keeps
+  two Paperclip starts apart. It is keyed on the physical path, it is never moved
+  or removed automatically (a dead owner is refused with a manual step), a
+  `postmaster.pid` is moved aside only while that start lock is held, and a start
+  refuses (instead of continuing unserialised) when the lock cannot be created or
+  written. A refusal names every server whose ownership could
+  not be proven and the safe manual step.
+- **[Refs #173]** Recovery reads the Claude session-limit statement only from
+  the ACP error and stop reason, or from a non-ACP run's own error field. A run
+  whose summary, output or transcript only quotes the phrase is no longer parked
+  as a provider quota wait. The reset clock is read only from the run's own
+  error (and the ACP error and stop reason), never from quoted result text.
+  Each `resets` or `try again at` candidate is validated before one is chosen,
+  so an impossible clock or an unknown timezone no longer hides a later valid
+  reset. A clock must be a complete token: `9:000` is not read as `9:00`, and
+  `9:00pm:30` or `9pm30` is not read as `9:00pm` or `9pm`, in the adapter and in
+  recovery.
+  The Claude adapter now decides "provider quota" and "transient upstream", and
+  extracts the retry time, only from provider error evidence: the `result` of a
+  result event that the CLI marked as an error, its `errors` list, stderr, and
+  the adapter's own fallback message. Raw stdout and the result of a result
+  event that is not an error are ignored. The run result records where the
+  verdict and the retry time came from as `providerQuotaEvidenceSource` and
+  `retryNotBeforeSource`. The failure message that recovery reads as the run's
+  own error no longer carries the text of a result event that is not an error,
+  every reset statement in a source is tried in turn, and a reset clock that
+  names an unknown timezone is skipped instead of being read in the server's
+  timezone. Recovery decides the quota verdict from the run's own error only,
+  never from the result JSON: a non-error result that quotes "usage limit
+  reached", "you've hit your usage limit" or "provider quota exceeded" no longer
+  parks the run. Prose after a clock ("try again at 10:40pm or upgrade your
+  plan") is no longer read as a timezone; only a word written in capitals is a
+  timezone candidate, and an unknown one still makes the candidate unusable.
+
+- Embedded PostgreSQL process discovery reads only an uppercase `-D` as the
+  data directory option. PostgreSQL's lowercase `-d <debug level>` no longer
+  replaces it, so a server that is started with `-D <dir> -d 5` is identified
+  by its `-D` value.
+
+- Windows embedded PostgreSQL now writes its server log outside the data
+  directory, in the same log directory as the server log: by default
+  `<instance>/logs/postgres-<id>.log`, or the configured `logging.logDir` /
+  `PAPERCLIP_LOG_DIR`. Each data directory gets its own file, so instances that
+  share a log directory never share one. When the data directory contains that
+  directory, including through a symlink or junction, the log goes to a sibling
+  of the data directory, which is also where it goes when the configured
+  directory is a UNC share or contains a character (such as `&`) that the
+  dependency does not pass to `pg_ctl`. Server startup also
+  allows up to 600 seconds to start when the last shutdown was unclean (a
+  `postmaster.pid` was left behind); the CLI, worktree and migration paths that
+  start the database still wait 60 seconds. An open log inside the data
+  directory made crash recovery fail with a sharing violation and outlast
+  pg_ctl's 60-second wait.
+
+- **Docs:** the fork getting-started guide uses placeholders for local
+  workspace and notes-vault paths instead of one machine's paths.
+
+- **[Refs #162]** Recovery recognizes Claude ACP session-limit failures and
+  `resets` clock messages. These failures use the existing provider-quota wait
+  and monitor path instead of immediate continuation retries. Ordinary ACP
+  errors, generic `session limit` tool or MCP wording, and deliberately paused
+  issues retain their existing behavior.
+
+- **[#20]** Limited DB Vitest discovery to authored `src` and `scripts`
+  suites. Compiled and stale `dist` tests no longer run a second time.
+  A CLI-backed regression runs through the root workspace and checks source
+  extensions, default exclusions, stale-file filters, and maintenance suites.
+  It reuses the pinned canonical scratch helper and confines child temp output.
+  This does not repair embedded PostgreSQL startup or process cleanup.
+  The scratch helper now rejects unsafe file extensions and unique suffixes,
+  keeps every created path inside its root, and creates owner-only scratch.
+
+- **[#169]** Server startup reuses an embedded PostgreSQL only when a query on
+  the `postmaster.pid` port reports the configured data directory, compared by
+  physical path (case-insensitive on Windows) with the embedded login. If the
+  PID may still be alive but identity cannot be verified, startup stops (exit
+  code 75) and leaves the lock file unchanged. A lock is treated as stale and
+  moved aside to `postmaster.pid.stale-<timestamp>` (never deleted) when its PID
+  is dead, is the server's own, belongs to a live process that is not PostgreSQL
+  while nothing answers on the recorded or configured port, or when the lock is
+  unreadable or garbled and no PostgreSQL answers or references this data
+  directory. Any lock still present just before start is moved aside the same
+  way; if it cannot be moved, startup refuses (exit code 75).
+
+- **[#148]** Preserve declared Codex model ordering after discovery and keep
+  ordinary model picker entries in the adapter’s order. GPT-6 entries stay
+  ahead of older declared models; unknown discovered IDs remain available and
+  deterministic. Detected-model promotion, provider groups, manual IDs, saved
+  selections and model discovery caching retain their existing behavior.
+
+- **[#164]** Refresh Lockfile accepts manual `ref` and `base` inputs that default
+  to `dev`. Each base has its own refresh branch and matching PR lookup. Master
+  pushes still refresh their triggering commit and retain auto-merge; other bases
+  require maintainer review. Both lockfile gates accept the bot's exact per-base branch.
+
+- **[#160]** The PR security step now lists each flag (check name and file,
+  or package names) in the job log and in the `security-review` check-run
+  summary. For `secret-scan` flags it names only the pattern, never the
+  matched text. A failed draft-advisory call (403 for the workflow token on
+  this fork) is logged and no longer stops the check run or the exit-0
+  contract. The summary stays under the GitHub size limit and counts the
+  flags it leaves out. Refs #137.
+
+- **[#159]** A Codex ACP run whose whole reply is a provider error object now
+  fails. codex-acp 1.1.14 sends a rejected request (for example an unsupported
+  model id) as reply text and ends the turn normally, so the run was recorded
+  as succeeded and started corrective runs on the same dead model. The Codex
+  ACP executor now returns exit code 1, error code
+  `codex_provider_error_reply`, and the provider error type and message as the
+  failure reason. Only a reply that, without blank lines and the model-metadata
+  warning, parses as one JSON error object (`type: "error"`, or an `error`
+  object with HTTP status 400-599) matches. Prose that quotes an error stays a
+  success.
+
+- **[#148]** Corrected comments in the Codex adapter and its test that said
+  `gpt-5.6-sol` "stays the default model". `DEFAULT_CODEX_LOCAL_MODEL` only
+  sets an entry of the model dropdown list. A Codex agent with an empty model
+  field runs without `--model`, so it uses the `model` key of its company's
+  Codex home `config.toml`. Comments only; no code or assertion changed.
+
+- Agent hires accept a company-scoped `Idempotency-Key` header or `idempotencyKey` body field. Matching retries return the original hire with HTTP 200; changed payloads return 409. A database unique index and transaction prevent concurrent duplicate agents and approvals. Plan-based hiring docs now recommend a revision-and-slot key.
+
+- **[#150]** Pin the Codex client under `codex-acp` 1.1.14 to `@openai/codex`
+  0.160.0 with a scoped pnpm override, so Codex agents can run the GPT-6
+  models (the server refuses them from 0.147.0 with HTTP 400). The lockfile
+  changes only `@openai/codex` and its platform packages, plus one
+  `@babel/runtime` line that pnpm re-resolved. A frozen reinstall and a
+  restart are needed to take effect.
+
+- **[#148]** Added the GPT-6 model ids (`gpt-6.1-sol`, `gpt-6-astra`,
+  `gpt-6-sol`, `gpt-6-luna`) to the Codex adapter's fixed model list and its
+  fast-mode list, with matching help text, docs and tests. The default model
+  stays `gpt-5.6-sol`. The ids need the Codex client 0.160.0 that #150
+  pins; this change touches no dependency or version pin.
+
+- **[#144]** Pass the configured bind host to detect-port when choosing the
+  listen port, so a port held on another address of the machine no longer
+  moves the server. Add opt-in `PAPERCLIP_STRICT_PORT=true` to fail startup
+  instead of moving to another port. Real-socket tests and docs included. A
+  wildcard listener on Windows is still not detected.
+
+- **[#140]** Registered the Hermes adapter's Vitest project in the root test
+  workspace and grouped PR runner. Exact pre-push selection now runs its
+  sibling tests locally; the registration and test-policy changes still
+  require a topic-branch PR and hosted CI before publication to `dev`.
+
+- **[#20]** Moved the access-route permissions test's one-time module import
+  into bounded suite setup after timing showed it exceeded the test's 10-second
+  limit on Windows. Bounded the adapter-route suite's per-test reset/import
+  setup at 60 seconds after a 30-second hook timeout under the staged gate;
+  the focused suite passed 13/13. The self-lockout assertion and timeout are
+  unchanged; process-tree leak and full-suite validation remain open.
+
+- **[#140]** Added an opt-in, fail-closed Hermes Local launch boundary for a
+  separate named profile and scrubbed child environment, bounded strict runs to
+  900 seconds and three turns, removed unconditional `--yolo`, and made the
+  CLI fixture portable on Windows. Adapter tests pass; effective Hermes auth,
+  provider hard spending limits, sandboxing, and live dispatch remain separate
+  acceptance gates.
 
 - **[#114]** Added optional company/system/account-scoped source identities to
   cost events. Identical imports replay without duplicating spend; changed

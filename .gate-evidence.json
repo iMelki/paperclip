@@ -6,14 +6,11 @@
     ".github/scripts/check-pr-dedup-search.mjs",
     ".github/scripts/check-pr-dependencies.mjs",
     ".github/scripts/check-pr-linked-issue.mjs",
-    ".github/scripts/check-pr-lockfile.mjs",
-    ".github/scripts/check-pr-security.mjs",
     ".github/scripts/check-pr-template.mjs",
     ".github/scripts/check-pr-test-coverage.mjs",
     ".github/workflows/agent-runtime-images.yml",
     ".github/workflows/docker.yml",
     ".github/workflows/e2e.yml",
-    ".github/workflows/refresh-lockfile.yml",
     ".github/workflows/release-smoke.yml",
     ".github/workflows/release-verify.yml",
     ".github/workflows/release.yml",
@@ -36,7 +33,7 @@
   "finalRepairedSnapshot": {
     "_status": "Intentional frozen historical snapshot of the 2026-08-17 gate-bootstrap repair bundle. PR #66 merged into dev as 90bd179dd and PR #69 as 987700f91 without re-recording this baseline; the PR #69 delivery evidence lives in doc/evidence/*/2026-08-18-pr69-receipt.json.",
     "date": "2026-08-17",
-    "recordedAtUtc": "2026-08-16T22:02:24.9919430Z",
+    "recordedAtUtc": "2026-08-16T22:02:24.991943Z",
     "baseHead": "b6e8ae0794bd8ca2f1e2625daadfd095f461955c",
     "codeCommit": "a3dba3f74681fcfa9a3c49ce613e78def67507d2",
     "implementationFileCount": 19,
@@ -45,6 +42,359 @@
     "focusedTests": "121/121 passed with no skip"
   },
   "gates": [
+    {
+      "path": "patches/acpx@0.12.0.patch",
+      "negativeFixture": "packages/adapter-utils/src/acpx-engine/typed-failure.test.ts",
+      "candidate": {
+        "baseHead": "42ef1700fb6f2da96a1bf04ba9d900c1f26e58cd",
+        "basePatchGitBlob": "8d5500a7058a4b2baadbf208e69958d7b69bc866",
+        "patchSha256": "0016168dabdce86a1d9a1b6b447a2d5ddd1df6f7527c45f496497e04b94b2d3b",
+        "installedRuntimeSha256": "4d0e95923c6ba6b20fe32390be9a63cf3acbcfb47ddcb561ebc3fa689b6758dc",
+        "acpxVersion": "0.12.0",
+        "restoredAtUtc": "2026-10-07T20:36:39.5586014Z"
+      },
+      "id": "acpx-air-session-failure-negotiation",
+      "description": "Advertise AIR sessionFailure so a supporting ACP agent can report terminal failures.",
+      "observedFailure": {
+        "date": "2026-10-07",
+        "command": "corepack pnpm@9.15.4 exec vitest run packages/adapter-utils/src/acpx-engine/typed-failure.test.ts --project @paperclipai/adapter-utils --maxWorkers=1 --no-file-parallelism -t fails a negotiated|advertises|warning --reporter=verbose",
+        "exitCode": 1,
+        "breakApplied": "Frozen base installation used the original 99-line patch. The fixture only emits typed metadata after negotiation.",
+        "reason": "4 failed, 2 passed, 2 excluded callback tests. In both modes initializeMeta was [null]; expected undefined to be 1. The failure runs returned exitCode 0 and end_turn; expected +0 to be 1.",
+        "output": [
+          {
+            "mode": "oneshot",
+            "exitCode": 0,
+            "errorCode": null,
+            "stopReason": "end_turn"
+          },
+          {
+            "mode": "oneshot",
+            "initializeMeta": [
+              null,
+              null
+            ]
+          },
+          {
+            "mode": "persistent",
+            "exitCode": 0,
+            "errorCode": null,
+            "stopReason": "end_turn"
+          },
+          {
+            "mode": "persistent",
+            "initializeMeta": [
+              null
+            ]
+          }
+        ],
+        "restoredPass": "Candidate overlay restored and hash read back. Same full focused file: 8 passed, 0 failed, 0 skipped, exit 0. Both initialize records advertise version 1 and capabilities [sessionFailure]; warnings stay successful.",
+        "restoredCommand": "corepack pnpm@9.15.4 exec vitest run packages/adapter-utils/src/acpx-engine/typed-failure.test.ts --project @paperclipai/adapter-utils --maxWorkers=1 --no-file-parallelism --reporter=verbose",
+        "restoredExitCode": 0,
+        "restoredOutput": [
+          {
+            "mode": "oneshot",
+            "exitCode": 1,
+            "errorCode": "acpx_turn_failed",
+            "stopReason": "ACP agent reported a terminal request failure."
+          },
+          {
+            "mode": "oneshot",
+            "initializeMeta": [
+              {
+                "jetbrains": {
+                  "air": {
+                    "version": 1,
+                    "capabilities": [
+                      "sessionFailure"
+                    ]
+                  }
+                }
+              },
+              {
+                "jetbrains": {
+                  "air": {
+                    "version": 1,
+                    "capabilities": [
+                      "sessionFailure"
+                    ]
+                  }
+                }
+              }
+            ]
+          },
+          {
+            "mode": "persistent",
+            "exitCode": 1,
+            "errorCode": "acpx_turn_failed",
+            "stopReason": "ACP agent reported a terminal request failure."
+          },
+          {
+            "mode": "persistent",
+            "initializeMeta": [
+              {
+                "jetbrains": {
+                  "air": {
+                    "version": 1,
+                    "capabilities": [
+                      "sessionFailure"
+                    ]
+                  }
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "currentHeadRerun": {
+        "head": "3fdd6b8dc49e18e5f537283ea0d31fdfada39ce4",
+        "baseHead": "95956f99516afaf23bccff2b34005c30c97a2c1a",
+        "patchGitBlob": "1a6b4816aadaa293cb6abe7e9072449253582139",
+        "patchSha256": "01dddc6f0fb228cb181a8987eb5ac68c50aae9027b2dce6ba13395014f47f3fa",
+        "date": "2026-10-20",
+        "command": "pnpm exec vitest run packages/adapter-utils/src/acpx-engine/typed-failure.test.ts --project @paperclipai/adapter-utils --maxWorkers=1 --no-file-parallelism",
+        "result": "15 passed, 0 failed, 0 skipped, exit 0; the test resolved the runtime built from this patch (verified byte-identical to the patch applied to the pristine package).",
+        "note": "The observedFailure and 'restoredPass' entries above (8 tests, base 42ef1700, patch 0016168d) record the earlier candidate and were not re-run against this head; the focused file now holds 15 tests."
+      }
+    },
+    {
+      "path": "patches/acpx@0.12.0.patch",
+      "negativeFixture": "packages/adapter-utils/src/acpx-engine/typed-failure.test.ts",
+      "candidate": {
+        "baseHead": "42ef1700fb6f2da96a1bf04ba9d900c1f26e58cd",
+        "basePatchGitBlob": "8d5500a7058a4b2baadbf208e69958d7b69bc866",
+        "patchSha256": "0016168dabdce86a1d9a1b6b447a2d5ddd1df6f7527c45f496497e04b94b2d3b",
+        "installedRuntimeSha256": "4d0e95923c6ba6b20fe32390be9a63cf3acbcfb47ddcb561ebc3fa689b6758dc",
+        "acpxVersion": "0.12.0",
+        "restoredAtUtc": "2026-10-07T20:36:39.5586014Z"
+      },
+      "id": "acpx-typed-terminal-session-failure",
+      "description": "Fail error-severity typed terminal turns despite end_turn; preserve warnings and full per-turn diagnostics.",
+      "observedFailure": {
+        "date": "2026-10-07",
+        "command": "corepack pnpm@9.15.4 exec vitest run packages/adapter-utils/src/acpx-engine/typed-failure.test.ts --project @paperclipai/adapter-utils --maxWorkers=1 --no-file-parallelism -t fails a negotiated|advertises --reporter=verbose",
+        "exitCode": 1,
+        "breakApplied": "Removed only the terminalFailureCategory guard from the owned installed runPromptTurn. Capability advertisement and callback plumbing remained. Asserted the exact guard span and throw before removal.",
+        "reason": "2 failed, 2 passed, 4 excluded tests. Both advertisement checks passed, but the actual negotiated typed errors returned exitCode 0 and end_turn; expected +0 to be 1. This isolates the terminal detector from negotiation.",
+        "output": [
+          {
+            "mode": "oneshot",
+            "exitCode": 0,
+            "errorCode": null,
+            "stopReason": "end_turn"
+          },
+          {
+            "mode": "oneshot",
+            "initializeMeta": [
+              {
+                "jetbrains": {
+                  "air": {
+                    "version": 1,
+                    "capabilities": [
+                      "sessionFailure"
+                    ]
+                  }
+                }
+              },
+              {
+                "jetbrains": {
+                  "air": {
+                    "version": 1,
+                    "capabilities": [
+                      "sessionFailure"
+                    ]
+                  }
+                }
+              }
+            ]
+          },
+          {
+            "mode": "persistent",
+            "exitCode": 0,
+            "errorCode": null,
+            "stopReason": "end_turn"
+          },
+          {
+            "mode": "persistent",
+            "initializeMeta": [
+              {
+                "jetbrains": {
+                  "air": {
+                    "version": 1,
+                    "capabilities": [
+                      "sessionFailure"
+                    ]
+                  }
+                }
+              }
+            ]
+          }
+        ],
+        "restoredPass": "Replaced the four owned package files with the candidate using atomic file replacement; store hardlinks were not edited. Runtime SHA-256 matches the candidate. Full focused file: 8 passed, 0 failed, 0 skipped, exit 0. Both startTurn and runTurn bind callbacks on consecutive persistent turns and preserve a title beyond 4096 characters.",
+        "restoredCommand": "corepack pnpm@9.15.4 exec vitest run packages/adapter-utils/src/acpx-engine/typed-failure.test.ts --project @paperclipai/adapter-utils --maxWorkers=1 --no-file-parallelism --reporter=verbose",
+        "restoredExitCode": 0,
+        "restoredOutput": [
+          {
+            "mode": "oneshot",
+            "exitCode": 1,
+            "errorCode": "acpx_turn_failed",
+            "stopReason": "ACP agent reported a terminal request failure."
+          },
+          {
+            "mode": "oneshot",
+            "initializeMeta": [
+              {
+                "jetbrains": {
+                  "air": {
+                    "version": 1,
+                    "capabilities": [
+                      "sessionFailure"
+                    ]
+                  }
+                }
+              },
+              {
+                "jetbrains": {
+                  "air": {
+                    "version": 1,
+                    "capabilities": [
+                      "sessionFailure"
+                    ]
+                  }
+                }
+              }
+            ]
+          },
+          {
+            "mode": "persistent",
+            "exitCode": 1,
+            "errorCode": "acpx_turn_failed",
+            "stopReason": "ACP agent reported a terminal request failure."
+          },
+          {
+            "mode": "persistent",
+            "initializeMeta": [
+              {
+                "jetbrains": {
+                  "air": {
+                    "version": 1,
+                    "capabilities": [
+                      "sessionFailure"
+                    ]
+                  }
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "currentHeadRerun": {
+        "head": "3fdd6b8dc49e18e5f537283ea0d31fdfada39ce4",
+        "baseHead": "95956f99516afaf23bccff2b34005c30c97a2c1a",
+        "patchGitBlob": "1a6b4816aadaa293cb6abe7e9072449253582139",
+        "patchSha256": "01dddc6f0fb228cb181a8987eb5ac68c50aae9027b2dce6ba13395014f47f3fa",
+        "date": "2026-10-20",
+        "command": "pnpm exec vitest run packages/adapter-utils/src/acpx-engine/typed-failure.test.ts --project @paperclipai/adapter-utils --maxWorkers=1 --no-file-parallelism",
+        "result": "15 passed, 0 failed, 0 skipped, exit 0; the test resolved the runtime built from this patch (verified byte-identical to the patch applied to the pristine package).",
+        "note": "The observedFailure and 'restoredPass' entries above (8 tests, base 42ef1700, patch 0016168d) record the earlier candidate and were not re-run against this head; the focused file now holds 15 tests."
+      }
+    },
+    {
+      "id": "server-startup-pre-push-contract-selection",
+      "path": "scripts/pre-push-test-selection.mjs",
+      "description": "Declares the existing real startServer contract suite for server/src/index.ts while retaining failure when that suite is missing.",
+      "negativeFixture": "scripts/pre-push-test-selection.test.mjs",
+      "observedFailure": {
+        "date": "2026-10-07",
+        "command": "node --test --test-name-pattern='selects the server startup contract for the server entry point' scripts/pre-push-test-selection.test.mjs",
+        "breakApplied": "Ran the new exact entry-point selection fixture before adding its declaration. The fixture contained the production source path, its real startup contract path, and an unrelated suite.",
+        "reason": "Exit 1, one failing selected test: actual selected files [] instead of [server/src/__tests__/server-startup-feedback-export.test.ts]. The real pre-push gate independently rejected the same source path as lacking a deterministic sibling or declared test after the full typecheck passed.",
+        "exitCode": 1,
+        "restoredPass": "Added only the exact source-to-contract declaration. node --test scripts/pre-push-test-selection.test.mjs passed 22/22, zero skipped, exit 0. The missing-contract case still rejects coverage and identifies the exact missing startup suite; unrelated tests stay unselected."
+      }
+    },
+    {
+      "id": "embedded-postgres-reuse-identity",
+      "path": "server/src/embedded-postgres-reuse.ts",
+      "description": "Server startup reuses PostgreSQL only after a query on the recorded port confirms the configured data directory (physical path, case-insensitive on Windows). Only a dead PID (ESRCH) or the current process PID enters normal startup; a possibly-live PID with a failed identity query keeps its lock and refuses startup.",
+      "negativeFixture": "server/src/__tests__/embedded-postgres-reuse-native.test.ts",
+      "observedFailure": {
+        "date": "2026-10-07",
+        "baseHead": "3f3f583d8bb1c2152fc7832d5e3c00f380e17349",
+        "command": "pnpm --filter @paperclipai/server exec vitest run src/__tests__/embedded-postgres-reuse-native.test.ts",
+        "breakApplied": "Extracted the exact isPidRunning/getRunningPid block from base server/src/index.ts into the helper's interface. The native fixture wrote its actual live Node PID into a temporary initialized cluster's PID file while the recorded port was closed. Readback proved different broken/fixed source hashes.",
+        "reason": "One test failed, zero skipped, exit 1: expected { pid: <live-node-pid>, port: <closed-test-port> } to be null. PID occupancy incorrectly accepted Node as PostgreSQL; there was no import, syntax, or startup-harness failure.",
+        "exitCode": 1,
+        "restoredPass": "The helper was restored byte-for-byte. The identical native command passed 1/1 with zero skips, exit 0, in 11.41 seconds. It rejected the live Node PID, retained the stale file for the normal start path, started actual PostgreSQL after stale-lock removal, reused the actual PostgreSQL PID and recorded port even with a different configured port, and confirmed no reuse after clean stop. The 16-case unit suite passed separately, exit 0.",
+        "restoredSourceSha256": "1bec93d49040c6195c30832bbf0e6cef5aa919474ec83543f8f3655264344d36"
+      },
+      "consumerProof": {
+        "negativeFixture": "server/src/__tests__/server-startup-feedback-export.test.ts",
+        "command": "pnpm --filter @paperclipai/server exec vitest run src/__tests__/server-startup-feedback-export.test.ts -t 'starts PostgreSQL and removes the recycled-PID lock'",
+        "breakApplied": "Restored the whole original server/src/index.ts from the base commit while keeping the new caller regression. No production process or data directory was used.",
+        "reason": "One failed, 21 deliberately unselected, exit 1: expected vi.fn() to be called once, but got 0 times. The real startServer entry point skipped embedded PostgreSQL startup for a live Node PID.",
+        "exitCode": 1,
+        "restoredPass": "Restored exact candidate index bytes and ran the complete focused startup file: 22/22 passed, zero skips, exit 0, 6.68 seconds. Four new cases verify stale-lock removal/start for recycled and dead PIDs, reuse of a verified server's recorded port, and refusal of another instance with its lock intact.",
+        "restoredIndexSha256": "b652a4044f249950b7f5828dcb11d424ba8e5d1b9a0f078adb5d8faa1ad30ead"
+      },
+      "limits": "Windows native fixture and mocked startup proof only. Production deployment, macOS/Linux native proof, longer crash-recovery readiness waits, and CLI lifecycle consumers remain separate."
+    },
+    {
+      "id": "db-discovery-canonical-scratch-provenance",
+      "path": "scripts/lib/ephemeral-scratch.mjs",
+      "description": "Keep the standalone scratch helper byte-equivalent to its pinned source after line-ending normalization. The pin moved from the canonical copy (a296c167...) to 4c29cea62dbba24e737f3e8776b504bd7c710c3fbc6dc3ad1c980243cef11af2 for the extension/unique/mode containment fix, the extension-aware name grammar, file-collision retry and private child roots; the canonical upstream copy still needs the same fix.",
+      "negativeFixture": "packages/db/src/test-discovery.test.ts",
+      "observedFailure": {
+        "date": "2026-10-01",
+        "command": "node scripts/run-vitest-stable.mjs --files packages/db/src/test-discovery.test.ts",
+        "breakApplied": "Added one inert comment to the isolated vendored helper; the module remained valid and its consumer still launched.",
+        "reason": "Exit 1 at the canonical SHA-256 assertion; the three CLI-backed discovery tests passed. The failure was source drift, not syntax, import, launch, or timeout.",
+        "restoredPass": "Restored the canonical helper text. The identical caller exited 0, 4/4 tests passed; normalized SHA-256 a296c167b1d77fcb4b665152917f38f02d9b7c8c9458601d96bb678eeb38a6be.",
+        "artifactPath": "doc/evidence/db-test-discovery-2026-10-01.md"
+      }
+    },
+    {
+      "id": "ephemeral-scratch-extension-containment",
+      "path": "scripts/lib/ephemeral-scratch.mjs",
+      "description": "createEphemeralFile accepts only a single safe extension suffix, ephemeralName accepts only a governed unique suffix, every created path is a direct child of the requested root, and scratch is created owner-only (0700 dirs, 0600 files).",
+      "negativeFixture": "packages/db/src/test-discovery.test.ts",
+      "observedFailure": {
+        "date": "2026-10-19",
+        "command": "node scripts/run-vitest-stable.mjs --files packages/db/src/test-discovery.test.ts",
+        "breakApplied": "Ran the new containment tests against the unfixed helper. An extension of '/../../escape' wrote a file one directory above the requested root.",
+        "reason": "Exit 1: 3 failed / 5 passed. Missing TypeError for traversal extensions and for an unsafe unique suffix; directory mode was not 0700.",
+        "restoredPass": "With the fix and the updated pin, the same command exited 0 with 8/8 tests passing.",
+        "artifactPath": "doc/evidence/db-test-discovery-2026-10-01.md"
+      }
+    },
+    {
+      "id": "db-authored-test-discovery",
+      "path": "packages/db/vitest.config.ts",
+      "description": "Select authored src and maintenance scripts tests while rejecting compiled, stale, and nested dist copies.",
+      "negativeFixture": "packages/db/src/test-discovery.test.ts",
+      "observedFailure": {
+        "date": "2026-10-01",
+        "command": "node scripts/run-vitest-stable.mjs --files packages/db/src/test-discovery.test.ts",
+        "breakApplied": "The isolated worktree restored the base config with unrestricted default discovery. Readback showed only environment: node; the same CLI-backed fixture and stable runner were retained.",
+        "reason": "Exit 1, two of three tests failed: discovery returned dist/basic.test.js, dist/stale-only.spec.js and other non-authored paths, and a CLI stale-dist filter returned a generated suite instead of an empty list. No syntax/import/launch error caused the failure.",
+        "restoredPass": "Restoring authored src/scripts inclusion and default-preserving dist exclusions gave exit 0, 3/3 tests. The separate real maintenance suite passed 15/15. The repaired config SHA-256 is 18c0d1d32d4d55f3017864881466c597fc7232ccb6ef82e9f85adf17288c1e2f.",
+        "artifactPath": "doc/evidence/db-test-discovery-2026-10-01.md"
+      }
+    },
+    {
+      "id": "hermes-local-strict-isolation-launch",
+      "path": "packages/adapters/hermes/src/server/strict-isolation.ts",
+      "description": "Reject unsafe Hermes Local profile/home/env/limit/API-host inputs before child spawn.",
+      "negativeFixture": "packages/adapters/hermes/scripts/strict-isolation-probe.mts",
+      "observedFailure": {
+        "date": "2026-09-28",
+        "command": "pnpm exec tsx scripts/strict-isolation-probe.mts --bad-profile; pnpm exec tsx scripts/strict-isolation-probe.mts --remote-api (from packages/adapters/hermes)",
+        "breakApplied": "The fixtures selected the default Hermes profile or an https://paperclip.example/api host; no live Hermes command ran.",
+        "reason": "The exact validator rejected the default profile and rejected the remote API host with 'Strict Hermes isolation requires a loopback Paperclip API URL'. Both exited 1.",
+        "exitCode": 1,
+        "restoredPass": "Without either negative flag, the same fixture printed 'accepted: named profile and isolated home' and exited 0."
+      }
+    },
     {
       "id": "embedded-postgres-failed-stop-preserves-data",
       "path": "packages/db/src/test-embedded-postgres.ts",
@@ -207,6 +557,12 @@
         "command": "git push --set-upstream origin agent/codex/47-windows-path-hooks-and-review-governance-20260831; node --test scripts/pre-push-test-selection.test.mjs; node scripts/run-pre-push-tests.mjs --repo-root . --dry-run --changed-file <each of the five non-sibling production paths> --target-ref refs/heads/topic",
         "reason": "The real pre-push caller rejected five changed production files because their higher-level contract suites were not same-stem siblings. The missing-declaration fixture then named the absent http-logger contract test. A post-review control restored the old removed-source rule; the new declared-contract deletion fixture failed because it was incorrectly assigned to hosted CI despite its surviving exact contract test. Existing fixtures still reject uncovered production, untracked tests, malformed inputs, and escaping or linked paths.",
         "restoredPass": "With exact source-to-test declarations and the deletion ownership rule restored, the selector chose the existing generator, HTTP redaction, and onboarding persistence contract suites; its caller-shaped dry run reported zero uncovered files and zero selection errors. The selector suite passed 18/18 and the complete Node gate group passed 21/21. Negative/restored task receipts: 348a5530df404961b965ca48ee939bef and 6e9e1453d0144a00bd47cd5a041aab01."
+      },
+      "subsequentProof": {
+        "date": "2026-09-28",
+        "command": "node --test scripts/pre-push-test-selection.test.mjs",
+        "reason": "A new Hermes runner-classification assertion failed on the unregistered old selector with actual hosted-unregistered versus expected vitest; 19 passed, 1 failed, exit 1. The preceding real pre-push had already failed closed on two missing Hermes sibling tests after passing full typecheck.",
+        "restoredPass": "After adding Hermes to the selector, root Vitest projects, and grouped PR runner, the same selector suite passed 20/20, exit 0. The root exact runner executed both new Hermes sibling suites, 4/4 tests, exit 0; the complete Hermes package suite passed 78/78."
       }
     },
     {
@@ -650,6 +1006,165 @@
         "artifactPath": "doc/evidence/coordination-v2/2026-09-06-issue53-receipt.json"
       },
       "maintainabilityReceipt": "doc/evidence/coordination-v2/2026-09-06-maintainability.md"
+    },
+    {
+      "id": "plugin-single-company-job-invocation",
+      "path": "server/src/services/plugin-worker-manager.ts",
+      "description": "Binds runJob to exactly one host-authorized configured company, preserving denial for ambiguous, omitted, forged, expired, and cross-company scope.",
+      "negativeFixture": "server/src/__tests__/plugin-worker-manager.test.ts",
+      "observedFailure": {
+        "date": "2026-10-07",
+        "command": "pnpm --dir server exec vitest run --config <source-alias-config> src/__tests__/plugin-worker-manager.test.ts -t 'plugin job company context'",
+        "breakApplied": "Readback confirmed the singleton guard was changed from size === 1 to size >= 1. The test harness used the checkout SDK source because generated SDK outputs were absent.",
+        "reason": "Exit 1: the two-company case resolved { companyId: 'company-a' } instead of rejecting. The other ten focused cases passed, attributing the failure to the broadened company selector.",
+        "restoredPass": "Exact original source bytes restored and independently read back. The identical focused command exited 0 with 11/11 passing. The full worker-manager suite also exited 0 with 56/56 passing. Source-only evidence; compiler, independent review, and live adoption are separate gates.",
+        "restoredSourceSha256": "59866795649e6b9d3b17db05bf95eac4648e0c42f02e775f7b5460d0009e619e"
+      }
+    },
+    {
+      "id": "agent-hire-company-key-payload-identity",
+      "path": "server/src/services/agent-hire-idempotency.ts",
+      "description": "A company-scoped unique claim returns the original hire on matching replay and rejects changed payloads before another hire is created.",
+      "negativeFixture": "server/src/__tests__/agent-hire-idempotency.test.ts",
+      "observedFailure": {
+        "date": "2026-10-07",
+        "command": "pnpm exec vitest run --config vitest.config.ts src/__tests__/agent-hire-idempotency.test.ts -t 'two concurrent identical|a repeated request|rejects a different payload|keeps requests without' (from server)",
+        "breakApplied": "Restored the original route and shared hire validator from the base commit while retaining the regression fixture and new schema, then restored exact candidate bytes in finally.",
+        "reason": "Three attributable failures: concurrent requests returned two 201 responses, repeated request returned 201 rather than 200, and a changed payload reused the key with 201 rather than 409. The no-key compatibility case passed as required by unchanged behavior.",
+        "exitCode": 1,
+        "restoredPass": "Same real temporary PostgreSQL fixture after restoration and final review fixes: 15 passed, zero failures or skips, exit 0, 38.52 seconds. Concurrent readback found one agent, one approval, one matching receipt, two activities and zero runs. Shared schema tests separately failed 9/10 against the original validator and passed 10/10 after restoration."
+      }
+    },
+    {
+      "id": "pr-security-flags-visible-after-advisory-403",
+      "path": ".github/scripts/check-pr-security.mjs",
+      "description": "When the draft-advisory POST fails (403 for the workflow GITHUB_TOKEN on a fork), every flag is still listed by check name and file in the job log and the security-review check-run summary, the matched secret text is never printed, and the script exits 0.",
+      "negativeFixture": ".github/scripts/tests/check-pr-security-advisory-403.test.mjs",
+      "observedFailure": {
+        "date": "2026-10-07",
+        "command": "node --test .github/scripts/tests/check-pr-security-advisory-403.test.mjs",
+        "breakApplied": "git restore --source=origin/dev --worktree restored the unfixed script (SHA-256 7f847be419a9b10a498a6dbe602a4d646cb080faddf70738e19d359503e63f8b); git diff against origin/dev was empty.",
+        "reason": "Exit 1 with 1 pass and 1 fail. The 403 case failed on its first assertion: the job log did not list 'ci-tampering .github/workflows/pr.yml'. Its stderr held only the flag count and the advisory 403, as in the fork CI logs. The no-flag control passed.",
+        "exitCode": 1,
+        "restoredPass": "The fixed script was copied back (SHA-256 648fd3561a9747935da5b1cb118b81adad300e46653e41948a11cf4867244c7d). The identical command exited 0 with 2/2 passing. All .github/scripts/tests files passed 149/149."
+      }
+    },
+    {
+      "id": "lockfile-refresh-164-original-workflow",
+      "path": ".github/workflows/refresh-lockfile.yml",
+      "description": "Select the exact refresh head/base and retain maintainer review outside master.",
+      "negativeFixture": "scripts/refresh-lockfile.test.mjs",
+      "observedFailure": {
+        "date": "2026-10-08",
+        "command": "node --test --test-reporter=tap scripts/refresh-lockfile.test.mjs .github/scripts/tests/check-pr-lockfile.test.mjs",
+        "breakApplied": "Replaced only refresh-lockfile.yml with exact origin/dev bytes via git show; readback verified the break. Restored the candidate in finally.",
+        "reason": "Original workflow: 7 failures for absent input defaults/checkout/concurrency expressions, shared work branch, missing head/base PR routing, invalid-branch acceptance and dev auto-merge. 14 controls passed.",
+        "exitCode": 1,
+        "artifactPath": "doc/evidence/lockfile-refresh-164/original-workflow.log",
+        "restoredPass": "21 pass, 0 fail; byte-identical restoration verified.",
+        "restoredExitCode": 0,
+        "restoredArtifactPath": "doc/evidence/lockfile-refresh-164/original-workflow-restored.log",
+        "restoredSha256": "ab56c84ec3688fddd3f7695883fb55d19ab522f5b427dab2ae5ab8f17b9002dc",
+        "scope": "Local shell/CLI stubs and actual predicates; no live dispatch, push, PR creation or merge."
+      }
+    },
+    {
+      "id": "lockfile-refresh-164-loosened-lockfile-gate",
+      "path": ".github/scripts/check-pr-lockfile.mjs",
+      "description": "Select the exact refresh head/base and retain maintainer review outside master.",
+      "negativeFixture": ".github/scripts/tests/check-pr-lockfile.test.mjs",
+      "observedFailure": {
+        "date": "2026-10-08",
+        "command": "node --test --test-reporter=tap .github/scripts/tests/check-pr-lockfile.test.mjs",
+        "breakApplied": "Replaced the bot-author test with true and exact base equality with prBranch.startsWith('chore/refresh-lockfile-'); verified non-no-op edit and restored in finally.",
+        "reason": "Four rejection assertions failed: non-bot author, wrong base, extra branch suffix and missing base were accepted. Seven controls passed. Original gate separately failed all 3 new per-base acceptance cases.",
+        "exitCode": 1,
+        "artifactPath": "doc/evidence/lockfile-refresh-164/loosened-lockfile-gate.log",
+        "restoredPass": "11 pass, 0 fail; byte-identical restoration verified.",
+        "restoredExitCode": 0,
+        "restoredArtifactPath": "doc/evidence/lockfile-refresh-164/loosened-lockfile-gate-restored.log",
+        "restoredSha256": "b3aa32f56c0a0265a457a4974f36da6a73514a69f89abed715f7d6040ae3e888",
+        "scope": "Local shell/CLI stubs and actual predicates; no live dispatch, push, PR creation or merge."
+      }
+    },
+    {
+      "id": "lockfile-refresh-164-loosened-pr-policy",
+      "path": ".github/workflows/pr.yml",
+      "description": "Select the exact refresh head/base and retain maintainer review outside master.",
+      "negativeFixture": "scripts/refresh-lockfile.test.mjs",
+      "observedFailure": {
+        "date": "2026-10-08",
+        "command": "node --test --test-reporter=tap scripts/refresh-lockfile.test.mjs",
+        "breakApplied": "Replaced only the new github-actions[bot] author condition with true; readback verified the break. Restored exact candidate bytes in finally.",
+        "reason": "The PR policy accepted example chore/refresh-lockfile-dev -> dev; the test expected the manual-lockfile block to run. Exactly 1 failed, 9 controls passed.",
+        "exitCode": 1,
+        "artifactPath": "doc/evidence/lockfile-refresh-164/loosened-pr-policy.log",
+        "restoredPass": "10 pass, 0 fail; byte-identical restoration verified.",
+        "restoredExitCode": 0,
+        "restoredArtifactPath": "doc/evidence/lockfile-refresh-164/loosened-pr-policy-restored.log",
+        "restoredSha256": "befa0a2708e6b875aff8cee3addc62b06cf9a02a57ed6896efbc759e2413db26",
+        "scope": "Local shell/CLI stubs and actual predicates; no live dispatch, push, PR creation or merge."
+      }
+    },
+    {
+      "id": "heartbeat-workspace-containment-execution-completion",
+      "path": "server/src/__tests__/heartbeat-workspace-branch-containment.test.ts",
+      "description": "Await tracked heartbeat completion before final agent and containment assertions; reproduce delayed idle finalization in a disposable database.",
+      "negativeFixture": "server/src/__tests__/heartbeat-workspace-branch-containment.test.ts",
+      "observedFailure": {
+        "date": "2026-10-07",
+        "command": "(from server) node ../node_modules/vitest/vitest.mjs run src/__tests__/heartbeat-workspace-branch-containment.test.ts --reporter=default --reporter=json --outputFile.json=<run-report>",
+        "breakApplied": "Restored both original polling helpers and the default vi.waitFor status wait. Kept the 1.5-second final-idle-write trigger and marked agents. Verified the original waits were present and the replacement helper was absent before execution.",
+        "reason": "The project_primary configuration-failure case expected idle with null errorReason and read running with null errorReason. Exactly 1 failed, 7 passed, 0 skipped; exit 1.",
+        "exitCode": 1,
+        "artifactPath": "doc/evidence/issue-154/negative.txt",
+        "restoredPass": "Restored the saved fixed bytes, verified their SHA-256, then observed 10 consecutive runs: each 8 passed, 0 failed, 0 skipped, exit 0. Five unmodified baseline runs were green, so the negative proof uses a controlled slow final status write rather than claiming a natural flake reproduced.",
+        "restoredExitCode": 0,
+        "restoredArtifactPath": "doc/evidence/issue-154/runs.json",
+        "restoredTestSha256": "95d37d85c1d1ed93774e7383e6b8f6cbe0f17b94d80f0495cecbde040352c1e8",
+        "scope": "Serialized native Windows integration tests against disposable databases and Git fixtures. No live instance or hosted CI proof."
+      },
+      "maintainabilityReceipt": "doc/evidence/issue-154/verification.md",
+      "historicalNote": "restoredTestSha256 matches no committed version of the test file; this entry is kept unchanged as the original record and is superseded by heartbeat-workspace-containment-execution-completion-rebound."
+    },
+    {
+      "id": "heartbeat-workspace-containment-execution-completion-rebound",
+      "path": "server/src/__tests__/heartbeat-workspace-branch-containment.test.ts",
+      "description": "Rebinds the execution-completion gate to the committed test bytes (LF blob 9b492dea..., as committed at 8234176d) with independent reruns.",
+      "negativeFixture": "server/src/__tests__/heartbeat-workspace-branch-containment.test.ts",
+      "observedFailure": {
+        "date": "2026-10-12",
+        "command": "(from server) node ../node_modules/vitest/vitest.mjs run src/__tests__/heartbeat-workspace-branch-containment.test.ts --maxWorkers=1 --reporter=default --reporter=json --outputFile.json=<run-report>",
+        "breakApplied": "In an untracked scratch copy of the committed test, restored the merge-base polling helpers and default status wait; kept the 1.5-second final-idle-write trigger. The tracked test file was not edited.",
+        "reason": "3 failed, 5 passed, 0 skipped; exit 1. The project_primary configuration-failure case read running instead of idle (the intended failure); two old ten-second row polls read running instead of succeeded under host load.",
+        "exitCode": 1,
+        "artifactPath": "doc/evidence/issue-154/rerun-8234176d.json",
+        "restoredPass": "Three runs of the committed test at 8234176d: each 8 passed, 0 failed, 0 skipped, exit 0 (24/24); the run after the negative passed 8/8.",
+        "restoredExitCode": 0,
+        "restoredArtifactPath": "doc/evidence/issue-154/rerun-8234176d.json",
+        "restoredArtifactSha256": "07845da775713469eb06808e911da9e6eea4c07a0fddae1e91c67065e494a264",
+        "restoredTestSha256": "9b492deaf7e54a061d2c6262d99003db6aeef2a2759dd6bcf9af116a280c57c7",
+        "scope": "Serialized native Windows integration tests in an independent clone against disposable databases and Git fixtures. No live instance or hosted CI proof."
+      },
+      "maintainabilityReceipt": "doc/evidence/issue-154/verification.md"
+    },
+    {
+      "id": "acp-session-quota-recovery",
+      "path": "server/src/services/recovery/service.ts",
+      "description": "Recognize session quota failures from ACP and use the existing reset-time wait path.",
+      "negativeFixture": "server/src/services/recovery/provider-failure-classification.test.ts",
+      "observedFailure": {
+        "date": "2026-10-13",
+        "command": "(from server) node ../node_modules/vitest/vitest.mjs run src/services/recovery/provider-failure-classification.test.ts --maxWorkers=1",
+        "breakApplied": "Added the new production-shaped session-limit fixtures before changing the classifier.",
+        "reason": "The old classifier returned null for four quota cases; 4 failed, 11 passed.",
+        "exitCode": 1,
+        "artifactPath": "doc/evidence/acp-session-quota/verification.md",
+        "restoredPass": "15 passed, 0 failed after applying the classifier change; the final suite after review rounds is 28 passed, 0 failed.",
+        "restoredExitCode": 0,
+        "scope": "Isolated local source tests; no installed runtime or native recovery proof.",
+        "restoredArtifactPath": "doc/evidence/acp-session-quota/verification.md"
+      }
     }
   ]
 }

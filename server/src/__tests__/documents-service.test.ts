@@ -118,6 +118,22 @@ describeEmbeddedPostgres("documentService system issue documents", () => {
     }));
   });
 
+  it("returns the current revision for missing and stale update preconditions", async () => {
+    const { issueId } = await createIssueWithDocuments();
+    const current = await svc.getIssueDocumentByKey(issueId, "plan");
+    const input = { issueId, key: "plan", format: "markdown" as const, body: "Revised plan" };
+    for (const baseRevisionId of [undefined, null, randomUUID()]) {
+      await expect(svc.upsertIssueDocument({ ...input, baseRevisionId })).rejects.toMatchObject({
+        status: 409,
+        details: { currentRevisionId: current!.latestRevisionId },
+      });
+    }
+    expect((await svc.getIssueDocumentByKey(issueId, "plan"))?.body).toBe("# Plan");
+    const updated = await svc.upsertIssueDocument({ ...input, baseRevisionId: current!.latestRevisionId });
+    expect(updated.document.body).toBe("Revised plan");
+    expect(updated.document.latestRevisionId).not.toBe(current!.latestRevisionId);
+  });
+
   it("locks and unlocks issue documents", async () => {
     const { issueId } = await createIssueWithDocuments();
 

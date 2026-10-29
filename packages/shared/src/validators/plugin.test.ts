@@ -1,7 +1,12 @@
 import { describe, expect, it } from "vitest";
 import { PLUGIN_CAPABILITIES } from "../constants.js";
 import { resolveDeclaredSandboxCapabilities } from "../environment-support.js";
-import { pluginManagedRoutineDeclarationSchema, pluginManifestV1Schema, pluginUiSlotDeclarationSchema } from "./plugin.js";
+import {
+  pluginJobDeclarationSchema,
+  pluginManagedRoutineDeclarationSchema,
+  pluginManifestV1Schema,
+  pluginUiSlotDeclarationSchema,
+} from "./plugin.js";
 
 function buildSandboxProviderManifest(driver: Record<string, unknown>) {
   return {
@@ -420,5 +425,22 @@ describe("login pty transport capability and legacy alias", () => {
     );
 
     expect(rejected.success).toBe(false);
+  });
+});
+
+describe("plugin job declaration scope", () => {
+  const base = { jobKey: "sync.github-issues", displayName: "Sync GitHub issues", schedule: "*/5 * * * *" };
+
+  it("keeps a declared company or instance scope", () => {
+    expect(pluginJobDeclarationSchema.parse({ ...base, scope: "company" }).scope).toBe("company");
+    expect(pluginJobDeclarationSchema.parse({ ...base, scope: "instance" }).scope).toBe("instance");
+  });
+
+  it("leaves scope undefined when undeclared, so the host defaults to instance", () => {
+    expect(pluginJobDeclarationSchema.parse(base).scope).toBeUndefined();
+  });
+
+  it("rejects an unknown scope", () => {
+    expect(pluginJobDeclarationSchema.safeParse({ ...base, scope: "tenant" }).success).toBe(false);
   });
 });

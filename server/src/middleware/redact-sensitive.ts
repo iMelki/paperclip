@@ -11,6 +11,8 @@
 // objects/arrays. Caps depth so a hostile or accidental cycle can't pin
 // the logger.
 
+import { isSensitiveHttpHeaderName } from "./http-log-redaction.js";
+
 const SENSITIVE_KEYS = new Set<string>([
   "password",
   "currentpassword",
@@ -103,6 +105,36 @@ function stripSecretBearingUrlParts(value: string): string {
   }
 }
 
+// Header records shaped as { name, value } (for example tool
+// transportConfig.headerPolicy.staticHeaders) keep the credential in `value`,
+// which the per-key check above never flags. Mirrors the static header
+// sensitivity rules in packages/shared validators/tool-access.ts.
+const SENSITIVE_HEADER_NAMES = new Set<string>([
+  "authorization",
+  "cookie",
+  "proxy-authorization",
+  "set-cookie",
+  "x-api-key",
+  "x-csrf-token",
+  "x-xsrf-token",
+  "x-paperclip-tool-gateway-token",
+]);
+const SENSITIVE_HEADER_NAME_RE =
+  /(^|[-_])(access[-_]?key([-_]?id)?|api[-_]?key|auth|authorization|bearer|client[-_]?secret|cookie|credential(s)?|jwt|password|passwd|private[-_]?key|refresh[-_]?token|secret([-_]?access[-_]?key|[-_]?key)?|session([-_]?token)?|token)([-_]|$)/i;
+
+function isSensitiveHeaderName(name: string): boolean {
+  const normalized = name.trim().toLowerCase();
+  return SENSITIVE_HEADER_NAMES.has(normalized)
+    || SENSITIVE_HEADER_NAME_RE.test(normalized)
+    || isSensitiveHttpHeaderName(normalized);
+}
+
+function isSensitiveHeaderRecord(record: Record<string, unknown>): boolean {
+  if (!Object.prototype.hasOwnProperty.call(record, "value")) return false;
+  const name = record.name ?? record.header;
+  return typeof name === "string" && isSensitiveHeaderName(name);
+}
+
 export function redactSensitive(value: unknown, depth = 0): unknown {
   if (depth > MAX_DEPTH) return undefined;
   if (value === null || typeof value !== "object") return value;
@@ -111,7 +143,16 @@ export function redactSensitive(value: unknown, depth = 0): unknown {
     return value.map((entry) => redactSensitive(entry, depth + 1));
   }
   const out: Record<string, unknown> = {};
-  for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
+  const record = value as Record<string, unknown>;
+  const nonEmptyPlainBinding = record.type === "plain"
+    && Object.prototype.hasOwnProperty.call(record, "value")
+    && record.value !== "";
+  const sensitiveHeaderRecord = isSensitiveHeaderRecord(record);
+  for (const [key, entry] of Object.entries(record)) {
+    if ((nonEmptyPlainBinding || sensitiveHeaderRecord) && key === "value") {
+      out[key] = REDACTED;
+      continue;
+    }
     if (isSensitiveKey(key)) {
       out[key] = REDACTED;
       continue;
