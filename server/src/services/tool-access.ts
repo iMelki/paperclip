@@ -127,7 +127,7 @@ import { readSignedToolArgumentsPayload } from "./tool-content-guards.js";
 import { narrowestScopeBindings, profileIdsInBindingOrder } from "./tool-profile-binding-precedence.js";
 import { recordToolRuntimeAuditWriteFailure, TOOL_RUNTIME_AUDIT_WRITE_FAILURE_METRIC } from "./tool-runtime-metrics.js";
 import { createToolRuntimeSupervisor, ToolRuntimeSupervisorError } from "./tool-runtime-supervisor.js";
-import { createGitHubOAuthProviderConfig, GITHUB_OAUTH_METHOD_KEY, githubOAuthRequestedScopes, githubPrivateRepoAccessOptIn,
+import { createGitHubOAuthProviderConfig, GITHUB_OAUTH_METHOD_KEY, githubOAuthRequestedScopes, githubPrivateRepoAccessOptIn, githubStoredPrivateRepoAccessOptIn,
   getGitHubOAuthConnectionMethod } from "@paperclipai/shared/github-oauth";
 import { bindGitHubOAuthState, isBoundGitHubOAuthState, verifyGitHubOAuthState } from "./github-oauth-state.js";
 import { isNativeGitHubOAuthConnection, githubOAuthToolDescriptors, getGitHubOAuthToolDescriptor,
@@ -4253,7 +4253,7 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
       throw unprocessable("GitHub account expectation is missing. Reconnect.");
     }
     return { expectedLogin, expectedAccountId: typeof facts.accountId === "number" ? facts.accountId : undefined,
-      privateRepoAccess: githubPrivateRepoAccessOptIn(connection.config) };
+      privateRepoAccess: githubStoredPrivateRepoAccessOptIn(connection.config) };
   }
 
   async function verifiedGitHubCredential(connection: typeof toolConnections.$inferSelect, actor?: ActorInfo) {
@@ -6134,7 +6134,7 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
       connectionId: connection.id,
       codeVerifier: githubOAuth ? bindGitHubOAuthState({ verifier: codeVerifier, clientId: client.clientId,
         redirectUri: input.redirectUri, expectedLogin: gitHubGrantExpectation(connection).expectedLogin,
-        scopes: githubOAuthRequestedScopes(githubPrivateRepoAccessOptIn(connection.config)) }) : codeVerifier,
+        scopes: githubOAuthRequestedScopes(githubStoredPrivateRepoAccessOptIn(connection.config)) }) : codeVerifier,
       createdByActorType: binding.actorType,
       createdByActorId: binding.actorId,
       createdBySessionId: binding.sessionId,
@@ -6152,7 +6152,7 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
     authorizationUrl.searchParams.set("state", state);
     authorizationUrl.searchParams.set("code_challenge", base64UrlSha256(codeVerifier));
     authorizationUrl.searchParams.set("code_challenge_method", "S256");
-    const authorizationScopes = githubOAuth ? githubOAuthRequestedScopes(githubPrivateRepoAccessOptIn(connection.config)) : input.scopes ?? endpoints.scopes;
+    const authorizationScopes = githubOAuth ? githubOAuthRequestedScopes(githubStoredPrivateRepoAccessOptIn(connection.config)) : input.scopes ?? endpoints.scopes;
     if (authorizationScopes.length > 0) authorizationUrl.searchParams.set("scope", authorizationScopes.join(" "));
     if (githubOAuth) {
       authorizationUrl.searchParams.set("login", gitHubGrantExpectation(connection).expectedLogin);
@@ -6321,7 +6321,7 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
     const codeVerifier = githubOAuth ? verifyGitHubOAuthState(stateRow.codeVerifier, {
       clientId: client.clientId, redirectUri: input.redirectUri,
       expectedLogin: gitHubGrantExpectation(connection).expectedLogin,
-      scopes: githubOAuthRequestedScopes(githubPrivateRepoAccessOptIn(connection.config)),
+      scopes: githubOAuthRequestedScopes(githubStoredPrivateRepoAccessOptIn(connection.config)),
     }) : stateRow.codeVerifier;
 
     const token = await exchangeOAuthToken({

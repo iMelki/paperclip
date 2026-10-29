@@ -16,6 +16,8 @@ import {
   githubOAuthRequestedScopes,
   githubOAuthRequiredScopes,
   githubPrivateRepoAccessOptIn,
+  githubScopesExceed,
+  githubStoredPrivateRepoAccessOptIn,
   verifyGitHubOAuthExpiry,
   verifyGitHubOAuthGrant,
 } from "./github-oauth.js";
@@ -26,6 +28,7 @@ const grant = (overrides: Partial<Parameters<typeof verifyGitHubOAuthGrant>[0]> 
   account,
   expectedLogin: "test-operator",
   grantedScopes: "repo,project",
+  privateRepoAccess: true,
   ...overrides,
 });
 
@@ -125,15 +128,42 @@ describe("actual GitHub OAuth grant verification", () => {
 
   it.each(["", "public_repo", "read:project", "project", "repo", "myrepo,project", "public_repo,read:project_extra", "Public_repo,read:project"])(
     "default tier refuses grants missing read:project or public_repo: %s", (scopes) => {
-      expectRefusal(() => verifyGitHubOAuthGrant(grant({ grantedScopes: scopes })), "github_oauth_scopes_insufficient");
+      expectRefusal(() => verifyGitHubOAuthGrant(grant({ grantedScopes: scopes, privateRepoAccess: false })), "github_oauth_scopes_insufficient");
     },
   );
 
-  it.each(["read:project,public_repo", "project,public_repo", "read:project,repo", "repo,project"])(
-    "default tier accepts least access or a broader GitHub parent scope: %s", (scopes) => {
-      expect(verifyGitHubOAuthGrant(grant({ grantedScopes: scopes })).accountId).toBe(42);
+  it.each(["read:project,public_repo", "public_repo,read:project,read:org"])(
+    "default tier accepts an exact least-access grant: %s", (scopes) => {
+      expect(verifyGitHubOAuthGrant(grant({ grantedScopes: scopes, privateRepoAccess: false })).accountId).toBe(42);
     },
   );
+
+  it.each(["project,public_repo", "read:project,repo", "repo,project", "read:project,public_repo,repo", "read:project,public_repo,project"])(
+    "default tier refuses a grant wider than the chosen level (earlier broader consent): %s", (scopes) => {
+      expectRefusal(() => verifyGitHubOAuthGrant(grant({ grantedScopes: scopes, privateRepoAccess: false })), "github_oauth_scopes_too_broad");
+      expectRefusal(() => verifyGitHubOAuthGrant(grant({ grantedScopes: scopes, privateRepoAccess: undefined })), "github_oauth_scopes_too_broad");
+    },
+  );
+
+  it("private opt-in accepts the full repo grant", () => {
+    expect(verifyGitHubOAuthGrant(grant({ grantedScopes: "repo,project", privateRepoAccess: true })).grantedScopes).toEqual(["repo", "project"]);
+    expect(githubScopesExceed(["repo", "project"], true)).toBe(false);
+    expect(githubScopesExceed(["read:project", "public_repo"], false)).toBe(false);
+    expect(githubScopesExceed(["read:project", "public_repo", "repo"], false)).toBe(true);
+  });
+
+  it("treats a legacy stored connection with full repo scope and no flag as opted in, but never overrides an explicit flag", () => {
+    expect(githubStoredPrivateRepoAccessOptIn({ oauth: { scopes: ["repo", "project", "offline_access"] } })).toBe(true);
+    expect(githubStoredPrivateRepoAccessOptIn({ providerMetadata: { githubOAuth: { grantedScopes: ["repo", "project"] } } })).toBe(true);
+    expect(githubStoredPrivateRepoAccessOptIn({ githubPrivateRepoAccess: false, oauth: { scopes: ["repo", "project"] } })).toBe(false);
+    expect(githubStoredPrivateRepoAccessOptIn({ githubPrivateRepoAccess: "true", oauth: { scopes: ["repo"] } })).toBe(false);
+    expect(githubStoredPrivateRepoAccessOptIn({ githubPrivateRepoAccess: true })).toBe(true);
+    for (const config of [null, undefined, {}, [true], { oauth: { scopes: ["read:project", "public_repo"] } }, { oauth: { scopes: "repo" } }]) {
+      expect(githubStoredPrivateRepoAccessOptIn(config)).toBe(false);
+    }
+    // New, operator-supplied config stays strict: scopes alone never opt in.
+    expect(githubPrivateRepoAccessOptIn({ oauth: { scopes: ["repo", "project"] } })).toBe(false);
+  });
 
   it.each(["", "repo", "project", "repo,read:project", "public_repo,project", "read:project,public_repo", "myrepo,project", "repo,project_extra"])(
     "explicit private-repo opt-in refuses missing exact RW grants: %s", (scopes) => {

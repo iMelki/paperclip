@@ -44,10 +44,15 @@ const RESPONSE_MAX_BYTES = 1_000_000;
 const DEFAULT_TIMEOUT_MS = 10_000;
 const API_VERSION = "2026-03-10";
 
+/** Shown on a 422 when GitHub returns private-repository access for a public-only connection. */
+export const GITHUB_OAUTH_SCOPES_TOO_BROAD_MESSAGE = "GitHub granted private-repository access (repo or project scope) from an earlier sign-in, "
+  + "but this connection is public repositories only. Tick 'Include private repositories' and connect again, "
+  + "or revoke this OAuth App in GitHub settings (Settings > Applications > Authorized OAuth Apps) and reconnect. Nothing was saved.";
+
 export class GitHubOAuthTransportError extends HttpError {
   readonly code: string;
-  constructor(code: string, status = 502, dispatched = false, outcomeUnknown = false) {
-    super(status, code, { code, dispatched, outcomeUnknown });
+  constructor(code: string, status = 502, dispatched = false, outcomeUnknown = false, message?: string) {
+    super(status, message ?? code, { code, dispatched, outcomeUnknown });
     this.code = code;
   }
 }
@@ -179,7 +184,10 @@ export async function verifyGitHubOAuthAccount(input: {
     });
     return { ...current, rawTokenGrantedScopes: original.rawGrantedScopes, tokenGrantedScopes: original.grantedScopes };
   } catch (error) {
-    if (error instanceof GitHubOAuthValidationError) throw new GitHubOAuthTransportError(error.code, 422);
+    if (error instanceof GitHubOAuthValidationError) {
+      throw new GitHubOAuthTransportError(error.code, 422, false, false,
+        error.code === "github_oauth_scopes_too_broad" ? GITHUB_OAUTH_SCOPES_TOO_BROAD_MESSAGE : undefined);
+    }
     throw error;
   }
 }

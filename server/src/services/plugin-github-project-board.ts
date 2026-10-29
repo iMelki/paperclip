@@ -7,7 +7,7 @@ import { conflict, forbidden, unprocessable } from "../errors.js";
 import { pluginStateStore } from "./plugin-state-store.js";
 import { toolConnectionSnapshotColumns } from "./tool-connection-snapshot.js";
 import { isNativeGitHubOAuthConnection } from "./github-oauth-transport.js";
-import { githubOAuthRequiredScopes, githubPrivateRepoAccessOptIn, githubScopesSatisfy } from "@paperclipai/shared/github-oauth";
+import { githubOAuthRequiredScopes, githubScopesExceed, githubScopesSatisfy, githubStoredPrivateRepoAccessOptIn } from "@paperclipai/shared/github-oauth";
 import { checkedGitHubProjectPage, parseGitHubProjectBoardUrl, validateGitHubProjectPageInput,
   githubProjectAuthorizationDigest,
   type GitHubProjectPageInput } from "./github-oauth-project-page.js";
@@ -98,7 +98,8 @@ export function pluginGitHubProjectBoardService(
       || typeof facts.login !== "string" || typeof connection.config.expectedGitHubLogin !== "string"
       || facts.login.toLowerCase() !== connection.config.expectedGitHubLogin.toLowerCase()
       || !Array.isArray(grantedScopes)
-      || !githubScopesSatisfy(grantedScopes, githubOAuthRequiredScopes(githubPrivateRepoAccessOptIn(connection.config)))) {
+      || !githubScopesSatisfy(grantedScopes, githubOAuthRequiredScopes(githubStoredPrivateRepoAccessOptIn(connection.config)))
+      || githubScopesExceed(grantedScopes, githubStoredPrivateRepoAccessOptIn(connection.config))) {
       throw forbidden("Selected native GitHub OAuth connection is not verified and active");
     }
     const accessRefs = connection.credentialSecretRefs.filter(ref => ref.configPath === "oauth.access_token");
@@ -197,7 +198,8 @@ export function pluginGitHubProjectBoardService(
         const facts = record(record(row.config.providerMetadata).githubOAuth), grantedScopes = facts.grantedScopes;
         return isNativeGitHubOAuthConnection(row) && typeof facts.accountId === "number" && typeof facts.login === "string"
           && Array.isArray(grantedScopes)
-          && githubScopesSatisfy(grantedScopes, githubOAuthRequiredScopes(githubPrivateRepoAccessOptIn(row.config)))
+          && githubScopesSatisfy(grantedScopes, githubOAuthRequiredScopes(githubStoredPrivateRepoAccessOptIn(row.config)))
+          && !githubScopesExceed(grantedScopes, githubStoredPrivateRepoAccessOptIn(row.config))
           ? [{ connectionId: row.id, name: row.name, accountId: facts.accountId, login: facts.login,
             lastVerifiedAt: typeof facts.checkedAt === "string" ? facts.checkedAt : null }] : [];
       });

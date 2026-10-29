@@ -35,6 +35,24 @@ export function githubPrivateRepoAccessOptIn(config: unknown): boolean {
     && (config as Record<string, unknown>)[GITHUB_OAUTH_PRIVATE_REPO_OPT_IN_KEY] === true;
 }
 
+/**
+ * Opt-in for a STORED connection. An explicit boolean wins. A legacy connection saved before
+ * the opt-in flag existed (flag absent) that already requested or was granted full `repo`
+ * is treated as opted in, so it keeps working and reconnects with the same scopes instead of
+ * being rejected as too wide. Never use this for new, operator-supplied config.
+ */
+export function githubStoredPrivateRepoAccessOptIn(config: unknown): boolean {
+  if (config === null || typeof config !== "object" || Array.isArray(config)) return false;
+  const record = config as Record<string, unknown>;
+  const flag = record[GITHUB_OAUTH_PRIVATE_REPO_OPT_IN_KEY];
+  if (flag !== undefined) return flag === true;
+  const list = (value: unknown): unknown[] => (Array.isArray(value) ? value : []);
+  const child = (value: unknown, key: string): unknown =>
+    value !== null && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>)[key] : undefined;
+  return list(child(record.oauth, "scopes")).includes("repo")
+    || list(child(child(record.providerMetadata, "githubOAuth"), "grantedScopes")).includes("repo");
+}
+
 export function githubOAuthRequestedScopes(privateRepoAccess = false): string[] {
   return [...(privateRepoAccess === true ? GITHUB_OAUTH_PRIVATE_REQUESTED_SCOPES : GITHUB_OAUTH_PUBLIC_REQUESTED_SCOPES)];
 }
@@ -49,6 +67,17 @@ const GITHUB_SCOPE_PARENT: Record<string, string> = { "read:project": "project",
 export function githubScopesSatisfy(granted: readonly unknown[], required: readonly string[]): boolean {
   return required.every((scope) => granted.includes(scope)
     || (GITHUB_SCOPE_PARENT[scope] !== undefined && granted.includes(GITHUB_SCOPE_PARENT[scope])));
+}
+/**
+ * Scopes that are wider than the least-access tier. A default (public) connection must not
+ * be stored with any of these, even when GitHub returns them from an earlier broader consent.
+ */
+export const GITHUB_OAUTH_PRIVATE_TIER_ONLY_SCOPES = ["repo", "project"] as const;
+
+/** True when the grant holds any scope wider than the chosen tier allows. */
+export function githubScopesExceed(granted: readonly unknown[], privateRepoAccess = false): boolean {
+  if (privateRepoAccess === true) return false;
+  return GITHUB_OAUTH_PRIVATE_TIER_ONLY_SCOPES.some((scope) => granted.includes(scope));
 }
 // GitHub currently documents eight-hour access tokens; bound malformed expiry metadata.
 export const GITHUB_OAUTH_MAX_ACCESS_TTL_SECONDS = 86_400;
@@ -84,6 +113,7 @@ export type GitHubOAuthValidationCode =
   | "github_oauth_client_id_invalid"
   | "github_oauth_scope_metadata_invalid"
   | "github_oauth_scopes_insufficient"
+  | "github_oauth_scopes_too_broad"
   | "github_oauth_account_invalid"
   | "github_oauth_account_mismatch"
   | "github_oauth_expiry_invalid"
@@ -175,6 +205,10 @@ export function verifyGitHubOAuthGrant(input: GitHubOAuthGrantInput): GitHubOAut
   const parsed = parseGitHubGrantedScopes(input.grantedScopes);
   if (!githubScopesSatisfy(parsed.scopes, githubOAuthRequiredScopes(input.privateRepoAccess === true))) {
     refuse("github_oauth_scopes_insufficient");
+  }
+  if (githubScopesExceed(parsed.scopes, input.privateRepoAccess === true)) {
+    // An earlier consent granted private-repository access; refuse rather than store it.
+    refuse("github_oauth_scopes_too_broad");
   }
   return {
     provider: "github",
