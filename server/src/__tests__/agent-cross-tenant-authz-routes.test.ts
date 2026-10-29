@@ -535,6 +535,32 @@ describe.sequential("agent cross-tenant route authorization", () => {
     expect(mockLogActivity).not.toHaveBeenCalled();
   });
 
+  it("resumes (200) a marked agent once a real runtime is configured", async () => {
+    mockAgentService.getById.mockImplementation(async () => ({
+      ...baseAgent,
+      status: "paused",
+      pauseReason: "manual",
+      adapterType: "claude_local",
+      adapterConfig: { model: "configured" },
+      metadata: { "paperclip.pausedSetup": true },
+    }));
+    mockAgentService.resume.mockImplementation(async () => ({ ...baseAgent, status: "idle" }));
+    const app = await createApp({
+      type: "board",
+      userId: "board-user",
+      companyIds: [companyId],
+      source: "local_implicit",
+      isInstanceAdmin: true,
+    });
+
+    const res = await requestApp(app, (baseUrl) =>
+      request(baseUrl).post(`/api/agents/${agentId}/resume`).send({}),
+    );
+
+    expect(res.status).toBe(200);
+    expect(mockAgentService.resume).toHaveBeenCalledWith(agentId);
+  });
+
   it("returns a clear 409 for non-error agents", async () => {
     const { conflict } = await import("../errors.js");
     mockAgentService.getById.mockImplementation(async () => ({ ...baseAgent, status: "idle" }));

@@ -1,4 +1,4 @@
-import { isPausedAgentSetup, pausedAgentSetupFields, pausedAgentSetupProblem } from "@paperclipai/shared";
+import { isPausedAgentSetup, isPausedAgentSetupUnconfigured, pausedAgentSetupFields, pausedAgentSetupProblem } from "@paperclipai/shared";
 import { Router, type NextFunction, type Request, type Response } from "express";
 import { createHash, generateKeyPairSync, randomUUID } from "node:crypto";
 import path from "node:path";
@@ -3416,7 +3416,7 @@ export function agentRoutes(
       });
       return;
     }
-    if (isPausedAgentSetup(existing.metadata)) {
+    if (isPausedAgentSetupUnconfigured(existing)) {
       res.status(409).json({
         error: "Finish setup before resuming: this agent was created paused without a configured runtime",
         code: "agent_paused_setup_unconfigured",

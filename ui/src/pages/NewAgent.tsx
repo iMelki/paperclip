@@ -387,7 +387,7 @@ export function NewAgent() {
             <p className="text-xs text-muted-foreground mb-2">This will be the CEO</p>
           )}
           {submissionFrozen && <p className="mb-2 text-xs text-muted-foreground">This request is locked to its original company and settings. Retrying uses the same saved request.</p>}
-          {pausedSetup && <p className="mb-2 text-xs text-muted-foreground">Test Agent is unavailable: a paused agent has no runtime to test.</p>}
+          {pausedSetup && <p id="test-agent-disabled-reason" className="mb-2 text-xs text-muted-foreground">Test Agent is unavailable: a paused agent has no runtime to test.</p>}
           {formError && (
             <p className="text-xs text-destructive mb-2">{formError}</p>
           )}
@@ -410,6 +410,7 @@ export function NewAgent() {
                   variant="outline"
                   size="sm"
                   disabled={pausedSetup || testAgentState.disabled}
+                  aria-describedby={pausedSetup ? "test-agent-disabled-reason" : undefined}
                   onClick={() => { if (!pausedSetup) testAgentAction?.(); }}
                 >
                   {testAgentState.pending ? "Testing..." : "Test Agent"}

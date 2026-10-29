@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { createAgentHireSchema, createAgentSchema, updateAgentSchema } from "./validators/agent.js";
-import { isPausedAgentSetup, pausedAgentSetupFields, pausedAgentSetupProblem } from "./agent-paused-setup.js";
+import { isPausedAgentSetup, isPausedAgentSetupUnconfigured, pausedAgentSetupFields, pausedAgentSetupProblem } from "./agent-paused-setup.js";
 
 const inert = () => ({ name: "CFO", pausedSetup: true, ...pausedAgentSetupFields() });
 describe("paused agent setup boundary", () => {
@@ -45,5 +45,21 @@ describe("paused agent setup boundary", () => {
     expect(createAgentHireSchema.parse(ordinary)).not.toHaveProperty("pausedSetup");
     expect(createAgentHireSchema.parse(inert()).pausedSetup).toBe(true);
     expect(updateAgentSchema.parse({ pausedSetup: true })).not.toHaveProperty("pausedSetup");
+  });
+});
+
+describe("isPausedAgentSetupUnconfigured", () => {
+  const marker = { "paperclip.pausedSetup": true };
+  it("is true only with the marker and the inert process adapter", () => {
+    expect(isPausedAgentSetupUnconfigured({ metadata: marker, adapterType: "process", adapterConfig: {} })).toBe(true);
+    expect(isPausedAgentSetupUnconfigured({ metadata: marker, adapterConfig: null })).toBe(true);
+  });
+  it("is false once a real runtime is saved", () => {
+    expect(isPausedAgentSetupUnconfigured({ metadata: marker, adapterType: "claude_local", adapterConfig: {} })).toBe(false);
+    expect(isPausedAgentSetupUnconfigured({ metadata: marker, adapterType: "process", adapterConfig: { command: "run" } })).toBe(false);
+  });
+  it("is false without the marker", () => {
+    expect(isPausedAgentSetupUnconfigured({ metadata: {}, adapterType: "process", adapterConfig: {} })).toBe(false);
+    expect(isPausedAgentSetupUnconfigured(null)).toBe(false);
   });
 });

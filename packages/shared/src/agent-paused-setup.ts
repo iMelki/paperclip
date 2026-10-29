@@ -10,6 +10,17 @@ export function isPausedAgentSetup(metadata: unknown): boolean {
   return record(metadata)[PAUSED_AGENT_SETUP_KEY] === true;
 }
 
+/**
+ * True only while the agent carries the paused-setup marker AND still has no runtime:
+ * the inert process adapter with an empty adapter config. Once a real runtime is saved
+ * the marker no longer blocks resume, so nothing has to clear it.
+ */
+export function isPausedAgentSetupUnconfigured(agent: { metadata?: unknown; adapterType?: unknown; adapterConfig?: unknown } | null | undefined): boolean {
+  if (!agent || !isPausedAgentSetup(agent.metadata)) return false;
+  const adapterType = agent.adapterType ?? "process";
+  return adapterType === "process" && Object.keys(record(agent.adapterConfig)).length === 0;
+}
+
 export function pausedAgentSetupFields(metadata?: unknown) {
   return {
     adapterType: "process" as const,

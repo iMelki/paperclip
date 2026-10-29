@@ -178,11 +178,12 @@ describe("AgentActionButtons", () => {
   });
 
   it("shows Finish setup instead of Resume for a paused unconfigured agent", async () => {
-    render(makeAgent({ status: "paused", metadata: { "paperclip.pausedSetup": true } }));
+    render(makeAgent({ status: "paused", adapterType: "process", adapterConfig: {}, metadata: { "paperclip.pausedSetup": true } } as Partial<Agent>));
     await flushReact();
 
     expect(container.textContent).toContain("Finish setup");
     expect(container.textContent).not.toContain("Resume");
+    expect(container.querySelector('button[aria-label="Finish setup"]')).not.toBeNull();
     const finish = Array.from(container.querySelectorAll("button")).find((b) => b.textContent?.includes("Finish setup"));
     await act(async () => {
       finish?.click();
@@ -190,6 +191,19 @@ describe("AgentActionButtons", () => {
     await flushReact();
     expect(mockNavigate).toHaveBeenCalledWith("/agents/alpha/configuration");
     expect(mockAgentsApi.resume).not.toHaveBeenCalled();
+  });
+
+  it("shows Resume, not Finish setup, once a marked agent has a real runtime", async () => {
+    render(makeAgent({
+      status: "paused",
+      adapterType: "claude_local",
+      adapterConfig: { model: "configured" },
+      metadata: { "paperclip.pausedSetup": true },
+    } as Partial<Agent>));
+    await flushReact();
+
+    expect(container.textContent).toContain("Resume");
+    expect(container.textContent).not.toContain("Finish setup");
   });
 
   it("calls the terminate success handler after terminating an agent", async () => {
