@@ -116,10 +116,18 @@ describe("fixed GitHub authenticated-account proof", () => {
     },
   );
 
-  it("rejects insufficient actual grants despite requesting repo/project", async () => {
+  it("rejects insufficient actual grants despite requesting repo/project (explicit private opt-in)", async () => {
     const io = harness();
-    await expect(verifyGitHubOAuthAuthorization({ ...authorization(), scope: "repo,read:project" }, io.fetch))
+    await expect(verifyGitHubOAuthAuthorization({ ...authorization(), scope: "repo,read:project", privateRepoAccess: true }, io.fetch))
       .rejects.toThrow("github_oauth_scopes_insufficient");
+  });
+
+  it("default tier rejects a grant without public_repo or read:project and accepts least access", async () => {
+    await expect(verifyGitHubOAuthAuthorization({ ...authorization(), scope: "read:project" }, harness().fetch))
+      .rejects.toThrow("github_oauth_scopes_insufficient");
+    const io = harness(() => Response.json(user, { headers: { "X-OAuth-Scopes": "read:project, public_repo" } }));
+    const facts = await verifyGitHubOAuthAuthorization({ ...authorization(), scope: "read:project,public_repo" }, io.fetch);
+    expect(facts.grantedScopes).toEqual(["read:project", "public_repo"]);
   });
 
   it("derives current grant facts from GET/user header and retains original token-response scope separately", async () => {
@@ -135,7 +143,8 @@ describe("fixed GitHub authenticated-account proof", () => {
     "rejects missing, reduced, or malformed current grants despite saved full scopes: %s", async (scope) => {
       const response = scope === null ? Response.json(user) : Response.json(user, { headers: { "X-OAuth-Scopes": scope } });
       const io = harness(response);
-      await expect(verifyGitHubOAuthAccount({ headers, scope: "repo,project", expectedLogin: "test-operator", expectedAccountId: 42 }, io.fetch))
+      await expect(verifyGitHubOAuthAccount({ headers, scope: "repo,project", expectedLogin: "test-operator", expectedAccountId: 42,
+        privateRepoAccess: true }, io.fetch))
         .rejects.toThrow(/github_oauth_scope/);
       expect(io.calls).toHaveLength(1);
     },
@@ -147,7 +156,7 @@ describe("fixed GitHub authenticated-account proof", () => {
       .rejects.toThrow("github_oauth_scope_metadata_invalid");
   });
 
-  it.each([{ scope: ["repo", "project"] }, { scope: "repo,read:project" },
+  it.each([{ scope: ["repo", "project"] }, { scope: "read:project" },
     { expiresIn: 86401 }, { refreshToken: "" }])("surfaces safe actionable validation errors as HTTP 422 %#", async (change) => {
     const io = harness();
     try {

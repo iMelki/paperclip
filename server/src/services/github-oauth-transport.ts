@@ -186,7 +186,7 @@ export async function verifyGitHubOAuthAccount(input: {
 
 export async function verifyGitHubOAuthAuthorization(input: {
   accessToken: string; scope: unknown; expiresIn: unknown; refreshToken: unknown;
-  expectedLogin: string; expectedAccountId?: number;
+  expectedLogin: string; expectedAccountId?: number; privateRepoAccess?: boolean;
 }, guardedFetch: GitHubGuardedFetch): Promise<GitHubOAuthAuthorizationFacts> {
   try { verifyGitHubOAuthExpiry(input); }
   catch (error) {
@@ -196,7 +196,7 @@ export async function verifyGitHubOAuthAuthorization(input: {
   return verifyGitHubOAuthAccount({
     headers: { Authorization: `Bearer ${input.accessToken}` }, scope: input.scope,
     expectedLogin: input.expectedLogin, expectedAccountId: input.expectedAccountId,
-      privateRepoAccess: input.privateRepoAccess === true,
+    privateRepoAccess: input.privateRepoAccess === true,
   }, guardedFetch);
 }
 
