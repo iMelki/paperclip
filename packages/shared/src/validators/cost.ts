@@ -21,6 +21,17 @@ export const createCostEventSchema = z.object({
   outputTokens: z.number().int().nonnegative().optional().default(0),
   costCents: z.number().int().nonnegative(),
   occurredAt: z.string().datetime(),
+}).superRefine((value, ctx) => {
+  // Fork contract (dev): a source identity is all three fields or none.
+  const fields = ["sourceSystem", "sourceAccountId", "sourceEventId"] as const;
+  const supplied = fields.filter((field) => value[field] != null);
+  if (supplied.length > 0 && supplied.length !== fields.length) {
+    ctx.addIssue({
+      code: "custom",
+      path: ["sourceEventId"],
+      message: "sourceSystem, sourceAccountId and sourceEventId must be supplied together",
+    });
+  }
 }).transform((value) => ({
   ...value,
   biller: value.biller ?? value.provider,
