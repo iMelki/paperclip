@@ -78,6 +78,7 @@ export const agentRuntimeConfigSchema = z.object({
 }).catchall(z.unknown());
 
 export const createAgentSchema = z.object({
+  pausedSetup: z.boolean().optional(),
   name: z.string().min(1),
   role: z.enum(AGENT_ROLES).optional().default("general"),
   title: z.string().optional().nullable(),
@@ -133,7 +134,7 @@ export const createAgentHireSchema = createAgentSchema.extend({
 export type CreateAgentHire = z.infer<typeof createAgentHireSchema>;
 
 export const updateAgentSchema = objectWithoutDefaults(
-  createAgentSchema.omit({ permissions: true }),
+  createAgentSchema.omit({ permissions: true, pausedSetup: true }),
 )
   .partial()
   .extend({
