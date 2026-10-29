@@ -1,6 +1,6 @@
 import net from "node:net";
 import { afterEach, describe, expect, it } from "vitest";
-import { closeRegisteredClients, createDb } from "./client.js";
+import { closeAllRegisteredClients, closeRegisteredClients, createDb } from "./client.js";
 
 /**
  * A fake wire-protocol server. It speaks just enough of the startup and
@@ -108,5 +108,21 @@ describe("closeRegisteredClients", () => {
     }).not.toThrow();
 
     await db?.$client.end({ timeout: 0 }).catch(() => {});
+  });
+
+  it("closeAllRegisteredClients ends clients for every host and port (server shutdown path)", async () => {
+    const started = await startFakePostgresServer();
+    server = started.server;
+    const url = `postgres://test:test@127.0.0.1:${started.port}/test`;
+
+    const db = createDb(url, { connectTimeoutSeconds: 5 });
+    const reserved = await db.$client.reserve();
+
+    await closeAllRegisteredClients();
+
+    const settled = await reserved`select 1`.catch((error: unknown) => error);
+    expect(settled).toBeInstanceOf(Error);
+    // A second call finds nothing left to end.
+    await expect(closeAllRegisteredClients()).resolves.toBeUndefined();
   });
 });

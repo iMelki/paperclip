@@ -16,6 +16,7 @@ import type { Request as ExpressRequest, RequestHandler } from "express";
 import { warnIfUnsupportedNodeVersion } from "@paperclipai/shared/node-version";
 import { and, eq } from "drizzle-orm";
 import {
+  closeAllRegisteredClients,
   createDb,
   ensurePostgresDatabase,
   formatEmbeddedPostgresError,
@@ -1930,6 +1931,9 @@ export async function startServer(): Promise<StartedServer> {
       await finalizeServerShutdown({
         signal,
         shutdownAppServices: appShutdown,
+        // End the database pools before PostgreSQL stops, so a restart does not
+        // leave idle backends behind.
+        closeDatabasePools: closeAllRegisteredClients,
         stopEmbeddedPostgres,
         shutdownInstrumentation,
         shutdownSentry,

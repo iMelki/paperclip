@@ -23,6 +23,8 @@ type ShutdownLogger = {
 export async function finalizeServerShutdown(input: {
   signal: "SIGINT" | "SIGTERM";
   shutdownAppServices: (() => Promise<void>) | undefined;
+  /** Ends every database pool; runs after app services and before PostgreSQL stops. */
+  closeDatabasePools?: () => Promise<void>;
   stopEmbeddedPostgres: (() => Promise<void>) | null;
   shutdownInstrumentation: () => Promise<void>;
   shutdownSentry: () => Promise<void>;
@@ -37,6 +39,14 @@ export async function finalizeServerShutdown(input: {
     await input.shutdownAppServices?.();
   } catch (err) {
     input.log.error({ err, signal }, "Application service shutdown failed");
+  }
+
+  if (input.closeDatabasePools) {
+    try {
+      await input.closeDatabasePools();
+    } catch (err) {
+      input.log.error({ err, signal }, "Failed to end database pools during shutdown");
+    }
   }
 
   if (input.stopEmbeddedPostgres) {
