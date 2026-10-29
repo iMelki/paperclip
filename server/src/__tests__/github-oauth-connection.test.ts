@@ -288,7 +288,9 @@ describe("native GitHub OAuth service and routes (mandatory private PostgreSQL)"
     const seeded = await changeConnection(await readConnection(connected.connectionId), { ...(await readConnection(connected.connectionId)).config,
       githubPrivateRepoAccess: false, oauth: { ...((await readConnection(connected.connectionId)).config.oauth as Record<string, unknown>),
         scopes: ["repo", "project", "offline_access"] }, providerMetadata: { githubOAuth: { grantedScopes: ["repo", "project"] } } });
-    await request(app).patch(`/api/tool-connections/${seeded.id}`).send({ config: { expectedGitHubLogin: "x" } }).expect(200);
+    // PATCH replaces config whole; a generic edit that omits the three protected keys must keep them.
+    const { githubPrivateRepoAccess: _f, oauth: _o, providerMetadata: _p, ...editable } = seeded.config;
+    await request(app).patch(`/api/tool-connections/${seeded.id}`).send({ config: { ...editable, expectedGitHubLogin: "x" } }).expect(200);
     const kept = await readConnection(seeded.id);
     expect(kept.config.expectedGitHubLogin).toBe("x");
     expect(kept.config.githubPrivateRepoAccess).toBe(false);
