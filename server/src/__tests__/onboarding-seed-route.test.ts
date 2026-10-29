@@ -5,6 +5,7 @@ import { afterEach, expect, it, vi } from "vitest";
 import {
   activityLog,
   agents,
+  companyMemberships,
   companyOnboardingSeeds,
   goals,
   issues,
@@ -276,6 +277,55 @@ describeEmbeddedPostgres("POST /api/companies/:companyId/onboarding-seed", () =>
     const strangerApp = routeApp(ctx.db, strangerActor, onboardingSeedRoutes);
 
     const response = await post(strangerApp, companyId, SEED);
+
+    expect(response.status).toBe(403);
+    expect(await ctx.db.select().from(agents).where(eq(agents.companyId, companyId))).toHaveLength(0);
+    expect(await ctx.db.select().from(companyOnboardingSeeds)).toHaveLength(0);
+  });
+
+  // The seed creates a live CEO agent, so company access alone is not enough
+  // (Cursor security finding on #133): the route must refuse a member without
+  // agents:create and any agent API key, and create nothing for either.
+  it("refuses a company member without agents:create", async () => {
+    const { companyId } = await seedCompany();
+    const viewerId = `user-${randomUUID()}`;
+    await ctx.db.insert(companyMemberships).values({
+      companyId,
+      principalType: "user",
+      principalId: viewerId,
+      status: "active",
+      membershipRole: "viewer",
+      updatedAt: new Date(),
+    });
+    const viewerActor: BoardActor = {
+      type: "board",
+      source: "session",
+      userId: viewerId,
+      companyIds: [companyId],
+      memberships: [{ companyId, membershipRole: "viewer", status: "active" }],
+      isInstanceAdmin: false,
+    };
+    const viewerApp = routeApp(ctx.db, viewerActor, onboardingSeedRoutes);
+
+    const response = await post(viewerApp, companyId, SEED);
+
+    expect(response.status).toBe(403);
+    expect(await ctx.db.select().from(agents).where(eq(agents.companyId, companyId))).toHaveLength(0);
+    expect(await ctx.db.select().from(companyOnboardingSeeds)).toHaveLength(0);
+  });
+
+  it("refuses a same-company agent API key", async () => {
+    const { companyId } = await seedCompany();
+    const agentActor = {
+      type: "agent",
+      source: "agent_key",
+      agentId: randomUUID(),
+      companyId,
+      runId: null,
+    } as unknown as BoardActor;
+    const agentApp = routeApp(ctx.db, agentActor, onboardingSeedRoutes);
+
+    const response = await post(agentApp, companyId, SEED);
 
     expect(response.status).toBe(403);
     expect(await ctx.db.select().from(agents).where(eq(agents.companyId, companyId))).toHaveLength(0);
