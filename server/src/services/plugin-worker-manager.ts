@@ -18,7 +18,7 @@
  * @see PLUGIN_SPEC.md §13 — Host-Worker Protocol
  */
 
-import { fork, type ChildProcess } from "node:child_process";
+import { fork, type ChildProcess, type ForkOptions, type SpawnOptions } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { createInterface, type Interface as ReadlineInterface } from "node:readline";
@@ -1254,13 +1254,16 @@ export function createPluginWorkerHandle(
       TZ: process.env.TZ ?? "UTC",
     };
 
-    const child = fork(options.entrypointPath, [], {
+    // Node supports this fork option; the locked Node typings omit it from ForkOptions.
+    const workerOptions: ForkOptions & Pick<SpawnOptions, "windowsHide"> = {
       stdio: ["pipe", "pipe", "pipe", "ipc"],
       execArgv: options.execArgv ?? [],
       env: workerEnv,
+      windowsHide: true,
       // Don't let the child keep the parent alive
       detached: false,
-    });
+    };
+    const child = fork(options.entrypointPath, [], workerOptions);
 
     return child;
   }

@@ -1,4 +1,8 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
+import fs from "node:fs";
+import { createRequire } from "node:module";
+import path from "node:path";
+import { pathToFileURL } from "node:url";
 import { and, eq, sql } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { activityLog, agents, agentWakeupRequests, companies, companyMemberships, companySecrets, createDb, heartbeatRuns, issues, issueTreeHolds, plugins,
@@ -18,6 +22,7 @@ import type { PluginLoader } from "../services/plugin-loader.js";
 import { GITHUB_PROJECT_ATTESTATION_MAX_AGE_MS } from "../services/github-project-board-attestation.js";
 import { BOARD_IMPORT_NAMESPACE, boardImportDigest, type BoardImportIntent } from "../services/plugin-imported-issues-contract.js";
 import { BOARD_IMPORT_FIXTURE_SETUP_TIMEOUT_MS, startBoardImportFixtureDatabase } from "./helpers/board-import-fixture-db.js";
+import { createPluginWorkerHandle } from "../services/plugin-worker-manager.js";
 
 // This fixture mocks the credential reader and exercises real native DB/state/RPC custody.
 // The separate github-oauth-project-read fixture qualifies the actual reader; neither is execution proof until run.
@@ -75,6 +80,36 @@ async function seed() {
     scope: { companyId, projectId }, bind: { companyId, projectId, connectionId, boardUrl } };
 }
 type Setup = Awaited<ReturnType<typeof seed>>;
+async function actualBoardWorker(setup: Setup) {
+  const root = process.env.PAPERCLIP_BOARD_ARTIFACT_ROOT;
+  if (!root || !path.isAbsolute(root)
+    || path.normalize(fs.realpathSync.native(root)).toLowerCase() !== path.resolve(root).toLowerCase()) {
+    throw new Error("Explicit canonical retained Project12 artifact root required");
+  }
+  for (const [file, variable] of [["worker.js", "PAPERCLIP_BOARD_WORKER_SHA256"],
+    ["manifest.js", "PAPERCLIP_BOARD_MANIFEST_SHA256"]]) {
+    const expected = process.env[variable], filename = path.join(root, "dist", file);
+    if (!expected || !/^[a-f0-9]{64}$/.test(expected) || fs.lstatSync(filename).isSymbolicLink()
+      || createHash("sha256").update(fs.readFileSync(filename)).digest("hex") !== expected) {
+      throw new Error("Retained Project12 artifact hash mismatch");
+    }
+  }
+  const builtManifest = (await import(pathToFileURL(path.join(root, "dist/manifest.js")).href)).default;
+  expect(builtManifest.id).toBe(GITHUB_PROJECT_IMPORTER_KEY);
+  const importedBoard = vi.fn(setup.rpc["issues.importedBoard"]);
+  const handle = createPluginWorkerHandle(pluginId, {
+    entrypointPath: path.join(root, "dist/worker.js"), manifest: builtManifest, config: {},
+    instanceInfo: { instanceId: "synthetic-project12", hostVersion: "1.0.0" }, apiVersion: 1,
+    hostHandlers: { ...setup.rpc, "issues.importedBoard": importedBoard }, autoRestart: false,
+    proactiveCompanyScopes: [], execArgv: ["--import",
+      pathToFileURL(createRequire(import.meta.url).resolve("tsx/esm")).href],
+  });
+  const call = (key: string, params: Record<string, unknown>, userId: string | null = setup.userId) =>
+    handle.call("performAction", { key, params, companyId: setup.companyId,
+      actorContext: { type: "user", userId, agentId: null, runId: null, companyId: setup.companyId },
+      renderEnvironment: null });
+  return { handle, importedBoard, call };
+}
 async function binding(setup: Setup) {
   return setup.rpc["issues.importedBoard"]({ ...setup.bind, op: "bindProjectBoard" }, setup.context);
 }
@@ -121,7 +156,10 @@ async function waitForNativeLock(pid: number, finished: () => boolean) {
   }
   throw new Error("Native PostgreSQL lock custody was not observed within its bounded fixture deadline");
 }
-describe("native GitHub board OAuth binding/RPC custody", () => {
+// This launcher is Windows-only and requires an explicitly retained fixture directory.
+// Portable hooks report this group as skipped; native acceptance requires actual passes.
+describe.skipIf(process.platform !== "win32" || !process.env.PAPERCLIP_BOARD_FIXTURE_ROOT)(
+  "native GitHub board OAuth binding/RPC custody", () => {
   beforeAll(async () => {
     fixture = await startBoardImportFixtureDatabase();
     // Synthetic lock proof needs import + competing mutation + independent pg_stat_activity observer.
@@ -142,6 +180,48 @@ describe("native GitHub board OAuth binding/RPC custody", () => {
   });
   afterEach(() => dispose.splice(0).forEach(action => action()));
   afterAll(async () => { try { await db?.$client.end({ timeout: 5 }); } finally { await fixture?.cleanup(); } }, 30_000);
+  it.skipIf(!process.env.PAPERCLIP_BOARD_ARTIFACT_ROOT)(
+    "launches the pinned Project12 worker and imports twice through the real host database without dispatch", async () => {
+    const setup = await seed(), worker = await actualBoardWorker(setup);
+    try {
+      await worker.handle.start();
+      expect(worker.handle.diagnostics()).toMatchObject({ status: "running", totalCrashes: 0 });
+      await expect(worker.call("project.board.oauth.get", setup.scope)).resolves.toBeNull();
+      expect(worker.importedBoard).toHaveBeenCalledWith({ ...setup.scope, op: "readProjectBinding" },
+        expect.objectContaining({ invocationScope: expect.objectContaining({ companyId: setup.companyId,
+          actor: expect.objectContaining({ type: "user", userId: setup.userId }) }) }));
+      await expect(worker.call("project.board.oauth.get", setup.scope, null))
+        .rejects.toThrow("Native GitHub board OAuth request failed");
+      expect(worker.importedBoard).toHaveBeenLastCalledWith({ ...setup.scope, op: "readProjectBinding" },
+        expect.objectContaining({ invocationScope: expect.objectContaining({
+          actor: expect.objectContaining({ type: "user", userId: null }) }) }));
+      expect(await state(setup)).toEqual([]);
+      expect(await db.select().from(issues).where(eq(issues.companyId, setup.companyId))).toEqual([]);
+      expect(pageReader).not.toHaveBeenCalled();
+      await worker.call("project.board.oauth.bind", setup.bind);
+      const input = { ...setup.scope, boardUrl, selectedItemIds: ["PVTI_1"], maxSelected: 1 };
+      const plan = await worker.call("project.board.plan", input) as { supported: boolean; planId: string };
+      expect(plan.supported).toBe(true);
+      const first = await worker.call("project.board.import", { ...input, planId: plan.planId });
+      expect(first).toMatchObject({ complete: true, createdCount: 1, reusedCount: 0, heldCount: 0 });
+      const firstTasks = await db.select().from(issues).where(eq(issues.companyId, setup.companyId));
+      const firstState = (await state(setup)).filter(row => row.namespace === BOARD_IMPORT_NAMESPACE)
+        .sort((a, b) => a.stateKey.localeCompare(b.stateKey));
+      const second = await worker.call("project.board.import", { ...input, planId: plan.planId });
+      expect(second).toMatchObject({ complete: true, createdCount: 0, reusedCount: 1, heldCount: 0 });
+      const secondTasks = await db.select().from(issues).where(eq(issues.companyId, setup.companyId));
+      expect(secondTasks.map(issue => issue.id).sort()).toEqual(firstTasks.map(issue => issue.id).sort());
+      expect(firstTasks).toHaveLength(2);
+      for (const issue of [...firstTasks, ...secondTasks]) {
+        expect(issue).toMatchObject({ projectId: setup.projectId, status: "backlog", assigneeAgentId: null,
+          assigneeUserId: null, executionPolicy: null, executionState: null, checkoutRunId: null, executionRunId: null });
+      }
+      expect((await state(setup)).filter(row => row.namespace === BOARD_IMPORT_NAMESPACE)
+        .sort((a, b) => a.stateKey.localeCompare(b.stateKey))).toEqual(firstState);
+      await noAgentEffects(setup);
+    } finally { await worker.handle.stop(); }
+    expect(worker.handle.diagnostics()).toMatchObject({ status: "stopped", pid: null });
+  }, 25_000);
   it("lists metadata only, explicitly binds twice to one stable host record and imports twice without duplicates/wakes", async () => {
     const setup = await seed();
     const listed = await setup.rpc["issues.importedBoard"]({ ...setup.scope, op: "listProjectConnections" }, setup.context);
