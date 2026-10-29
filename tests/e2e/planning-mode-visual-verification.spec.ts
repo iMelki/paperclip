@@ -73,6 +73,12 @@ test("captures planning mode UI for desktop and mobile", async ({ page }) => {
   await expect(
     page.getByRole("heading", { name: "Let's get started..." }),
   ).toBeVisible({ timeout: 30_000 });
+  // The hire is rerouted to an http adapter, so Review must warn about the
+  // requested-vs-hired adapter mismatch (CTO ruling on #133).
+  await expect(page.getByTestId("onboarding-adapter-mismatch-warning")).toContainText(
+    "Connected with",
+    { timeout: 20_000 },
+  );
   await page.getByRole("button", { name: /Get started/ }).click();
   // The wizard now drops the user straight onto the first task's detail page,
   // and must not bounce through the dashboard (PAP-404).

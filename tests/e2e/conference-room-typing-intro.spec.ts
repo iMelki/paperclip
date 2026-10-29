@@ -91,6 +91,12 @@ async function runOnboardingWizard(page: Page, companyName: string) {
   // detail page.
   const getStarted = page.getByRole("button", { name: /Get started/ });
   await getStarted.waitFor({ timeout: 20_000 });
+  // The hire is rerouted to an http adapter, so Review must warn about the
+  // requested-vs-hired adapter mismatch (CTO ruling on #133).
+  await expect(page.getByTestId("onboarding-adapter-mismatch-warning")).toContainText(
+    "Connected with",
+    { timeout: 20_000 },
+  );
   await getStarted.click();
 }
 
