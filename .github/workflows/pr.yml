@@ -311,6 +311,8 @@ jobs:
     needs: [policy]
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: [rf-paperclip]
+    permissions:
+      contents: read
     # Same rf-slot hook budget as the other box jobs (45 min) plus 10 min of work.
     timeout-minutes: 55
 
@@ -348,6 +350,7 @@ jobs:
         run: |
           report="$RUNNER_TEMP/daytona-vitest.json"
           pnpm exec vitest run --config vitest.config.ts --passWithNoTests=false \
+            --exclude '**/*.live.test.ts' --exclude '**/node_modules/**' \
             --reporter=default --reporter=json --outputFile.json="$report"
           ran="$(node -e 'const r=require(process.argv[1]); console.log(r.numPassedTests + r.numFailedTests)' "$report")"
           echo "Daytona plugin tests executed: $ran"
@@ -360,7 +363,7 @@ jobs:
     # Preserve the legacy required-check name while the underlying work runs in parallel.
     name: verify
     if: ${{ always() }}
-    needs: [typecheck_release_registry, general_tests, build]
+    needs: [typecheck_release_registry, general_tests, build, daytona_plugin_tests]
     runs-on: ubuntu-latest
     timeout-minutes: 5
 
@@ -370,10 +373,12 @@ jobs:
           TYPECHECK_RELEASE_REGISTRY_RESULT: ${{ needs.typecheck_release_registry.result }}
           GENERAL_TESTS_RESULT: ${{ needs.general_tests.result }}
           BUILD_RESULT: ${{ needs.build.result }}
+          DAYTONA_PLUGIN_TESTS_RESULT: ${{ needs.daytona_plugin_tests.result }}
         run: |
           test "$TYPECHECK_RELEASE_REGISTRY_RESULT" = "success"
           test "$GENERAL_TESTS_RESULT" = "success"
           test "$BUILD_RESULT" = "success"
+          test "$DAYTONA_PLUGIN_TESTS_RESULT" = "success"
 
   build:
     name: Build
