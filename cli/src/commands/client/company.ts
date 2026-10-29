@@ -59,6 +59,7 @@ interface AgentMeResponse {
 type CompanyDeleteSelectorMode = "auto" | "id" | "prefix";
 type CompanyImportTargetMode = "new" | "existing";
 type CompanyCollisionMode = "rename" | "skip" | "replace";
+export type CompanyImportAdapterStrategy = "portable-defaults" | "preserve";
 
 interface CompanyDeleteOptions extends BaseClientOptions {
   by?: CompanyDeleteSelectorMode;
@@ -100,6 +101,7 @@ interface CompanyImportOptions extends BaseClientOptions {
   collision?: CompanyCollisionMode;
   ref?: string;
   paperclipUrl?: string;
+  adapterStrategy?: CompanyImportAdapterStrategy;
   yes?: boolean;
   dryRun?: boolean;
 }
@@ -385,13 +387,26 @@ export function buildSelectedFilesFromImportSelection(
   return Array.from(selected).sort((left, right) => left.localeCompare(right));
 }
 
+// Fork contract (dev d5402928): --adapter-strategy lets imports preserve
+// executable adapters, and skipped or unselected agents never get overrides.
 export function buildDefaultImportAdapterOverrides(
-  preview: Pick<CompanyPortabilityPreviewResult, "manifest" | "selectedAgentSlugs">,
+  preview: Pick<
+    CompanyPortabilityPreviewResult,
+    "manifest" | "plan" | "selectedAgentSlugs"
+  >,
+  adapterStrategy: CompanyImportAdapterStrategy = "portable-defaults",
 ): Record<string, { adapterType: string }> | undefined {
+  if (adapterStrategy === "preserve") return undefined;
   const selectedAgentSlugs = new Set(preview.selectedAgentSlugs);
+  const skippedAgentSlugs = new Set(
+    preview.plan.agentPlans
+      .filter((plan) => plan.action === "skip")
+      .map((plan) => plan.slug),
+  );
   const overrides = Object.fromEntries(
     preview.manifest.agents
-      .filter((agent) => selectedAgentSlugs.size === 0 || selectedAgentSlugs.has(agent.slug))
+      .filter((agent) => selectedAgentSlugs.has(agent.slug))
+      .filter((agent) => !skippedAgentSlugs.has(agent.slug))
       .filter((agent) => agent.adapterType === "process")
       .map((agent) => [
         agent.slug,
@@ -402,6 +417,18 @@ export function buildDefaultImportAdapterOverrides(
       ]),
   );
   return Object.keys(overrides).length > 0 ? overrides : undefined;
+}
+
+export function resolveCompanyImportAdapterStrategy(
+  value: string | undefined,
+): CompanyImportAdapterStrategy {
+  const normalized = value?.trim().toLowerCase() || "portable-defaults";
+  if (normalized !== "portable-defaults" && normalized !== "preserve") {
+    throw new Error(
+      "Invalid --adapter-strategy value. Use: portable-defaults | preserve",
+    );
+  }
+  return normalized;
 }
 
 function buildDefaultImportAdapterMessages(
@@ -1650,6 +1677,11 @@ export function registerCompanyCommands(program: Command): void {
       .option("--new-company-name <name>", "Name override for --target new")
       .option("--agents <list>", "Comma-separated agent slugs to import, or all", "all")
       .option("--collision <mode>", "Collision strategy: rename | skip | replace", "rename")
+      .option(
+        "--adapter-strategy <strategy>",
+        "Adapter handling: portable-defaults | preserve",
+        "portable-defaults",
+      )
       .option("--ref <value>", "Git ref to use for GitHub imports (branch, tag, or commit)")
       .option("--paperclip-url <url>", "Alias for --api-base on this command")
       .option("--yes", "Accept default selection and skip the pre-import confirmation prompt", false)
@@ -1672,6 +1704,9 @@ export function registerCompanyCommands(program: Command): void {
           if (!["rename", "skip", "replace"].includes(collision)) {
             throw new Error("Invalid --collision value. Use: rename, skip, replace");
           }
+          const adapterStrategy = resolveCompanyImportAdapterStrategy(
+            opts.adapterStrategy,
+          );
 
           const inferredTarget = opts.target ?? (opts.companyId || ctx.companyId ? "existing" : "new");
           const target = inferredTarget.toLowerCase() as CompanyImportTargetMode;
@@ -1797,7 +1832,10 @@ export function registerCompanyCommands(program: Command): void {
           if (!preview) {
             throw new Error("Import preview returned no data.");
           }
-          const adapterOverrides = buildDefaultImportAdapterOverrides(preview);
+          const adapterOverrides = buildDefaultImportAdapterOverrides(
+            preview,
+            adapterStrategy,
+          );
           const adapterMessages = buildDefaultImportAdapterMessages(adapterOverrides);
 
           if (opts.dryRun) {

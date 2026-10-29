@@ -22,6 +22,7 @@ import { toolAccessService } from "../services/tool-access.js";
 import { createToolGatewayService } from "../services/tool-gateway.js";
 import { canonicalToolArguments, signToolArguments } from "../services/tool-content-guards.js";
 import {
+  EMBEDDED_POSTGRES_TEST_SETUP_TIMEOUT_MS,
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
@@ -37,7 +38,7 @@ describeEmbeddedPostgres("tool review queue vs unsigned ask-first request", () =
   beforeAll(async () => {
     tempDb = await startEmbeddedPostgresTestDatabase("paperclip-review-queue-unsigned-");
     db = createDb(tempDb.connectionString);
-  }, 20_000);
+  }, EMBEDDED_POSTGRES_TEST_SETUP_TIMEOUT_MS);
 
   afterAll(async () => {
     await tempDb?.cleanup();

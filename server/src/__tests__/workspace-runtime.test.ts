@@ -73,6 +73,7 @@ import type { WorkspaceOperation } from "@paperclipai/shared";
 import type { WorkspaceOperationRecorder } from "../services/workspace-operations.ts";
 import { deriveWorktreeInstanceId } from "../services/workspace-instance-cleanup.ts";
 import {
+  EMBEDDED_POSTGRES_TEST_SETUP_TIMEOUT_MS,
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
@@ -5266,6 +5267,13 @@ describe("readLocalServicePortOwner", () => {
       `#!/bin/sh\nprintf '${launchedPid}\\n'\n`,
       { mode: 0o755 },
     );
+    // The fork resolves netstat as %SystemRoot%\System32\netstat.exe (9e37ea19),
+    // not from PATH, so stage the same fake there too.
+    const previousSystemRoot = process.env.SystemRoot;
+    await fs.mkdir(path.join(fakeBin, "System32"), { recursive: true });
+    await fs.copyFile(path.join(fakeBin, "netstat"), path.join(fakeBin, "System32", "netstat.exe"));
+    await fs.chmod(path.join(fakeBin, "System32", "netstat.exe"), 0o755);
+    process.env.SystemRoot = fakeBin;
     process.env.PATH = `${fakeBin}${path.delimiter}${previousPath ?? ""}`;
     Object.defineProperty(process, "platform", { value: "win32" });
 
@@ -5275,6 +5283,8 @@ describe("readLocalServicePortOwner", () => {
     } finally {
       if (previousPath === undefined) delete process.env.PATH;
       else process.env.PATH = previousPath;
+      if (previousSystemRoot === undefined) delete process.env.SystemRoot;
+      else process.env.SystemRoot = previousSystemRoot;
       await fs.rm(fakeBin, { recursive: true, force: true });
     }
   });
@@ -5598,7 +5608,7 @@ describeEmbeddedPostgres("workspace dirty quarantine branch repair", () => {
   beforeAll(async () => {
     tempDb = await startEmbeddedPostgresTestDatabase("paperclip-workspace-dirty-quarantine-");
     db = createDb(tempDb.connectionString);
-  }, 20_000);
+  }, EMBEDDED_POSTGRES_TEST_SETUP_TIMEOUT_MS);
 
   afterAll(async () => {
     await tempDb?.cleanup();
@@ -6241,7 +6251,7 @@ describeEmbeddedPostgres("workspace runtime service control persistence", () => 
   beforeAll(async () => {
     tempDb = await startEmbeddedPostgresTestDatabase("paperclip-workspace-runtime-control-");
     db = createDb(tempDb.connectionString);
-  }, 20_000);
+  }, EMBEDDED_POSTGRES_TEST_SETUP_TIMEOUT_MS);
 
   afterAll(async () => {
     await tempDb?.cleanup();
@@ -7285,7 +7295,7 @@ describeEmbeddedPostgres("workspace runtime startup reconciliation", () => {
   beforeAll(async () => {
     tempDb = await startEmbeddedPostgresTestDatabase("paperclip-workspace-runtime-");
     db = createDb(tempDb.connectionString);
-  }, 20_000);
+  }, EMBEDDED_POSTGRES_TEST_SETUP_TIMEOUT_MS);
 
   afterAll(async () => {
     await tempDb?.cleanup();
