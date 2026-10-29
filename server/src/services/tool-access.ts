@@ -1,3 +1,4 @@
+import { isDeepStrictEqual } from "node:util";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { exactTimestampRevision } from "./exact-timestamp-revision.js";
@@ -1509,6 +1510,9 @@ export async function exchangeOAuthToken(
     raw: record,
   };
 }
+
+const GITHUB_OAUTH_PROTECTED_CONFIG_KEYS = ["githubPrivateRepoAccess", "oauth", "providerMetadata"] as const;
+const GITHUB_OAUTH_IDENTITY_CONFIG_KEYS = ["sourceTemplateKey", "methodKey"] as const;
 
 export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}) {
   const secrets = secretService(db);
@@ -7290,20 +7294,30 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
       let transportConfig = isGoogleSheetsConnectionConfig(config) ? config : input.transportConfig ?? config;
       if (existing.config.methodKey === GITHUB_OAUTH_METHOD_KEY) {
         // Private-repository access and OAuth state are set only by the connect/reconnect flow.
+        // The identity keys are also carried so a whole-config PATCH cannot turn the connection non-GitHub.
+        for (const supplied of [input.config, input.transportConfig]) {
+          if (!supplied || typeof supplied !== "object") continue;
+          const record = supplied as Record<string, unknown>;
+          if (GITHUB_OAUTH_IDENTITY_CONFIG_KEYS.some((key) => key in record && record[key] !== existing.config[key])) {
+            throw badRequest("A GitHub OAuth connection cannot change its app or method. Connect a new app instead.",
+              { code: "github_oauth_config_immutable" });
+          }
+        }
         // A generic update can neither drop them (which would re-derive access from legacy scopes)
         // nor widen them (which would skip the create-time opt-in).
         for (const supplied of [input.config, input.transportConfig]) {
           if (!supplied || typeof supplied !== "object") continue;
           const record = supplied as Record<string, unknown>;
-          if (("githubPrivateRepoAccess" in record && record.githubPrivateRepoAccess !== existing.config.githubPrivateRepoAccess)
-            || "oauth" in record || "providerMetadata" in record) {
+          // Echoing the stored value back (a whole-config round trip) is not a change; anything else is refused.
+          const changed = (key: string) => key in record && !isDeepStrictEqual(record[key], existing.config[key]);
+          if (GITHUB_OAUTH_PROTECTED_CONFIG_KEYS.some(changed)) {
             throw badRequest("GitHub private repository access and OAuth settings cannot be changed here. Change private repository access by reconnecting.",
               { code: "github_oauth_config_immutable" });
           }
         }
         const carry = (value: Record<string, unknown>) => {
           const next: Record<string, unknown> = { ...value };
-          for (const key of ["githubPrivateRepoAccess", "oauth", "providerMetadata"] as const) {
+          for (const key of [...GITHUB_OAUTH_PROTECTED_CONFIG_KEYS, ...GITHUB_OAUTH_IDENTITY_CONFIG_KEYS]) {
             if (key in existing.config) next[key] = existing.config[key];
             else delete next[key];
           }

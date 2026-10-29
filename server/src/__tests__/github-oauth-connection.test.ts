@@ -298,7 +298,14 @@ describe("native GitHub OAuth service and routes (mandatory private PostgreSQL)"
     expect(kept.transportConfig.githubPrivateRepoAccess).toBe(false);
     const begun = await begin(fixture, seeded.id);
     expect(new URL(begun.started.authorizationUrl).searchParams.get("scope")).toBe("read:project public_repo offline_access");
+    // A whole-config round trip that echoes the stored values is accepted, and a config that omits the
+    // identity keys still leaves a GitHub connection.
+    await request(app).patch(`/api/tool-connections/${seeded.id}`).send({ config: { ...(await readConnection(seeded.id)).config, note: "n" } }).expect(200);
+    const { sourceTemplateKey: _s, methodKey: _m, ...noIdentity } = editable;
+    await request(app).patch(`/api/tool-connections/${seeded.id}`).send({ config: noIdentity }).expect(200);
+    expect((await readConnection(seeded.id)).config).toMatchObject({ sourceTemplateKey: "github", methodKey: "rest-oauth", githubPrivateRepoAccess: false });
     const before = await readConnection(seeded.id);
+    await request(app).patch(`/api/tool-connections/${seeded.id}`).send({ config: { ...editable, methodKey: "synthetic-other" } }).expect(400);
     for (const config of [{ githubPrivateRepoAccess: true }, { githubPrivateRepoAccess: null }, { githubPrivateRepoAccess: "false" }, { oauth: { scopes: ["repo", "project", "offline_access"] } },
       { providerMetadata: { githubOAuth: { grantedScopes: ["repo"] } } }]) {
       const refused = await request(app).patch(`/api/tool-connections/${seeded.id}`).send({ config }).expect(400);
