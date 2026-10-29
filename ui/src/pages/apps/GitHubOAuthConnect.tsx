@@ -3,7 +3,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import type { ToolConnection } from "@paperclipai/shared";
 import {
   createGitHubOAuthProviderConfig, GITHUB_OAUTH_PRIVATE_REQUESTED_SCOPES as PRIVATE_REQUESTED_SCOPES,
-  GITHUB_OAUTH_REQUESTED_SCOPES as REQUESTED_SCOPES, githubPrivateRepoAccessOptIn,
+  GITHUB_OAUTH_REQUESTED_SCOPES as REQUESTED_SCOPES, githubStoredPrivateRepoAccessOptIn,
 } from "@paperclipai/shared/github-oauth";
 import { toolsApi } from "@/api/tools";
 import { useCompany } from "@/context/CompanyContext";
@@ -13,6 +13,7 @@ import { queryKeys } from "@/lib/queryKeys";
 import { InlineBanner } from "@/components/InlineBanner";
 import { SecretBindingPicker, type SecretBindingValue } from "@/components/SecretBindingPicker";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 
@@ -59,7 +60,8 @@ export function githubOAuthDraft(connection: ToolConnection, companyId: string):
     clientId: oauth.clientId,
     expectedLogin: config.expectedGitHubLogin,
     secret: { secretId: secrets[0].secretId, version: secrets[0].versionSelector ?? "latest" },
-    privateRepoAccess: githubPrivateRepoAccessOptIn(config),
+    // Legacy connections saved with full repo scope before the flag existed keep their tier on reconnect.
+    privateRepoAccess: githubStoredPrivateRepoAccessOptIn(config),
   };
 }
 
@@ -257,9 +259,9 @@ function GitHubOAuthCompanySetup({ companyId, companyName, companyScope }: {
         </div>
         <div className="space-y-1">
           <div className="flex items-center gap-2">
-            <input id={`${id}-privateRepoAccess`} type="checkbox" className="h-4 w-4" disabled={busy} checked={draft.privateRepoAccess}
+            <Checkbox id={`${id}-privateRepoAccess`} disabled={busy} checked={draft.privateRepoAccess}
               aria-describedby={`${id}-private-help`}
-              onChange={(event) => changeDraft({ ...draft, privateRepoAccess: event.target.checked })} />
+              onCheckedChange={(checked) => changeDraft({ ...draft, privateRepoAccess: checked === true })} />
             <Label htmlFor={`${id}-privateRepoAccess`}>Include private repositories</Label>
           </div>
           <p id={`${id}-private-help`} className="text-sm text-muted-foreground">Off by default. Turning this on requests GitHub's full repo and project scopes, which allow read and write access to every private repository this account can reach. Leave it off to import boards that only use public repositories.</p>

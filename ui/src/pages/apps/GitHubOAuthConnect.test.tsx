@@ -88,6 +88,16 @@ describe("GitHub customer OAuth discriminators", () => {
     expect(() => validateGitHubAuthorizationUrl(authorization(), SETUP, optedIn)).toThrow();
     expect(githubOAuthDraft(connection({ config: { ...connection().config, githubPrivateRepoAccess: true } }), "company-1")).toEqual(optedIn);
   });
+  it("derives the private tier for a legacy saved connection with full repo scope and no opt-in flag", () => {
+    const legacy = connection({ config: { ...connection().config, oauth: { clientId: DRAFT.clientId, scopes: [...SETUP.privateRepoRequestedScopes] } } });
+    const draft = githubOAuthDraft(legacy, "company-1")!;
+    expect(draft.privateRepoAccess).toBe(true);
+    // The server requests full scopes for this connection, so reconnect must not report a link mismatch.
+    const privateScope = { scope: SETUP.privateRepoRequestedScopes.join(" ") };
+    expect(validateGitHubAuthorizationUrl(authorization(privateScope), SETUP, draft)).toBe(authorization(privateScope));
+    const explicitOff = connection({ config: { ...legacy.config, githubPrivateRepoAccess: false } });
+    expect(githubOAuthDraft(explicitOff, "company-1")!.privateRepoAccess).toBe(false);
+  });
 });
 
 describe("dedicated GitHub OAuth setup", () => {
@@ -160,6 +170,37 @@ describe("dedicated GitHub OAuth setup", () => {
     expect(container.textContent).toContain("Requested scopes: read:project, public_repo, offline_access");
     expect(api.finish).not.toHaveBeenCalled(); expect(api.install).not.toHaveBeenCalled();
     expect(localStorage.length).toBe(0); expect(sessionStorage.length).toBe(0);
+  });
+  it("uses the kit checkbox for private repositories and sends the opt-in only when checked", async () => {
+    await render(); await fill();
+    const box = () => container.querySelector<HTMLButtonElement>('[role="checkbox"][id$="-privateRepoAccess"]')!;
+    expect(box()).toBeTruthy();
+    expect(box().tagName).toBe("BUTTON"); // kit (Radix) Checkbox, not the native input
+    expect(box().getAttribute("aria-checked")).toBe("false");
+    expect(box().getAttribute("aria-describedby")).toMatch(/-private-help$/);
+    expect(container.querySelector<HTMLLabelElement>('label[for$="-privateRepoAccess"]')?.textContent).toBe("Include private repositories");
+    await click("Connect GitHub");
+    expect(api.connect.mock.calls[0][1]).toMatchObject({ configValues: { expectedGitHubLogin: DRAFT.expectedLogin } });
+    expect((api.connect.mock.calls[0][1] as { configValues: Record<string, unknown> }).configValues).not.toHaveProperty("githubPrivateRepoAccess");
+
+    await act(async () => root.unmount()); client.clear(); api.connect.mockClear();
+    root = createRoot(container);
+    const privateUrl = authorization({ scope: SETUP.privateRepoRequestedScopes.join(" ") });
+    api.connect.mockResolvedValue({ connectionId: "conn-1", auth: { kind: "oauth", startUrl: privateUrl },
+      connection: connection({ config: { ...connection().config, githubPrivateRepoAccess: true } }) });
+    await render(); await fill();
+    await act(async () => box().dispatchEvent(new MouseEvent("click", { bubbles: true })));
+    expect(box().getAttribute("aria-checked")).toBe("true");
+    await click("Connect GitHub");
+    expect(api.connect).toHaveBeenCalledTimes(1);
+    expect(api.connect.mock.calls[0][1]).toMatchObject({ configValues: { expectedGitHubLogin: DRAFT.expectedLogin, githubPrivateRepoAccess: true } });
+  });
+  it("disables the private repositories checkbox while busy", async () => {
+    const pending = deferred<ReturnType<typeof prepared>>();
+    api.connect.mockReturnValueOnce(pending.promise);
+    await render(); await fill(); await click("Connect GitHub");
+    expect(container.querySelector<HTMLButtonElement>('[role="checkbox"][id$="-privateRepoAccess"]')!.disabled).toBe(true);
+    pending.resolve(prepared()); await flush(); await flush();
   });
   it("validates required login and focuses its named input before any mutation", async () => {
     await render(); await click("Connect GitHub");
