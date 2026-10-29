@@ -865,6 +865,10 @@ async function terminateWindowsProcessTree(pid: number) {
  *
  * Tolerance: btime is whole seconds (up to 1000 ms truncation), plus one
  * clock tick, plus the 1 ms precision of the recorded processStartedAt.
+ * btime is derived from the current wall clock minus uptime, so it can also
+ * shift slightly when the system clock is adjusted (NTP slew or step). That
+ * drift is one more reason the tolerance exists; a larger clock step makes the
+ * check fail closed rather than trust a pid.
  *
  * Fails closed: any read or parse error, a missing /proc, a gone pid, or a
  * non-Linux platform returns false (untrusted).
