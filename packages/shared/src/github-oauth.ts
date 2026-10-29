@@ -18,12 +18,14 @@ export const GITHUB_OAUTH_USER_URL = "https://api.github.com/user";
  * opts in (connection config `githubPrivateRepoAccess: true`) because GitHub offers no
  * narrower classic scope that can read private-repository issues on a Project board.
  *
- * `offline_access` keeps the existing expiring-token refresh contract in both tiers.
+ * No `offline_access`: it is not a GitHub OAuth App scope. OAuth App tokens normally do not
+ * expire; when GitHub does return expiring tokens (expires_in plus refresh_token), they are
+ * still validated by verifyGitHubOAuthExpiry.
  */
 export const GITHUB_OAUTH_PUBLIC_REQUIRED_SCOPES = ["read:project", "public_repo"] as const;
-export const GITHUB_OAUTH_PUBLIC_REQUESTED_SCOPES = ["read:project", "public_repo", "offline_access"] as const;
+export const GITHUB_OAUTH_PUBLIC_REQUESTED_SCOPES = ["read:project", "public_repo"] as const;
 export const GITHUB_OAUTH_PRIVATE_REQUIRED_SCOPES = ["repo", "project"] as const;
-export const GITHUB_OAUTH_PRIVATE_REQUESTED_SCOPES = ["repo", "project", "offline_access"] as const;
+export const GITHUB_OAUTH_PRIVATE_REQUESTED_SCOPES = ["repo", "project"] as const;
 /** Default (no opt-in) tier. */
 export const GITHUB_OAUTH_REQUIRED_SCOPES = GITHUB_OAUTH_PUBLIC_REQUIRED_SCOPES;
 export const GITHUB_OAUTH_REQUESTED_SCOPES = GITHUB_OAUTH_PUBLIC_REQUESTED_SCOPES;
@@ -74,10 +76,22 @@ export function githubScopesSatisfy(granted: readonly unknown[], required: reado
  */
 export const GITHUB_OAUTH_PRIVATE_TIER_ONLY_SCOPES = ["repo", "project"] as const;
 
-/** True when the grant holds any scope wider than the chosen tier allows. */
+/**
+ * Allowlist per tier: the tier's requested scopes plus their documented child scopes
+ * (https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/scopes-for-oauth-apps),
+ * plus read-only `read:org`, which an earlier consent may carry and grants no write access.
+ */
+export const GITHUB_OAUTH_PUBLIC_ALLOWED_SCOPES = ["read:project", "public_repo", "read:org"] as const;
+export const GITHUB_OAUTH_PRIVATE_ALLOWED_SCOPES = [
+  "repo", "repo:status", "repo_deployment", "public_repo", "repo:invite", "security_events",
+  "project", "read:project", "read:org",
+] as const;
+
+/** True when the grant holds any scope outside the chosen tier's allowlist. */
 export function githubScopesExceed(granted: readonly unknown[], privateRepoAccess = false): boolean {
-  if (privateRepoAccess === true) return false;
-  return GITHUB_OAUTH_PRIVATE_TIER_ONLY_SCOPES.some((scope) => granted.includes(scope));
+  const allowed: readonly string[] = privateRepoAccess === true
+    ? GITHUB_OAUTH_PRIVATE_ALLOWED_SCOPES : GITHUB_OAUTH_PUBLIC_ALLOWED_SCOPES;
+  return granted.some((scope) => typeof scope !== "string" || !allowed.includes(scope));
 }
 // GitHub currently documents eight-hour access tokens; bound malformed expiry metadata.
 export const GITHUB_OAUTH_MAX_ACCESS_TTL_SECONDS = 86_400;
@@ -219,11 +233,18 @@ export function verifyGitHubOAuthGrant(input: GitHubOAuthGrantInput): GitHubOAut
   };
 }
 
-/** Enforce the selected expiring-token lifecycle without returning any credential. */
+/**
+ * Accept both GitHub token shapes without returning any credential:
+ * - OAuth App tokens: no expires_in and no refresh_token. They do not expire (expiresIn null).
+ * - Expiring user tokens: a bounded positive expires_in AND a well-formed refresh_token.
+ * A response carrying only one of the two fields is refused.
+ */
 export function verifyGitHubOAuthExpiry(input: {
   expiresIn: unknown;
   refreshToken: unknown;
-}): { expiresIn: number } {
+}): { expiresIn: number | null } {
+  const absent = (value: unknown) => value === undefined || value === null;
+  if (absent(input.expiresIn) && absent(input.refreshToken)) return { expiresIn: null };
   if (typeof input.expiresIn !== "number" || !Number.isSafeInteger(input.expiresIn)
     || input.expiresIn <= 0 || input.expiresIn > GITHUB_OAUTH_MAX_ACCESS_TTL_SECONDS) {
     refuse("github_oauth_expiry_invalid");

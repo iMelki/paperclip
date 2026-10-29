@@ -200,18 +200,43 @@ describe("native GitHub OAuth service and routes (mandatory private PostgreSQL)"
     expect(tokenCalls()).toHaveLength(0); await expectNoAgentEffects(fixture.companyId);
   });
 
+  it("refuses a disabled or deleted same-company client secret at connect time", async () => {
+    for (const change of ["disabled", "deleted"] as const) {
+      const fixture = await seed();
+      await db.update(companySecrets).set(change === "disabled" ? { status: "disabled" } : { deletedAt: new Date() })
+        .where(eq(companySecrets.id, fixture.secretId));
+      await expect(fixture.service.connectGalleryApp(fixture.companyId, connectInput(fixture), fixture.actor))
+        .rejects.toMatchObject({ status: 422 });
+      expect(tokenCalls()).toHaveLength(0); await expectNoAgentEffects(fixture.companyId);
+    }
+  });
+
+  it("accepts a non-expiring OAuth App token (no expires_in, no refresh_token) and never tries to refresh it", async () => {
+    const fixture = await seed();
+    const { expires_in: _expiresIn, refresh_token: _refresh, ...oauthAppToken } = token();
+    io.tokenPayload = oauthAppToken;
+    const saved = await active(fixture);
+    expect((saved.config.oauth as Record<string, unknown>).expiresAt).toBeNull();
+    expect(saved.credentialSecretRefs.some((ref) => ref.configPath === "oauth.access_token")).toBe(true);
+    expect(saved.credentialSecretRefs.some((ref) => ref.configPath === "oauth.refresh_token")).toBe(false);
+    const before = tokenCalls().length;
+    await fixture.service.checkHealth(saved.id, fixture.actor);
+    expect(tokenCalls()).toHaveLength(before);
+    await expectNoAgentEffects(fixture.companyId);
+  });
+
   it("runs the actual setup/connect/callback routes with finite expiry, PKCE and private token storage", async () => {
     const fixture = await seed(); const app = routeApp(routeActor(fixture));
     const setup = await request(app).get(`/api/companies/${fixture.companyId}/tools/github/oauth/setup`).expect(200);
     expect(setup.body.callbackUrl).toBe(CALLBACK);
-    expect(setup.body.requestedScopes).toEqual(["read:project", "public_repo", "offline_access"]);
-    expect(setup.body.privateRepoRequestedScopes).toEqual(["repo", "project", "offline_access"]);
+    expect(setup.body.requestedScopes).toEqual(["read:project", "public_repo"]);
+    expect(setup.body.privateRepoRequestedScopes).toEqual(["repo", "project"]);
     const connected = await request(app).post(`/api/companies/${fixture.companyId}/tools/apps/connect`).send(connectInput(fixture)).expect(201);
     const consent = new URL(connected.body.auth.startUrl);
     expect(consent.origin + consent.pathname).toBe("https://github.com/login/oauth/authorize");
     expect(consent.searchParams.get("redirect_uri")).toBe(CALLBACK); expect(consent.searchParams.get("login")).toBe(USER.login);
     // Least access by default: no `repo` (private repositories) without an explicit opt-in.
-    expect(consent.searchParams.get("scope")).toBe("read:project public_repo offline_access");
+    expect(consent.searchParams.get("scope")).toBe("read:project public_repo");
     expect(consent.searchParams.get("code_challenge_method")).toBe("S256"); expect(consent.searchParams.get("code_challenge")).toMatch(/^[\w-]{43}$/);
     const callback = await request(app).get("/api/tools/oauth/callback").set("Accept", "application/json")
       .query({ state: consent.searchParams.get("state"), code: "synthetic-code" }).expect(200);
@@ -241,7 +266,7 @@ describe("native GitHub OAuth service and routes (mandatory private PostgreSQL)"
         configValues: { expectedGitHubLogin: USER.login, githubPrivateRepoAccess: optIn } }, fixture.actor);
       expect(connected.connection.config.githubPrivateRepoAccess).toBe(false);
       const begun = await begin(fixture, connected.connectionId);
-      expect(new URL(begun.started.authorizationUrl).searchParams.get("scope")).toBe("read:project public_repo offline_access");
+      expect(new URL(begun.started.authorizationUrl).searchParams.get("scope")).toBe("read:project public_repo");
     }
     resetTransport(); const fixture = await seed();
     const connected = await fixture.service.connectGalleryApp(fixture.companyId, { ...connectInput(fixture),
@@ -249,7 +274,7 @@ describe("native GitHub OAuth service and routes (mandatory private PostgreSQL)"
     expect(connected.connection.config).toMatchObject({ githubPrivateRepoAccess: true,
       oauth: { scopes: ["repo", "project", "offline_access"] } });
     const begun = await begin(fixture, connected.connectionId);
-    expect(new URL(begun.started.authorizationUrl).searchParams.get("scope")).toBe("repo project offline_access");
+    expect(new URL(begun.started.authorizationUrl).searchParams.get("scope")).toBe("repo project");
     io.tokenPayload.scope = "read:project,public_repo"; io.currentScopes = "read:project,public_repo";
     await expect(complete(fixture, begun.state)).rejects.toMatchObject({ status: 422 });
     resetTransport(); io.tokenPayload.scope = "repo,project"; io.currentScopes = "repo,project";
@@ -297,7 +322,7 @@ describe("native GitHub OAuth service and routes (mandatory private PostgreSQL)"
     expect(kept.config.oauth).toEqual(seeded.config.oauth); expect(kept.config.providerMetadata).toEqual(seeded.config.providerMetadata);
     expect(kept.transportConfig.githubPrivateRepoAccess).toBe(false);
     const begun = await begin(fixture, seeded.id);
-    expect(new URL(begun.started.authorizationUrl).searchParams.get("scope")).toBe("read:project public_repo offline_access");
+    expect(new URL(begun.started.authorizationUrl).searchParams.get("scope")).toBe("read:project public_repo");
     // A whole-config round trip that echoes the stored values is accepted, and a config that omits the
     // identity keys still leaves a GitHub connection.
     const echoed = (await readConnection(seeded.id)).config;
@@ -319,8 +344,8 @@ describe("native GitHub OAuth service and routes (mandatory private PostgreSQL)"
   });
 
   it("derives a legacy flagless connection's access from its saved scopes on reconnect", async () => {
-    for (const [scopes, expected] of [[["repo", "project", "offline_access"], "repo project offline_access"],
-      [["read:project", "public_repo", "offline_access"], "read:project public_repo offline_access"]] as const) {
+    for (const [scopes, expected] of [[["repo", "project", "offline_access"], "repo project"],
+      [["read:project", "public_repo", "offline_access"], "read:project public_repo"]] as const) {
       resetTransport(); const fixture = await seed();
       const connected = await fixture.service.connectGalleryApp(fixture.companyId, connectInput(fixture), fixture.actor);
       const row = await readConnection(connected.connectionId);

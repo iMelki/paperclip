@@ -4509,6 +4509,12 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
     return connection.credentialSecretRefs.find((ref) => ref.configPath === configPath) ?? null;
   }
 
+  function isNonExpiringGitHubOAuth(connection: typeof toolConnections.$inferSelect, expiresAtMs: number | null): boolean {
+    return expiresAtMs === null
+      && oauthConfig(connection).provider === "github"
+      && !oauthSecretRef(connection, "oauth.refresh_token");
+  }
+
   function oauthExpiresAtMs(connection: typeof toolConnections.$inferSelect): number | null {
     const expiresAt = oauthConfig(connection).expiresAt;
     if (typeof expiresAt !== "string") return null;
@@ -5200,6 +5206,8 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
     if (typeof oauth.tokenUrl !== "string" || typeof oauth.provider !== "string") return connection;
     const expiresAtMs = oauthExpiresAtMs(connection);
     if (expiresAtMs && expiresAtMs > Date.now() + 60_000) return connection;
+    // GitHub OAuth App tokens do not expire: no expiry and no refresh token means nothing to refresh.
+    if (isNonExpiringGitHubOAuth(connection, expiresAtMs)) return connection;
     const grantType = oauth.grantType === "client_credentials" || oauth.clientCredentials === true
       ? "client_credentials" as const
       : "refresh_token" as const;
@@ -5396,6 +5404,8 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
     if (typeof oauth.tokenUrl !== "string" || typeof oauth.provider !== "string") return connection;
     const expiresAtMs = oauthExpiresAtMs(connection);
     if (expiresAtMs && expiresAtMs > Date.now() + 60_000) return connection;
+    // GitHub OAuth App tokens do not expire: no expiry and no refresh token means nothing to refresh.
+    if (isNonExpiringGitHubOAuth(connection, expiresAtMs)) return connection;
     return oauthSingleFlight(oauthRefreshFlights, connection.id, async () => {
       const lease = await acquireOAuthRefreshLease(connection);
       if (!lease.leaseId) return lease.connection;
@@ -5460,6 +5470,13 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
       const refs = input.credentialSecretRefs ?? [];
       if (refs.length !== 1 || refs[0].configPath !== "oauth.client_secret") {
         throw badRequest("Select one company-scoped OAuth client secret");
+      }
+      const [clientSecret] = await db.select({ id: companySecrets.id }).from(companySecrets).where(and(
+        eq(companySecrets.id, refs[0].secretId), eq(companySecrets.companyId, companyId),
+        eq(companySecrets.status, "active"), isNull(companySecrets.deletedAt),
+      )).limit(1);
+      if (!clientSecret) {
+        throw unprocessable("Select an active OAuth client secret saved in this company", { code: "github_oauth_client_secret_invalid" });
       }
       config = {
         sourceTemplateKey: "github", methodKey: GITHUB_OAUTH_METHOD_KEY, serverUrl: method?.defaults?.serverUrl,

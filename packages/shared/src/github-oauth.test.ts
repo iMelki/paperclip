@@ -44,9 +44,9 @@ describe("dedicated GitHub OAuth provider metadata", () => {
       clientId: "synthetic-client",
       authorizationUrl: "https://github.com/login/oauth/authorize",
       tokenUrl: "https://github.com/login/oauth/access_token",
-      scopes: ["read:project", "public_repo", "offline_access"],
+      scopes: ["read:project", "public_repo"],
     });
-    expect(createGitHubOAuthProviderConfig("synthetic-client", true).scopes).toEqual(["repo", "project", "offline_access"]);
+    expect(createGitHubOAuthProviderConfig("synthetic-client", true).scopes).toEqual(["repo", "project"]);
     expect(GITHUB_OAUTH_API_URL).toBe("https://api.github.com");
     expect(GITHUB_OAUTH_USER_URL).toBe("https://api.github.com/user");
   });
@@ -61,7 +61,7 @@ describe("dedicated GitHub OAuth provider metadata", () => {
     const first = createGitHubOAuthProviderConfig("synthetic-client");
     first.scopes.push("delete_repo");
     const next = createGitHubOAuthProviderConfig("synthetic-client");
-    expect(next.scopes).toEqual(["read:project", "public_repo", "offline_access"]);
+    expect(next.scopes).toEqual(["read:project", "public_repo"]);
     expect(Object.keys(next).sort()).toEqual(["authorizationUrl", "clientId", "provider", "scopes", "tokenUrl"]);
   });
 
@@ -72,7 +72,7 @@ describe("dedicated GitHub OAuth provider metadata", () => {
     const method = getGitHubOAuthConnectionMethod(definition)!;
     expect(definition.methods.at(-1)?.key).toBe(GITHUB_OAUTH_METHOD_KEY);
     expect(method.ownershipModes).toEqual(["customer"]);
-    expect(method.defaults?.scopesHint).toEqual(["read:project", "public_repo", "offline_access"]);
+    expect(method.defaults?.scopesHint).toEqual(["read:project", "public_repo"]);
     expect(method.credentialFields?.map((field) => [field.key, field.secret])).toEqual([
       ["clientId", false], ["clientSecret", true],
     ]);
@@ -145,6 +145,21 @@ describe("actual GitHub OAuth grant verification", () => {
     },
   );
 
+  it.each(["admin:org", "delete_repo", "workflow", "write:packages", "user", "gist", "offline_access"])(
+    "allowlist refuses %s in both tiers even from an earlier broader consent", (extra) => {
+      expectRefusal(() => verifyGitHubOAuthGrant(grant({ grantedScopes: `read:project,public_repo,${extra}`, privateRepoAccess: false })),
+        "github_oauth_scopes_too_broad");
+      expectRefusal(() => verifyGitHubOAuthGrant(grant({ grantedScopes: `repo,project,${extra}`, privateRepoAccess: true })),
+        "github_oauth_scopes_too_broad");
+      expect(githubScopesExceed(["repo", "project", extra], true)).toBe(true);
+    },
+  );
+
+  it("private opt-in allows the documented repo and project child scopes", () => {
+    expect(githubScopesExceed(["repo", "project", "repo:status", "repo_deployment", "public_repo", "repo:invite",
+      "security_events", "read:project", "read:org"], true)).toBe(false);
+  });
+
   it("private opt-in accepts the full repo grant", () => {
     expect(verifyGitHubOAuthGrant(grant({ grantedScopes: "repo,project", privateRepoAccess: true })).grantedScopes).toEqual(["repo", "project"]);
     expect(githubScopesExceed(["repo", "project"], true)).toBe(false);
@@ -172,8 +187,8 @@ describe("actual GitHub OAuth grant verification", () => {
   );
 
   it("selects scope tiers only from an explicit boolean opt-in", () => {
-    expect(githubOAuthRequestedScopes()).toEqual(["read:project", "public_repo", "offline_access"]);
-    expect(githubOAuthRequestedScopes(true)).toEqual(["repo", "project", "offline_access"]);
+    expect(githubOAuthRequestedScopes()).toEqual(["read:project", "public_repo"]);
+    expect(githubOAuthRequestedScopes(true)).toEqual(["repo", "project"]);
     expect(githubOAuthRequiredScopes(false)).toEqual(["read:project", "public_repo"]);
     expect(githubOAuthRequiredScopes(true)).toEqual(["repo", "project"]);
     for (const config of [null, undefined, {}, { githubPrivateRepoAccess: "true" }, { githubPrivateRepoAccess: 1 }, [true]]) {
@@ -234,6 +249,16 @@ describe("actual GitHub OAuth grant verification", () => {
 describe("GitHub expiring-token lifecycle metadata", () => {
   it("returns only a validated finite expiry, never a refresh credential", () => {
     expect(verifyGitHubOAuthExpiry({ expiresIn: 28800, refreshToken: "synthetic-refresh" })).toEqual({ expiresIn: 28800 });
+  });
+
+  it("accepts a non-expiring OAuth App token response (no expires_in, no refresh_token)", () => {
+    expect(verifyGitHubOAuthExpiry({ expiresIn: undefined, refreshToken: undefined })).toEqual({ expiresIn: null });
+    expect(verifyGitHubOAuthExpiry({ expiresIn: null, refreshToken: null })).toEqual({ expiresIn: null });
+  });
+
+  it("still validates an expiring token when only one lifecycle field is present", () => {
+    expectRefusal(() => verifyGitHubOAuthExpiry({ expiresIn: 28800, refreshToken: undefined }), "github_oauth_refresh_missing");
+    expectRefusal(() => verifyGitHubOAuthExpiry({ expiresIn: undefined, refreshToken: "synthetic-refresh" }), "github_oauth_expiry_invalid");
   });
 
   it.each([undefined, null, "28800", 0, -1, 0.5, NaN, Infinity, 86401, Number.MAX_SAFE_INTEGER + 1])(
