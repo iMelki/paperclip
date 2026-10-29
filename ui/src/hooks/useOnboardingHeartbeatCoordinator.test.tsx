@@ -70,6 +70,8 @@ vi.mock("@/lib/router", () => ({
 
 vi.mock("../adapters/use-disabled-adapters", () => ({
   useDisabledAdaptersSync: () => new Set<string>(),
+  // Setup only: upstream's wizard also gates on the adapter registry load.
+  useAdapterRegistryLoaded: () => true,
 }));
 
 vi.mock("../adapters/use-adapter-capabilities", () => ({
