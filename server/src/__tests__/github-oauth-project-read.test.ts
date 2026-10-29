@@ -30,9 +30,9 @@ async function syntheticFetch(input: string | URL | Request, init: RequestInit =
   const url = String(input), method = init.method ?? "GET";
   calls.push({ url, method });
   if (url === "https://github.com/login/oauth/access_token") return Response.json({
-    access_token: "synthetic-access", refresh_token: "synthetic-refresh", expires_in: 28800, token_type: "bearer", scope: "repo,project",
+    access_token: "synthetic-access", refresh_token: "synthetic-refresh", expires_in: 28800, token_type: "bearer", scope: "read:project,public_repo",
   });
-  if (url === "https://api.github.com/user") return Response.json(user, { headers: { "X-OAuth-Scopes": "repo,project" } });
+  if (url === "https://api.github.com/user") return Response.json(user, { headers: { "X-OAuth-Scopes": "read:project,public_repo" } });
   if (url === "https://api.github.com/graphql" && method === "POST") {
     expect(init.redirect).toBe("manual");
     expect(JSON.parse(String(init.body)).query).not.toContain("mutation");

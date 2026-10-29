@@ -104,6 +104,7 @@ describe("dedicated GitHub OAuth setup", () => {
   let container: HTMLDivElement;
   let root: Root;
   let client: QueryClient;
+  let originalResizeObserver: typeof ResizeObserver | undefined;
   beforeEach(() => {
     vi.resetAllMocks(); company.id = "company-1";
     api.setup.mockResolvedValue(SETUP); api.list.mockResolvedValue({ connections: [] });
@@ -112,9 +113,13 @@ describe("dedicated GitHub OAuth setup", () => {
     container = document.createElement("div"); document.body.appendChild(container); root = createRoot(container);
     client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
     Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
+    // The kit (Radix) Checkbox measures itself; jsdom has no ResizeObserver.
+    originalResizeObserver = globalThis.ResizeObserver;
+    globalThis.ResizeObserver = class { observe() {} unobserve() {} disconnect() {} } as unknown as typeof ResizeObserver;
   });
   afterEach(async () => {
     await act(async () => root.unmount()); client.clear(); container.remove();
+    globalThis.ResizeObserver = originalResizeObserver as typeof ResizeObserver;
   });
   async function flush() {
     await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
