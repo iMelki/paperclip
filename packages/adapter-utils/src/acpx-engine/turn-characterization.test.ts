@@ -276,9 +276,11 @@ describe("ACPX engine turn characterization", () => {
     const signal = input.signal as AbortSignal;
     expect(signal).toBeInstanceOf(AbortSignal);
     expect(signal.aborted).toBe(false);
-    // Exactly the six documented keys are threaded.
+    // The fork's typed terminal-session-failure callback (#165) is threaded too.
+    expect(typeof input.onTerminalSessionFailure).toBe("function");
+    // Exactly the six documented keys plus that callback are threaded.
     expect(Object.keys(input).sort()).toEqual(
-      ["handle", "mode", "requestId", "signal", "text", "timeoutMs"].sort(),
+      ["handle", "mode", "onTerminalSessionFailure", "requestId", "signal", "text", "timeoutMs"].sort(),
     );
   });
 
