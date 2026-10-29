@@ -60,6 +60,23 @@ function adapterConfigsEqual(
   return JSON.stringify(normalizedJson(left)) === JSON.stringify(normalizedJson(right));
 }
 
+/**
+ * True when every key the hire returned still holds the same value in the
+ * readback. Server-side additions made after the hire (instruction bundle
+ * paths seeded by onboarding) are allowed; any changed or dropped key is not.
+ */
+export function adapterConfigIncludes(
+  readback: Record<string, unknown>,
+  expected: Record<string, unknown>,
+) {
+  return Object.keys(expected).every(
+    (key) =>
+      key in readback
+      && JSON.stringify(normalizedJson(readback[key]))
+        === JSON.stringify(normalizedJson(expected[key])),
+  );
+}
+
 export function selectOnboardingAdapterModel(
   currentAdapterType: string,
   nextAdapterType: string,

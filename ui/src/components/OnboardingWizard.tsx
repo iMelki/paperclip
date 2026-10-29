@@ -89,6 +89,7 @@ import { Badge } from "@/components/ui/badge";
 import { useOnboardingAgentConfigReview } from "../hooks/useOnboardingAgentConfigReview";
 import { usePersistOnboardingAgentConfig } from "../hooks/usePersistOnboardingAgentConfig";
 import { OnboardingConfigurationReview } from "./OnboardingConfigurationReview";
+import { adapterConfigIncludes } from "../lib/onboarding-agent-config";
 import {
   Building2,
   Bot,
@@ -1501,9 +1502,29 @@ function OnboardingWizardInner({
 
       if (!stillTheSameCompany(createdCompanyId)) return;
       setCreatedAgentId(agent.id);
-      setPersistedAdapterConfigExpectation(
-        (agent.adapterConfig as Record<string, unknown> | undefined) ?? null,
-      );
+      // Review then demands an exact readback of this expectation. Seeding
+      // instructions above may legitimately add bundle keys server-side, so
+      // the exact expectation is taken from one readback that must still
+      // hold every key the hire returned; anything else stays a mismatch.
+      const hiredConfig =
+        (agent.adapterConfig as Record<string, unknown> | undefined) ?? null;
+      let expectation = hiredConfig;
+      if (hiredConfig) {
+        try {
+          const readback = await agentsApi.get(agent.id, createdCompanyId);
+          const readbackConfig = (readback.adapterConfig ?? {}) as Record<string, unknown>;
+          if (
+            readback.adapterType === adapterType
+            && adapterConfigIncludes(readbackConfig, hiredConfig)
+          ) {
+            expectation = readbackConfig;
+          }
+        } catch {
+          // Review's own readback reports the failure and keeps launch blocked.
+        }
+      }
+      if (!stillTheSameCompany(createdCompanyId)) return;
+      setPersistedAdapterConfigExpectation(expectation);
       // Advance to the Review step — the lead is now online. The user drives
       // strategy + hiring from the planning chat after "Get started".
       setStep(5);

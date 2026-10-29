@@ -22,6 +22,16 @@ const setRouteDismissedMock = vi.hoisted(() => vi.fn());
 const setSelectedCompanyIdMock = vi.hoisted(() => vi.fn());
 
 vi.mock("../api/agents", () => ({ agentsApi: agentsApiMock }));
+// Setup only: upstream restores a saved draft only after a settled company
+// list shows the draft's company is still owned by this account.
+vi.mock("../api/companies-query", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../api/companies-query")>()),
+  useCompanyListQuery: () => ({
+    isSuccess: true,
+    isFetching: false,
+    data: { companies: [{ id: "company-1" }], unauthorized: false },
+  }),
+}));
 // Setup only: upstream's Test now resolves the run environment before it
 // probes (fail-closed), so these stubs let it settle on the server default.
 vi.mock("../api/environments", () => ({
