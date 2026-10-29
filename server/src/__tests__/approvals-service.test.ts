@@ -552,6 +552,107 @@ describe("approvalService resolution idempotency", () => {
     expect(mockNotifyHireApproved).toHaveBeenCalledTimes(1);
   });
 
+  it.each(["pending", "standalone"] as const)(
+    "strips setup execution settings before secret preparation for a %s hire",
+    async (kind) => {
+      const metadata = { "paperclip.pausedSetup": true, purpose: "finance-draft" };
+      if (kind === "pending") {
+        mockAgentService.getById.mockResolvedValue({
+          id: "agent-1", companyId: "company-1", status: "pending_approval",
+          role: "general", adapterType: "process", adapterConfig: {}, runtimeConfig: {},
+          metadata, permissions: { canCreateAgents: false, canCreateSkills: false, canAssignTasks: false },
+        });
+      }
+      const payload = {
+        name: "Finance setup", role: "general",
+        ...(kind === "pending" ? { agentId: "agent-1" } : {}),
+        metadata: kind === "pending" ? { "paperclip.pausedSetup": false } : metadata,
+        adapterType: "codex_local",
+        adapterConfig: { command: "must-not-run", env: { SETUP_SENTINEL: { type: "plain", value: "must-not-provision" } } },
+        runtimeConfig: { heartbeat: { enabled: true, wakeOnDemand: true } },
+        defaultEnvironmentId: "environment-must-not-select",
+        desiredSkills: ["must-not-install"],
+        instructionsBundle: { path: "must-not-materialize" },
+        permissions: { canCreateAgents: false, canCreateSkills: false, canAssignTasks: false },
+        requestedConfigurationSnapshot: { adapterConfig: { command: "must-not-store" } },
+      };
+      const dbStub = createDbStub([], [], [createApproval("pending")]);
+      await approvalService(dbStub.db as any).create("company-1", {
+        type: "hire_agent", requestedByAgentId: null, requestedByUserId: "board-user",
+        status: "pending", payload,
+      });
+      expect(mockSecretService.normalizeHireApprovalPayloadForPersistence).toHaveBeenCalledTimes(1);
+      const prepared = mockSecretService.normalizeHireApprovalPayloadForPersistence.mock.calls[0]![1];
+      expect(prepared).toMatchObject({
+        adapterType: "process", adapterConfig: {}, defaultEnvironmentId: null,
+        desiredSkills: [], instructionsBundle: null, metadata,
+        permissions: { canCreateAgents: false, canCreateSkills: false, canAssignTasks: false },
+        runtimeConfig: { heartbeat: {
+          enabled: false, intervalSec: 0, wakeOnDemand: false, wakeOnAssignment: false,
+          wakeOnOnDemand: false, wakeOnAutomation: false, maxConcurrentRuns: 1,
+        } },
+      });
+      expect(prepared.requestedConfigurationSnapshot.adapterConfig).toEqual({});
+      expect(JSON.stringify(prepared)).not.toContain("must-not-");
+      expect(JSON.stringify(dbStub.insertValues.mock.calls)).not.toContain("must-not-");
+      expect(mockAgentService.create).not.toHaveBeenCalled();
+      expect(mockNotifyHireApproved).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(["pending", "standalone"] as const)(
+    "approving a paused %s hire with a tampered non-zero budget ends at 0 with no spending policy",
+    async (kind) => {
+      const metadata = { "paperclip.pausedSetup": true, purpose: "finance-draft" };
+      mockAgentService.getById.mockResolvedValue({
+        id: "agent-1", companyId: "company-1", status: "pending_approval",
+        role: "general", adapterType: "process", adapterConfig: {}, runtimeConfig: {},
+        metadata, permissions: { canCreateAgents: false, canCreateSkills: false, canAssignTasks: false },
+      });
+      mockAgentService.create.mockResolvedValue({ id: "agent-1" });
+      const payload = {
+        name: "Finance setup", role: "general", adapterType: "process",
+        ...(kind === "pending" ? { agentId: "agent-1", metadata: { "paperclip.pausedSetup": false } } : { metadata }),
+        budgetMonthlyCents: 50_000,
+        permissions: { canCreateAgents: false, canCreateSkills: false, canAssignTasks: false },
+      };
+      const approved = { ...createApproval("approved"), payload };
+      const dbStub = createDbStub([[{ ...createApproval("pending"), payload }]], [approved]);
+      await approvalService(dbStub.db as any).approve("approval-1", "board", "setup only");
+      if (kind === "standalone") {
+        expect(mockAgentService.create).toHaveBeenCalledWith("company-1", expect.objectContaining({ budgetMonthlyCents: 0 }));
+      } else {
+        expect(mockAgentService.activatePendingApproval).toHaveBeenCalledTimes(1);
+      }
+      expect(mockBudgetService.upsertPolicy).not.toHaveBeenCalled();
+    },
+  );
+
+  it("creates a legacy standalone marked hire paused with no executable or grants", async () => {
+    const payload = {
+      name: "Finance setup", role: "general", adapterType: "process",
+      adapterConfig: { command: "legacy-must-not-run" },
+      runtimeConfig: { heartbeat: { enabled: true, wakeOnDemand: true } },
+      defaultEnvironmentId: "legacy-environment",
+      permissions: { canCreateAgents: false, canCreateSkills: false, canAssignTasks: false },
+      metadata: { "paperclip.pausedSetup": true, purpose: "finance-draft" },
+    };
+    const approved = { ...createApproval("approved"), payload };
+    const dbStub = createDbStub([[{ ...createApproval("pending"), payload }]], [approved]);
+    await approvalService(dbStub.db as any).approve("approval-1", "board", "setup only");
+    expect(mockAgentService.create).toHaveBeenCalledWith("company-1", expect.objectContaining({
+      status: "paused", pauseReason: "manual", pausedAt: expect.any(Date),
+      adapterType: "process", adapterConfig: {}, defaultEnvironmentId: null,
+      permissions: { canCreateAgents: false, canCreateSkills: false, canAssignTasks: false },
+      runtimeConfig: { heartbeat: {
+        enabled: false, intervalSec: 0, wakeOnDemand: false, wakeOnAssignment: false,
+        wakeOnOnDemand: false, wakeOnAutomation: false, maxConcurrentRuns: 1,
+      } },
+      metadata: payload.metadata, lastHeartbeatAt: null,
+    }));
+    expect(JSON.stringify(mockAgentService.create.mock.calls)).not.toContain("legacy-must-not-run");
+  });
+
   it("creates the agent from payload when approval does not reference a pending agent", async () => {
     const restrictivePermissions = {
       canCreateAgents: false,

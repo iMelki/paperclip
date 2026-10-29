@@ -1,5 +1,7 @@
 import express from "express";
 import request from "supertest";
+import type { SQL } from "drizzle-orm";
+import { PgDialect } from "drizzle-orm/pg-core";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { DEFAULT_OPENCODE_LOCAL_MODEL } from "@paperclipai/adapter-opencode-local";
 import { LOW_TRUST_REVIEW_PRESET } from "@paperclipai/shared";
@@ -214,11 +216,18 @@ function registerModuleMocks() {
   }));
 }
 
-function createDbStub(options: { requireBoardApprovalForNewAgents?: boolean } = {}) {
+type RouteDbOptions = {
+  requireBoardApprovalForNewAgents?: boolean;
+  censusRows?: Array<Record<string, unknown>>;
+};
+
+function createDbStub(options: RouteDbOptions = {}) {
+  const censusQueries: Array<{ sql: string; params: unknown[]; columns: string[]; projection?: Record<string, unknown>; table: unknown }> = [];
   return {
-    select: vi.fn().mockReturnValue({
-      from: vi.fn().mockReturnValue({
-        where: vi.fn().mockReturnValue({
+    censusQueries,
+    select: vi.fn((projection?: Record<string, unknown>) => ({
+      from: vi.fn((table: unknown) => ({
+        where: vi.fn((predicate: SQL) => ({
           then: vi.fn((resolve) =>
             Promise.resolve(resolve([{
               id: companyId,
@@ -226,13 +235,25 @@ function createDbStub(options: { requireBoardApprovalForNewAgents?: boolean } = 
               requireBoardApprovalForNewAgents: options.requireBoardApprovalForNewAgents ?? false,
             }])),
           ),
-        }),
-      }),
-    }),
+          // Emulate only the census select seam. Compile the actual route's
+          // predicate rather than silently assuming the desired company filter.
+          orderBy: vi.fn(async () => {
+            const query = new PgDialect().sqlToQuery(predicate);
+            const rows = options.censusRows ?? [];
+            const columns = Object.keys(projection ?? rows[0] ?? {});
+            censusQueries.push({ sql: query.sql, params: query.params, columns, projection, table });
+            return rows
+              .filter((row) => row.companyId === query.params[0])
+              .sort((left, right) => String(left.id).localeCompare(String(right.id)))
+              .map((row) => Object.fromEntries(columns.map((key) => [key, row[key]])));
+          }),
+        })),
+      })),
+    })),
   };
 }
 
-async function createApp(actor: Record<string, unknown>, dbOptions: { requireBoardApprovalForNewAgents?: boolean } = {}) {
+async function createApp(actor: Record<string, unknown>, dbOptions: RouteDbOptions = {}) {
   const [{ errorHandler }, { agentRoutes }] = await Promise.all([
     import("../middleware/index.js") as Promise<typeof import("../middleware/index.js")>,
     import("../routes/agents.js") as Promise<typeof import("../routes/agents.js")>,
@@ -246,7 +267,9 @@ async function createApp(actor: Record<string, unknown>, dbOptions: { requireBoa
     };
     next();
   });
-  app.use("/api", agentRoutes(createDbStub(dbOptions) as any));
+  const testDb = createDbStub(dbOptions);
+  app.locals.agentRouteTestDb = testDb;
+  app.use("/api", agentRoutes(testDb as any));
   app.use(errorHandler);
   return app;
 }
@@ -502,6 +525,38 @@ describe.sequential("agent permission routes", () => {
         runtimeConfig: {},
       }),
     ]);
+  });
+
+  it.each([
+    ["unconfigured", { adapterType: "process", adapterConfig: {} }, 409],
+    ["configured", { adapterType: "codex_local", adapterConfig: { model: "configured" } }, 200],
+  ] as const)("PATCH status on a %s paused-setup agent returns %s", async (_label, runtime, expected) => {
+    mockAgentService.getById.mockResolvedValue({
+      ...baseAgent,
+      ...runtime,
+      status: "paused",
+      pauseReason: "manual",
+      metadata: { "paperclip.pausedSetup": true },
+    });
+    const app = await createApp({
+      type: "board",
+      userId: "board-user",
+      source: "local_implicit",
+      isInstanceAdmin: true,
+      companyIds: [companyId],
+    });
+
+    const res = await requestApp(app, (baseUrl) => request(baseUrl)
+      .patch(`/api/agents/${agentId}`)
+      .send({ status: "idle" }));
+
+    expect(res.status, JSON.stringify(res.body)).toBe(expected);
+    if (expected === 409) {
+      expect(res.body.code).toBe("agent_paused_setup_unconfigured");
+      expect(mockAgentService.update).not.toHaveBeenCalled();
+    } else {
+      expect(mockAgentService.update).toHaveBeenCalledWith(agentId, expect.objectContaining({ status: "idle" }), expect.anything());
+    }
   });
 
   it("blocks agent updates for authenticated company members without agent admin permission", async () => {
@@ -1880,4 +1935,258 @@ describe.sequential("agent permission routes", () => {
     expect(res.body.error).toBe("Heartbeat run not found");
     expect(mockHeartbeatService.cancelRun).not.toHaveBeenCalled();
   });
+
+  // Paused setup exercises the real HTTP handler and shared safety helper.
+  // Downstream service mocks capture the proposed saved state; the separate
+  // paused-agent-setup integration suite proves persistence and approval.
+  const pausedBoardActor = {
+    type: "board", userId: "setup-board", source: "session",
+    isInstanceAdmin: false, companyIds: [companyId],
+  };
+  const pausedRequest = {
+    name: "Finance setup",
+    role: "cfo",
+    pausedSetup: true,
+    adapterType: "process",
+    adapterConfig: {},
+    permissions: { canCreateAgents: false, canCreateSkills: false, canAssignTasks: false },
+  };
+
+  function capturePausedCreation() {
+    mockAgentService.create.mockImplementation(async (targetCompanyId: string, input: Record<string, unknown>) => ({
+      ...baseAgent, ...input, companyId: targetCompanyId,
+    }));
+    mockApprovalService.create.mockImplementation(async (targetCompanyId: string, input: Record<string, unknown>) => ({
+      id: "paused-hire-approval", ...input, companyId: targetCompanyId,
+    }));
+  }
+
+  function expectPausedConfiguration(input: Record<string, unknown>) {
+    expect(input.adapterType).toBe("process");
+    expect(input.adapterConfig).toEqual({});
+    expect(input.defaultEnvironmentId).toBeNull();
+    expect(input.permissions).toEqual({
+      canCreateAgents: false, canCreateSkills: false, canAssignTasks: false,
+    });
+    expect(input.runtimeConfig).toEqual({ heartbeat: {
+      enabled: false, intervalSec: 0, wakeOnDemand: false,
+      wakeOnAssignment: false, wakeOnOnDemand: false, wakeOnAutomation: false,
+      maxConcurrentRuns: 1,
+    } });
+    expect(input.metadata).toMatchObject({ "paperclip.pausedSetup": true });
+  }
+
+  function expectNoPausedProvisioning() {
+    expect(mockCompanySkillService.resolveRequestedSkillKeys).not.toHaveBeenCalled();
+    expect(mockCompanySkillService.listRuntimeSkillEntries).not.toHaveBeenCalled();
+    expect(mockAgentInstructionsService.materializeManagedBundle).not.toHaveBeenCalled();
+    expect(mockSyncInstructionsBundleConfigFromFilePath).not.toHaveBeenCalled();
+    expect(mockAccessService.setPrincipalPermission).not.toHaveBeenCalled();
+    expect(mockAccessService.ensureMembership).not.toHaveBeenCalled();
+    expect(mockBuiltInAgentService.ensureCompanyDefaultAgentGrants).not.toHaveBeenCalled();
+    expect(mockBudgetService.upsertPolicy).not.toHaveBeenCalled();
+    expect(mockEnvironmentService.getById).not.toHaveBeenCalled();
+    expect(mockHeartbeatService.cancelInvocationsForAgents).not.toHaveBeenCalled();
+  }
+
+  function expectNoPausedWriteOrPreparation() {
+    expect(mockAgentService.create).not.toHaveBeenCalled();
+    expect(mockApprovalService.create).not.toHaveBeenCalled();
+    expect(mockSecretService.normalizeAdapterConfigForPersistence).not.toHaveBeenCalled();
+    expect(mockSecretService.resolveAdapterConfigForRuntime).not.toHaveBeenCalled();
+    expect(mockLogActivity).not.toHaveBeenCalled();
+    expect(mockTrackAgentCreated).not.toHaveBeenCalled();
+    expectNoPausedProvisioning();
+  }
+
+  it("board paused setup proposes an inert paused record without provisioning or default grants", async () => {
+    capturePausedCreation();
+    const app = await createApp(pausedBoardActor);
+    const res = await requestApp(app, (baseUrl) => request(baseUrl)
+      .post(`/api/companies/${companyId}/agents`).send(pausedRequest));
+
+    expect(res.status, JSON.stringify(res.body)).toBe(201);
+    expect(mockAgentService.create).toHaveBeenCalledTimes(1);
+    const [targetCompanyId, input] = mockAgentService.create.mock.calls[0]!;
+    expect(targetCompanyId).toBe(companyId);
+    expect(input).toMatchObject({ status: "paused", pauseReason: "manual", budgetMonthlyCents: 0 });
+    expect(input.pausedAt).toBeInstanceOf(Date);
+    expect(input).not.toHaveProperty("pausedSetup");
+    expectPausedConfiguration(input);
+    expect(res.body.status).toBe("paused");
+    expect(res.body.adapterConfig).toEqual({});
+    expectNoPausedProvisioning();
+    expect(mockApprovalService.create).not.toHaveBeenCalled();
+  });
+
+  it("paused setup cannot bypass the company approval requirement through direct creation", async () => {
+    const app = await createApp(pausedBoardActor, { requireBoardApprovalForNewAgents: true });
+    const res = await requestApp(app, (baseUrl) => request(baseUrl)
+      .post(`/api/companies/${companyId}/agents`).send(pausedRequest));
+
+    expect(res.status).toBe(409);
+    expect(res.body.error).toContain("/agent-hires");
+    expectNoPausedWriteOrPreparation();
+  });
+
+  it("board paused hire stays pending and freezes an inert approval snapshot", async () => {
+    capturePausedCreation();
+    const app = await createApp(pausedBoardActor, { requireBoardApprovalForNewAgents: true });
+    const res = await requestApp(app, (baseUrl) => request(baseUrl)
+      .post(`/api/companies/${companyId}/agent-hires`).send(pausedRequest));
+
+    expect(res.status, JSON.stringify(res.body)).toBe(201);
+    expect(mockAgentService.create).toHaveBeenCalledTimes(1);
+    const input = mockAgentService.create.mock.calls[0]![1];
+    expect(input.status).toBe("pending_approval");
+    expectPausedConfiguration(input);
+    expect(mockApprovalService.create).toHaveBeenCalledTimes(1);
+    const [approvalCompanyId, approval] = mockApprovalService.create.mock.calls[0]!;
+    expect(approvalCompanyId).toBe(companyId);
+    expect(approval).toMatchObject({ type: "hire_agent", status: "pending" });
+    expectPausedConfiguration(approval.payload);
+    expect(approval.payload.desiredSkills).toEqual([]);
+    expect(approval.payload.requestedConfigurationSnapshot).toMatchObject({
+      adapterType: "process", adapterConfig: {}, desiredSkills: [],
+    });
+    expect(approval.payload.requestedConfigurationSnapshot.runtimeConfig).toEqual(input.runtimeConfig);
+    expect(res.body.agent.status).toBe("pending_approval");
+    expect(res.body.approval.status).toBe("pending");
+    expectNoPausedProvisioning();
+  });
+
+  it("board paused hire becomes paused when the company does not require approval", async () => {
+    capturePausedCreation();
+    const app = await createApp(pausedBoardActor);
+    const res = await requestApp(app, (baseUrl) => request(baseUrl)
+      .post(`/api/companies/${companyId}/agent-hires`).send(pausedRequest));
+
+    expect(res.status, JSON.stringify(res.body)).toBe(201);
+    const input = mockAgentService.create.mock.calls[0]![1];
+    expect(input.status).toBe("paused");
+    expectPausedConfiguration(input);
+    expect(res.body.agent.status).toBe("paused");
+    expect(res.body.approval).toBeNull();
+    expect(mockApprovalService.create).not.toHaveBeenCalled();
+    expectNoPausedProvisioning();
+  });
+
+  const deniedPausedActors = [
+    ["agent with creation permission", {
+      type: "agent", agentId, companyId, source: "agent_key",
+    }, true],
+    ["board without creation permission", pausedBoardActor, false],
+    ["board from another company", {
+      ...pausedBoardActor, companyIds: ["33333333-3333-4333-8333-333333333333"],
+    }, true],
+  ] as const;
+
+  describe.each(["agents", "agent-hires"])("paused setup authorization on %s", (resource) => {
+    it.each(deniedPausedActors)("denies %s before preparation", async (_name, actor, allowed) => {
+      mockAccessService.canUser.mockResolvedValue(allowed);
+      mockAccessService.hasPermission.mockResolvedValue(true);
+      const app = await createApp(actor);
+      const res = await requestApp(app, (baseUrl) => request(baseUrl)
+        .post(`/api/companies/${companyId}/${resource}`).send(pausedRequest));
+
+      expect(res.status).toBe(403);
+      expectNoPausedWriteOrPreparation();
+    });
+  });
+
+  const executablePausedInputs: Array<[string, Record<string, unknown>]> = [
+    ["command", { adapterConfig: { command: "fixture-must-never-run" } }],
+    ["environment values", { adapterConfig: { env: { REVIEW_SENTINEL: { type: "plain", value: "must-not-persist" } } } }],
+    ["timer and wake aliases", { runtimeConfig: { heartbeat: {
+      enabled: true, intervalSec: 1, wakeOnDemand: true, wakeOnAssignment: true,
+      wakeOnOnDemand: true, wakeOnAutomation: true,
+    } } }],
+    ["permission grants", { permissions: { canCreateAgents: true, canCreateSkills: true, canAssignTasks: true } }],
+    ["instruction files", { instructionsBundle: { files: { "AGENTS.md": "fixture instructions" } } }],
+    ["skills", { desiredSkills: ["fixture-skill"] }],
+    ["execution environment", { defaultEnvironmentId: "33333333-3333-4333-8333-333333333333" }],
+    ["configured adapter", { adapterType: "codex_local" }],
+    ["runtime extensions", { runtimeConfig: { modelProfiles: { cheap: { adapterConfig: {} } } } }],
+    ["spending limits", { budgetMonthlyCents: 100 }],
+  ];
+
+  describe.each(["agents", "agent-hires"])("paused setup rejects executable input on %s", (resource) => {
+    it.each(executablePausedInputs)("rejects %s before side effects", async (_name, patch) => {
+      const app = await createApp(pausedBoardActor);
+      const res = await requestApp(app, (baseUrl) => request(baseUrl)
+        .post(`/api/companies/${companyId}/${resource}`).send({ ...pausedRequest, ...patch }));
+
+      expect(res.status, JSON.stringify(res.body)).toBe(422);
+      expect(res.body.details).toMatchObject({ code: "paused_setup_conflict" });
+      expectNoPausedWriteOrPreparation();
+    });
+  });
+
+  it("board census returns only six identity fields for every status and the requested company", async () => {
+    const statuses = ["active", "paused", "idle", "running", "error", "pending_approval", "terminated"];
+    const rows = statuses.map((status, index) => ({
+      ...baseAgent,
+      id: `00000000-0000-4000-8000-${String(index + 1).padStart(12, "0")}`,
+      name: `Finance ${status}`,
+      role: "cfo",
+      status,
+      adapterConfig: { command: "census-command-must-not-leak", env: { TOKEN: "census-env-must-not-leak" } },
+      runtimeConfig: { privateRuntime: "census-runtime-must-not-leak" },
+      metadata: { privateNote: "census-metadata-must-not-leak" },
+      permissions: { privateGrant: true },
+    }));
+    const foreign = { ...rows[0]!, id: "foreign-agent", companyId: "33333333-3333-4333-8333-333333333333" };
+    const app = await createApp(pausedBoardActor, { censusRows: [...rows].reverse().concat(foreign) });
+    const res = await requestApp(app, (baseUrl) => request(baseUrl)
+      .get(`/api/companies/${companyId}/agent-census`));
+
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(Object.keys(res.body).sort()).toEqual(["companyId", "items"]);
+    expect(res.body.companyId).toBe(companyId);
+    expect(res.body.items).toEqual(rows.map(({ id, name, role, status, reportsTo }) => ({
+      id, companyId, name, role, status, reportsTo,
+    })));
+    for (const row of res.body.items) {
+      expect(Object.keys(row).sort()).toEqual(["companyId", "id", "name", "reportsTo", "role", "status"]);
+    }
+    expect(JSON.stringify(res.body)).not.toContain("must-not-leak");
+    expect(mockAgentService.list).not.toHaveBeenCalled();
+    const [query] = app.locals.agentRouteTestDb.censusQueries;
+    const { agents: agentsTable } = await import("@paperclipai/db");
+    expect(query.table).toBe(agentsTable);
+    for (const field of ["id", "companyId", "name", "role", "status", "reportsTo"] as const) {
+      expect(query.projection[field]).toBe(agentsTable[field]);
+    }
+    expect(query).toMatchObject({ sql: '"agents"."company_id" = $1', params: [companyId] });
+    expect([...query.columns].sort()).toEqual(["companyId", "id", "name", "reportsTo", "role", "status"]);
+    expect(mockLogActivity).not.toHaveBeenCalled();
+  });
+
+  it.each(["?status=paused", "?include=adapterConfig", "?companyId=another-company"])(
+    "board census rejects query parameters %s before selecting records",
+    async (query) => {
+      const app = await createApp(pausedBoardActor);
+      const res = await requestApp(app, (baseUrl) => request(baseUrl)
+        .get(`/api/companies/${companyId}/agent-census${query}`));
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toContain("does not accept query parameters");
+      expect(app.locals.agentRouteTestDb.select).not.toHaveBeenCalled();
+      expect(mockAgentService.list).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(deniedPausedActors)("board census denies %s before selecting records", async (_name, actor, allowed) => {
+    mockAccessService.canUser.mockResolvedValue(allowed);
+    mockAccessService.hasPermission.mockResolvedValue(true);
+    const app = await createApp(actor);
+    const res = await requestApp(app, (baseUrl) => request(baseUrl)
+      .get(`/api/companies/${companyId}/agent-census`));
+
+    expect(res.status).toBe(403);
+    expect(app.locals.agentRouteTestDb.select).not.toHaveBeenCalled();
+    expect(mockAgentService.list).not.toHaveBeenCalled();
+    expectNoPausedWriteOrPreparation();
+  });
+
 });

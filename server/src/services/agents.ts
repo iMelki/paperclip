@@ -1,3 +1,4 @@
+import { isPausedAgentSetup, isPausedAgentSetupUnconfigured, pausedAgentSetupFields } from "@paperclipai/shared";
 import { createHash, randomBytes } from "node:crypto";
 import { and, desc, eq, gte, inArray, lt, ne, or, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
@@ -462,6 +463,25 @@ export function agentService(db: Db) {
     });
   }
 
+  /** Every path that leaves "paused" must refuse while paused setup has no runtime. */
+  function assertPausedSetupConfigured(
+    existing: { status?: unknown; metadata?: unknown; adapterType?: unknown; adapterConfig?: unknown },
+    next: { status?: unknown; adapterType?: unknown; adapterConfig?: unknown } = {},
+  ) {
+    if (existing.status !== "paused") return;
+    if (next.status === undefined || next.status === "paused" || next.status === "terminated") return;
+    const effective = {
+      metadata: existing.metadata,
+      adapterType: next.adapterType ?? existing.adapterType,
+      adapterConfig: next.adapterConfig ?? existing.adapterConfig,
+    };
+    if (isPausedAgentSetupUnconfigured(effective)) {
+      throw conflict("Finish setup before resuming: this agent was created paused without a configured runtime", {
+        code: "agent_paused_setup_unconfigured",
+      });
+    }
+  }
+
   async function updateAgent(
     id: string,
     data: Partial<typeof agents.$inferInsert>,
@@ -481,6 +501,7 @@ export function agentService(db: Db) {
     ) {
       throw conflict("Pending approval agents cannot be activated directly");
     }
+    assertPausedSetupConfigured(existing, data);
     if (existing.status === "pending_approval" && !options?.allowPendingApprovalConfigUpdate) {
       const changedFields = changedPendingApprovalConfigFields(existing as typeof agents.$inferSelect, data);
       if (changedFields.length > 0) {
@@ -666,6 +687,7 @@ export function agentService(db: Db) {
       if (existing.status === "pending_approval") {
         throw conflict("Pending approval agents cannot be resumed");
       }
+      assertPausedSetupConfigured(existing, { status: "idle" });
 
       const updated = await db
         .update(agents)
@@ -789,7 +811,8 @@ export function agentService(db: Db) {
         const existing = await agentService(txDb).getById(id);
         if (!existing || existing.status !== "pending_approval") return null;
         const approvedPatch = approvedPayload ? configPatchFromApprovalPayload(approvedPayload) : {};
-        let patch = { ...approvedPatch } as Partial<typeof agents.$inferInsert>;
+        const pausedSetup = isPausedAgentSetup(existing.metadata);
+        let patch = { ...approvedPatch, ...(pausedSetup ? pausedAgentSetupFields(existing.metadata) : {}) } as Partial<typeof agents.$inferInsert>;
         if (
           Object.prototype.hasOwnProperty.call(patch, "adapterConfig") &&
           isPlainRecord(patch.adapterConfig)
@@ -808,7 +831,7 @@ export function agentService(db: Db) {
         }
         const updated = await tx
           .update(agents)
-          .set({ ...patch, status: "idle", updatedAt: new Date() })
+          .set({ ...patch, status: pausedSetup ? "paused" : "idle", ...(pausedSetup ? { pausedAt: new Date(), pauseReason: "manual" as const } : {}), updatedAt: new Date() })
           .where(and(eq(agents.id, id), eq(agents.status, "pending_approval")))
           .returning()
           .then((rows) => rows[0] ?? null);
