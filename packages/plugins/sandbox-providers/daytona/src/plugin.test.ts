@@ -3535,8 +3535,8 @@ describe("daytona native file-sync hooks", () => {
     const transfer = spans.find((span) => span.name === "transfer");
     expect(transfer).toBeDefined();
     expect(transfer!.ended).toBe(true);
-    // One serial guard round trip before the transfer: mkdir (with the zstd probe).
-    expect(transfer!.attributes["paperclip.sandbox.startup.transfer.guard.count"]).toBe(1);
+    // Two serial guard round trips before the transfer: mkdir (with the zstd probe) and the symlink-escape guard.
+    expect(transfer!.attributes["paperclip.sandbox.startup.transfer.guard.count"]).toBe(2);
     expect(transfer!.attributes["paperclip.sandbox.startup.provider"]).toBe("daytona");
     expect(typeof transfer!.attributes["paperclip.sandbox.startup.transfer.wall_ms"]).toBe("number");
     // A bulk file upload builds no host tarball, so it opens no pack span.
@@ -3640,8 +3640,8 @@ describe("daytona native file-sync hooks", () => {
 
     const transfer = spans.find((span) => span.name === "transfer");
     expect(transfer).toBeDefined();
-    // One serial guard round trip before the transfer: mkdir.
-    expect(transfer!.attributes["paperclip.sandbox.startup.transfer.guard.count"]).toBe(1);
+    // Two serial guard round trips before the transfer: mkdir and the symlink-escape guard.
+    expect(transfer!.attributes["paperclip.sandbox.startup.transfer.guard.count"]).toBe(2);
   });
 
   it("opens ensureDirectory, transfer, promote spans in call order for a file-mapping sync", async () => {
@@ -3673,6 +3673,7 @@ describe("daytona native file-sync hooks", () => {
 
     expect(spans.map((span) => span.name)).toEqual([
       "ensureDirectory",
+      "checkSymlinkEscape",
       "transfer",
       "promote",
     ]);
@@ -3721,6 +3722,7 @@ describe("daytona native file-sync hooks", () => {
     expect(spans.map((span) => span.name)).toEqual([
       "pack",
       "ensureDirectory",
+      "checkSymlinkEscape",
       "transfer",
       "extractTarball",
     ]);
@@ -3797,6 +3799,7 @@ describe("daytona native file-sync hooks", () => {
     // the post-upload command then opens the postUploadCommand span.
     expect(spans.map((span) => span.name)).toEqual([
       "ensureDirectory",
+      "checkSymlinkEscape",
       "transfer",
       "promote",
       "postUploadCommand",

@@ -158,16 +158,15 @@ describe("daytona file-sync inbound scratch cleanup", () => {
     expect(standaloneRemoves).toHaveLength(0);
   });
 
-  it("writes an inbound file mapping to a sandbox path outside the workspace root", async () => {
+  it("refuses an inbound file mapping to a sandbox path outside the workspace root", async () => {
     const hostDir = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-daytona-outside-root-"));
     cleanupDirs.push(hostDir);
     const sourcePath = path.join(hostDir, "source.txt");
     await fs.writeFile(sourcePath, "payload");
 
-    // A target outside the workspace remote dir. The inbound direction writes
-    // host data into the sandbox, and the sandbox already has read/write
-    // authority over its own filesystem, so the provider no longer confines
-    // the target to the remote dir.
+    // The upload and the promote run through privileged Daytona FS/exec APIs, so
+    // an inbound target outside the workspace remote dir is refused before any
+    // sandbox command or byte transfer.
     const remoteDir = "/workspace";
     const targetPath = "/etc/paperclip-outside-root.txt";
     const uploadedDestinations: string[] = [];
@@ -179,12 +178,11 @@ describe("daytona file-sync inbound scratch cleanup", () => {
       files: [{ sourcePath, targetPath, kind: "file" }],
     }];
 
-    const result = await performSyncIn({ sandbox: sandbox as never, operations, remoteDir, timeoutSeconds: 30 });
-
-    expect(result.operations[0].filesTransferred).toBe(1);
-    const promoteCommand = commands.map((entry) => entry.command).find((command) => command.includes("mv -f"));
-    expect(promoteCommand).toBeDefined();
-    expect(promoteCommand).toContain(targetPath);
+    await expect(
+      performSyncIn({ sandbox: sandbox as never, operations, remoteDir, timeoutSeconds: 30 }),
+    ).rejects.toThrow(/escapes the workspace remote dir/);
+    expect(uploadedDestinations).toEqual([]);
+    expect(commands).toEqual([]);
   });
 });
 

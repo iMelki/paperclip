@@ -622,6 +622,7 @@ async function syncInFileMappings(input: {
   let bytesTransferred = 0;
   const plans: FileMappingPlan[] = [];
   for (const mapping of mappings) {
+    assertConfinedSandboxPath(remoteDir, mapping.targetPath, "target");
     parentDirs.add(path.posix.dirname(mapping.targetPath));
     const sourceSize = (await fs.stat(mapping.sourcePath)).size;
     bytesTransferred += sourceSize;
@@ -659,6 +660,24 @@ async function syncInFileMappings(input: {
   // An absent or unexpected probe answer fails closed: no compression, byte-
   // identical to a sandbox that has no `zstd` binary.
   const sandboxHasZstd = mkdirOutput.includes(ZSTD_PROBE_MARKER);
+
+  // Defense-in-depth beyond the lexical `assertConfinedSandboxPath`: a sandbox
+  // can replace a target parent with a symlink outside the workspace so the string
+  // check passes but the privileged write resolves through it. Canonicalize the
+  // (now materialized) paths and fail closed if any escapes, BEFORE any bytes land.
+  // `checkSymlinkEscape` span: re-check a path resolves inside the workspace root.
+  await withProviderSpan({
+    name: "checkSymlinkEscape",
+    run: () =>
+      assertSandboxPathsConfined({
+        sandbox,
+        remoteDir,
+        paths: [...parentDirs],
+        timeoutSeconds,
+        label: "inbound symlink-escape guard",
+      }),
+  });
+  guardRoundTrips += 1;
 
   // Host-side compression, gated on the probe AND a runtime feature check (a
   // declared `engines.node` floor is an assumption, not a guarantee — always
@@ -844,6 +863,7 @@ async function syncInDirectoryMapping(input: {
   timeoutSeconds: number;
 }): Promise<{ filesTransferred: number; bytesTransferred: number }> {
   const { sandbox, mapping, remoteDir, timeoutSeconds } = input;
+  assertConfinedSandboxPath(remoteDir, mapping.targetPath, "target");
   return withHostTempDir(async (tmp) => {
     const archivePath = path.join(tmp, "sync-in.tar");
     // The pack step is host-local: it builds the tarball and makes no sandbox
@@ -878,6 +898,23 @@ async function syncInDirectoryMapping(input: {
           timeoutSeconds,
           "syncIn mkdir",
         ),
+    });
+    guardRoundTrips += 1;
+    // Defense-in-depth beyond the lexical `assertConfinedSandboxPath`: a sandbox
+    // can replace a target parent with a symlink outside the workspace so the string
+    // check passes but the privileged write resolves through it. Canonicalize the
+    // (now materialized) paths and fail closed if any escapes, BEFORE any bytes land.
+    // `checkSymlinkEscape` span: re-check a path resolves inside the workspace root.
+    await withProviderSpan({
+      name: "checkSymlinkEscape",
+      run: () =>
+        assertSandboxPathsConfined({
+          sandbox,
+          remoteDir,
+          paths: [mapping.targetPath],
+          timeoutSeconds,
+          label: "inbound symlink-escape guard",
+        }),
     });
     guardRoundTrips += 1;
     // The uploaded scratch tar lands at the workspace root as a reserved
