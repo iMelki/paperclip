@@ -32,9 +32,12 @@ const HANDLE = "handle-abcdef1234567890";
 // not probe for a real host broker. This suite is about the default, so it opts
 // back in and restores the harness value afterwards.
 let previousHttpsMode: string | undefined;
-beforeEach(() => {
+beforeEach(async () => {
   previousHttpsMode = process.env.PAPERCLIP_MANAGED_RUNTIME_HTTPS;
   process.env.PAPERCLIP_MANAGED_RUNTIME_HTTPS = "auto";
+  // A backend reaped by the previous suite in this shard may still be
+  // releasing 42000/52000; see waitForExposureBasePairReleased.
+  await waitForExposureBasePairReleased();
 });
 
 afterEach(async () => {
@@ -43,7 +46,21 @@ afterEach(async () => {
   // These tests spawn real loopback backends on dedicated-range ports; reap them
   // rather than leaving one squatting 42xxx/52xxx for every test in the file.
   await resetRuntimeServicesForTests({ terminateProcesses: true });
+  // Isolation between tests: termination is signalled, but the reaped guest can
+  // still hold its listener for a moment. The next test asserts the allocator's
+  // FIRST pick (42000), so it must start against a released base pair, not race
+  // the previous test's dying backend and get relocated to 42001.
+  await waitForExposureBasePairReleased();
 });
+
+async function waitForExposureBasePairReleased(timeoutMs = 10_000): Promise<void> {
+  const base = 42_000;
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (await isLoopbackPortFree(base) && await isLoopbackPortFree(deriveViteHmrPort(base))) return;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+}
 
 function serviceCommand() {
   // Answers `/api/health` the way a real Paperclip dev runtime does: managed
