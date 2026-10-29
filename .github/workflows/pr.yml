@@ -306,6 +306,56 @@ jobs:
             pnpm test:run:general -- --group '${{ matrix.group }}'
           fi
 
+  daytona_plugin_tests:
+    name: Daytona plugin tests
+    needs: [policy]
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [rf-paperclip]
+    # Same rf-slot hook budget as the other box jobs (45 min) plus 10 min of work.
+    timeout-minutes: 55
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+        with:
+          version: 9.15.4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          cache: pnpm
+
+      # The Daytona plugin is outside the pnpm workspace, but its vitest config
+      # aliases @paperclipai/plugin-sdk to the SDK sources, which import
+      # @paperclipai/shared. Install only the SDK and its workspace deps, frozen.
+      - name: Install plugin SDK dependencies (frozen)
+        run: pnpm install --frozen-lockfile --filter '@paperclipai/plugin-sdk...'
+
+      # The plugin has no lockfile of its own, so this install cannot be frozen.
+      # It uses the repo's pinned pnpm (9.15.4) with --ignore-workspace.
+      - name: Install Daytona plugin dependencies
+        working-directory: packages/plugins/sandbox-providers/daytona
+        run: pnpm install --ignore-workspace --no-frozen-lockfile
+
+      - name: Run Daytona plugin tests
+        working-directory: packages/plugins/sandbox-providers/daytona
+        run: |
+          report="$RUNNER_TEMP/daytona-vitest.json"
+          pnpm exec vitest run --config vitest.config.ts --passWithNoTests=false \
+            --reporter=default --reporter=json --outputFile.json="$report"
+          ran="$(node -e 'const r=require(process.argv[1]); console.log(r.numPassedTests + r.numFailedTests)' "$report")"
+          echo "Daytona plugin tests executed: $ran"
+          if [ "$ran" -lt 1 ]; then
+            echo "::error::Daytona plugin test step ran 0 tests"
+            exit 1
+          fi
+
   verify:
     # Preserve the legacy required-check name while the underlying work runs in parallel.
     name: verify
