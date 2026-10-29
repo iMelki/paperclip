@@ -1,0 +1,6 @@
+import { execFile } from "node:child_process";
+
+declare const command: string;
+const argv = ["-c", "printf '%s' ready"] as const;
+execFile("/bin/sh", [...argv]);
+execFile(command, ["--version"]);
