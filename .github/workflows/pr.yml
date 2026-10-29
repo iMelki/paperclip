@@ -337,11 +337,11 @@ jobs:
       - name: Install plugin SDK dependencies (frozen)
         run: pnpm install --frozen-lockfile --filter '@paperclipai/plugin-sdk...'
 
-      # The plugin has no lockfile of its own, so this install cannot be frozen.
+      # The plugin has its own committed lockfile, so this install is frozen.
       # It uses the repo's pinned pnpm (9.15.4) with --ignore-workspace.
-      - name: Install Daytona plugin dependencies
+      - name: Install Daytona plugin dependencies (frozen)
         working-directory: packages/plugins/sandbox-providers/daytona
-        run: pnpm install --ignore-workspace --no-frozen-lockfile
+        run: pnpm install --ignore-workspace --frozen-lockfile
 
       - name: Run Daytona plugin tests
         working-directory: packages/plugins/sandbox-providers/daytona
