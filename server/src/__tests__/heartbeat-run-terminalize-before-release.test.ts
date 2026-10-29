@@ -10,6 +10,7 @@ import {
   issues,
 } from "@paperclipai/db";
 import {
+  EMBEDDED_POSTGRES_TEST_SETUP_TIMEOUT_MS,
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
@@ -64,7 +65,7 @@ describeEmbeddedPostgres("heartbeat teardown terminalizes the run before releasi
   beforeAll(async () => {
     tempDb = await startEmbeddedPostgresTestDatabase("paperclip-terminalize-before-release-");
     db = createDb(tempDb.connectionString);
-  }, 20_000);
+  }, EMBEDDED_POSTGRES_TEST_SETUP_TIMEOUT_MS);
 
   afterEach(async () => {
     await db.delete(heartbeatRunEvents);
