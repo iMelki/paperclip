@@ -645,6 +645,7 @@ export function toolAccessRoutes(
       "Tool connection not found",
     );
     if (!connection) return;
+    if (!hasCompanyAccess(req, connection.companyId)) throw notFound("Tool connection not found");
     assertCompanyAccess(req, connection.companyId);
     res.json(await svc.getConnectionInstallSnapshot(connection.id, connection.companyId));
   });
@@ -926,6 +927,7 @@ export function toolAccessRoutes(
       "Tool connection not found",
     );
     if (!existing) return;
+    if (!hasCompanyAccess(req, existing.companyId)) throw notFound("Tool connection not found");
     assertCompanyAccess(req, existing.companyId);
     res.json({ catalog: await svc.listCatalog(existing.id, existing.companyId) });
   });
