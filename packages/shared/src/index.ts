@@ -2608,3 +2608,4 @@ export {
   isPaperclipDevRunnerCommand,
   rewriteUrlHostToLoopback,
 } from "./runtime-exposure/loopback-bind.js";
+export { PAUSED_AGENT_SETUP_KEY, isPausedAgentSetup, isPausedAgentSetupUnconfigured, pausedAgentSetupFields, pausedAgentSetupProblem } from "./agent-paused-setup.js";

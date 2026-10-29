@@ -18,6 +18,51 @@ const noUser = {
   },
 };
 
+test("the confirmed Cloud service account is not inferred as a personal token", () => {
+  for (const source of ["USER", "LOGNAME", "USERNAME"]) {
+    assert.deepEqual(core.resolveDynamicForbiddenTokens({ [source]: " AgEnT " }, noUser), []);
+  }
+  assert.deepEqual(core.resolveDynamicForbiddenTokens({}, { userInfo: () => ({ username: "agent" }) }), []);
+});
+
+test("service-account inference preserves actual and near-matching operator names", () => {
+  assert.deepEqual(core.resolveDynamicForbiddenTokens({
+    USER: "agent", LOGNAME: "synthetic-operator", USERNAME: "agent-operator",
+  }, { userInfo: () => ({ username: "ops-agent" }) }), [
+    "synthetic-operator", "agent-operator", "ops-agent",
+  ]);
+});
+
+test("explicit service-account and structural tokens still block real tracked content", (t) => {
+  const root = mkdtempSync(path.join(tmpdir(), "forbidden-tokens-explicit-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  git(root, "init", "-q");
+  const privateFile = path.join(root, ".git", "hooks", "forbidden-tokens.txt");
+  const trackedFile = path.join(root, "structural-patterns.txt");
+  writeFileSync(privateFile, "agent\n");
+  writeFileSync(trackedFile, "synthetic-structural-pattern\n");
+  const tokens = core.resolveForbiddenTokens([privateFile, trackedFile], { USER: "agent" }, noUser);
+  assert.deepEqual(tokens, ["agent", "synthetic-structural-pattern"]);
+  const check = () => core.runForbiddenTokenCheck({ repoRoot: root, tokens, log: () => {}, error: () => {} });
+  const content = path.join(root, "tracked.md");
+  writeFileSync(content, "agent\n");
+  git(root, "add", "tracked.md");
+  assert.equal(check(), 1, "explicit private spelling must still block");
+  writeFileSync(content, "synthetic-structural-pattern\n");
+  assert.equal(check(), 1, "structural patterns must still block");
+  writeFileSync(content, "non-sensitive example\n");
+  assert.equal(check(), 0, "restored clean content must pass with both tokens retained");
+});
+
+test("generic account handling does not turn scan errors into clean results", () => {
+  for (const status of [128, null]) {
+    assert.equal(core.runForbiddenTokenCheck({
+      repoRoot, tokens: ["synthetic-private-token"], grep: () => ({ status, stdout: "" }),
+      log: () => {}, error: () => {},
+    }), 1);
+  }
+});
+
 // ---------------------------------------------------------------------------
 // Tokens are literals, not regexes.
 //

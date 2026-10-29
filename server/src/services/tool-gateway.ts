@@ -51,6 +51,7 @@ import type {
   UpdateToolMcpGateway,
 } from "@paperclipai/shared";
 import type { AgentToolDescriptor, PluginToolDispatcher } from "./plugin-tool-dispatcher.js";
+import { HttpError } from "../errors.js";
 import { logActivity, type LogActivityInput } from "./activity-log.js";
 import { secretService } from "./secrets.js";
 import { mcpHttpRequestHeaders, parseMcpHttpResponseBody } from "./mcp-http.js";
@@ -61,6 +62,8 @@ import {
 } from "./remote-mcp-headers.js";
 import { assertPublicRemoteHttpEndpoint, parseRemoteHttpEndpoint } from "./remote-http-endpoint-guard.js";
 import { toolAccessPolicyService } from "./tool-access-policy.js";
+import { toolAccessService } from "./tool-access.js";
+import { getGitHubOAuthToolDescriptor, isNativeGitHubOAuthConnection } from "./github-oauth-transport.js";
 import { issueThreadInteractionService } from "./issue-thread-interactions.js";
 import {
   createToolRuntimeSupervisor,
@@ -126,6 +129,7 @@ export type ToolGatewayProviderType =
   | "mcp_stdio_fixture"
   | "mcp_remote_http"
   | "mcp_local_stdio"
+  | "github_rest"
   | "paperclip_self"
   | "paperclip_plugin"
   | "paperclip_virtual";
@@ -136,7 +140,7 @@ export interface ConnectedMcpGatewayMetadata {
   applicationDisplayName: string;
   connectionId: string;
   catalogEntryId: string;
-  transport: "mcp_remote" | "local_stdio";
+  transport: "mcp_remote" | "local_stdio" | "rest_api";
   gatewayToolName: string;
   upstreamToolName: string;
   catalogName: string;
@@ -479,7 +483,53 @@ function shortStableId(id: string): string {
 }
 
 function toolRequiresFormalApproval(tool: ToolGatewayDescriptor): boolean {
-  return tool.risk === "destructive";
+  return tool.risk === "destructive" || (tool.providerType === "github_rest" && tool.risk !== "read");
+}
+
+function requireGitHubWriteApproval(tool: ToolGatewayDescriptor, decision: ToolAccessDecision): ToolAccessDecision {
+  if (tool.providerType !== "github_rest" || tool.risk === "read" || !decision.allowed) return decision;
+  return { ...decision, decision: "require_approval", allowed: false, reasonCode: "requires_approval_policy",
+    explanation: "GitHub writes require formal approval of the exact reviewed target and arguments." };
+}
+
+function nativeGitHubCatalogMatches(
+  entry: typeof toolCatalogEntries.$inferSelect,
+  connection: typeof toolConnections.$inferSelect,
+): boolean {
+  const descriptor = getGitHubOAuthToolDescriptor(entry.toolName);
+  return isNativeGitHubOAuthConnection(connection) && descriptor !== null
+    && asRecord(connection.config)?.sourceTemplateKey === "github"
+    && asRecord(connection.transportConfig)?.sourceTemplateKey === "github"
+    && entry.riskLevel === descriptor.risk && entry.isReadOnly === (descriptor.risk === "read")
+    && entry.isWrite === (descriptor.risk === "write") && entry.isDestructive === false
+    && stableHash(entry.inputSchema ?? {}) === stableHash(descriptor.inputSchema)
+    && stableHash(entry.annotations ?? {}) === stableHash(descriptor.annotations ?? {});
+}
+
+function nativeGitHubGatewayError(error: unknown): ToolGatewayHttpError {
+  if (error instanceof ToolGatewayHttpError) return error;
+  const details = error instanceof HttpError ? asRecord(error.details) : null;
+  const code = typeof details?.code === "string" && /^[a-z][a-z0-9_]{0,95}$/.test(details.code)
+    ? details.code : "github_execution_failed";
+  const unknown = details?.outcomeUnknown === true || code === "github_write_outcome_unknown";
+  const httpStatus = error instanceof HttpError && Number.isInteger(error.status)
+    && error.status >= 400 && error.status <= 599 ? error.status : 502;
+  // An uncertain write is not a retryable runtime deferral, even when its HTTP request timed out.
+  return new ToolGatewayHttpError(unknown ? 502 : httpStatus,
+    unknown ? "GitHub write outcome is unknown. Verify the target before retrying; Paperclip will not retry automatically."
+      : "GitHub execution was refused or failed.", code,
+    { code, ...(details?.replayed === true ? { replayed: true } : { httpStatus }),
+      dispatched: typeof details?.dispatched === "boolean" ? details.dispatched : null,
+      outcomeUnknown: unknown ? true : typeof details?.outcomeUnknown === "boolean" ? details.outcomeUnknown : null });
+}
+
+function nativeGitHubErrorAudit(tool: ToolGatewayDescriptor, error: unknown): Record<string, unknown> {
+  if (tool.providerType !== "github_rest" || !(error instanceof ToolGatewayHttpError)) return {};
+  return { nativeGitHub: { code: error.reasonCode,
+    dispatched: typeof error.details.dispatched === "boolean" ? error.details.dispatched : null,
+    outcomeUnknown: typeof error.details.outcomeUnknown === "boolean" ? error.details.outcomeUnknown : null,
+    ...(error.details.replayed === true ? { replayed: true } : {}),
+    ...(typeof error.details.httpStatus === "number" ? { httpStatus: error.details.httpStatus } : {}) } };
 }
 
 function toolAuditMetadata(tool: ToolGatewayDescriptor): Record<string, unknown> {
@@ -842,19 +892,21 @@ export function createToolGatewayService(
         eq(toolCatalogEntries.status, "active"),
         isNull(toolCatalogEntries.quarantinedAt),
         eq(toolConnections.companyId, companyId),
-        inArray(toolConnections.transport, ["mcp_remote", "local_stdio"]),
+        inArray(toolConnections.transport, ["mcp_remote", "local_stdio", "rest_api"]),
         eq(toolConnections.status, "active"),
         eq(toolConnections.enabled, true),
         inArray(toolConnections.healthStatus, ["ok", "healthy"]),
         eq(toolApplications.companyId, companyId),
-        inArray(toolApplications.type, ["mcp_http", "mcp_stdio"]),
+        inArray(toolApplications.type, ["mcp_http", "mcp_stdio", "rest_api"]),
         eq(toolApplications.status, "active"),
       ))
       .orderBy(toolConnections.name, toolCatalogEntries.name);
 
-    const eligibleRows = rows.filter(({ connection, application }) =>
+    const eligibleRows = rows.filter(({ catalogEntry, connection, application }) =>
       (connection.transport === "mcp_remote" && application.type === "mcp_http")
       || (connection.transport === "local_stdio" && application.type === "mcp_stdio")
+      || (connection.transport === "rest_api" && application.type === "rest_api"
+        && catalogEntry.applicationId === application.id && nativeGitHubCatalogMatches(catalogEntry, connection))
     );
     const baseNames = eligibleRows.map(({ catalogEntry, connection, application }) => {
       const applicationKey = application.applicationKey ?? null;
@@ -868,9 +920,9 @@ export function createToolGatewayService(
     }, new Map());
 
     return eligibleRows.map(({ catalogEntry, connection, application }, index) => {
-      if (connection.transport === "rest_api") {
-        throw new Error(`REST API connection ${connection.id} cannot be exposed through the MCP gateway`);
-      }
+      // REST is opt-in only for the fixed native GitHub adapter, never a generic HTTP bypass.
+      const githubDescriptor = connection.transport === "rest_api"
+        ? getGitHubOAuthToolDescriptor(catalogEntry.toolName) : null;
       const baseName = baseNames[index]!;
       const gatewayToolName = baseNameCounts.get(baseName)! > 1
         ? `${baseName}-${shortStableId(catalogEntry.id)}`
@@ -905,10 +957,12 @@ export function createToolGatewayService(
       return {
         name: gatewayToolName,
         displayName: catalogEntry.title ?? catalogEntry.toolName,
-        description: catalogEntry.description ?? `Connected MCP tool ${catalogEntry.toolName} from ${connection.name}.`,
+        description: githubDescriptor?.description ?? catalogEntry.description
+          ?? `Connected MCP tool ${catalogEntry.toolName} from ${connection.name}.`,
         parametersSchema: inputSchema,
         pluginId: `mcp:${applicationKey ?? application.id}`,
-        providerType: connection.transport === "local_stdio" ? "mcp_local_stdio" : "mcp_remote_http",
+        providerType: connection.transport === "rest_api" ? "github_rest"
+          : connection.transport === "local_stdio" ? "mcp_local_stdio" : "mcp_remote_http",
         risk,
         applicationId: application.id,
         applicationKey,
@@ -1466,6 +1520,31 @@ export function createToolGatewayService(
     });
   }
 
+  async function createFormalToolApproval(input: {
+    session: ToolGatewaySession; tool: ToolGatewayDescriptor;
+    invocationId: string; actionRequestId: string; argumentsHash: string;
+  }): Promise<string | null> {
+    if (!toolRequiresFormalApproval(input.tool)) return null;
+    const [approval] = await db.insert(approvals).values({
+      companyId: input.session.companyId, type: "request_board_approval",
+      requestedByAgentId: input.session.agentId,
+      payload: {
+        title: `Approve high-risk tool action: ${input.tool.name}`,
+        summary: `${input.tool.name} is classified as ${input.tool.risk} and requires formal board approval before execution.`,
+        recommendedAction: "Approve only if the reviewed arguments match the intended operation.",
+        risks: ["The tool may perform irreversible or externally visible side effects.",
+          "Execution will use the stored reviewed arguments exactly once."],
+        source: "tool_gateway", invocationId: input.invocationId, actionRequestId: input.actionRequestId,
+        tool: input.tool.name, risk: input.tool.risk, argumentsHash: input.argumentsHash,
+      },
+    }).returning();
+    if (input.session.issueId) await db.insert(issueApprovals).values({
+      companyId: input.session.companyId, issueId: input.session.issueId,
+      approvalId: approval.id, linkedByAgentId: input.session.agentId,
+    }).onConflictDoNothing();
+    return approval.id;
+  }
+
   async function requestApprovalForRecordedToolCall(input: {
     invocation: typeof toolInvocations.$inferSelect;
     actionRequest: typeof toolActionRequests.$inferSelect | null;
@@ -1591,42 +1670,8 @@ export function createToolGatewayService(
       actionRequest.previewMarkdown?.trim() ||
       buildHumanizedActionPreview({ tool: input.tool, argumentsSummary: input.argumentsSummary });
 
-    let formalApprovalId: string | null = null;
-    if (toolRequiresFormalApproval(input.tool)) {
-      const [approval] = await db
-        .insert(approvals)
-        .values({
-          companyId: input.session.companyId,
-          type: "request_board_approval",
-          requestedByAgentId: input.session.agentId,
-          payload: {
-            title: `Approve high-risk tool action: ${input.tool.name}`,
-            summary: `${input.tool.name} is classified as ${input.tool.risk} and requires formal board approval before execution.`,
-            recommendedAction: "Approve only if the reviewed arguments match the intended operation.",
-            risks: [
-              "The tool may perform irreversible or externally visible side effects.",
-              "Execution will use the stored reviewed arguments exactly once.",
-            ],
-            source: "tool_gateway",
-            invocationId: input.invocation.id,
-            actionRequestId: actionRequest.id,
-            tool: input.tool.name,
-            risk: input.tool.risk,
-            argumentsHash: canonicalArgumentsHash,
-          },
-        })
-        .returning();
-      formalApprovalId = approval.id;
-      await db
-        .insert(issueApprovals)
-        .values({
-          companyId: input.session.companyId,
-          issueId: input.session.issueId,
-          approvalId: approval.id,
-          linkedByAgentId: input.session.agentId,
-        })
-        .onConflictDoNothing();
-    }
+    const formalApprovalId = await createFormalToolApproval({ session: input.session, tool: input.tool,
+      invocationId: input.invocation.id, actionRequestId: actionRequest.id, argumentsHash: canonicalArgumentsHash });
 
     const interaction = await interactions.create(
       { id: input.session.issueId, companyId: input.session.companyId },
@@ -1923,7 +1968,7 @@ export function createToolGatewayService(
       (tool) => session.agentId || (tool.providerType !== "paperclip_self" && tool.providerType !== "paperclip_plugin"),
     );
     const decisions = await Promise.all(tools.map(async (tool) => {
-      const decision = await policyService.decide(policyInputForTool({ session, tool }));
+      const decision = requireGitHubWriteApproval(tool, await policyService.decide(policyInputForTool({ session, tool })));
       return { tool, decision };
     }));
     const visibleTools = decisions
@@ -2574,7 +2619,8 @@ export function createToolGatewayService(
     tool: ToolGatewayDescriptor,
     options: { requireResolvedCredentials?: boolean } = {},
   ): Promise<Record<string, unknown> | null> {
-    if (tool.providerType !== "mcp_remote_http" || !tool.connectionId || !tool.catalogEntryId) {
+    if ((tool.providerType !== "mcp_remote_http" && tool.providerType !== "github_rest")
+      || !tool.connectionId || !tool.catalogEntryId) {
       return null;
     }
     const [row] = await db
@@ -2594,7 +2640,17 @@ export function createToolGatewayService(
         eq(toolApplications.companyId, session.companyId),
       ))
       .limit(1);
-    if (!row) return null;
+    if (!row) {
+      if (tool.providerType === "github_rest") throw new ToolGatewayHttpError(404, "GitHub tool is no longer connected", "tool_not_found");
+      return null;
+    }
+    if (tool.providerType === "github_rest" && (!nativeGitHubCatalogMatches(row.entry, row.connection)
+      || row.entry.status !== "active" || row.entry.quarantinedAt !== null || row.entry.entryKind !== "tool"
+      || row.entry.applicationId !== row.application.id || row.application.type !== "rest_api"
+      || row.application.status !== "active" || row.connection.status !== "active" || !row.connection.enabled
+      || !["ok", "healthy"].includes(row.connection.healthStatus))) {
+      throw new ToolGatewayHttpError(409, "Native GitHub tool target is not active and reviewed", "approved_tool_target_changed");
+    }
     const credentialVersions = await connectedCredentialVersionSnapshots(row.connection, {
       requireResolved: options.requireResolvedCredentials === true,
     });
@@ -2623,6 +2679,73 @@ export function createToolGatewayService(
       gatewayToolName: tool.name,
       riskLevel: tool.risk,
     };
+  }
+
+  async function assertNativeGitHubDispatchApproved(
+    session: ToolGatewaySession, tool: ToolGatewayDescriptor, parameters: unknown, invocationId: string,
+  ): Promise<void> {
+    if (tool.risk === "read") return;
+    const [row] = await db.select({ request: toolActionRequests, invocation: toolInvocations })
+      .from(toolActionRequests).innerJoin(toolInvocations, eq(toolActionRequests.invocationId, toolInvocations.id))
+      .where(and(eq(toolActionRequests.invocationId, invocationId), eq(toolActionRequests.companyId, session.companyId),
+        eq(toolInvocations.companyId, session.companyId))).limit(1);
+    if (!row || !["approved", "executing", "executed"].includes(row.request.status) || !row.request.approvalId
+      || !row.request.expiresAt || row.request.expiresAt.getTime() <= Date.now()
+      || row.invocation.status !== "executing" || row.invocation.approvalState !== "approved"
+      || row.invocation.agentId !== session.agentId || row.invocation.runId !== session.runId
+      || row.invocation.catalogEntryId !== tool.catalogEntryId || row.invocation.connectionId !== tool.connectionId
+      || row.invocation.toolName !== tool.name) {
+      throw new ToolGatewayHttpError(409, "GitHub write has no approved exact-target action", "formal_approval_required");
+    }
+    const [approval] = await db.select({ status: approvals.status, decidedByUserId: approvals.decidedByUserId }).from(approvals)
+      .where(and(eq(approvals.id, row.request.approvalId), eq(approvals.companyId, session.companyId))).limit(1);
+    if (approval?.status !== "approved" || !approval.decidedByUserId?.trim()) {
+      throw new ToolGatewayHttpError(409, "GitHub write requires formal board approval", "formal_approval_required");
+    }
+    const signed = readSignedToolArgumentsPayload({ signedArguments: row.request.signedArguments,
+      invocationId, toolName: tool.name, signingSecret: options.toolActionSigningSecret });
+    if (!signed || signed.executionOnApprove !== true
+      || row.request.canonicalArgumentsHash !== summarizeToolValue(parameters).sha256
+      || canonicalToolArguments(signed.arguments) !== canonicalToolArguments(parameters)) {
+      throw new ToolGatewayHttpError(409, "GitHub write arguments differ from the reviewed action", "signed_arguments_mismatch");
+    }
+    const snapshot = await connectedRemoteApprovalSnapshot(session, tool);
+    if (!approvalSnapshotsMatch(signed.approvalSnapshot, snapshot)) {
+      throw new ToolGatewayHttpError(409, "GitHub write target changed after review", "approved_tool_target_changed");
+    }
+  }
+
+  async function executeNativeGitHubTool(
+    session: ToolGatewaySession, tool: ToolGatewayDescriptor, parameters: unknown, timeout: number, invocationId: string,
+  ): Promise<RemoteHttpExecutionResult> {
+    const live = (await connectedMcpToolsForConnection(session.companyId, tool.connectionId ?? ""))
+      .find(candidate => candidate.providerType === "github_rest" && candidate.catalogEntryId === tool.catalogEntryId
+        && candidate.name === tool.name && candidate.upstreamToolName === tool.upstreamToolName);
+    if (!live?.connectionId || !live.catalogEntryId || !live.upstreamToolName) {
+      throw new ToolGatewayHttpError(404, "Native GitHub tool is no longer active and reviewed", "tool_not_found");
+    }
+    await assertNativeGitHubDispatchApproved(session, live, parameters, invocationId);
+    const initialSnapshot = await connectedRemoteApprovalSnapshot(session, live);
+    try {
+      const result = await toolAccessService(db, {
+        deploymentMode: options.deploymentMode, deploymentExposure: options.deploymentExposure,
+        trustedLocalStdioRuntimeHost: options.trustedLocalStdioRuntimeHost,
+      }).executeGitHubOAuthTool({
+        companyId: session.companyId, connectionId: live.connectionId, catalogEntryId: live.catalogEntryId,
+        toolName: live.upstreamToolName, parameters, timeoutMs: Math.min(timeout, 30_000),
+        actor: { actorType: session.actorType ?? (session.agentId ? "agent" : "system"),
+          actorId: session.actorId ?? session.agentId ?? session.gatewayTokenId ?? null },
+        runContext: { runId: session.runId, issueId: session.issueId },
+        beforeDispatch: async () => {
+          const latestSnapshot = await connectedRemoteApprovalSnapshot(session, live);
+          if (!approvalSnapshotsMatch(initialSnapshot, latestSnapshot)) {
+            throw new ToolGatewayHttpError(409, "GitHub target changed during authorization", "approved_tool_target_changed");
+          }
+          await assertNativeGitHubDispatchApproved(session, live, parameters, invocationId);
+        },
+      });
+      return { result };
+    } catch (error) { throw nativeGitHubGatewayError(error); }
   }
 
   function responseTooLargeError() {
@@ -3642,7 +3765,9 @@ export function createToolGatewayService(
           ? await executeRemoteHttpTool(args.session, args.tool, args.parameters, executionTimeoutMs, args.invocationId)
           : args.tool.providerType === "mcp_local_stdio"
             ? await executeLocalStdioTool(args.session, args.tool, args.parameters, executionTimeoutMs)
-            : null;
+            : args.tool.providerType === "github_rest"
+              ? await executeNativeGitHubTool(args.session, args.tool, args.parameters, executionTimeoutMs, args.invocationId)
+              : null;
       if (!connectedMcpExecution) {
         throw new ToolGatewayHttpError(404, `Tool "${args.tool.name}" not found`, "tool_not_found", {
           tool: args.tool.name,
@@ -3744,6 +3869,7 @@ export function createToolGatewayService(
           source: "test",
           ...(err instanceof ToolContentValidationError ? { findings: err.findings } : {}),
           ...(executionAuditFromError(err) ? { execution: executionAuditFromError(err) } : {}),
+          ...nativeGitHubErrorAudit(args.tool, err),
         },
         tool: args.tool,
       });
@@ -3767,6 +3893,7 @@ export function createToolGatewayService(
           durationMs: Date.now() - startedAt,
           error: message,
           ...(executionAuditFromError(err) ? { execution: executionAuditFromError(err) } : {}),
+          ...nativeGitHubErrorAudit(args.tool, err),
         },
       });
       return {
@@ -3841,7 +3968,7 @@ export function createToolGatewayService(
       promptInjectionMode: "ignore",
     }).summary;
     try {
-      await runTestToolInvocation({
+      const outcome = await runTestToolInvocation({
         session,
         tool,
         parameters,
@@ -3853,6 +3980,11 @@ export function createToolGatewayService(
         reasonCode: "approval_granted",
         matchedPolicyIds: invocation.matchedPolicyIds ?? [],
       });
+      if (tool.providerType === "github_rest" && "error" in outcome) {
+        await reflectToolActionInteractionLifecycle({ actionRequestId, status: "failed",
+          errorCode: outcome.error.reasonCode, errorMessage: outcome.error.message });
+        return;
+      }
       await reflectToolActionInteractionLifecycle({ actionRequestId, status: "executed" });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -4117,7 +4249,9 @@ export function createToolGatewayService(
         ? (await executeRemoteHttpTool(session, tool, parameters, executionTimeoutMs, invocation.id)).result
         : tool.providerType === "mcp_local_stdio"
           ? (await executeLocalStdioTool(session, tool, parameters, executionTimeoutMs)).result
-          : tool.providerType !== "paperclip_plugin"
+          : tool.providerType === "github_rest"
+            ? (await executeNativeGitHubTool(session, tool, parameters, executionTimeoutMs, invocation.id)).result
+            : tool.providerType !== "paperclip_plugin"
             ? await runWithTimeout(executeBuiltinTool(session, tool, parameters), executionTimeoutMs)
             : (() => { throw new ToolGatewayHttpError(409, "Plugin actions cannot execute outside their originating run", "approved_execution_unsupported"); })();
       const resultValidation = validateToolContent({
@@ -4172,8 +4306,14 @@ export function createToolGatewayService(
         policyDecision: "deny",
         reasonCode,
         argumentsSummary,
-        metadata: { durationMs: Date.now() - startedAt },
+        metadata: { durationMs: Date.now() - startedAt, ...nativeGitHubErrorAudit(tool, error) },
         tool,
+      });
+      if (tool.providerType === "github_rest") await writeAudit({
+        session, companyId: session.companyId, agentId: session.agentId, runId: session.runId,
+        issueId: session.issueId, action: "tool_gateway.call_failed",
+        details: { invocationId: invocation.id, actionRequestId: claimed.id, reasonCode,
+          ...toolAuditMetadata(tool), ...nativeGitHubErrorAudit(tool, error), durationMs: Date.now() - startedAt },
       });
       throw error;
     }
@@ -4792,11 +4932,11 @@ export function createToolGatewayService(
       await assertAgentInCompany(input.companyId, input.agentId);
       const tools = await connectedMcpToolsForConnection(input.companyId, input.connectionId);
       const decisions = await Promise.all(tools.map(async (tool) => {
-        const decision = await policyService.decide(policyInputForAgentTool({
+        const decision = requireGitHubWriteApproval(tool, await policyService.decide(policyInputForAgentTool({
           companyId: input.companyId,
           agentId: input.agentId,
           tool,
-        }));
+        })));
         const testDecision =
           decision.decision === "require_approval"
             ? "ask_first"
@@ -4878,7 +5018,7 @@ export function createToolGatewayService(
         idempotencyKey: `test-call:${randomUUID()}`,
         consumeRateLimit: true,
       });
-      const accessDecision = await policyService.decide(decisionInput);
+      const accessDecision = requireGitHubWriteApproval(tool, await policyService.decide(decisionInput));
       const recorded = await policyService.recordInvocation(decisionInput, accessDecision);
       await policyService.writeAudit(decisionInput, accessDecision);
       const invocationId = recorded.invocation.id;
@@ -4904,6 +5044,9 @@ export function createToolGatewayService(
           signingSecret: options.toolActionSigningSecret,
         });
         const previewMarkdown = buildHumanizedActionPreview({ tool, argumentsSummary: argumentValidation.summary });
+        const formalApprovalId = tool.providerType === "github_rest"
+          ? await createFormalToolApproval({ session, tool, invocationId,
+            actionRequestId: recorded.actionRequest.id, argumentsHash: canonicalArgumentsHash }) : null;
         await db
           .update(toolActionRequests)
           .set({
@@ -4911,6 +5054,7 @@ export function createToolGatewayService(
             canonicalArgumentsSummary: argumentValidation.summary,
             signedArguments,
             previewMarkdown,
+            approvalId: formalApprovalId,
             expiresAt: new Date(Date.now() + 60 * 60 * 1000),
             updatedAt: new Date(),
           })
@@ -5581,11 +5725,21 @@ export function createToolGatewayService(
           idempotencyKey: input.idempotencyKey,
           consumeRateLimit: true,
         });
-        const accessDecision = await policyService.decide(decisionInput);
+        const accessDecision = requireGitHubWriteApproval(tool, await policyService.decide(decisionInput));
         const recorded = await policyService.recordInvocation(decisionInput, accessDecision);
         await policyService.writeAudit(decisionInput, accessDecision);
         invocationId = recorded.invocation.id;
         if (recorded.replayed) {
+          if (tool.providerType === "github_rest" && recorded.invocation.errorCode === "github_write_outcome_unknown") {
+            const error = nativeGitHubGatewayError(new HttpError(502, "unknown", {
+              code: "github_write_outcome_unknown", dispatched: true, outcomeUnknown: true, replayed: true,
+            }));
+            await writeAudit({ session, companyId: session.companyId, agentId: session.agentId,
+              runId: session.runId, issueId: session.issueId, action: "tool_gateway.call_denied",
+              details: { invocationId, reasonCode: error.reasonCode, replayed: true,
+                ...toolAuditMetadata(tool), ...nativeGitHubErrorAudit(tool, error) } });
+            throw error;
+          }
           await writeAudit({
             session,
             companyId: session.companyId,
@@ -5689,7 +5843,9 @@ export function createToolGatewayService(
             ? await executeRemoteHttpTool(session, tool, effectiveParameters, executionTimeoutMs, invocationId, input.callerHeaders)
             : tool.providerType === "mcp_local_stdio"
             ? await executeLocalStdioTool(session, tool, effectiveParameters, executionTimeoutMs)
-            : null;
+            : tool.providerType === "github_rest"
+              ? await executeNativeGitHubTool(session, tool, effectiveParameters, executionTimeoutMs, invocationId)
+              : null;
         const result =
           connectedMcpExecution
             ? connectedMcpExecution.result
@@ -5836,6 +5992,7 @@ export function createToolGatewayService(
             ...(virtualToolName ? { virtualToolName, targetToolName: tool.name } : {}),
             ...(normalizedError instanceof ToolContentValidationError ? { findings: normalizedError.findings } : {}),
             ...(executionAuditFromError(normalizedError) ? { execution: executionAuditFromError(normalizedError) } : {}),
+            ...nativeGitHubErrorAudit(tool, normalizedError),
           },
           tool,
         });
@@ -5858,6 +6015,7 @@ export function createToolGatewayService(
             durationMs: Date.now() - startedAt,
             error: message,
             ...(executionAuditFromError(normalizedError) ? { execution: executionAuditFromError(normalizedError) } : {}),
+            ...nativeGitHubErrorAudit(tool, normalizedError),
           },
         });
         if (normalizedError instanceof ToolContentValidationError) {
