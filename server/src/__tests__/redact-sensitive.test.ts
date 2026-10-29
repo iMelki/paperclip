@@ -222,4 +222,22 @@ describe("redactSensitive", () => {
     expect(json).not.toContain("null");
     expect(json).not.toContain("[1,2,3]");
   });
+
+  it("redacts hyphenated and compound passcode and verification-code keys", () => {
+    const keys = [
+      "pass-code", "Pass-Code", "PASS_CODE", "userPassCode", "one_time_passcode", "oneTimePasscode",
+      "verification-code", "verification_code", "VerificationCode", "smsVerificationCode",
+      "email-verification-code", "security-code", "user_password_hash", "newPass-word", "api-key",
+    ];
+    const out = redactSensitive(Object.fromEntries(keys.map((k) => [k, "v"]))) as Record<string, unknown>;
+    for (const key of keys) expect(out[key], key).toBe("[REDACTED]");
+  });
+
+  it("does not over-redact harmless keys that only resemble credential words", () => {
+    const input = {
+      passport: "p", bypassMode: "b", barcode: "c", zipCode: "z", countryCode: "cc", encoder: "e",
+      spinner: "s", stateName: "n", secretary: "y", tokenCount: 3, monkey: "m", keep: "ok",
+    };
+    expect(redactSensitive(input)).toEqual(input);
+  });
 });

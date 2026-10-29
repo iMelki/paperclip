@@ -98,10 +98,50 @@ function normalizePayloadKey(key: string): string {
     .toLowerCase();
 }
 
+// Separator-free, lowercase form: `pass-code`, `pass_code`, `passCode` and
+// `PASS CODE` all become `passcode`, and `verification-code` becomes
+// `verificationcode`.
+function compactPayloadKey(key: string): string {
+  return key.toLowerCase().replace(/[-_\s.]/g, "");
+}
+
+const SENSITIVE_COMPACT_KEYS = new Set<string>(
+  [...SENSITIVE_KEYS].map((entry) => entry.replace(/_/g, "")),
+);
+
+// Compound keys (userPassCode, one_time_passcode, smsVerificationCode) are
+// redacted when their compact form contains one of these unambiguous
+// credential tokens. Short or ambiguous tokens (code, pin, state, secret,
+// token) stay exact-match or segment-match only, so keys like barcode,
+// spinner, secretary or tokenCount are not over-redacted.
+const SENSITIVE_COMPACT_SUBSTRINGS = [
+  "password",
+  "passwd",
+  "passcode",
+  "passphrase",
+  "onetimepass",
+  "verificationcode",
+  "securitycode",
+  "authorizationcode",
+  "browsercode",
+  "privatekey",
+  "apikey",
+  "clientsecret",
+  "accesstoken",
+  "refreshtoken",
+  "sessiontoken",
+  "authtoken",
+  "idtoken",
+];
+
 function isSensitiveKey(key: string): boolean {
   const normalized = normalizePayloadKey(key);
   if (NON_SENSITIVE_METRIC_KEYS.has(normalized)) return false;
-  return SENSITIVE_KEYS.has(normalized) || SENSITIVE_KEY_SEGMENT_RE.test(normalized);
+  const compact = compactPayloadKey(key);
+  return SENSITIVE_KEYS.has(normalized)
+    || SENSITIVE_COMPACT_KEYS.has(compact)
+    || SENSITIVE_KEY_SEGMENT_RE.test(normalized)
+    || SENSITIVE_COMPACT_SUBSTRINGS.some((token) => compact.includes(token));
 }
 
 function isUrlishKey(key: string): boolean {
