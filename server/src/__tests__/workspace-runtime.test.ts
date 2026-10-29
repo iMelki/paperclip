@@ -6360,16 +6360,27 @@ describeEmbeddedPostgres("workspace runtime service control persistence", () => 
     // pre-spawn row and see providerRef null.
     const waitForPersistedStatus = async (status: string, requirePid = false) => {
       const deadline = Date.now() + 5_000;
+      let last: { status: string; providerRef: string | null } | null = null;
       while (Date.now() < deadline) {
         const row = await db
           .select()
           .from(workspaceRuntimeServices)
           .where(eq(workspaceRuntimeServices.executionWorkspaceId, executionWorkspaceId))
           .then((rows) => rows[0] ?? null);
+        last = row;
         if (row?.status === status && (!requirePid || row.providerRef !== null)) return row;
         await new Promise((resolve) => setTimeout(resolve, 25));
       }
-      throw new Error(`Timed out waiting for persisted runtime service status ${status}`);
+      if (requirePid && last?.status === status) {
+        throw new Error(
+          `Timed out waiting for persisted runtime service status ${status} with a pid: ` +
+            `status was ${last.status} but the pid (providerRef) was missing (providerRef=${String(last.providerRef)})`,
+        );
+      }
+      throw new Error(
+        `Timed out waiting for persisted runtime service status ${status} ` +
+          `(last status=${String(last?.status ?? null)}, pid/providerRef=${String(last?.providerRef ?? null)})`,
+      );
     };
 
     const startPromise = startRuntimeServicesForWorkspaceControl({
