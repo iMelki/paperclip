@@ -163,16 +163,19 @@ async function requestGitHub(
 
 export async function verifyGitHubOAuthAccount(input: {
   headers: Record<string, string>; scope: unknown; expectedLogin: string; expectedAccountId?: number;
+  privateRepoAccess?: boolean;
 }, guardedFetch: GitHubGuardedFetch): Promise<GitHubOAuthAuthorizationFacts> {
   const result = await requestGitHub({ url: GITHUB_OAUTH_USER_URL, method: "GET" }, input.headers, guardedFetch);
   try {
     const original = verifyGitHubOAuthGrant({
       account: result.payload, grantedScopes: input.scope,
       expectedLogin: input.expectedLogin, expectedAccountId: input.expectedAccountId,
+      privateRepoAccess: input.privateRepoAccess === true,
     });
     const current = verifyGitHubOAuthGrant({
       account: result.payload, grantedScopes: result.response.headers.get("X-OAuth-Scopes"),
       expectedLogin: input.expectedLogin, expectedAccountId: input.expectedAccountId,
+      privateRepoAccess: input.privateRepoAccess === true,
     });
     return { ...current, rawTokenGrantedScopes: original.rawGrantedScopes, tokenGrantedScopes: original.grantedScopes };
   } catch (error) {
@@ -193,6 +196,7 @@ export async function verifyGitHubOAuthAuthorization(input: {
   return verifyGitHubOAuthAccount({
     headers: { Authorization: `Bearer ${input.accessToken}` }, scope: input.scope,
     expectedLogin: input.expectedLogin, expectedAccountId: input.expectedAccountId,
+      privateRepoAccess: input.privateRepoAccess === true,
   }, guardedFetch);
 }
 

@@ -62,8 +62,8 @@
         "authorizationEndpoint": "https://github.com/login/oauth/authorize",
         "tokenEndpoint": "https://github.com/login/oauth/access_token",
         "scopesHint": [
-          "repo",
-          "project",
+          "read:project",
+          "public_repo",
           "offline_access"
         ]
       },
@@ -93,7 +93,7 @@
         "docs": "https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/authorizing-oauth-apps"
       },
       "warnings": [
-        "The repo scope permits broad read and write access to public and private repositories available to the authorizing account; OAuth Apps cannot select individual repositories at consent.",
+        "By default Paperclip requests only read:project and public_repo: Projects are read-only and only public repositories are reachable. Full repo and project scopes (broad read and write access to every private repository available to the authorizing account; OAuth Apps cannot select individual repositories at consent) are requested only when you explicitly opt in to private repositories.",
         "The project scope permits reading and updating personal and organization Projects. Repository and organization policies can still restrict access.",
         "offline_access requests expiring access tokens and refresh support; Paperclip must verify the actual response before saving a connection.",
         "GitHub consent is separate from Paperclip agent access and approval for each write operation. No import or agent run starts merely by connecting."

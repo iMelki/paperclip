@@ -149,8 +149,10 @@ describe("Browse store door (PAP-13254 door 1)", () => {
     expect(zapierTiles.every((button) => !button.disabled)).toBe(true);
     expect(notionTiles).toHaveLength(2);
     expect(notionTiles.every((button) => !button.disabled)).toBe(true);
-    // GitHub has a real OAuth connect flow now: the header button plus its popular and gallery tiles.
-    expect(githubTiles).toHaveLength(3);
+    // GitHub has a real OAuth connect flow now: popular and gallery tiles, plus a header link.
+    expect(githubTiles).toHaveLength(2);
+    const headerLink = Array.from(container.querySelectorAll("a")).find((link) => link.textContent === "Connect GitHub OAuth");
+    expect(headerLink?.getAttribute("href")).toBe("/apps/connect?source=github");
     expect(githubTiles.every((button) => !button.disabled)).toBe(true);
     expect(githubTiles.some((button) => button.textContent?.includes("Coming soon"))).toBe(false);
     expect(tile?.disabled).toBe(true);

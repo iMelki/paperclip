@@ -127,7 +127,7 @@ import { readSignedToolArgumentsPayload } from "./tool-content-guards.js";
 import { narrowestScopeBindings, profileIdsInBindingOrder } from "./tool-profile-binding-precedence.js";
 import { recordToolRuntimeAuditWriteFailure, TOOL_RUNTIME_AUDIT_WRITE_FAILURE_METRIC } from "./tool-runtime-metrics.js";
 import { createToolRuntimeSupervisor, ToolRuntimeSupervisorError } from "./tool-runtime-supervisor.js";
-import { createGitHubOAuthProviderConfig, GITHUB_OAUTH_METHOD_KEY, GITHUB_OAUTH_REQUESTED_SCOPES,
+import { createGitHubOAuthProviderConfig, GITHUB_OAUTH_METHOD_KEY, githubOAuthRequestedScopes, githubPrivateRepoAccessOptIn,
   getGitHubOAuthConnectionMethod } from "@paperclipai/shared/github-oauth";
 import { bindGitHubOAuthState, isBoundGitHubOAuthState, verifyGitHubOAuthState } from "./github-oauth-state.js";
 import { isNativeGitHubOAuthConnection, githubOAuthToolDescriptors, getGitHubOAuthToolDescriptor,
@@ -4252,7 +4252,8 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
     if (typeof expectedLogin !== "string" || !expectedLogin) {
       throw unprocessable("GitHub account expectation is missing. Reconnect.");
     }
-    return { expectedLogin, expectedAccountId: typeof facts.accountId === "number" ? facts.accountId : undefined };
+    return { expectedLogin, expectedAccountId: typeof facts.accountId === "number" ? facts.accountId : undefined,
+      privateRepoAccess: githubPrivateRepoAccessOptIn(connection.config) };
   }
 
   async function verifiedGitHubCredential(connection: typeof toolConnections.$inferSelect, actor?: ActorInfo) {
@@ -5449,6 +5450,7 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
       if (typeof expectedLogin !== "string" || !/^[a-z\d](?:[a-z\d-]{0,37}[a-z\d])?$/i.test(expectedLogin)) {
         throw badRequest("Enter the GitHub account you intend to connect");
       }
+      const privateRepoAccess = githubPrivateRepoAccessOptIn(suppliedConfig);
       const refs = input.credentialSecretRefs ?? [];
       if (refs.length !== 1 || refs[0].configPath !== "oauth.client_secret") {
         throw badRequest("Select one company-scoped OAuth client secret");
@@ -5456,7 +5458,9 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
       config = {
         sourceTemplateKey: "github", methodKey: GITHUB_OAUTH_METHOD_KEY, serverUrl: method?.defaults?.serverUrl,
         expectedGitHubLogin: expectedLogin, quarantineNewEntries: true, safeDefault: true,
-        oauth: createGitHubOAuthProviderConfig(input.credentialValues?.["credentials.clientId"] ?? ""),
+        // Least access unless the operator explicitly opted in to private repositories (full `repo`).
+        githubPrivateRepoAccess: privateRepoAccess,
+        oauth: createGitHubOAuthProviderConfig(input.credentialValues?.["credentials.clientId"] ?? "", privateRepoAccess),
       };
     }
     if (galleryEntry?.slug === GOOGLE_SHEETS_GALLERY_KEY) {
@@ -6130,7 +6134,7 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
       connectionId: connection.id,
       codeVerifier: githubOAuth ? bindGitHubOAuthState({ verifier: codeVerifier, clientId: client.clientId,
         redirectUri: input.redirectUri, expectedLogin: gitHubGrantExpectation(connection).expectedLogin,
-        scopes: [...GITHUB_OAUTH_REQUESTED_SCOPES] }) : codeVerifier,
+        scopes: githubOAuthRequestedScopes(githubPrivateRepoAccessOptIn(connection.config)) }) : codeVerifier,
       createdByActorType: binding.actorType,
       createdByActorId: binding.actorId,
       createdBySessionId: binding.sessionId,
@@ -6148,7 +6152,7 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
     authorizationUrl.searchParams.set("state", state);
     authorizationUrl.searchParams.set("code_challenge", base64UrlSha256(codeVerifier));
     authorizationUrl.searchParams.set("code_challenge_method", "S256");
-    const authorizationScopes = githubOAuth ? [...GITHUB_OAUTH_REQUESTED_SCOPES] : input.scopes ?? endpoints.scopes;
+    const authorizationScopes = githubOAuth ? githubOAuthRequestedScopes(githubPrivateRepoAccessOptIn(connection.config)) : input.scopes ?? endpoints.scopes;
     if (authorizationScopes.length > 0) authorizationUrl.searchParams.set("scope", authorizationScopes.join(" "));
     if (githubOAuth) {
       authorizationUrl.searchParams.set("login", gitHubGrantExpectation(connection).expectedLogin);
@@ -6317,7 +6321,7 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
     const codeVerifier = githubOAuth ? verifyGitHubOAuthState(stateRow.codeVerifier, {
       clientId: client.clientId, redirectUri: input.redirectUri,
       expectedLogin: gitHubGrantExpectation(connection).expectedLogin,
-      scopes: [...GITHUB_OAUTH_REQUESTED_SCOPES],
+      scopes: githubOAuthRequestedScopes(githubPrivateRepoAccessOptIn(connection.config)),
     }) : stateRow.codeVerifier;
 
     const token = await exchangeOAuthToken({

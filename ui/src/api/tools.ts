@@ -236,7 +236,7 @@ export const toolsApi = {
   listGallery: (companyId: string) =>
     api.get<ToolGalleryResponse>(`/companies/${companyId}/tools/gallery`),
   getGitHubOAuthSetup: (companyId: string) =>
-    api.get<{ callbackUrl: string; registrationUrl: string; requestedScopes: string[] }>(
+    api.get<{ callbackUrl: string; registrationUrl: string; requestedScopes: string[]; privateRepoRequestedScopes: string[] }>(
       `/companies/${companyId}/tools/github/oauth/setup`,
     ),
   connectApp: (companyId: string, input: {

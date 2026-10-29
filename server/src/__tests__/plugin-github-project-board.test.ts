@@ -156,9 +156,11 @@ async function waitForNativeLock(pid: number, finished: () => boolean) {
   }
   throw new Error("Native PostgreSQL lock custody was not observed within its bounded fixture deadline");
 }
-// This launcher is Windows-only and requires an explicitly retained fixture directory.
-// Portable hooks report this group as skipped; native acceptance requires actual passes.
-describe.skipIf(process.platform !== "win32" || !process.env.PAPERCLIP_BOARD_FIXTURE_ROOT)(
+// Linux/macOS (and CI): startBoardImportFixtureDatabase uses the repo's embedded PostgreSQL
+// launcher, so this suite is mandatory there. Only the Windows NativeJob launcher needs an
+// explicitly retained fixture directory; without it this group is a visible Windows-only skip.
+const WINDOWS_NATIVE_FIXTURE_MISSING = process.platform === "win32" && !process.env.PAPERCLIP_BOARD_FIXTURE_ROOT;
+describe.skipIf(WINDOWS_NATIVE_FIXTURE_MISSING)(
   "native GitHub board OAuth binding/RPC custody", () => {
   beforeAll(async () => {
     fixture = await startBoardImportFixtureDatabase();
@@ -180,8 +182,10 @@ describe.skipIf(process.platform !== "win32" || !process.env.PAPERCLIP_BOARD_FIX
   });
   afterEach(() => dispose.splice(0).forEach(action => action()));
   afterAll(async () => { try { await db?.$client.end({ timeout: 5 }); } finally { await fixture?.cleanup(); } }, 30_000);
+  // Acceptance-only: needs the hash-pinned, separately built Project12 worker artifact
+  // (PAPERCLIP_BOARD_ARTIFACT_ROOT + SHA-256 pins). Not platform-bound; skipped where absent.
   it.skipIf(!process.env.PAPERCLIP_BOARD_ARTIFACT_ROOT)(
-    "launches the pinned Project12 worker and imports twice through the real host database without dispatch", async () => {
+    "[artifact acceptance] launches the pinned Project12 worker and imports twice through the real host database without dispatch", async () => {
     const setup = await seed(), worker = await actualBoardWorker(setup);
     try {
       await worker.handle.start();
@@ -328,6 +332,37 @@ describe.skipIf(process.platform !== "win32" || !process.env.PAPERCLIP_BOARD_FIX
     await db.update(companyMemberships).set({ membershipRole: "viewer" }).where(eq(companyMemberships.companyId, setup.companyId));
     await expect(binding(setup)).rejects.toThrow();
     expect(pageReader).not.toHaveBeenCalled(); expect(await state(setup)).toEqual([]);
+  });
+  it("refuses another company's native connection and project even for an admin of the calling company", async () => {
+    const setup = await seed(), foreign = await seed();
+    // Calling company's actor, foreign company's connection id: never bound, never resolved.
+    await expect(setup.rpc["issues.importedBoard"]({ ...setup.bind, connectionId: foreign.connectionId, op: "bindProjectBoard" },
+      setup.context)).rejects.toThrow();
+    // Foreign company scope with the calling company's actor (not a member there).
+    await expect(setup.rpc["issues.importedBoard"]({ ...foreign.scope, op: "listProjectConnections" },
+      { invocationScope: { companyId: foreign.companyId, actor: setup.context.invocationScope.actor } })).rejects.toThrow();
+    const listed = await setup.rpc["issues.importedBoard"]({ ...setup.scope, op: "listProjectConnections" }, setup.context) as {
+      connections: Array<{ connectionId: string }> };
+    expect(listed.connections.map(connection => connection.connectionId)).toEqual([setup.connectionId]);
+    expect(pageReader).not.toHaveBeenCalled(); expect(await state(setup)).toEqual([]); expect(await state(foreign)).toEqual([]);
+  });
+  it("accepts the least-access default grant and requires full repo/project only after an explicit private opt-in", async () => {
+    const setup = await seed();
+    const withScopes = async (grantedScopes: string[], privateOptIn: boolean) => {
+      const config = { ...setup.config, ...(privateOptIn ? { githubPrivateRepoAccess: true } : {}),
+        providerMetadata: { githubOAuth: { accountId: 42, login: "example", grantedScopes, checkedAt: "2026-10-13T00:00:00Z" } } };
+      await db.update(toolConnections).set({ config, transportConfig: config }).where(eq(toolConnections.id, setup.connectionId));
+      const listed = await setup.rpc["issues.importedBoard"]({ ...setup.scope, op: "listProjectConnections" }, setup.context) as {
+        connections: unknown[] };
+      return listed.connections.length;
+    };
+    expect(await withScopes(["read:project", "public_repo"], false)).toBe(1);
+    expect(await withScopes(["repo", "project"], false)).toBe(1); // broader grant still satisfies the default tier
+    expect(await withScopes(["public_repo"], false)).toBe(0);
+    expect(await withScopes(["read:project", "public_repo"], true)).toBe(0);
+    expect(await withScopes(["repo", "read:project"], true)).toBe(0);
+    expect(await withScopes(["repo", "project"], true)).toBe(1);
+    expect(pageReader).not.toHaveBeenCalled();
   });
   it("preserves a different retained connection and forbids account changes and wrong-board page reads", async () => {
     const setup = await seed(); const saved = await binding(setup); const before = await state(setup);

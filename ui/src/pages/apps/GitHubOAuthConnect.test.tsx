@@ -26,8 +26,9 @@ vi.mock("@/components/SecretBindingPicker", () => ({ SecretBindingPicker: ({ val
   <option value="">Select secret</option><option value="secret-1">Saved fixture secret</option>
 </select>; } }));
 
-const SETUP = { callbackUrl: "https://paperclip.fixture.test:5113/api/tools/oauth/callback", registrationUrl: "https://github.com/settings/applications/new", requestedScopes: ["repo", "project", "offline_access"] };
-const DRAFT = { clientId: "public-client-123", expectedLogin: "fixture-user", secret: { secretId: "secret-1", version: "latest" as const } };
+const SETUP = { callbackUrl: "https://paperclip.fixture.test:5113/api/tools/oauth/callback", registrationUrl: "https://github.com/settings/applications/new", requestedScopes: ["read:project", "public_repo", "offline_access"],
+  privateRepoRequestedScopes: ["repo", "project", "offline_access"] };
+const DRAFT = { clientId: "public-client-123", expectedLogin: "fixture-user", secret: { secretId: "secret-1", version: "latest" as const }, privateRepoAccess: false };
 function connection(overrides: Partial<ToolConnection> = {}): ToolConnection {
   return {
     id: "conn-1", companyId: "company-1", transport: "rest_api", authKind: "oauth", ownership: "customer",
@@ -56,6 +57,9 @@ describe("GitHub customer OAuth discriminators", () => {
       expect(() => validateGitHubOAuthSetup({ ...SETUP, callbackUrl })).toThrow();
     }
     expect(() => validateGitHubOAuthSetup({ ...SETUP, requestedScopes: ["repo", "project", "delete_repo"] })).toThrow();
+    // The default tier must never silently become full `repo` access.
+    expect(() => validateGitHubOAuthSetup({ ...SETUP, requestedScopes: SETUP.privateRepoRequestedScopes })).toThrow();
+    expect(() => validateGitHubOAuthSetup({ ...SETUP, privateRepoRequestedScopes: ["repo", "project", "delete_repo"] })).toThrow();
   });
   it("requires company, customer REST method and exactly one secret reference", () => {
     expect(githubOAuthDraft(connection(), "company-1")).toEqual(DRAFT);
@@ -75,6 +79,14 @@ describe("GitHub customer OAuth discriminators", () => {
     }
     expect(() => validateGitHubAuthorizationUrl(authorization().replace("github.com", "github.com.example.test"), SETUP, DRAFT)).toThrow();
     expect(() => validateGitHubAuthorizationUrl(`${authorization()}&client_id=other`, SETUP, DRAFT)).toThrow();
+  });
+  it("binds consent scopes to the private-repository opt-in in both directions", () => {
+    const privateScope = { scope: SETUP.privateRepoRequestedScopes.join(" ") };
+    expect(() => validateGitHubAuthorizationUrl(authorization(privateScope), SETUP, DRAFT)).toThrow();
+    const optedIn = { ...DRAFT, privateRepoAccess: true };
+    expect(validateGitHubAuthorizationUrl(authorization(privateScope), SETUP, optedIn)).toBe(authorization(privateScope));
+    expect(() => validateGitHubAuthorizationUrl(authorization(), SETUP, optedIn)).toThrow();
+    expect(githubOAuthDraft(connection({ config: { ...connection().config, githubPrivateRepoAccess: true } }), "company-1")).toEqual(optedIn);
   });
 });
 
@@ -145,6 +157,7 @@ describe("dedicated GitHub OAuth setup", () => {
       configValues: { expectedGitHubLogin: DRAFT.expectedLogin },
     });
     expect(nav.top).toHaveBeenCalledExactlyOnceWith(authorization());
+    expect(container.textContent).toContain("Requested scopes: read:project, public_repo, offline_access");
     expect(api.finish).not.toHaveBeenCalled(); expect(api.install).not.toHaveBeenCalled();
     expect(localStorage.length).toBe(0); expect(sessionStorage.length).toBe(0);
   });

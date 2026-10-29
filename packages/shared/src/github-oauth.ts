@@ -5,8 +5,51 @@ export const GITHUB_OAUTH_AUTHORIZATION_URL = "https://github.com/login/oauth/au
 export const GITHUB_OAUTH_TOKEN_URL = "https://github.com/login/oauth/access_token";
 export const GITHUB_OAUTH_API_URL = "https://api.github.com";
 export const GITHUB_OAUTH_USER_URL = "https://api.github.com/user";
-export const GITHUB_OAUTH_REQUIRED_SCOPES = ["repo", "project"] as const;
-export const GITHUB_OAUTH_REQUESTED_SCOPES = ["repo", "project", "offline_access"] as const;
+/**
+ * Scope tiers (GitHub classic OAuth App scopes, see
+ * https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/scopes-for-oauth-apps).
+ *
+ * Default tier, least access: `read:project` reads user and organization Projects (the
+ * board import is read-only), and `public_repo` covers issues and contents in public
+ * repositories only. It never grants access to private repositories.
+ *
+ * Private tier: `repo` is full read/write on every private repository the user can reach,
+ * and `project` adds Project writes. It is requested ONLY when the operator explicitly
+ * opts in (connection config `githubPrivateRepoAccess: true`) because GitHub offers no
+ * narrower classic scope that can read private-repository issues on a Project board.
+ *
+ * `offline_access` keeps the existing expiring-token refresh contract in both tiers.
+ */
+export const GITHUB_OAUTH_PUBLIC_REQUIRED_SCOPES = ["read:project", "public_repo"] as const;
+export const GITHUB_OAUTH_PUBLIC_REQUESTED_SCOPES = ["read:project", "public_repo", "offline_access"] as const;
+export const GITHUB_OAUTH_PRIVATE_REQUIRED_SCOPES = ["repo", "project"] as const;
+export const GITHUB_OAUTH_PRIVATE_REQUESTED_SCOPES = ["repo", "project", "offline_access"] as const;
+/** Default (no opt-in) tier. */
+export const GITHUB_OAUTH_REQUIRED_SCOPES = GITHUB_OAUTH_PUBLIC_REQUIRED_SCOPES;
+export const GITHUB_OAUTH_REQUESTED_SCOPES = GITHUB_OAUTH_PUBLIC_REQUESTED_SCOPES;
+export const GITHUB_OAUTH_PRIVATE_REPO_OPT_IN_KEY = "githubPrivateRepoAccess";
+
+/** Only an explicit boolean `true` opts in; anything else stays on the least-access tier. */
+export function githubPrivateRepoAccessOptIn(config: unknown): boolean {
+  return config !== null && typeof config === "object" && !Array.isArray(config)
+    && (config as Record<string, unknown>)[GITHUB_OAUTH_PRIVATE_REPO_OPT_IN_KEY] === true;
+}
+
+export function githubOAuthRequestedScopes(privateRepoAccess = false): string[] {
+  return [...(privateRepoAccess === true ? GITHUB_OAUTH_PRIVATE_REQUESTED_SCOPES : GITHUB_OAUTH_PUBLIC_REQUESTED_SCOPES)];
+}
+
+export function githubOAuthRequiredScopes(privateRepoAccess = false): string[] {
+  return [...(privateRepoAccess === true ? GITHUB_OAUTH_PRIVATE_REQUIRED_SCOPES : GITHUB_OAUTH_PUBLIC_REQUIRED_SCOPES)];
+}
+
+/** GitHub scope hierarchy: `project` includes `read:project`, `repo` includes `public_repo`. */
+const GITHUB_SCOPE_PARENT: Record<string, string> = { "read:project": "project", public_repo: "repo" };
+
+export function githubScopesSatisfy(granted: readonly unknown[], required: readonly string[]): boolean {
+  return required.every((scope) => granted.includes(scope)
+    || (GITHUB_SCOPE_PARENT[scope] !== undefined && granted.includes(GITHUB_SCOPE_PARENT[scope])));
+}
 // GitHub currently documents eight-hour access tokens; bound malformed expiry metadata.
 export const GITHUB_OAUTH_MAX_ACCESS_TTL_SECONDS = 86_400;
 
@@ -25,6 +68,8 @@ export interface GitHubOAuthGrantInput {
   grantedScopes: unknown;
   expectedLogin: string;
   expectedAccountId?: number;
+  /** Explicit private-repository opt-in; omitted means the least-access tier. */
+  privateRepoAccess?: boolean;
 }
 
 export interface GitHubOAuthGrantFacts {
@@ -68,7 +113,7 @@ function isAccountId(value: unknown): value is number {
 }
 
 /** Public metadata only. Company boundaries, secret references, and state are host-owned. */
-export function createGitHubOAuthProviderConfig(clientId: string): GitHubOAuthProviderConfig {
+export function createGitHubOAuthProviderConfig(clientId: string, privateRepoAccess = false): GitHubOAuthProviderConfig {
   if (typeof clientId !== "string") refuse("github_oauth_client_id_invalid");
   const normalized = clientId.trim();
   if (!/^[a-z\d_-]{1,128}$/i.test(normalized)
@@ -80,7 +125,7 @@ export function createGitHubOAuthProviderConfig(clientId: string): GitHubOAuthPr
     clientId: normalized,
     authorizationUrl: GITHUB_OAUTH_AUTHORIZATION_URL,
     tokenUrl: GITHUB_OAUTH_TOKEN_URL,
-    scopes: [...GITHUB_OAUTH_REQUESTED_SCOPES],
+    scopes: githubOAuthRequestedScopes(privateRepoAccess),
   };
 }
 
@@ -128,7 +173,7 @@ export function verifyGitHubOAuthGrant(input: GitHubOAuthGrantInput): GitHubOAut
     refuse("github_oauth_account_mismatch");
   }
   const parsed = parseGitHubGrantedScopes(input.grantedScopes);
-  if (!GITHUB_OAUTH_REQUIRED_SCOPES.every((scope) => parsed.scopes.includes(scope))) {
+  if (!githubScopesSatisfy(parsed.scopes, githubOAuthRequiredScopes(input.privateRepoAccess === true))) {
     refuse("github_oauth_scopes_insufficient");
   }
   return {

@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Link2, Search } from "lucide-react";
-import { useNavigate } from "@/lib/router";
+import { Link, useNavigate } from "@/lib/router";
 import { useCompany } from "@/context/CompanyContext";
 import { useBreadcrumbs } from "@/context/BreadcrumbContext";
 import { queryKeys } from "@/lib/queryKeys";
@@ -143,9 +143,9 @@ export function Browse() {
         <p className="mt-1 text-sm text-muted-foreground">
           Choose an app or connect your own MCP server.
         </p>
-        <Button className="mt-4" type="button" variant="outline"
-          onClick={() => navigate(appSourceConnectHref("github"))}>
-          Connect GitHub OAuth
+        {/* Navigation, so it is a link (keyboard, middle-click and screen readers treat it as one). */}
+        <Button className="mt-4" variant="outline" asChild>
+          <Link to={appSourceConnectHref("github")}>Connect GitHub OAuth</Link>
         </Button>
       </header>
 

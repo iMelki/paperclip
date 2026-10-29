@@ -2,7 +2,8 @@ import { useId, useLayoutEffect, useRef, useState, type RefObject } from "react"
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import type { ToolConnection } from "@paperclipai/shared";
 import {
-  createGitHubOAuthProviderConfig, GITHUB_OAUTH_REQUESTED_SCOPES as REQUESTED_SCOPES,
+  createGitHubOAuthProviderConfig, GITHUB_OAUTH_PRIVATE_REQUESTED_SCOPES as PRIVATE_REQUESTED_SCOPES,
+  GITHUB_OAUTH_REQUESTED_SCOPES as REQUESTED_SCOPES, githubPrivateRepoAccessOptIn,
 } from "@paperclipai/shared/github-oauth";
 import { toolsApi } from "@/api/tools";
 import { useCompany } from "@/context/CompanyContext";
@@ -15,9 +16,18 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 
-type Setup = { callbackUrl: string; registrationUrl: string; requestedScopes: string[] };
-type Draft = { clientId: string; expectedLogin: string; secret: SecretBindingValue | null };
-const EMPTY_DRAFT: Draft = { clientId: "", expectedLogin: "", secret: null };
+type Setup = { callbackUrl: string; registrationUrl: string; requestedScopes: string[]; privateRepoRequestedScopes: string[] };
+/** privateRepoAccess is an explicit opt-in to GitHub's full `repo` scope; default is least access. */
+type Draft = { clientId: string; expectedLogin: string; secret: SecretBindingValue | null; privateRepoAccess: boolean };
+const EMPTY_DRAFT: Draft = { clientId: "", expectedLogin: "", secret: null, privateRepoAccess: false };
+
+function sameScopes(actual: unknown, expected: readonly string[]): boolean {
+  return Array.isArray(actual) && actual.length === expected.length && expected.every((scope) => actual.includes(scope));
+}
+
+export function draftScopes(setup: Setup, draft: Pick<Draft, "privateRepoAccess">): string[] {
+  return draft.privateRepoAccess ? setup.privateRepoRequestedScopes : setup.requestedScopes;
+}
 const LOGIN = /^[a-z\d](?:[a-z\d-]{0,37}[a-z\d])?$/i;
 
 function record(value: unknown): Record<string, unknown> {
@@ -30,8 +40,8 @@ export function validateGitHubOAuthSetup(setup: Setup): void {
   if (callback.protocol !== "https:" || callback.username || callback.password ||
       callback.pathname !== "/api/tools/oauth/callback" || callback.search || callback.hash ||
       setup.registrationUrl !== "https://github.com/settings/applications/new" ||
-      !Array.isArray(setup.requestedScopes) || setup.requestedScopes.length !== REQUESTED_SCOPES.length ||
-      !REQUESTED_SCOPES.every((scope) => setup.requestedScopes.includes(scope))) {
+      !sameScopes(setup.requestedScopes, REQUESTED_SCOPES) ||
+      !sameScopes(setup.privateRepoRequestedScopes, PRIVATE_REQUESTED_SCOPES)) {
     throw new Error("The server did not provide a valid GitHub OAuth setup. Refresh before connecting.");
   }
 }
@@ -49,12 +59,13 @@ export function githubOAuthDraft(connection: ToolConnection, companyId: string):
     clientId: oauth.clientId,
     expectedLogin: config.expectedGitHubLogin,
     secret: { secretId: secrets[0].secretId, version: secrets[0].versionSelector ?? "latest" },
+    privateRepoAccess: githubPrivateRepoAccessOptIn(config),
   };
 }
 
 function draftKey(draft: Draft): string {
   return JSON.stringify([draft.clientId.trim(), draft.expectedLogin.trim().toLowerCase(),
-    draft.secret?.secretId, draft.secret?.version ?? "latest"]);
+    draft.secret?.secretId, draft.secret?.version ?? "latest", draft.privateRepoAccess === true]);
 }
 
 export function validateGitHubAuthorizationUrl(raw: string, setup: Setup, draft: Draft): string {
@@ -62,13 +73,14 @@ export function validateGitHubAuthorizationUrl(raw: string, setup: Setup, draft:
   const params = url.searchParams;
   const fields = ["client_id", "redirect_uri", "scope", "state", "code_challenge", "code_challenge_method", "login"];
   const scopes = (params.get("scope") ?? "").split(/\s+/);
+  const expectedScopes = draftScopes(setup, draft);
   if (url.origin !== "https://github.com" || url.pathname !== "/login/oauth/authorize" ||
       url.username || url.password || url.hash || fields.some((field) => params.getAll(field).length !== 1) ||
       params.get("client_id") !== draft.clientId.trim() || params.get("redirect_uri") !== setup.callbackUrl ||
       params.get("login")?.toLowerCase() !== draft.expectedLogin.trim().toLowerCase() ||
       !params.get("state")?.trim() || params.get("code_challenge_method") !== "S256" ||
       !/^[a-z\d_-]{43}$/i.test(params.get("code_challenge") ?? "") ||
-      scopes.length !== setup.requestedScopes.length || !setup.requestedScopes.every((scope) => scopes.includes(scope))) {
+      !sameScopes(scopes, expectedScopes)) {
     throw new Error("The sign-in link does not match this account, app or callback. Refresh saved connections.");
   }
   return url.toString();
@@ -170,7 +182,9 @@ function GitHubOAuthCompanySetup({ companyId, companyName, companyScope }: {
           credentialValues: { "credentials.clientId": snapshot.clientId.trim() },
           credentialSecretRefs: [{ configPath: "oauth.client_secret", secretId: snapshot.secret!.secretId,
             versionSelector: snapshot.secret!.version ?? "latest", required: true, label: "OAuth client secret" }],
-          configValues: { expectedGitHubLogin: snapshot.expectedLogin.trim() },
+          configValues: snapshot.privateRepoAccess
+            ? { expectedGitHubLogin: snapshot.expectedLogin.trim(), githubPrivateRepoAccess: true }
+            : { expectedGitHubLogin: snapshot.expectedLogin.trim() },
         });
         const saved = githubOAuthDraft(result.connection, companyId);
         if (!saved || result.connectionId !== result.connection.id || draftKey(saved) !== draftKey(snapshot) || !result.auth?.startUrl) {
@@ -200,7 +214,8 @@ function GitHubOAuthCompanySetup({ companyId, companyName, companyScope }: {
       </div>
       <InlineBanner title="Authorization does not run agents">
         This saves a GitHub connection only. It does not install tools, grant agent access, import tasks or start sync.
-        Repository access is broad read/write access; Projects access covers user and organization boards.
+        By default Paperclip asks only for read-only Projects access and public repositories. Full private-repository
+        access (GitHub's broad read/write `repo` scope) is requested only if you opt in below.
       </InlineBanner>
       {setup ? (
         <section className="space-y-3 rounded-xl border border-border bg-card p-4" aria-labelledby={`${id}-registration`}>
@@ -208,7 +223,7 @@ function GitHubOAuthCompanySetup({ companyId, companyName, companyScope }: {
           <p className="text-sm">Use this exact callback; a different hostname or port will not match.</p>
           <Label htmlFor={`${id}-callback`}>Authorization callback URL</Label>
           <Input id={`${id}-callback`} readOnly value={setup.callbackUrl} className="font-mono" />
-          <p className="break-words text-sm text-muted-foreground">Requested scopes: {setup.requestedScopes.join(", ")}</p>
+          <p className="break-words text-sm text-muted-foreground">Requested scopes: {draftScopes(setup, draft).join(", ")}</p>
           <a className="text-sm underline" href={setup.registrationUrl} target="_blank" rel="noopener noreferrer">Open GitHub OAuth App registration</a>
         </section>
       ) : (
@@ -239,6 +254,15 @@ function GitHubOAuthCompanySetup({ companyId, companyName, companyScope }: {
           <Label htmlFor={`${id}-clientId`}>OAuth App public client ID</Label>
           <Input id={`${id}-clientId`} autoComplete="off" disabled={busy} value={draft.clientId}
             onChange={(event) => changeDraft({ ...draft, clientId: event.target.value })} />
+        </div>
+        <div className="space-y-1">
+          <div className="flex items-center gap-2">
+            <input id={`${id}-privateRepoAccess`} type="checkbox" className="h-4 w-4" disabled={busy} checked={draft.privateRepoAccess}
+              aria-describedby={`${id}-private-help`}
+              onChange={(event) => changeDraft({ ...draft, privateRepoAccess: event.target.checked })} />
+            <Label htmlFor={`${id}-privateRepoAccess`}>Include private repositories</Label>
+          </div>
+          <p id={`${id}-private-help`} className="text-sm text-muted-foreground">Off by default. Turning this on requests GitHub's full repo and project scopes, which allow read and write access to every private repository this account can reach. Leave it off to import boards that only use public repositories.</p>
         </div>
         <fieldset id={`${id}-secret`} className="space-y-2">
           <legend className="text-sm font-medium">OAuth client secret</legend>

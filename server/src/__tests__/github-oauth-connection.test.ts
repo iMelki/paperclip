@@ -13,6 +13,7 @@ import { secretService } from "../services/secrets.js";
 import { toolAccessService } from "../services/tool-access.js";
 import { toolAccessRoutes } from "../routes/tool-access.js";
 import { errorHandler } from "../middleware/index.js";
+import { logger } from "../middleware/logger.js";
 import { githubOAuthToolDescriptors } from "../services/github-oauth-transport.js";
 import { BOARD_IMPORT_FIXTURE_SETUP_TIMEOUT_MS, startBoardImportFixtureDatabase } from "./helpers/board-import-fixture-db.js";
 
@@ -201,11 +202,14 @@ describe("native GitHub OAuth service and routes (mandatory private PostgreSQL)"
     const fixture = await seed(); const app = routeApp(routeActor(fixture));
     const setup = await request(app).get(`/api/companies/${fixture.companyId}/tools/github/oauth/setup`).expect(200);
     expect(setup.body.callbackUrl).toBe(CALLBACK);
+    expect(setup.body.requestedScopes).toEqual(["read:project", "public_repo", "offline_access"]);
+    expect(setup.body.privateRepoRequestedScopes).toEqual(["repo", "project", "offline_access"]);
     const connected = await request(app).post(`/api/companies/${fixture.companyId}/tools/apps/connect`).send(connectInput(fixture)).expect(201);
     const consent = new URL(connected.body.auth.startUrl);
     expect(consent.origin + consent.pathname).toBe("https://github.com/login/oauth/authorize");
     expect(consent.searchParams.get("redirect_uri")).toBe(CALLBACK); expect(consent.searchParams.get("login")).toBe(USER.login);
-    expect(consent.searchParams.get("scope")).toBe("repo project offline_access");
+    // Least access by default: no `repo` (private repositories) without an explicit opt-in.
+    expect(consent.searchParams.get("scope")).toBe("read:project public_repo offline_access");
     expect(consent.searchParams.get("code_challenge_method")).toBe("S256"); expect(consent.searchParams.get("code_challenge")).toMatch(/^[\w-]{43}$/);
     const callback = await request(app).get("/api/tools/oauth/callback").set("Accept", "application/json")
       .query({ state: consent.searchParams.get("state"), code: "synthetic-code" }).expect(200);
@@ -226,6 +230,54 @@ describe("native GitHub OAuth service and routes (mandatory private PostgreSQL)"
     expect(encrypted.valueSha256).toBe(hash("synthetic-access-initial"));
     expect(JSON.stringify(encrypted.material)).not.toContain("synthetic-access-initial");
     await expectNoAgentEffects(fixture.companyId);
+  });
+
+  it("requests full repo/project only after an explicit private-repository opt-in and then requires that grant", async () => {
+    for (const optIn of [false, "true", 1] as const) {
+      resetTransport(); const fixture = await seed();
+      const connected = await fixture.service.connectGalleryApp(fixture.companyId, { ...connectInput(fixture),
+        configValues: { expectedGitHubLogin: USER.login, githubPrivateRepoAccess: optIn } }, fixture.actor);
+      expect(connected.connection.config.githubPrivateRepoAccess).toBe(false);
+      const begun = await begin(fixture, connected.connectionId);
+      expect(new URL(begun.started.authorizationUrl).searchParams.get("scope")).toBe("read:project public_repo offline_access");
+    }
+    resetTransport(); const fixture = await seed();
+    const connected = await fixture.service.connectGalleryApp(fixture.companyId, { ...connectInput(fixture),
+      configValues: { expectedGitHubLogin: USER.login, githubPrivateRepoAccess: true } }, fixture.actor);
+    expect(connected.connection.config).toMatchObject({ githubPrivateRepoAccess: true,
+      oauth: { scopes: ["repo", "project", "offline_access"] } });
+    const begun = await begin(fixture, connected.connectionId);
+    expect(new URL(begun.started.authorizationUrl).searchParams.get("scope")).toBe("repo project offline_access");
+    io.tokenPayload.scope = "read:project,public_repo"; io.currentScopes = "read:project,public_repo";
+    await expect(complete(fixture, begun.state)).rejects.toMatchObject({ status: 422 });
+    resetTransport(); const retry = await begin(fixture, connected.connectionId);
+    await complete(fixture, retry.state);
+    expect((await readConnection(connected.connectionId)).config.providerMetadata)
+      .toMatchObject({ githubOAuth: { grantedScopes: ["repo", "project"] } });
+    await expectNoAgentEffects(fixture.companyId);
+  });
+
+  it("never writes access, refresh or client-secret values to the server logger or console", async () => {
+    const levels = ["trace", "debug", "info", "warn", "error", "fatal"] as const;
+    const spies = [...levels.map((level) => vi.spyOn(logger, level)),
+      ...(["log", "info", "warn", "error", "debug"] as const).map((method) => vi.spyOn(console, method).mockImplementation(() => {}))];
+    try {
+      const fixture = await seed(); const app = routeApp(routeActor(fixture));
+      const connected = await request(app).post(`/api/companies/${fixture.companyId}/tools/apps/connect`).send(connectInput(fixture)).expect(201);
+      const consent = new URL(connected.body.auth.startUrl);
+      await request(app).get("/api/tools/oauth/callback").set("Accept", "application/json")
+        .query({ state: consent.searchParams.get("state"), code: "synthetic-code" }).expect(200);
+      // A failing callback goes through the real error handler, which logs.
+      resetTransport(); io.userPayload = { ...USER, id: 43 };
+      const again = await fixture.service.startOAuth(fixture.companyId, connected.body.connectionId, { redirectUri: CALLBACK, actor: fixture.actor });
+      await request(app).get("/api/tools/oauth/callback").set("Accept", "application/json")
+        .query({ state: new URL(again.authorizationUrl).searchParams.get("state"), code: "synthetic-code" }).expect(422);
+      const logged = JSON.stringify(spies.flatMap((spy) => spy.mock.calls), (_key, value) =>
+        value instanceof Error ? { message: value.message, stack: value.stack } : value);
+      for (const secret of ["synthetic-access-initial", "synthetic-refresh-initial", "synthetic-client-secret"]) {
+        expect(logged).not.toContain(secret);
+      }
+    } finally { spies.forEach((spy) => spy.mockRestore()); }
   });
 
   it("keeps the omitted-method GitHub PAT path separate and does not borrow global OAuth clients", async () => {
@@ -276,14 +328,14 @@ describe("native GitHub OAuth service and routes (mandatory private PostgreSQL)"
   });
 
   it("refuses wrong account, incomplete grant or invalid expiry without rotating existing credentials", async () => {
-    const changes = ["login", "account-id", "missing-scope", "read-only-project", "missing-expiry", "bad-expiry", "missing-refresh"];
+    const changes = ["login", "account-id", "missing-scope", "missing-public-repo", "missing-expiry", "bad-expiry", "missing-refresh"];
     for (const change of changes) {
       resetTransport(); const fixture = await seed(); const saved = await active(fixture);
       const versions = await existingVersions(saved); const begun = await begin(fixture, saved.id);
       if (change === "login") io.userPayload = { ...USER, login: "synthetic-other" };
       if (change === "account-id") io.userPayload = { ...USER, id: 43 };
       if (change === "missing-scope") delete io.tokenPayload.scope;
-      if (change === "read-only-project") io.tokenPayload.scope = "repo,read:project";
+      if (change === "missing-public-repo") io.tokenPayload.scope = "read:project";
       if (change === "missing-expiry") delete io.tokenPayload.expires_in;
       if (change === "bad-expiry") io.tokenPayload.expires_in = 86401;
       if (change === "missing-refresh") delete io.tokenPayload.refresh_token;
@@ -293,7 +345,7 @@ describe("native GitHub OAuth service and routes (mandatory private PostgreSQL)"
   });
 
   it("checks the provider's current scope header rather than blessing cached grant metadata", async () => {
-    for (const scope of [null, "repo,read:project", "repo,project,invalid scope!"]) {
+    for (const scope of [null, "read:project", "repo,project,invalid scope!"]) {
       resetTransport(); const fixture = await seed(); const begun = await begin(fixture); io.currentScopes = scope;
       await expect(complete(fixture, begun.state)).rejects.toMatchObject({ status: 422 });
       const saved = await readConnection(begun.id);
