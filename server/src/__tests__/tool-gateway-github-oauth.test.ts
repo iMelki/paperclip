@@ -168,9 +168,18 @@ describe("native GitHub gateway boundary (mandatory isolated PostgreSQL)", () =>
     expect(nativeExecutor.mock.calls[0]![0].parameters).toEqual(writeArgs);
     const [invocation] = await db.select().from(toolInvocations).where(eq(toolInvocations.id, request.invocationId));
     expect(invocation).toMatchObject({ status: "succeeded", approvalState: "approved" });
-    await expect(fixture.gateway.approveActionRequest({ companyId: fixture.company.id, actionRequestId: request.id,
-      actor: { userId: "synthetic-board-user" } })).rejects.toMatchObject({ reasonCode: "action_not_pending" });
+    const [approvedRequest] = await db.select().from(toolActionRequests).where(eq(toolActionRequests.id, request.id));
+    expect(approvedRequest).toMatchObject({ id: request.id, invocationId: request.invocationId,
+      approvalId: request.approvalId, status: "approved" });
+    const repeated = await fixture.gateway.approveActionRequest({ companyId: fixture.company.id, actionRequestId: request.id,
+      actor: { userId: "synthetic-board-user" } });
+    expect(repeated).toEqual(approvedRequest);
+    const [requestAfterRepeat] = await db.select().from(toolActionRequests).where(eq(toolActionRequests.id, request.id));
+    expect(requestAfterRepeat).toEqual(approvedRequest);
+    const [invocationAfterRepeat] = await db.select().from(toolInvocations).where(eq(toolInvocations.id, request.invocationId));
+    expect(invocationAfterRepeat).toEqual(invocation);
     expect(nativeExecutor).toHaveBeenCalledTimes(1);
+    expect(syntheticDispatch).toHaveBeenCalledTimes(1);
   });
 
   it("forces formal approval on the normal agent path and executes the stored reviewed arguments once", async () => {
@@ -272,8 +281,17 @@ describe("native GitHub gateway boundary (mandatory isolated PostgreSQL)", () =>
     const audits = await db.select().from(toolAccessAuditEvents).where(eq(toolAccessAuditEvents.companyId, fixture.company.id));
     expect(JSON.stringify([invocation, events, audits])).not.toContain("SYNTHETIC_PRIVATE_PROVIDER_PAYLOAD");
     expect(syntheticDispatch).toHaveBeenCalledTimes(1);
-    await expect(fixture.gateway.approveActionRequest({ companyId: fixture.company.id, actionRequestId: request.id,
-      actor: { userId: "synthetic-board-user" } })).rejects.toMatchObject({ reasonCode: "action_not_pending" });
+    const [approvedRequest] = await db.select().from(toolActionRequests).where(eq(toolActionRequests.id, request.id));
+    expect(approvedRequest).toMatchObject({ id: request.id, invocationId: request.invocationId,
+      approvalId: request.approvalId, status: "approved" });
+    const repeated = await fixture.gateway.approveActionRequest({ companyId: fixture.company.id, actionRequestId: request.id,
+      actor: { userId: "synthetic-board-user" } });
+    expect(repeated).toEqual(approvedRequest);
+    const [requestAfterRepeat] = await db.select().from(toolActionRequests).where(eq(toolActionRequests.id, request.id));
+    expect(requestAfterRepeat).toEqual(approvedRequest);
+    const [invocationAfterRepeat] = await db.select().from(toolInvocations).where(eq(toolInvocations.id, request.invocationId));
+    expect(invocationAfterRepeat).toEqual(invocation);
+    expect(nativeExecutor).toHaveBeenCalledTimes(1);
     expect(syntheticDispatch).toHaveBeenCalledTimes(1);
   });
 
