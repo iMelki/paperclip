@@ -431,6 +431,56 @@ export function resolveCompanyImportAdapterStrategy(
   return normalized;
 }
 
+// Fork contract (dev d5402928): JSON import output reports the adapter policy.
+type CompanyImportAdapterPolicy = {
+  strategy: CompanyImportAdapterStrategy;
+  preservedExecutableAgentSlugs: string[];
+  changes: Array<{
+    agentSlug: string;
+    fromAdapterType: string;
+    toAdapterType: string;
+    reason: "portable_process_fallback";
+  }>;
+};
+
+function buildCompanyImportAdapterPolicy(
+  preview: Pick<
+    CompanyPortabilityPreviewResult,
+    "manifest" | "plan" | "selectedAgentSlugs"
+  >,
+  strategy: CompanyImportAdapterStrategy,
+  overrides: Record<string, { adapterType: string }> | undefined,
+): CompanyImportAdapterPolicy {
+  const manifestAgentsBySlug = new Map(
+    preview.manifest.agents.map((agent) => [agent.slug, agent]),
+  );
+  const selectedAgentSlugs = new Set(preview.selectedAgentSlugs);
+  const skippedAgentSlugs = new Set(
+    preview.plan.agentPlans
+      .filter((plan) => plan.action === "skip")
+      .map((plan) => plan.slug),
+  );
+  return {
+    strategy,
+    preservedExecutableAgentSlugs:
+      strategy === "preserve"
+        ? preview.manifest.agents
+          .filter((agent) => selectedAgentSlugs.has(agent.slug))
+          .filter((agent) => !skippedAgentSlugs.has(agent.slug))
+          .filter((agent) => agent.adapterType === "process")
+          .map((agent) => agent.slug)
+          .sort((left, right) => left.localeCompare(right))
+        : [],
+    changes: Object.entries(overrides ?? {}).map(([agentSlug, override]) => ({
+      agentSlug,
+      fromAdapterType:
+        manifestAgentsBySlug.get(agentSlug)?.adapterType ?? "unknown",
+      toAdapterType: override.adapterType,
+      reason: "portable_process_fallback",
+    })),
+  };
+}
+
 function buildDefaultImportAdapterMessages(
   overrides: Record<string, { adapterType: string }> | undefined,
 ): string[] {
@@ -1837,10 +1887,15 @@ export function registerCompanyCommands(program: Command): void {
             adapterStrategy,
           );
           const adapterMessages = buildDefaultImportAdapterMessages(adapterOverrides);
+          const adapterPolicy = buildCompanyImportAdapterPolicy(
+            preview,
+            adapterStrategy,
+            adapterOverrides,
+          );
 
           if (opts.dryRun) {
             if (ctx.json) {
-              printOutput(preview, { json: true });
+              printOutput({ ...preview, adapterImport: adapterPolicy }, { json: true });
             } else {
               printCompanyImportView(
                 "Import Preview",
@@ -1919,7 +1974,7 @@ export function registerCompanyCommands(program: Command): void {
             }
           }
           if (ctx.json) {
-            printOutput(imported, { json: true });
+            printOutput({ ...imported, adapterImport: adapterPolicy }, { json: true });
           } else {
             printCompanyImportView(
               "Import Result",
