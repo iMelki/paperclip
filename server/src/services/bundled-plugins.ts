@@ -220,7 +220,6 @@ function defaultBundleManifestExists(localPath: string): boolean {
 }
 
 /**
-/**
  * Re-enable a bundled plugin that a previous boot left in `error`.
  *
  * `error` is not an operator choice: the loader records it when activation
