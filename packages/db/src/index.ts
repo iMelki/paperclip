@@ -1,5 +1,7 @@
 export {
   createDb,
+  closeRegisteredClients,
+  closeAllRegisteredClients,
   getPostgresDataDirectory,
   ensurePostgresDatabase,
   resetPostgresDatabase,
