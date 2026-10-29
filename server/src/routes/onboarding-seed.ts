@@ -3,10 +3,7 @@ import type { Db } from "@paperclipai/db";
 import { applyOnboardingSeedSchema } from "@paperclipai/shared";
 import { validate } from "../middleware/index.js";
 import { onboardingSeedService } from "../services/onboarding-seed.js";
-import { forbidden } from "../errors.js";
-import { accessService } from "../services/index.js";
-import { authorizationDeniedDetails } from "../services/authorization.js";
-import { assertBoard, assertCompanyAccess, getActorInfo } from "./authz.js";
+import { assertCompanyAccess, getActorInfo } from "./authz.js";
 
 /**
  * Receiver for the onboarding seed Paperclip Cloud collects at signup and
@@ -35,29 +32,13 @@ import { assertBoard, assertCompanyAccess, getActorInfo } from "./authz.js";
 export function onboardingSeedRoutes(db: Db) {
   const router = Router();
   const svc = onboardingSeedService(db);
-  const access = accessService(db);
 
   router.post(
     "/companies/:companyId/onboarding-seed",
     validate(applyOnboardingSeedSchema),
     async (req, res) => {
       const companyId = req.params.companyId as string;
-      // The seed creates a live agent, so it needs what the hire and create
-      // routes need: a board actor (never an agent key) with agents:create.
-      // The trusted Cloud envelope is the one board source exempt from the
-      // permission check, because Cloud provisions the tenant it seeds.
-      assertBoard(req);
       assertCompanyAccess(req, companyId);
-      if (req.actor.source !== "cloud_tenant") {
-        const decision = await access.decide({
-          actor: req.actor,
-          action: "agents:create",
-          resource: { type: "company", companyId },
-        });
-        if (!decision.allowed) {
-          throw forbidden(decision.explanation, authorizationDeniedDetails(decision));
-        }
-      }
 
       // The audit entry is written inside `apply`'s own transaction, so it
       // commits with the seed or not at all. A logging failure therefore rolls
