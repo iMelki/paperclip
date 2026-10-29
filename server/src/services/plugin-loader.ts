@@ -2011,6 +2011,8 @@ export function pluginLoader(
       // activation: the error status only legally transitions to ready or
       // uninstalled, so a retry that failed while still in error status could
       // not re-mark itself as errored.
+      // This covers every plugin in error status, bundled and third-party alike,
+      // once per boot.
       const erroredPlugins = (await registry.listByStatus("error")) as PluginRecord[];
       const retriedPlugins: PluginRecord[] = [];
       for (const plugin of erroredPlugins) {

@@ -184,6 +184,43 @@ describe("daytona file-sync inbound scratch cleanup", () => {
     expect(uploadedDestinations).toEqual([]);
     expect(commands).toEqual([]);
   });
+
+  it("refuses an in-tree inbound target whose parent resolves through a symlink outside the workspace", async () => {
+    const hostDir = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-daytona-symlink-escape-"));
+    cleanupDirs.push(hostDir);
+    const sourcePath = path.join(hostDir, "source.txt");
+    await fs.writeFile(sourcePath, "payload");
+
+    // The target is lexically inside the remote dir, but the sandbox has
+    // replaced its parent with a symlink to a path outside it. The sandbox-side
+    // canonicalizer reports the escape (exit 42), and the provider must stop
+    // before any privileged upload or promote reaches that path.
+    const remoteDir = "/workspace";
+    const targetPath = "/workspace/linked-parent/file.txt";
+    const uploadedDestinations: string[] = [];
+    const commands: RecordedCommand[] = [];
+    const sandbox = createMockSandbox({ uploadedDestinations, commands });
+    const executeCommand = sandbox.process.executeCommand;
+    sandbox.process.executeCommand = async (command: string) => {
+      if (command.includes("ESCAPE:")) {
+        commands.push({ command });
+        return { exitCode: 42, result: "ESCAPE:/workspace/linked-parent" };
+      }
+      return executeCommand(command);
+    };
+
+    const operations: PluginSyncOperation[] = [{
+      operationId: "sync-op-symlink-escape",
+      files: [{ sourcePath, targetPath, kind: "file" }],
+    }];
+
+    await expect(
+      performSyncIn({ sandbox: sandbox as never, operations, remoteDir, timeoutSeconds: 30 }),
+    ).rejects.toThrow(/inbound symlink-escape guard command failed \(exit 42\)/);
+    expect(uploadedDestinations).toEqual([]);
+    expect(commands.some((entry) => entry.command.includes("ESCAPE:"))).toBe(true);
+    expect(commands.some((entry) => entry.command.includes("mv -f"))).toBe(false);
+  });
 });
 
 // ---------------------------------------------------------------
