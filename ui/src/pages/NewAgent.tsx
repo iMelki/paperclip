@@ -30,7 +30,7 @@ import { getUIAdapter, listUIAdapters } from "../adapters";
 import { useDisabledAdaptersSync } from "../adapters/use-disabled-adapters";
 import { isValidAdapterType } from "../adapters/metadata";
 import { ReportsToPicker } from "../components/ReportsToPicker";
-import { buildNewAgentHirePayload } from "../lib/new-agent-hire-payload";
+import { buildNewAgentHirePayload, shouldUnlockHireSubmission } from "../lib/new-agent-hire-payload";
 import { TrustPresetSection } from "../components/TrustPresetSection";
 import { buildPermissionsForTrustPreset, getTrustPreset } from "../lib/trust-policy-ui";
 import { DEFAULT_CODEX_LOCAL_BYPASS_APPROVALS_AND_SANDBOX } from "@paperclipai/adapter-codex-local";
@@ -66,7 +66,7 @@ export function NewAgent() {
 
   const [name, setName] = useState("");
   const [pausedSetup, setPausedSetup] = useState(false);
-  const [submissionKey] = useState(() => crypto.randomUUID());
+  const [submissionKey, setSubmissionKey] = useState(() => crypto.randomUUID());
   const frozenSubmission = useRef<{ companyId: string; payload: Record<string, unknown> } | null>(null);
   const [submissionFrozen, setSubmissionFrozen] = useState(false);
   const [title, setTitle] = useState("");
@@ -157,6 +157,11 @@ export function NewAgent() {
       navigate(agentUrl(result.agent));
     },
     onError: (error) => {
+      if (shouldUnlockHireSubmission(error)) {
+        frozenSubmission.current = null;
+        setSubmissionFrozen(false);
+        setSubmissionKey(crypto.randomUUID());
+      }
       setFormError(error instanceof Error ? error.message : "Failed to create agent");
     },
   });
@@ -294,7 +299,11 @@ export function NewAgent() {
           />
         </div>
 
-        <div className="border-t border-border px-4 py-4">
+        {pausedSetup ? (
+          <div className="border-t border-border px-4 py-4">
+            <p className="text-xs text-muted-foreground">Permissions are not granted while the agent is created paused. Configure them when you finish setup.</p>
+          </div>
+        ) : <div className="border-t border-border px-4 py-4">
           <TrustPresetSection
             permissions={permissions}
             onChange={setPermissions}
@@ -310,14 +319,14 @@ export function NewAgent() {
             }))}
             candidatesLoading={boundaryProjectsLoading || boundaryIssuesLoading}
           />
-        </div>
+        </div>}
 
         <div className="border-t border-border px-4 py-4">
           <label className="flex items-center gap-2 text-sm">
-            <Checkbox checked={pausedSetup} onCheckedChange={(value) => setPausedSetup(value === true)} />
+            <Checkbox aria-describedby="paused-setup-help" checked={pausedSetup} onCheckedChange={(value) => setPausedSetup(value === true)} />
             Create paused, without a configured runtime
           </label>
-          <p className="mt-1 text-xs text-muted-foreground">No agent runs, automatic wakes, credentials or skills are configured. Required hire approval still applies.</p>
+          <p id="paused-setup-help" className="mt-1 text-xs text-muted-foreground">No agent runs, automatic wakes, credentials or skills are configured. Required hire approval still applies.</p>
         </div>
         {/* Shared config form */}
         {!pausedSetup && <AgentConfigForm
@@ -329,7 +338,12 @@ export function NewAgent() {
           onTestFeedbackChange={handleTestAgentFeedbackChange}
         />}
 
-        <div className="border-t border-border px-4 py-4">
+        {pausedSetup ? (
+          <div className="border-t border-border px-4 py-4">
+            <h2 className="text-sm font-medium">Company skills</h2>
+            <p className="mt-1 text-xs text-muted-foreground">Skills are not installed while the agent is created paused. Add them when you finish setup.</p>
+          </div>
+        ) : <div className="border-t border-border px-4 py-4">
           <div className="space-y-3">
             <div>
               <h2 className="text-sm font-medium">Company skills</h2>
@@ -364,7 +378,7 @@ export function NewAgent() {
               </div>
             )}
           </div>
-        </div>
+        </div>}
 
         {/* Footer */}
         </fieldset>
@@ -373,6 +387,7 @@ export function NewAgent() {
             <p className="text-xs text-muted-foreground mb-2">This will be the CEO</p>
           )}
           {submissionFrozen && <p className="mb-2 text-xs text-muted-foreground">This request is locked to its original company and settings. Retrying uses the same saved request.</p>}
+          {pausedSetup && <p className="mb-2 text-xs text-muted-foreground">Test Agent is unavailable: a paused agent has no runtime to test.</p>}
           {formError && (
             <p className="text-xs text-destructive mb-2">{formError}</p>
           )}

@@ -510,6 +510,31 @@ describe.sequential("agent cross-tenant route authorization", () => {
     expect(mockLogActivity).not.toHaveBeenCalled();
   });
 
+  it("returns 409 on resume while the agent still has the paused-setup marker", async () => {
+    mockAgentService.getById.mockImplementation(async () => ({
+      ...baseAgent,
+      status: "paused",
+      pauseReason: "manual",
+      metadata: { "paperclip.pausedSetup": true },
+    }));
+    const app = await createApp({
+      type: "board",
+      userId: "board-user",
+      companyIds: [companyId],
+      source: "local_implicit",
+      isInstanceAdmin: true,
+    });
+
+    const res = await requestApp(app, (baseUrl) =>
+      request(baseUrl).post(`/api/agents/${agentId}/resume`).send({}),
+    );
+
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe("agent_paused_setup_unconfigured");
+    expect(mockAgentService.resume).not.toHaveBeenCalled();
+    expect(mockLogActivity).not.toHaveBeenCalled();
+  });
+
   it("returns a clear 409 for non-error agents", async () => {
     const { conflict } = await import("../errors.js");
     mockAgentService.getById.mockImplementation(async () => ({ ...baseAgent, status: "idle" }));

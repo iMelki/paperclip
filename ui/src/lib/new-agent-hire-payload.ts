@@ -56,3 +56,9 @@ export function buildNewAgentHirePayload(input: {
     ...(permissions ? { permissions } : {}),
   };
 }
+
+/** A 4xx means the server rejected this exact request, so the form unlocks and the next submit gets a new idempotency key. */
+export function shouldUnlockHireSubmission(error: unknown): boolean {
+  const status = (error as { status?: unknown } | null)?.status;
+  return typeof status === "number" && status >= 400 && status < 500;
+}

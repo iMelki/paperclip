@@ -177,6 +177,21 @@ describe("AgentActionButtons", () => {
     expect(container.textContent).not.toContain("Clear error");
   });
 
+  it("shows Finish setup instead of Resume for a paused unconfigured agent", async () => {
+    render(makeAgent({ status: "paused", metadata: { "paperclip.pausedSetup": true } }));
+    await flushReact();
+
+    expect(container.textContent).toContain("Finish setup");
+    expect(container.textContent).not.toContain("Resume");
+    const finish = Array.from(container.querySelectorAll("button")).find((b) => b.textContent?.includes("Finish setup"));
+    await act(async () => {
+      finish?.click();
+    });
+    await flushReact();
+    expect(mockNavigate).toHaveBeenCalledWith("/agents/alpha/configuration");
+    expect(mockAgentsApi.resume).not.toHaveBeenCalled();
+  });
+
   it("calls the terminate success handler after terminating an agent", async () => {
     const onTerminateSuccess = vi.fn();
     render(makeAgent(), { onTerminateSuccess });

@@ -9,6 +9,7 @@ describe("paused agent setup boundary", () => {
     expect(fields.adapterType).toBe("process");
     expect(fields.adapterConfig).toEqual({});
     expect(fields.defaultEnvironmentId).toBeNull();
+    expect(fields.budgetMonthlyCents).toBe(0);
     expect(fields.permissions).toEqual({ canCreateAgents: false, canCreateSkills: false, canAssignTasks: false });
     expect(Object.entries(fields.runtimeConfig.heartbeat).filter(([key]) => key.startsWith("wake")).every(([, value]) => value === false)).toBe(true);
     expect(fields.runtimeConfig.heartbeat.enabled).toBe(false);

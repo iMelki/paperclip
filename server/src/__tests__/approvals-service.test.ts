@@ -600,6 +600,34 @@ describe("approvalService resolution idempotency", () => {
     },
   );
 
+  it.each(["pending", "standalone"] as const)(
+    "approving a paused %s hire with a tampered non-zero budget ends at 0 with no spending policy",
+    async (kind) => {
+      const metadata = { "paperclip.pausedSetup": true, purpose: "finance-draft" };
+      mockAgentService.getById.mockResolvedValue({
+        id: "agent-1", companyId: "company-1", status: "pending_approval",
+        role: "general", adapterType: "process", adapterConfig: {}, runtimeConfig: {},
+        metadata, permissions: { canCreateAgents: false, canCreateSkills: false, canAssignTasks: false },
+      });
+      mockAgentService.create.mockResolvedValue({ id: "agent-1" });
+      const payload = {
+        name: "Finance setup", role: "general", adapterType: "process",
+        ...(kind === "pending" ? { agentId: "agent-1", metadata: { "paperclip.pausedSetup": false } } : { metadata }),
+        budgetMonthlyCents: 50_000,
+        permissions: { canCreateAgents: false, canCreateSkills: false, canAssignTasks: false },
+      };
+      const approved = { ...createApproval("approved"), payload };
+      const dbStub = createDbStub([[{ ...createApproval("pending"), payload }]], [approved]);
+      await approvalService(dbStub.db as any).approve("approval-1", "board", "setup only");
+      if (kind === "standalone") {
+        expect(mockAgentService.create).toHaveBeenCalledWith("company-1", expect.objectContaining({ budgetMonthlyCents: 0 }));
+      } else {
+        expect(mockAgentService.activatePendingApproval).toHaveBeenCalledTimes(1);
+      }
+      expect(mockBudgetService.upsertPolicy).not.toHaveBeenCalled();
+    },
+  );
+
   it("creates a legacy standalone marked hire paused with no executable or grants", async () => {
     const payload = {
       name: "Finance setup", role: "general", adapterType: "process",

@@ -20,6 +20,7 @@ export function pausedAgentSetupFields(metadata?: unknown) {
       maxConcurrentRuns: 1,
     } },
     defaultEnvironmentId: null,
+    budgetMonthlyCents: 0,
     permissions: { canCreateAgents: false, canCreateSkills: false, canAssignTasks: false },
     metadata: { ...record(metadata), [PAUSED_AGENT_SETUP_KEY]: true },
   };

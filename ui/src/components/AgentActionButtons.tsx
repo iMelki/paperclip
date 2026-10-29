@@ -33,6 +33,7 @@ import { agentsApi } from "../api/agents";
 import { ApiError } from "../api/client";
 import { queryKeys } from "../lib/queryKeys";
 import { agentRouteRef } from "../lib/utils";
+import { isPausedAgentSetup } from "@paperclipai/shared";
 import { copyTextToClipboard } from "../lib/clipboard";
 import { useDialogActions } from "../context/DialogContext";
 import { useToastActions } from "../context/ToastContext";
@@ -356,6 +357,17 @@ export function AgentActionButtons({
           disabled={clearErrorDisabled}
           size={size}
         />
+      ) : isPaused && isPausedAgentSetup(agent.metadata) ? (
+        <Button
+          variant="outline"
+          size={size}
+          onClick={() => navigate(`/agents/${canonicalAgentRef}/configuration`)}
+          disabled={disabled}
+          title="This agent was created paused without a runtime. Configure it before resuming."
+        >
+          <Play className="h-3.5 w-3.5 sm:mr-1" />
+          <span className="hidden sm:inline">Finish setup</span>
+        </Button>
       ) : (
         <PauseResumeButton
           isPaused={isPaused}

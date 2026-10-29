@@ -1,4 +1,4 @@
-import { pausedAgentSetupFields, pausedAgentSetupProblem } from "@paperclipai/shared";
+import { isPausedAgentSetup, pausedAgentSetupFields, pausedAgentSetupProblem } from "@paperclipai/shared";
 import { Router, type NextFunction, type Request, type Response } from "express";
 import { createHash, generateKeyPairSync, randomUUID } from "node:crypto";
 import path from "node:path";
@@ -3413,6 +3413,13 @@ export function agentRoutes(
     if (existing.orgChainHealth?.status === "invalid_org_chain") {
       res.status(409).json({
         error: existing.orgChainHealth?.repairGuidance ?? "Repair this agent's reporting chain before resuming it",
+      });
+      return;
+    }
+    if (isPausedAgentSetup(existing.metadata)) {
+      res.status(409).json({
+        error: "Finish setup before resuming: this agent was created paused without a configured runtime",
+        code: "agent_paused_setup_unconfigured",
       });
       return;
     }

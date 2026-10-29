@@ -1,6 +1,16 @@
 // @vitest-environment node
 import { describe, expect, it } from "vitest";
-import { buildNewAgentHirePayload } from "./new-agent-hire-payload.js";
+import { buildNewAgentHirePayload, shouldUnlockHireSubmission } from "./new-agent-hire-payload.js";
+import { ApiError } from "../api/client.js";
+
+describe("shouldUnlockHireSubmission", () => {
+  it("unlocks on a 4xx rejection and keeps the lock on 5xx or network errors", () => {
+    expect(shouldUnlockHireSubmission(new ApiError("bad", 400, null))).toBe(true);
+    expect(shouldUnlockHireSubmission(new ApiError("conflict", 409, null))).toBe(true);
+    expect(shouldUnlockHireSubmission(new ApiError("down", 503, null))).toBe(false);
+    expect(shouldUnlockHireSubmission(new TypeError("Failed to fetch"))).toBe(false);
+  });
+});
 import { defaultCreateValues } from "../components/agent-config-defaults.js";
 
 describe("buildNewAgentHirePayload", () => {

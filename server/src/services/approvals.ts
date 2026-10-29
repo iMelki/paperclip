@@ -266,8 +266,10 @@ export function approvalService(db: Db) {
       : await createAgentFromApprovedHire(source, approval, payload);
 
     await reconcileApprovedBuiltInAgent(source, approval.companyId, payload);
+    const approvedAgent = await agentService(source).getById(hireApprovedAgentId);
+    const pausedSetup = isPausedAgentSetup(payload.metadata) || isPausedAgentSetup(approvedAgent?.metadata);
     const budgetMonthlyCents =
-      typeof payload.budgetMonthlyCents === "number" ? payload.budgetMonthlyCents : 0;
+      !pausedSetup && typeof payload.budgetMonthlyCents === "number" ? payload.budgetMonthlyCents : 0;
     if (budgetMonthlyCents > 0) {
       await budgetService(source).upsertPolicy(
         approval.companyId,
