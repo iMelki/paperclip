@@ -75,7 +75,20 @@ function registerClient(key: string, client: RegisteredPostgresClient): void {
  * Swallows individual `end()` errors so one bad client cannot block the rest.
  */
 export async function closeRegisteredClients(url: string): Promise<void> {
-  const key = hostPortKey(url);
+  await closeRegisteredClientsByKey(hostPortKey(url));
+}
+
+/**
+ * Ends every live client `createDb` handed out, for every host and port. The
+ * server calls this during SIGINT/SIGTERM shutdown so a restart does not leave
+ * idle backends behind until the OS reaps the sockets.
+ */
+export async function closeAllRegisteredClients(): Promise<void> {
+  const keys = [...clientsByHostPort.keys()];
+  await Promise.all(keys.map((key) => closeRegisteredClientsByKey(key)));
+}
+
+async function closeRegisteredClientsByKey(key: string): Promise<void> {
   const refs = clientsByHostPort.get(key);
   if (!refs) return;
 
