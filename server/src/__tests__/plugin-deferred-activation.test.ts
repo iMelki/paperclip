@@ -10,11 +10,11 @@ vi.mock("../services/plugin-registry.js", () => ({
 import { pluginLifecycleManager } from "../services/plugin-lifecycle.js";
 import type { PluginLoader } from "../services/plugin-loader.js";
 
-function fixture(status = "ready") {
+function fixture(status = "ready", newCaps: string[] = []) {
   let row = {
     id: "plugin-1", pluginKey: "example.plugin", status,
     packageName: "@example/plugin", packagePath: "/retained/old",
-    version: "1.0.0", manifestJson: { id: "example.plugin", capabilities: [] },
+    version: "1.0.0", manifestJson: { id: "example.plugin", capabilities: [] as string[], version: "1.0.0" },
   };
   const order: string[] = [];
   registry.getById.mockImplementation(async () => ({ ...row }));
@@ -29,10 +29,12 @@ function fixture(status = "ready") {
     loadSingle: vi.fn(async () => ({ success: true, plugin: row, error: undefined as string | undefined })),
     upgradePlugin: vi.fn(async () => {
       order.push("replace");
-      row = { ...row, version: "2.0.0", packagePath: "/retained/new" };
+      const oldManifest = row.manifestJson;
+      const newManifest = { id: row.pluginKey, capabilities: newCaps, version: "2.0.0" };
+      row = { ...row, version: "2.0.0", packagePath: "/retained/new", manifestJson: newManifest };
       return {
-        oldManifest: { id: row.pluginKey, capabilities: [], version: "1.0.0" },
-        newManifest: { id: row.pluginKey, capabilities: [], version: "2.0.0" },
+        oldManifest,
+        newManifest,
         discovered: { version: "2.0.0" },
       };
     }),
@@ -51,13 +53,81 @@ describe("explicit deferred plugin activation", () => {
     });
     expect(f.order).toEqual(["status:upgrade_pending", "unload", "replace"]);
     expect(f.loader.upgradePlugin).toHaveBeenCalledWith("plugin-1", {
-      version: undefined, localPath: "/retained/new",
+      version: undefined, localPath: "/retained/new", stageForApproval: true,
     });
     expect(result).toMatchObject({ id: "plugin-1", status: "upgrade_pending", packagePath: "/retained/new" });
     expect(f.loader.loadSingle).not.toHaveBeenCalled();
     await f.lifecycle.enable("plugin-1");
     expect(f.row().status).toBe("ready");
     expect(f.loader.loadSingle).toHaveBeenCalledExactlyOnceWith("plugin-1");
+  });
+
+  it("stages the same disabled identity without briefly enabling its old worker", async () => {
+    const f = fixture("disabled");
+    const result = await f.lifecycle.upgrade("plugin-1", undefined, { activate: false });
+    expect(f.order).toEqual(["status:upgrade_pending", "unload", "replace"]);
+    expect(result).toMatchObject({ id: "plugin-1", status: "upgrade_pending", version: "2.0.0" });
+    expect(f.loader.upgradePlugin).toHaveBeenCalledWith("plugin-1", {
+      version: undefined, stageForApproval: true,
+    });
+    expect(f.loader.loadSingle).not.toHaveBeenCalled();
+  });
+
+  it.each([undefined, true])("refuses disabled activation %s before mutation", async (activate) => {
+    const f = fixture("disabled");
+    await expect(f.lifecycle.upgrade("plugin-1", undefined, { activate })).rejects.toThrow("Cannot upgrade");
+    expect(f.order).toEqual([]);
+    expect(f.loader.upgradePlugin).not.toHaveBeenCalled();
+  });
+
+  it("does not treat a repeated pending upgrade as capability approval", async () => {
+    const f = fixture("upgrade_pending");
+    const result = await f.lifecycle.upgrade("plugin-1", "2.0.0");
+    expect(result.status).toBe("upgrade_pending");
+    expect(f.loader.loadSingle).not.toHaveBeenCalled();
+    expect(f.order).toEqual(["unload", "replace"]);
+  });
+
+  it("keeps an ordinary upgrade with new capabilities pending until explicit enable", async () => {
+    const f = fixture("ready", ["companies.read"]);
+    const result = await f.lifecycle.upgrade("plugin-1", "2.0.0");
+    expect(result).toMatchObject({ status: "upgrade_pending", manifestJson: { capabilities: ["companies.read"] } });
+    expect(f.order).toEqual(["status:upgrade_pending", "unload", "replace"]);
+    expect(f.loader.loadSingle).not.toHaveBeenCalled();
+    await f.lifecycle.enable("plugin-1");
+    expect(f.loader.loadSingle).toHaveBeenCalledExactlyOnceWith("plugin-1");
+  });
+
+  it("does not activate or emit enabled when the reviewed manifest snapshot is stale", async () => {
+    const f = fixture("upgrade_pending");
+    const enabled = vi.fn();
+    f.lifecycle.on("plugin.enabled", enabled);
+    registry.updateStatus.mockRejectedValueOnce(new Error("Plugin activation hold changed"));
+    await expect(f.lifecycle.enable("plugin-1")).rejects.toThrow("activation hold changed");
+    expect(f.loader.loadSingle).not.toHaveBeenCalled();
+    expect(enabled).not.toHaveBeenCalled();
+    expect(registry.updateStatus).toHaveBeenCalledWith("plugin-1", {
+      status: "ready", lastError: null,
+    }, { status: "upgrade_pending", manifest: f.row().manifestJson });
+  });
+
+  it("refuses activation if another staged manifest replaced this upgrade", async () => {
+    const f = fixture();
+    registry.getById.mockResolvedValueOnce(f.row()).mockResolvedValueOnce({
+      ...f.row(), status: "upgrade_pending",
+      manifestJson: { ...f.row().manifestJson, capabilities: ["companies.read"] },
+    });
+    await expect(f.lifecycle.upgrade("plugin-1", "2.0.0")).rejects.toThrow("Staged plugin manifest changed");
+    expect(f.loader.loadSingle).not.toHaveBeenCalled();
+  });
+
+  it.each(["unload", "replace"])("retains a disabled upgrade hold after %s fails", async (stage) => {
+    const f = fixture("disabled");
+    if (stage === "unload") f.loader.unloadSingle.mockRejectedValueOnce(new Error("stage failed"));
+    else f.loader.upgradePlugin.mockRejectedValueOnce(new Error("stage failed"));
+    await expect(f.lifecycle.upgrade("plugin-1", undefined, { activate: false })).rejects.toThrow("stage failed");
+    expect(f.row().status).toBe("upgrade_pending");
+    expect(f.loader.loadSingle).not.toHaveBeenCalled();
   });
 
   it.each(["unload", "replace"])("keeps the hold when %s fails", async (stage) => {
@@ -106,7 +176,7 @@ describe("explicit deferred plugin activation", () => {
   it("retains immediate activation for legacy upgrade requests", async () => {
     const f = fixture();
     await f.lifecycle.upgrade("plugin-1", "2.0.0");
-    expect(f.order).toEqual(["unload", "replace", "status:ready"]);
+    expect(f.order).toEqual(["status:upgrade_pending", "unload", "replace", "status:ready"]);
     expect(f.loader.loadSingle).toHaveBeenCalledExactlyOnceWith("plugin-1");
   });
 

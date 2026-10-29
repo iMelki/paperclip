@@ -1,6 +1,7 @@
 /** Source-only proposal. Adopt under server/src/__tests__ before qualification. */
 import { describe, expect, it, vi } from "vitest";
 import { plugins } from "@paperclipai/db";
+import { PgDialect } from "drizzle-orm/pg-core";
 import { pluginRegistryService } from "../services/plugin-registry.js";
 
 const original = {
@@ -12,22 +13,23 @@ const original = {
   status: "disabled",
 };
 
-function makeRegistryFixture(found = true) {
+function makeRegistryFixture(found = true, manifestJson?: unknown) {
   const updates: Record<string, unknown>[] = [];
-  const selected = vi.fn().mockResolvedValue(found ? [{ ...original }] : []);
+  const predicates: unknown[] = [];
+  const selected = vi.fn().mockResolvedValue(found ? [{ ...original, manifestJson }] : []);
   const returning = vi.fn(async () => [{ ...original, ...updates.at(-1) }]);
   const db = {
     select: vi.fn(() => ({ from: () => ({ where: selected }) })),
     update: vi.fn(() => ({
       set: (values: Record<string, unknown>) => {
         updates.push(values);
-        return { where: () => ({ returning }) };
+        return { where: (predicate: unknown) => { predicates.push(predicate); return { returning }; } };
       },
     })),
     insert: vi.fn(() => { throw new Error("Unexpected insert"); }),
     delete: vi.fn(() => { throw new Error("Unexpected delete"); }),
   };
-  return { db, updates, registry: pluginRegistryService(db as never) };
+  return { db, updates, predicates, returning, registry: pluginRegistryService(db as never) };
 }
 
 describe("plugin registry packagePath persistence", () => {
@@ -68,5 +70,47 @@ describe("plugin registry packagePath persistence", () => {
     expect(fixture.db.update).not.toHaveBeenCalled();
     expect(fixture.db.insert).not.toHaveBeenCalled();
     expect(fixture.db.delete).not.toHaveBeenCalled();
+  });
+
+  it.each(["manifest", "status"])("binds %s writes to the exact pending manifest snapshot", async (kind) => {
+    const fixture = makeRegistryFixture();
+    const manifest = { id: original.pluginKey, capabilities: ["companies.read"] };
+    const expected = { status: "upgrade_pending" as const, manifest: manifest as never };
+    if (kind === "manifest") {
+      await fixture.registry.update(original.id, { version: "2.0.0" }, expected);
+    } else {
+      await fixture.registry.updateStatus(original.id, { status: "ready" }, expected);
+    }
+    const query = new PgDialect().sqlToQuery(fixture.predicates[0] as never);
+    expect(query.sql).toContain('"plugins"."id"');
+    expect(query.sql).toContain('"plugins"."status"');
+    expect(query.sql).toContain('"plugins"."manifest_json"');
+    expect(query.params).toEqual([original.id, "upgrade_pending", JSON.stringify(manifest)]);
+    expect(fixture.db.insert).not.toHaveBeenCalled();
+  });
+
+  it.each(["manifest", "status"])("rejects a stale guarded %s write without retry", async (kind) => {
+    const fixture = makeRegistryFixture();
+    fixture.returning.mockResolvedValueOnce([]);
+    const expected = {
+      status: "upgrade_pending", manifest: { id: original.pluginKey, capabilities: [] } as never,
+    } as const;
+    const write = kind === "manifest"
+      ? fixture.registry.update(original.id, { version: "2.0.0" }, expected)
+      : fixture.registry.updateStatus(original.id, { status: "ready" }, expected);
+    await expect(write).rejects.toThrow("activation hold changed");
+    expect(fixture.db.update).toHaveBeenCalledTimes(1);
+    expect(fixture.db.insert).not.toHaveBeenCalled();
+    expect(fixture.db.delete).not.toHaveBeenCalled();
+  });
+
+  it("keeps the caller's reviewed manifest even when preliminary selection has changed", async () => {
+    const fixture = makeRegistryFixture(true, { id: original.pluginKey, capabilities: ["companies.read"] });
+    const reviewed = { id: original.pluginKey, capabilities: [] };
+    await fixture.registry.updateStatus(original.id, { status: "ready" }, {
+      status: "upgrade_pending", manifest: reviewed as never,
+    });
+    const query = new PgDialect().sqlToQuery(fixture.predicates[0] as never);
+    expect(query.params).toEqual([original.id, "upgrade_pending", JSON.stringify(reviewed)]);
   });
 });

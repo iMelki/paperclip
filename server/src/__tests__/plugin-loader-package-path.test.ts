@@ -11,7 +11,10 @@ const mocks = vi.hoisted(() => ({
   registry: {
     getById: vi.fn(),
     listInstalled: vi.fn(),
-    update: vi.fn<(id: string, data: Record<string, unknown>) => Promise<unknown>>(),
+    updateStatus: vi.fn(),
+    update: vi.fn<(
+      id: string, data: Record<string, unknown>, expected?: Record<string, unknown>,
+    ) => Promise<unknown>>(),
   },
   execFile: vi.fn((
     _file: string,
@@ -33,6 +36,7 @@ vi.mock("node:fs", async (importOriginal) => {
 });
 
 import { pluginLoader } from "../services/plugin-loader.js";
+import { pluginLifecycleManager } from "../services/plugin-lifecycle.js";
 
 const pluginId = "plugin-fixture-1";
 const pluginKey = "paperclip.path_persistence_fixture";
@@ -69,13 +73,13 @@ async function makeRoot(): Promise<string> {
   return root;
 }
 
-function selectExisting(packagePath: string | null, capabilities = baseManifest.capabilities) {
+function selectExisting(packagePath: string | null, capabilities = baseManifest.capabilities, status = "disabled") {
   mocks.registry.getById.mockResolvedValue({
     id: pluginId,
     pluginKey,
     packageName,
     packagePath,
-    status: "disabled",
+    status,
     manifestJson: { ...baseManifest, capabilities, version: "1.0.0" },
   });
 }
@@ -83,7 +87,7 @@ function selectExisting(packagePath: string | null, capabilities = baseManifest.
 beforeEach(() => {
   vi.clearAllMocks();
   mocks.registry.listInstalled.mockResolvedValue([]);
-  mocks.registry.update.mockResolvedValue(undefined);
+  mocks.registry.update.mockResolvedValue({ id: pluginId, status: "upgrade_pending" });
 });
 
 afterAll(() => {
@@ -153,4 +157,84 @@ describe("plugin loader source-aware packagePath update", () => {
     expect(mocks.registry.update).not.toHaveBeenCalled();
     expect(mocks.execFile).not.toHaveBeenCalled();
   });
+
+  it("stages added capabilities only under a persisted pending hold", async () => {
+    const root = await makeRoot();
+    await makePackage(root);
+    selectExisting("C:/synthetic/old-retained-pointer", [], "upgrade_pending");
+    const loader = pluginLoader({} as never, { enableNpmDiscovery: false, enableLocalFilesystem: false });
+    const result = await loader.upgradePlugin(pluginId, { localPath: root, stageForApproval: true });
+    expect(result.newManifest.capabilities).toEqual(["companies.read"]);
+    expect(mocks.registry.update).toHaveBeenCalledWith(pluginId, {
+      packageName, packagePath: path.resolve(root), version: baseManifest.version, manifest: baseManifest,
+    }, expect.objectContaining({ status: "upgrade_pending" }));
+    expect(mocks.execFile).not.toHaveBeenCalled();
+  });
+
+  it("composes disabled lifecycle and real loader staging, with approval only via separate enable", async () => {
+    const root = await makeRoot();
+    await makePackage(root);
+    let row = {
+      id: pluginId, pluginKey, packageName, packagePath: "C:/synthetic/old-retained-pointer",
+      status: "disabled", version: "1.0.0",
+      manifestJson: { ...baseManifest, capabilities: [], version: "1.0.0" },
+    };
+    const order: string[] = [];
+    mocks.registry.getById.mockImplementation(async () => ({ ...row }));
+    mocks.registry.updateStatus.mockImplementation(async (_id, change) => {
+      order.push(`status:${change.status}`);
+      row = { ...row, ...change };
+      return { ...row };
+    });
+    mocks.registry.update.mockImplementation(async (_id, data, expected) => {
+      expect(row.status).toBe("upgrade_pending");
+      expect(expected).toEqual({ status: "upgrade_pending", manifest: row.manifestJson });
+      order.push("replace");
+      row = { ...row, ...data, manifestJson: data.manifest as typeof row.manifestJson };
+      return { ...row };
+    });
+    const loader = pluginLoader({} as never, { enableNpmDiscovery: false, enableLocalFilesystem: false });
+    vi.spyOn(loader, "hasRuntimeServices").mockReturnValue(true);
+    vi.spyOn(loader, "unloadSingle").mockImplementation(async () => { order.push("unload"); });
+    const load = vi.spyOn(loader, "loadSingle").mockImplementation(async () => ({
+      success: true, plugin: row as never,
+      registered: { worker: true, eventSubscriptions: 0, jobs: 0, webhooks: 0, tools: 0 },
+    }));
+    const lifecycle = pluginLifecycleManager({} as never, { loader });
+    const held = await lifecycle.upgrade(pluginId, undefined, { localPath: root, activate: false });
+    expect(order).toEqual(["status:upgrade_pending", "unload", "replace"]);
+    expect(held).toMatchObject({ id: pluginId, status: "upgrade_pending", manifestJson: baseManifest });
+    expect(load).not.toHaveBeenCalled();
+    // Re-reading the now-identical manifest must not implicitly approve it.
+    await lifecycle.upgrade(pluginId, undefined, { localPath: root });
+    expect(row.status).toBe("upgrade_pending");
+    expect(load).not.toHaveBeenCalled();
+    await lifecycle.enable(pluginId);
+    expect(row.status).toBe("ready");
+    expect(load).toHaveBeenCalledExactlyOnceWith(pluginId);
+    expect(mocks.execFile).not.toHaveBeenCalled();
+  });
+
+  it("fails closed when the conditional staging update loses its hold", async () => {
+    const root = await makeRoot();
+    await makePackage(root);
+    selectExisting("C:/synthetic/old-retained-pointer", [], "upgrade_pending");
+    mocks.registry.update.mockResolvedValueOnce(null);
+    const loader = pluginLoader({} as never, { enableNpmDiscovery: false, enableLocalFilesystem: false });
+    await expect(loader.upgradePlugin(pluginId, { localPath: root, stageForApproval: true }))
+      .rejects.toThrow("activation hold changed");
+    expect(mocks.execFile).not.toHaveBeenCalled();
+  });
+
+  it.each(["ready", "disabled", "error", "installed", "uninstalled"])(
+    "refuses staging from %s before package discovery or persistence", async (status) => {
+      selectExisting("C:/synthetic/absent", [], status);
+      const loader = pluginLoader({} as never, { enableNpmDiscovery: false, enableLocalFilesystem: false });
+      await expect(loader.upgradePlugin(pluginId, {
+        localPath: "C:/synthetic/absent", stageForApproval: true,
+      })).rejects.toThrow("persisted upgrade_pending hold");
+      expect(mocks.registry.update).not.toHaveBeenCalled();
+      expect(mocks.execFile).not.toHaveBeenCalled();
+    },
+  );
 });
