@@ -114,6 +114,7 @@ import type {
 import { CLASS3_STATIC_LEASE_ALLOWLIST, credentialConfigPath, getAvailableConnectionMethod, getConnectableAppDefinition, isToolConnectionAttentionHealth, recommendedDefaultsForApp } from "@paperclipai/shared";
 import { badRequest, conflict, forbidden, HttpError, notFound, unprocessable } from "../errors.js";
 import { logActivity } from "./activity-log.js";
+import { logger } from "../middleware/logger.js";
 import { mcpHttpRequestHeaders, parseMcpHttpResponseBody } from "./mcp-http.js";
 import {
   buildRemoteMcpHeaders,
@@ -6422,7 +6423,13 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
       const [boundGrant] = await db.select({ id: connectionGrants.id }).from(connectionGrants)
         .where(sql`${connectionGrants.credentialSecretRefs} @> ${needle}::jsonb`).limit(1);
       if (boundConnection || boundGrant) return;
-      await secrets.remove(staleRefreshRef.secretId).catch(() => undefined);
+      // Best effort: the reconnect is already saved without the ref, so a failed delete only leaves an
+      // unreferenced secret. Log the id and error class only, never secret values.
+      await secrets.remove(staleRefreshRef.secretId).catch((error: unknown) => {
+        logger.warn({ connectionId: connection.id, secretId: staleRefreshRef.secretId,
+          errorName: error instanceof Error ? error.name : typeof error },
+        "Could not remove stale GitHub OAuth refresh secret after reconnect");
+      });
     };
     const expiresAt = token.expiresIn ? new Date(Date.now() + token.expiresIn * 1000).toISOString() : null;
     if (stateRow.subjectUserId) {

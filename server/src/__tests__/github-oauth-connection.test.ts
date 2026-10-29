@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { lookup } from "node:dns/promises";
 import express from "express";
 import request from "supertest";
-import { and, eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   agents, agentWakeupRequests, companies, companyMemberships, companySecrets, companySecretVersions,
@@ -243,6 +243,69 @@ describe("native GitHub OAuth service and routes (mandatory private PostgreSQL)"
     const before = tokenCalls().length;
     await fixture.service.checkHealth(saved.id, fixture.actor);
     expect(tokenCalls()).toHaveLength(before);
+    await expectNoAgentEffects(fixture.companyId);
+  });
+
+  it("keeps the old refresh ref and secret when the reconnect save fails partway through", async () => {
+    const fixture = await seed();
+    const expiring = await active(fixture);
+    const oldRefresh = expiring.credentialSecretRefs.find((ref) => ref.configPath === "oauth.refresh_token")!;
+    expect(oldRefresh).toBeDefined();
+    const { expires_in: _expiresIn, refresh_token: _refresh, ...oauthAppToken } = token("reconnect");
+    io.tokenPayload = oauthAppToken;
+    const { state } = await begin(fixture, expiring.id);
+    const fn = `synthetic_fail_${randomUUID().replace(/-/g, "")}`;
+    // A real database failure on the credential-ref write of this one connection.
+    await db.execute(sql.raw(`create function ${fn}() returns trigger language plpgsql as $$ begin
+      if new.id = '${expiring.id}' and new.credential_secret_refs is distinct from old.credential_secret_refs then
+        raise exception 'synthetic connection update failure'; end if; return new; end $$`));
+    await db.execute(sql.raw(`create trigger ${fn} before update on tool_connections for each row execute function ${fn}()`));
+    try {
+      const failure = await complete(fixture, state).then(() => null, (error: unknown) => error as Error & { cause?: Error });
+      expect(failure).not.toBeNull();
+      expect(`${failure?.message} ${failure?.cause?.message}`).toMatch(/synthetic connection update failure/);
+    } finally {
+      await db.execute(sql.raw(`drop trigger if exists ${fn} on tool_connections`));
+      await db.execute(sql.raw(`drop function if exists ${fn}()`));
+    }
+    const kept = await readConnection(expiring.id);
+    expect(kept.credentialSecretRefs.find((ref) => ref.configPath === "oauth.refresh_token")?.secretId).toBe(oldRefresh.secretId);
+    const [oldSecret] = await db.select().from(companySecrets).where(eq(companySecrets.id, oldRefresh.secretId));
+    expect(oldSecret).toBeDefined();
+    expect(oldSecret.status).toBe("active");
+    expect(oldSecret.deletedAt).toBeNull();
+  });
+
+  it("still completes a non-expiring reconnect and drops the ref when removing the old secret throws", async () => {
+    const fixture = await seed();
+    const expiring = await active(fixture);
+    const oldRefresh = expiring.credentialSecretRefs.find((ref) => ref.configPath === "oauth.refresh_token")!;
+    expect(oldRefresh).toBeDefined();
+    const { expires_in: _expiresIn, refresh_token: _refresh, ...oauthAppToken } = token("reconnect");
+    io.tokenPayload = oauthAppToken;
+    const { state } = await begin(fixture, expiring.id);
+    const fn = `synthetic_fail_${randomUUID().replace(/-/g, "")}`;
+    // secrets.remove starts by marking the row deleted; fail exactly that write for the old secret.
+    await db.execute(sql.raw(`create function ${fn}() returns trigger language plpgsql as $$ begin
+      if new.id = '${oldRefresh.secretId}' then raise exception 'synthetic secret remove failure'; end if;
+      return new; end $$`));
+    await db.execute(sql.raw(`create trigger ${fn} before update on company_secrets for each row execute function ${fn}()`));
+    const warn = vi.spyOn(logger, "warn");
+    let reconnected!: Awaited<ReturnType<typeof complete>>;
+    try {
+      reconnected = await complete(fixture, state);
+    } finally {
+      await db.execute(sql.raw(`drop trigger if exists ${fn} on company_secrets`));
+      await db.execute(sql.raw(`drop function if exists ${fn}()`));
+    }
+    const saved = await readConnection(reconnected.connectionId);
+    expect(saved.status).toBe("active");
+    expect((saved.config.oauth as Record<string, unknown>).expiresAt).toBeNull();
+    expect(saved.credentialSecretRefs.some((ref) => ref.configPath === "oauth.refresh_token")).toBe(false);
+    expect(warn).toHaveBeenCalledWith(expect.objectContaining({ secretId: oldRefresh.secretId }),
+      "Could not remove stale GitHub OAuth refresh secret after reconnect");
+    expect(JSON.stringify(warn.mock.calls)).not.toContain("synthetic-refresh-");
+    warn.mockRestore();
     await expectNoAgentEffects(fixture.companyId);
   });
 
