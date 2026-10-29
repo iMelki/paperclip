@@ -36,6 +36,7 @@
  * @see PLUGIN_SPEC.md §12.5 — Graceful Shutdown Policy
  */
 import { EventEmitter } from "node:events";
+import { isDeepStrictEqual } from "node:util";
 import type { Db } from "@paperclipai/db";
 import type {
   PluginStatus,
@@ -65,6 +66,7 @@ import { logger } from "../middleware/logger.js";
  *   ready → uninstalled     (uninstall)
  *
  *   disabled → ready        (operator re-enables plugin)
+ *   disabled → upgrade_pending (explicit dormant replacement)
  *   disabled → uninstalled  (uninstall while disabled)
  *
  *   error → ready           (retry / recovery)
@@ -79,7 +81,7 @@ import { logger } from "../middleware/logger.js";
 const VALID_TRANSITIONS: Record<string, readonly PluginStatus[]> = {
   installed: ["ready", "error", "uninstalled"],
   ready: ["ready", "disabled", "error", "upgrade_pending", "uninstalled"],
-  disabled: ["ready", "uninstalled"],
+  disabled: ["ready", "upgrade_pending", "uninstalled"],
   error: ["ready", "uninstalled"],
   upgrade_pending: ["ready", "error", "uninstalled"],
   uninstalled: ["installed"], // reinstall
@@ -134,6 +136,12 @@ type LifecycleEventPayload<K extends LifecycleEventName> = PluginLifecycleEvents
 // PluginLifecycleManager
 // ---------------------------------------------------------------------------
 
+export interface PluginUpgradeOptions {
+  localPath?: string;
+  /** Keep the replacement dormant until a separate explicit enable. */
+  activate?: boolean;
+}
+
 export interface PluginLifecycleManager {
   /**
    * Load a newly installed plugin – transitions `installed` → `ready`.
@@ -145,7 +153,7 @@ export interface PluginLifecycleManager {
   load(pluginId: string): Promise<PluginRecord>;
 
   /**
-   * Enable a plugin that is in `disabled`, `error`, or `upgrade_pending` state.
+   * Enable an installed, disabled, errored, or upgrade-pending plugin.
    * Transitions → `ready`.
    */
   enable(pluginId: string): Promise<PluginRecord>;
@@ -185,7 +193,7 @@ export interface PluginLifecycleManager {
    * If the upgrade adds new capabilities, transitions to `upgrade_pending`.
    * Otherwise, transitions to `ready` directly.
    */
-  upgrade(pluginId: string, version?: string): Promise<PluginRecord>;
+  upgrade(pluginId: string, version?: string, options?: PluginUpgradeOptions): Promise<PluginRecord>;
 
   /**
    * Start the worker process for a plugin that is already in `ready` state.
@@ -358,7 +366,7 @@ export function pluginLifecycleManager(
     const updated = await registry.updateStatus(pluginId, {
       status: to,
       lastError,
-    });
+    }, { status: plugin.status, manifest: plugin.manifestJson });
 
     if (!updated) throw notFound(`Plugin not found after status update: ${pluginId}`);
     const result = updated as PluginRecord;
@@ -491,16 +499,26 @@ export function pluginLifecycleManager(
     async enable(pluginId: string): Promise<PluginRecord> {
       const plugin = await requirePlugin(pluginId);
 
-      // Only allow enabling from disabled, error, or upgrade_pending states
-      if (plugin.status !== "disabled" && plugin.status !== "error" && plugin.status !== "upgrade_pending") {
+      if (!["installed", "disabled", "error", "upgrade_pending"].includes(plugin.status)) {
         throw badRequest(
           `Cannot enable plugin in status '${plugin.status}'. ` +
-            `Plugin must be in 'disabled', 'error', or 'upgrade_pending' status to be enabled.`,
+            `Plugin must be installed, disabled, errored, or upgrade_pending to be enabled.`,
         );
       }
 
       const result = await transition(pluginId, "ready", null, plugin);
-      await activateReadyPlugin(pluginId);
+      try {
+        await activateReadyPlugin(pluginId);
+      } catch (error) {
+        // Loader cleanup can itself fail before markError persists. Do not leave a
+        // rejected explicit enable boot-eligible; saving the failure must not rely
+        // on another successful runtime unload.
+        const current = await requirePlugin(pluginId);
+        if (current.status === "ready") {
+          await transition(pluginId, "error", error instanceof Error ? error.message : String(error), current);
+        }
+        throw error;
+      }
       emitDomain("plugin.enabled", {
         pluginId,
         pluginKey: result.pluginKey,
@@ -634,78 +652,54 @@ export function pluginLifecycleManager(
      * @param pluginId - The UUID of the plugin to upgrade.
      * @param version - Optional target version specifier.
      * @returns The updated `PluginRecord`.
-     * @throws {BadRequest} If the plugin is not in a ready or upgrade_pending state.
+     * A disabled plugin requires activate:false. Existing pending upgrades stay
+     * dormant until a separate explicit Enable, including same-manifest retries.
      */
-    async upgrade(pluginId: string, version?: string): Promise<PluginRecord> {
+    async upgrade(pluginId: string, version?: string, options?: PluginUpgradeOptions): Promise<PluginRecord> {
       const plugin = await requirePlugin(pluginId);
-
-      // Can only upgrade plugins that are ready or already in upgrade_pending
-      if (plugin.status !== "ready" && plugin.status !== "upgrade_pending") {
+      const deferred = options?.activate === false;
+      if (plugin.status !== "ready" && plugin.status !== "upgrade_pending"
+        && !(plugin.status === "disabled" && deferred)) {
         throw badRequest(
           `Cannot upgrade plugin in status '${plugin.status}'. ` +
-            `Plugin must be in 'ready' or 'upgrade_pending' status to be upgraded.`,
+          "A disabled plugin requires activate:false; otherwise ready or upgrade_pending is required.",
         );
       }
+      if (deferred && (typeof pluginLoaderInstance.unloadSingle !== "function"
+        || !pluginLoaderInstance.hasRuntimeServices?.())) {
+        throw badRequest("Deferred upgrade requires the configured plugin runtime owner.");
+      }
 
-      log.info(
-        { pluginId, pluginKey: plugin.pluginKey, targetVersion: version },
-        "plugin lifecycle: upgrade requested",
-      );
-
+      // Hold before unload/replacement, including ordinary upgrades whose new
+      // capabilities are not known yet. Failure must never silently resume work.
+      if (plugin.status !== "upgrade_pending") {
+        await transition(pluginId, "upgrade_pending", null, plugin);
+      }
       await deactivatePluginRuntime(pluginId, plugin.pluginKey);
-
-      // 1. Download and validate new package via loader
-      const { oldManifest, newManifest, discovered } =
-        await pluginLoaderInstance.upgradePlugin(pluginId, { version });
-
-      log.info(
-        {
-          pluginId,
-          pluginKey: plugin.pluginKey,
-          oldVersion: oldManifest.version,
-          newVersion: newManifest.version,
-        },
-        "plugin lifecycle: package upgraded on disk",
-      );
-
-      // 2. Compare capabilities
-      const addedCaps = newManifest.capabilities.filter(
-        (cap) => !oldManifest.capabilities.includes(cap),
-      );
-
-      // 3. Transition state
-      if (addedCaps.length > 0) {
-        // New capabilities require operator approval — worker stays stopped
-        log.info(
-          { pluginId, pluginKey: plugin.pluginKey, addedCaps },
-          "plugin lifecycle: new capabilities detected, transitioning to upgrade_pending",
-        );
-        // Skip the inner stopWorkerIfRunning since we already stopped above
-        const result = await transition(pluginId, "upgrade_pending", null, plugin);
-        emitDomain("plugin.upgrade_pending", {
-          pluginId,
-          pluginKey: result.pluginKey,
-        });
-        return result;
-      } else {
-        const result = await transition(pluginId, "ready", null, {
-          ...plugin,
-          version: discovered.version,
-          manifestJson: newManifest,
-        } as PluginRecord);
-        await activateReadyPlugin(pluginId);
-
-        emitDomain("plugin.loaded", {
-          pluginId,
-          pluginKey: result.pluginKey,
-        });
-        emitDomain("plugin.enabled", {
-          pluginId,
-          pluginKey: result.pluginKey,
-        });
-
-        return result;
+      const { oldManifest, newManifest } = await pluginLoaderInstance.upgradePlugin(pluginId, {
+        version,
+        ...(options?.localPath !== undefined ? { localPath: options.localPath } : {}),
+        stageForApproval: true,
+      });
+      const held = await requirePlugin(pluginId);
+      if (held.status !== "upgrade_pending") {
+        throw badRequest("Deferred upgrade lost its activation hold; runtime acceptance is required.");
       }
+      if (!isDeepStrictEqual(held.manifestJson, JSON.parse(JSON.stringify(newManifest)))) {
+        throw badRequest("Staged plugin manifest changed; reload and review before activation.");
+      }
+      const addedCaps = newManifest.capabilities.filter((cap) => !oldManifest.capabilities.includes(cap));
+      // A retry against the newly stored manifest is not permission approval.
+      // Only a separate explicit admin Enable may release an existing hold.
+      if (deferred || plugin.status === "upgrade_pending" || addedCaps.length > 0) {
+        emitDomain("plugin.upgrade_pending", { pluginId, pluginKey: held.pluginKey });
+        return held;
+      }
+      const result = await transition(pluginId, "ready", null, held);
+      await activateReadyPlugin(pluginId);
+      emitDomain("plugin.loaded", { pluginId, pluginKey: result.pluginKey });
+      emitDomain("plugin.enabled", { pluginId, pluginKey: result.pluginKey });
+      return result;
     },
 
     // -- startWorker ------------------------------------------------------

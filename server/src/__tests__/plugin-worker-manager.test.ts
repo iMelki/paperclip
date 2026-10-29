@@ -302,7 +302,7 @@ describe("plugin-worker-manager stderr failure context", () => {
       });
       expect(companiesGet).toHaveBeenCalledWith(
         { companyId: "company-a" },
-        { invocationScope: { companyId: "company-a" } },
+        { invocationScope: { companyId: "company-a", actor: { type: "agent", userId: null } } },
       );
     } finally {
       await handle.stop().catch(() => undefined);
@@ -1177,7 +1177,7 @@ describe("plugin proactive company scope (LOOA-629)", () => {
       await vi.waitFor(() => {
         expect(configGet).toHaveBeenCalledWith(
           { companyId: "company-a" },
-          { invocationScope: { companyId: "company-a" } },
+          { invocationScope: { companyId: "company-a", actor: { type: "agent", userId: null } } },
         );
       });
     } finally {

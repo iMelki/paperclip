@@ -144,6 +144,8 @@ interface PluginInstallRequest {
   version?: string;
   /** True if packageName is a local filesystem path */
   isLocalPath?: boolean;
+  /** False installs without starting the plugin runtime. Defaults to true. */
+  activate?: boolean;
 }
 
 interface AvailableBundledPlugin {
@@ -1160,7 +1162,7 @@ export function pluginRoutes(
   router.post("/plugins/install", async (req, res) => {
     assertInstanceAdmin(req);
     assertPluginManagementVisible();
-    const { packageName, version, isLocalPath } = req.body as PluginInstallRequest;
+    const { packageName, version, isLocalPath, activate } = req.body as PluginInstallRequest;
 
     // Input validation
     if (!packageName || typeof packageName !== "string") {
@@ -1175,6 +1177,11 @@ export function pluginRoutes(
 
     if (isLocalPath !== undefined && typeof isLocalPath !== "boolean") {
       res.status(400).json({ error: "isLocalPath must be a boolean if provided" });
+      return;
+    }
+
+    if (activate !== undefined && typeof activate !== "boolean") {
+      res.status(400).json({ error: "activate must be a boolean if provided" });
       return;
     }
 
@@ -1233,10 +1240,10 @@ export function pluginRoutes(
         return;
       }
 
-      // Transition to ready state
+      // Deferred installation persists the package but does not start its runtime.
       const existingPlugin = await registry.getByKey(discovered.manifest.id);
       if (existingPlugin) {
-        await lifecycle.load(existingPlugin.id);
+        if (activate !== false) await lifecycle.load(existingPlugin.id);
         const updated = await registry.getById(existingPlugin.id);
         await logPluginMutationActivity(req, "plugin.installed", existingPlugin.id, {
           pluginId: existingPlugin.id,
@@ -1244,6 +1251,7 @@ export function pluginRoutes(
           packageName: updated?.packageName ?? existingPlugin.packageName,
           version: updated?.version ?? existingPlugin.version,
           source: isLocalPath ? "local_path" : "npm",
+          activationRequested: activate !== false,
         });
         publishGlobalLiveEvent({ type: "plugin.ui.updated", payload: { pluginId: existingPlugin.id, action: "installed" } });
         res.json(updated);
@@ -2258,8 +2266,34 @@ export function pluginRoutes(
     assertInstanceAdmin(req);
     assertPluginManagementVisible();
     const { pluginId } = req.params;
-    const body = req.body as { version?: string } | undefined;
+    const body = req.body as { version?: string; localPath?: string; activate?: boolean } | undefined;
     const version = body?.version;
+
+    if (version !== undefined && typeof version !== "string") {
+      res.status(400).json({ error: "version must be a string if provided" });
+      return;
+    }
+    if (body?.activate !== undefined && typeof body.activate !== "boolean") {
+      res.status(400).json({ error: "activate must be a boolean if provided" });
+      return;
+    }
+    let canonicalLocalPath: string | undefined;
+    if (body?.localPath !== undefined) {
+      if (typeof body.localPath !== "string" || !body.localPath.trim()) {
+        res.status(400).json({ error: "localPath must be a nonempty string if provided" });
+        return;
+      }
+      const validated = await canonicalizeLocalPluginPath(body.localPath.trim());
+      if (!validated.ok) {
+        res.status(400).json({ error: `Invalid localPath: ${validated.reason}` });
+        return;
+      }
+      if (isCloudManagedInstance() && !(await isWithinBundledPluginRoot(validated.canonicalPath))) {
+        res.status(403).json({ error: "cloud-managed instances may only upgrade from the bundled plugin catalog" });
+        return;
+      }
+      canonicalLocalPath = validated.canonicalPath;
+    }
 
     const plugin = await resolvePlugin(registry, pluginId);
     if (!plugin) {
@@ -2273,13 +2307,20 @@ export function pluginRoutes(
       // 2. Compare capabilities
       // 3. If new capabilities, mark as upgrade_pending
       // 4. Otherwise, transition to ready
-      const result = await lifecycle.upgrade(plugin.id, version);
+      const upgradeOptions = {
+        ...(canonicalLocalPath !== undefined ? { localPath: canonicalLocalPath } : {}),
+        ...(body?.activate !== undefined ? { activate: body.activate } : {}),
+      };
+      const result = Object.keys(upgradeOptions).length > 0
+        ? await lifecycle.upgrade(plugin.id, version, upgradeOptions)
+        : await lifecycle.upgrade(plugin.id, version);
       await logPluginMutationActivity(req, "plugin.upgraded", plugin.id, {
         pluginId: plugin.id,
         pluginKey: plugin.pluginKey,
         previousVersion: plugin.version,
         version: result?.version ?? plugin.version,
         targetVersion: version ?? null,
+        activationRequested: body?.activate !== false,
       });
       publishGlobalLiveEvent({ type: "plugin.ui.updated", payload: { pluginId: plugin.id, action: "upgraded" } });
       res.json(result);
