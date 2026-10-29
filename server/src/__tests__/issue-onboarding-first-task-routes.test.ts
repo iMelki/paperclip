@@ -18,6 +18,7 @@ import {
 } from "@paperclipai/db";
 import { ONBOARDING_FIRST_TASK_ORIGIN_KIND } from "@paperclipai/shared";
 import {
+  EMBEDDED_POSTGRES_TEST_SETUP_TIMEOUT_MS,
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
@@ -74,7 +75,7 @@ describeEmbeddedPostgres("issue create onboarding first-task routes", () => {
   beforeAll(async () => {
     tempDb = await startEmbeddedPostgresTestDatabase("paperclip-issue-onboarding-first-task-routes-");
     db = createDb(tempDb.connectionString);
-  }, 20_000);
+  }, EMBEDDED_POSTGRES_TEST_SETUP_TIMEOUT_MS);
 
   afterEach(async () => {
     // Wait for the background assignment wake to reach quiescence before the

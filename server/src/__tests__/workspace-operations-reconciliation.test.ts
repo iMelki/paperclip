@@ -19,6 +19,7 @@ import {
   workspaceOperationService,
 } from "../services/workspace-operations.js";
 import {
+  EMBEDDED_POSTGRES_TEST_SETUP_TIMEOUT_MS,
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
@@ -86,7 +87,7 @@ describeEmbeddedPostgres("workspace operation reconciliation", () => {
     logRoot = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-workspace-operation-logs-"));
     previousLogRoot = process.env.WORKSPACE_OPERATION_LOG_BASE_PATH;
     process.env.WORKSPACE_OPERATION_LOG_BASE_PATH = logRoot;
-  }, 20_000);
+  }, EMBEDDED_POSTGRES_TEST_SETUP_TIMEOUT_MS);
 
   afterEach(async () => {
     await db.delete(workspaceOperations);
