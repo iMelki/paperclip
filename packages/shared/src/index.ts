@@ -2395,3 +2395,4 @@ export {
   type FeatureTier,
   type InstanceFeatureKey,
 } from "./feature-catalog.js";
+export { PAUSED_AGENT_SETUP_KEY, isPausedAgentSetup, pausedAgentSetupFields, pausedAgentSetupProblem } from "./agent-paused-setup.js";

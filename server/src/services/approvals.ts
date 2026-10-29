@@ -1,3 +1,4 @@
+import { isPausedAgentSetup, pausedAgentSetupFields } from "@paperclipai/shared";
 import { and, asc, eq, inArray, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { approvalComments, approvals } from "@paperclipai/db";
@@ -126,6 +127,25 @@ export function approvalService(db: Db) {
       );
     }
 
+    // A saved setup marker is authoritative for a pending agent. Clamp before
+    // secret preparation, which may otherwise provision unused env bindings.
+    const setupMetadata = pendingAgent ? pendingAgent.metadata : materializedPayload.metadata;
+    if (isPausedAgentSetup(setupMetadata)) {
+      const inert = pausedAgentSetupFields(setupMetadata);
+      materializedPayload = {
+        ...materializedPayload,
+        ...inert,
+        desiredSkills: [],
+        instructionsBundle: null,
+        ...(Object.prototype.hasOwnProperty.call(materializedPayload, "requestedConfigurationSnapshot") ? {
+          requestedConfigurationSnapshot: {
+            adapterType: inert.adapterType, adapterConfig: {},
+            runtimeConfig: inert.runtimeConfig, desiredSkills: [],
+          },
+        } : {}),
+      };
+    }
+
     const normalizedPayload = await secretsSvc.normalizeHireApprovalPayloadForPersistence(
       companyId,
       materializedPayload,
@@ -215,7 +235,8 @@ export function approvalService(db: Db) {
           && !Array.isArray(guardedPayload.metadata)
           ? (guardedPayload.metadata as Record<string, unknown>)
           : null,
-      status: "idle",
+      status: isPausedAgentSetup(guardedPayload.metadata) ? "paused" : "idle",
+      ...(isPausedAgentSetup(guardedPayload.metadata) ? { pausedAt: new Date(), pauseReason: "manual" as const } : {}),
       spentMonthlyCents: 0,
       permissions:
         typeof guardedPayload.permissions === "object"
@@ -224,6 +245,7 @@ export function approvalService(db: Db) {
           ? (guardedPayload.permissions as Record<string, unknown>)
           : undefined,
       lastHeartbeatAt: null,
+      ...(isPausedAgentSetup(guardedPayload.metadata) ? pausedAgentSetupFields(guardedPayload.metadata) : {}),
     });
     if (created?.id) return created.id;
     throw unprocessable("Hire approval did not produce an agent", {

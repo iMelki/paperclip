@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useSearchParams } from "@/lib/router";
 import { useCompany } from "../context/CompanyContext";
@@ -65,6 +65,10 @@ export function NewAgent() {
   const presetAdapterType = searchParams.get("adapterType");
 
   const [name, setName] = useState("");
+  const [pausedSetup, setPausedSetup] = useState(false);
+  const [submissionKey] = useState(() => crypto.randomUUID());
+  const frozenSubmission = useRef<{ companyId: string; payload: Record<string, unknown> } | null>(null);
+  const [submissionFrozen, setSubmissionFrozen] = useState(false);
   const [title, setTitle] = useState("");
   const [role, setRole] = useState("general");
   const [reportsTo, setReportsTo] = useState<string | null>(null);
@@ -141,11 +145,15 @@ export function NewAgent() {
   }, [presetAdapterType]);
 
   const createAgent = useMutation({
-    mutationFn: (data: Record<string, unknown>) =>
-      agentsApi.hire(selectedCompanyId!, data),
-    onSuccess: (result) => {
-      queryClient.invalidateQueries({ queryKey: queryKeys.agents.list(selectedCompanyId!) });
-      queryClient.invalidateQueries({ queryKey: queryKeys.approvals.list(selectedCompanyId!) });
+    mutationFn: (request: { companyId: string; payload: Record<string, unknown> }) =>
+      agentsApi.hire(request.companyId, request.payload),
+    onSuccess: (result, request) => {
+      queryClient.invalidateQueries({ queryKey: queryKeys.agents.list(request.companyId) });
+      queryClient.invalidateQueries({ queryKey: queryKeys.approvals.list(request.companyId) });
+      if (selectedCompanyId !== request.companyId) {
+        setFormError(`Saved agent ${result.agent.id} in the original company. The saved request remains locked; switch back to view it.`);
+        return;
+      }
       navigate(agentUrl(result.agent));
     },
     onError: (error) => {
@@ -159,17 +167,22 @@ export function NewAgent() {
   }
 
   function handleSubmit() {
+    if (frozenSubmission.current) {
+      createAgent.mutate(frozenSubmission.current);
+      return;
+    }
     if (!selectedCompanyId || !name.trim()) return;
     setFormError(null);
-    if (configValues.adapterType === "opencode_local") {
+    if (!pausedSetup && configValues.adapterType === "opencode_local") {
       if (!isValidOpenCodeModelId(configValues.model)) {
         setFormError("OpenCode requires an explicit model in provider/model format.");
         return;
       }
     }
-    createAgent.mutate(
-      buildNewAgentHirePayload({
+    const payload = buildNewAgentHirePayload({
         name,
+        pausedSetup,
+        idempotencyKey: submissionKey,
         effectiveRole,
         title,
         reportsTo,
@@ -177,8 +190,11 @@ export function NewAgent() {
         configValues,
         adapterConfig: buildAdapterConfig(),
         permissions,
-      }),
-    );
+      });
+    const request = { companyId: selectedCompanyId, payload };
+    frozenSubmission.current = request;
+    setSubmissionFrozen(true);
+    createAgent.mutate(request);
   }
 
   const availableSkills = (companySkills ?? []).filter((skill) => !skill.key.startsWith("paperclipai/paperclip/"));
@@ -217,6 +233,7 @@ export function NewAgent() {
       </div>
 
       <div className="border border-border">
+        <fieldset disabled={submissionFrozen} className="min-w-0">
         {/* Name */}
         <div className="px-4 pt-4 pb-2">
           <input
@@ -295,15 +312,22 @@ export function NewAgent() {
           />
         </div>
 
+        <div className="border-t border-border px-4 py-4">
+          <label className="flex items-center gap-2 text-sm">
+            <Checkbox checked={pausedSetup} onCheckedChange={(value) => setPausedSetup(value === true)} />
+            Create paused, without a configured runtime
+          </label>
+          <p className="mt-1 text-xs text-muted-foreground">No agent runs, automatic wakes, credentials or skills are configured. Required hire approval still applies.</p>
+        </div>
         {/* Shared config form */}
-        <AgentConfigForm
+        {!pausedSetup && <AgentConfigForm
           mode="create"
           values={configValues}
           onChange={(patch) => setConfigValues((prev) => ({ ...prev, ...patch }))}
           onTestActionChange={handleTestAgentActionChange}
           onTestActionStateChange={handleTestAgentStateChange}
           onTestFeedbackChange={handleTestAgentFeedbackChange}
-        />
+        />}
 
         <div className="border-t border-border px-4 py-4">
           <div className="space-y-3">
@@ -343,10 +367,12 @@ export function NewAgent() {
         </div>
 
         {/* Footer */}
+        </fieldset>
         <div className="border-t border-border px-4 py-3">
           {isFirstAgent && (
             <p className="text-xs text-muted-foreground mb-2">This will be the CEO</p>
           )}
+          {submissionFrozen && <p className="mb-2 text-xs text-muted-foreground">This request is locked to its original company and settings. Retrying uses the same saved request.</p>}
           {formError && (
             <p className="text-xs text-destructive mb-2">{formError}</p>
           )}
@@ -368,8 +394,8 @@ export function NewAgent() {
                   type="button"
                   variant="outline"
                   size="sm"
-                  disabled={testAgentState.disabled}
-                  onClick={() => testAgentAction?.()}
+                  disabled={pausedSetup || testAgentState.disabled}
+                  onClick={() => { if (!pausedSetup) testAgentAction?.(); }}
                 >
                   {testAgentState.pending ? "Testing..." : "Test Agent"}
                 </Button>

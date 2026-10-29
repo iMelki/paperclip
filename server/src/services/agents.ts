@@ -1,3 +1,4 @@
+import { isPausedAgentSetup, pausedAgentSetupFields } from "@paperclipai/shared";
 import { createHash, randomBytes } from "node:crypto";
 import { and, desc, eq, gte, inArray, lt, ne, or, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
@@ -789,7 +790,8 @@ export function agentService(db: Db) {
         const existing = await agentService(txDb).getById(id);
         if (!existing || existing.status !== "pending_approval") return null;
         const approvedPatch = approvedPayload ? configPatchFromApprovalPayload(approvedPayload) : {};
-        let patch = { ...approvedPatch } as Partial<typeof agents.$inferInsert>;
+        const pausedSetup = isPausedAgentSetup(existing.metadata);
+        let patch = { ...approvedPatch, ...(pausedSetup ? pausedAgentSetupFields(existing.metadata) : {}) } as Partial<typeof agents.$inferInsert>;
         if (
           Object.prototype.hasOwnProperty.call(patch, "adapterConfig") &&
           isPlainRecord(patch.adapterConfig)
@@ -808,7 +810,7 @@ export function agentService(db: Db) {
         }
         const updated = await tx
           .update(agents)
-          .set({ ...patch, status: "idle", updatedAt: new Date() })
+          .set({ ...patch, status: pausedSetup ? "paused" : "idle", ...(pausedSetup ? { pausedAt: new Date(), pauseReason: "manual" as const } : {}), updatedAt: new Date() })
           .where(and(eq(agents.id, id), eq(agents.status, "pending_approval")))
           .returning()
           .then((rows) => rows[0] ?? null);
