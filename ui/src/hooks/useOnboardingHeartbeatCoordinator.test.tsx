@@ -22,6 +22,17 @@ const setRouteDismissedMock = vi.hoisted(() => vi.fn());
 const setSelectedCompanyIdMock = vi.hoisted(() => vi.fn());
 
 vi.mock("../api/agents", () => ({ agentsApi: agentsApiMock }));
+// Setup only: upstream's Test now resolves the run environment before it
+// probes (fail-closed), so these stubs let it settle on the server default.
+vi.mock("../api/environments", () => ({
+  environmentsApi: { list: vi.fn(async () => []) },
+}));
+vi.mock("../api/instanceSettings", () => ({
+  instanceSettingsApi: {
+    get: vi.fn(async () => ({ defaultEnvironmentId: null })),
+    getExperimental: vi.fn(async () => ({ enableManagedSandboxOnly: false })),
+  },
+}));
 
 vi.mock("../context/DialogContext", () => ({
   useDialog: () => ({

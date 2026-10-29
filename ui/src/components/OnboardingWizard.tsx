@@ -86,6 +86,9 @@ import { OnboardingHeading } from "./onboarding/OnboardingPrimitives";
 import { DEFAULT_AGENT_ROLE } from "../lib/onboarding-agent-role";
 import { capsuleHeroMotion } from "./onboarding/onboarding-motion";
 import { Badge } from "@/components/ui/badge";
+import { useOnboardingAgentConfigReview } from "../hooks/useOnboardingAgentConfigReview";
+import { usePersistOnboardingAgentConfig } from "../hooks/usePersistOnboardingAgentConfig";
+import { OnboardingConfigurationReview } from "./OnboardingConfigurationReview";
 import {
   Building2,
   Bot,
@@ -445,6 +448,20 @@ function OnboardingWizardInner({
     useState(false);
   const [unsetAnthropicLoading, setUnsetAnthropicLoading] = useState(false);
   const [showMoreAdapters, setShowMoreAdapters] = useState(false);
+  // Fork layer: which adapter fields the customer actually chose, so a
+  // returning flow PATCHes only those and preserves hidden settings.
+  const [modelTouched, setModelTouched] = useState(
+    (saved?.modelTouched as boolean) ?? false,
+  );
+  const [urlTouched, setUrlTouched] = useState(
+    (saved?.urlTouched as boolean) ?? false,
+  );
+  // The exact saved adapter configuration Review must read back before launch.
+  // Memory only: it may hold private adapter fields, so it never reaches
+  // localStorage, and after a reload the customer must save again.
+  const [persistedAdapterConfigExpectation, setPersistedAdapterConfigExpectation] =
+    useState<Record<string, unknown> | null>(null);
+  const persistOnboardingAgentConfig = usePersistOnboardingAgentConfig();
 
   // Created entity IDs — pre-populate from existing company when skipping step 1
   const [createdCompanyId, setCreatedCompanyId] = useState<string | null>(
@@ -674,7 +691,7 @@ function OnboardingWizardInner({
     if (!effectiveOnboardingOpen) return;
     const state = {
       step, companyName, companyGoal, missionPath, missionConfirmed,
-      q1, q2, q3, q4, agentName, agentRole, adapterType, cwd, model, command, args, url,
+      q1, q2, q3, q4, agentName, agentRole, adapterType, cwd, model, modelTouched, command, args, url, urlTouched,
       createdCompanyId, createdCompanyPrefix, createdAgentId,
       createdCompanyGoalId, createdProjectId, createdIssueRef,
       onboardingPath, growWorkflows, growPainPoints, growAutomate,
@@ -682,7 +699,7 @@ function OnboardingWizardInner({
     onboardingDraftStorage.write(JSON.stringify(state));
   }, [
     effectiveOnboardingOpen, step, companyName, companyGoal, missionPath, missionConfirmed,
-    q1, q2, q3, q4, agentName, agentRole, adapterType, cwd, model, command, args, url,
+    q1, q2, q3, q4, agentName, agentRole, adapterType, cwd, model, modelTouched, command, args, url, urlTouched,
     createdCompanyId, createdCompanyPrefix, createdAgentId,
     createdCompanyGoalId, createdProjectId, createdIssueRef,
     onboardingPath, growWorkflows, growPainPoints, growAutomate,
@@ -860,6 +877,9 @@ function OnboardingWizardInner({
     setAgentRole(DEFAULT_AGENT_ROLE);
     setAdapterType("claude_local");
     setModel("");
+    setModelTouched(false);
+    setUrlTouched(false);
+    setPersistedAdapterConfigExpectation(null);
     setCommand("");
     setArgs("");
     setUrl("");
@@ -928,6 +948,7 @@ function OnboardingWizardInner({
       setError(INCOMPLETE_ONBOARDING_STATE_MESSAGE);
       return;
     }
+    if (!persistedConfigVerified) return;
     setLoading(true);
     setError(null);
     try {
@@ -1040,6 +1061,46 @@ function OnboardingWizardInner({
     return config;
   }
 
+  const hasPersistedAdapterConfigExpectation =
+    persistedAdapterConfigExpectation !== null;
+  const {
+    review: persistedConfigReview,
+    pending: persistedConfigReadbackPending,
+    errorMessage: persistedConfigReadbackErrorMessage,
+    verified: persistedConfigReadbackVerified,
+  } = useOnboardingAgentConfigReview({
+    companyId: createdCompanyId,
+    agentId: createdAgentId,
+    adapterType,
+    adapterConfig: persistedAdapterConfigExpectation ?? {},
+    exactAdapterConfig: true,
+    enabled:
+      effectiveOnboardingOpen
+      && step === 5
+      && hasPersistedAdapterConfigExpectation,
+  });
+  const persistedConfigVerified =
+    hasPersistedAdapterConfigExpectation && persistedConfigReadbackVerified;
+  const persistedReadbackErrorMessage =
+    step === 5 && !hasPersistedAdapterConfigExpectation
+      ? "Return to configuration and save again before launch. The prior exact save expectation is not available after reload."
+      : persistedConfigReadbackErrorMessage;
+
+  async function verifyAdapterEnvironmentForSave(
+    adapterConfig: Record<string, unknown>,
+  ) {
+    if (!isLocalAdapter) return true;
+    const result = await runAdapterEnvironmentTest(adapterConfig);
+    if (!result) return false;
+    if (result.status === "fail") {
+      setError(
+        "Adapter environment check failed. Resolve the reported checks before saving."
+      );
+      return false;
+    }
+    return true;
+  }
+
   async function runAdapterEnvironmentTest(
     adapterConfigOverride?: Record<string, unknown>
   ): Promise<AdapterEnvironmentTestResult | null> {
@@ -1106,7 +1167,9 @@ function OnboardingWizardInner({
         adapterType,
         {
           adapterConfig: adapterConfigOverride ?? buildAdapterConfig(),
-          environmentId,
+          // No resolved environment means the server default; omit the key
+          // rather than send an explicit null.
+          ...(environmentId ? { environmentId } : {}),
         }
       );
       setAdapterEnvResult(result);
@@ -1296,7 +1359,31 @@ function OnboardingWizardInner({
     // learns what the company is for.
     if (missionUnresolvedForHire) return;
     if (createdAgentId) {
-      setStep(5);
+      // Fork layer: a returning flow saves its configuration onto the existing
+      // lead (never a second hire), then Review verifies the readback.
+      if (hiringAgentRef.current) return;
+      hiringAgentRef.current = true;
+      setLoading(true);
+      setError(null);
+      try {
+        const persisted = await persistOnboardingAgentConfig({
+          companyId: createdCompanyId,
+          agentId: createdAgentId,
+          adapterType,
+          adapterConfig: buildAdapterConfig(),
+          intent: { model: modelTouched, url: urlTouched },
+          verifyEffectiveAdapterConfig: verifyAdapterEnvironmentForSave,
+        });
+        if (!persisted) return;
+        if (!stillTheSameCompany(createdCompanyId)) return;
+        setPersistedAdapterConfigExpectation(persisted.expectedAdapterConfig);
+        setStep(5);
+      } catch (err) {
+        setError(err instanceof Error ? err.message : "Failed to save agent configuration");
+      } finally {
+        hiringAgentRef.current = false;
+        setLoading(false);
+      }
       return;
     }
     if (hiringAgentRef.current) return;
@@ -1414,6 +1501,9 @@ function OnboardingWizardInner({
 
       if (!stillTheSameCompany(createdCompanyId)) return;
       setCreatedAgentId(agent.id);
+      setPersistedAdapterConfigExpectation(
+        (agent.adapterConfig as Record<string, unknown> | undefined) ?? null,
+      );
       // Advance to the Review step — the lead is now online. The user drives
       // strategy + hiring from the planning chat after "Get started".
       setStep(5);
@@ -1530,6 +1620,7 @@ function OnboardingWizardInner({
   const showsAgentArcStepper = isAgentArcStep && entryStep >= 3;
 
   const launchStateIncomplete = step === 5 && (!createdCompanyId || !createdAgentId);
+  const launchConfigurationBlocked = step === 5 && !persistedConfigVerified;
   const visibleError = error ?? (launchStateIncomplete ? INCOMPLETE_ONBOARDING_STATE_MESSAGE : null);
 
   return (
@@ -2058,8 +2149,11 @@ function OnboardingWizardInner({
                           )}
                           onClick={() => {
                             const nextType = opt.type;
+                            if (nextType !== adapterType) setModelTouched(true);
                             setAdapterType(nextType);
                             if (nextType === "codex_local") {
+                              // Another adapter's model never carries over.
+                              if (nextType !== adapterType) setModel("");
                               return;
                             }
                             if (nextType === "opencode_local") {
@@ -2111,6 +2205,7 @@ function OnboardingWizardInner({
                              onClick={() => {
                                if (opt.comingSoon) return;
                                const nextType = opt.type;
+                              if (nextType !== adapterType) setModelTouched(true);
                               setAdapterType(nextType);
                               if (nextType === "gemini_local" && !model) {
                                 setModel(DEFAULT_GEMINI_LOCAL_MODEL);
@@ -2290,7 +2385,10 @@ function OnboardingWizardInner({
                             : "https://..."
                         }
                         value={url}
-                        onChange={(e) => setUrl(e.target.value)}
+                        onChange={(e) => {
+                          setUrlTouched(true);
+                          setUrl(e.target.value);
+                        }}
                       />
                     </div>
                   )}
@@ -2302,6 +2400,21 @@ function OnboardingWizardInner({
                   ready, and the pill above has just woken to show it — a
                   checklist restating those in three rows only asked the
                   customer to audit work they watched happen. */}
+
+              {/* Fork layer: Review shows the authoritative saved-config
+                  readback; launch stays blocked until it matches. */}
+              {step === 5 && (
+                <OnboardingConfigurationReview
+                  savedConfig={persistedConfigReview}
+                  savedConfigVerified={persistedConfigVerified}
+                  savedConfigPending={persistedConfigReadbackPending}
+                  savedConfigError={persistedReadbackErrorMessage}
+                  environmentRequired={isLocalAdapter}
+                  environmentResult={adapterEnvResult}
+                  environmentLoading={adapterEnvLoading}
+                  environmentError={adapterEnvError}
+                />
+              )}
 
               {/* Error */}
               {visibleError && (
@@ -2321,15 +2434,27 @@ function OnboardingWizardInner({
                   // action "Create". Here the model step sits between, so this
                   // one advances — which is exactly the distinction the
                   // prototype's own local flow draws with "Next".
-                  primaryLabel={step === 3 ? "Next" : step === 4 ? "Connect" : "Get started"}
-                  loadingLabel={step === 4 ? "Connecting..." : "Launching..."}
+                  // A returning flow (lead already hired) saves onto that lead,
+                  // so it keeps the fork's "Give it a heartbeat" action.
+                  primaryLabel={
+                    step === 3
+                      ? "Next"
+                      : step === 4
+                        ? createdAgentId ? "Give it a heartbeat" : "Connect"
+                        : "Get started"
+                  }
+                  loadingLabel={
+                    step === 4
+                      ? createdAgentId ? "Bringing to life..." : "Connecting..."
+                      : "Launching..."
+                  }
                   loading={step === 3 ? false : loading}
                   primaryDisabled={
                     step === 3
                       ? !agentName.trim()
                       : step === 4
                         ? loading || adapterEnvLoading || missionUnresolvedForHire
-                        : loading || launchStateIncomplete
+                        : loading || launchStateIncomplete || launchConfigurationBlocked
                   }
                   onPrimary={() => {
                     if (step === 3) setStep(4);
@@ -2412,14 +2537,16 @@ function OnboardingWizardInner({
                       ) : (
                         <ArrowRight className="h-3.5 w-3.5 mr-1" />
                       )}
-                      {loading ? "Connecting..." : "Connect"}
+                      {loading
+                        ? createdAgentId ? "Bringing to life..." : "Connecting..."
+                        : createdAgentId ? "Give it a heartbeat" : "Connect"}
                     </Button>
                   )}
                   {step === 5 && (
                     <Button
                       size="sm"
                       onClick={handleLaunchToDashboard}
-                      disabled={loading || launchStateIncomplete}
+                      disabled={loading || launchStateIncomplete || launchConfigurationBlocked}
                     >
                       {loading ? (
                         <Loader2 className="h-3.5 w-3.5 mr-1 animate-spin" />
