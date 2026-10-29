@@ -14,6 +14,7 @@ import { pathToFileURL } from "node:url";
 import type { Request as ExpressRequest, RequestHandler } from "express";
 import { and, eq } from "drizzle-orm";
 import {
+  closeAllRegisteredClients,
   createDb,
   ensurePostgresDatabase,
   formatEmbeddedPostgresError,
@@ -1579,6 +1580,14 @@ export async function startServer(): Promise<StartedServer> {
 
       const appShutdown = (app as { locals?: { paperclipShutdown?: () => void } }).locals?.paperclipShutdown;
       appShutdown?.();
+
+      // End the database pools before PostgreSQL stops, so a restart does not
+      // leave idle backends behind.
+      try {
+        await closeAllRegisteredClients();
+      } catch (err) {
+        logger.error({ err, signal }, "Failed to end database pools during shutdown");
+      }
 
       if (embeddedPostgres && embeddedPostgresStartedByThisProcess) {
         logger.info({ signal }, "Stopping embedded PostgreSQL");

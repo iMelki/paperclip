@@ -199,8 +199,15 @@ describe("resolveBundledCatalogRoot", () => {
 // ensureBundledPlugins (fail-safe installer)
 // ---------------------------------------------------------------------------
 
+type LooseRow = {
+  id: string;
+  pluginKey: string;
+  status: string;
+  lastError?: string | null;
+};
+
 function makeDeps(overrides?: {
-  rows?: Record<string, { id: string; pluginKey: string; status: string } | null>;
+  rows?: Record<string, LooseRow | null>;
   bundleManifestExists?: (localPath: string) => boolean;
   installError?: Error;
 }) {
@@ -215,16 +222,18 @@ function makeDeps(overrides?: {
     installedRows.set(pluginKey, { id: `id-${pluginKey}`, pluginKey, status: "installed" });
     return { manifest: { id: pluginKey } };
   });
+  const updateStatus = vi.fn(async () => undefined);
   const deps: BundledPluginProvisionerDeps = {
     registry: {
       getByKey: vi.fn(async (pluginKey: string) => installedRows.get(pluginKey) ?? null),
-    },
+      updateStatus,
+    } as unknown as BundledPluginProvisionerDeps["registry"],
     loader: { installPlugin } as unknown as BundledPluginProvisionerDeps["loader"],
     lifecycle: { load: vi.fn(async () => undefined) },
-    logger: { info: vi.fn(), error: vi.fn() },
+    logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
     bundleManifestExists: overrides?.bundleManifestExists ?? (() => true),
   };
-  return { deps, installPlugin };
+  return { deps, installPlugin, updateStatus };
 }
 
 const K8S: ResolvedBundledPlugin = {
@@ -249,7 +258,7 @@ describe("ensureBundledPlugins", () => {
   });
 
   it("skips a plugin present in any non-uninstalled state (disabled is not re-enabled)", async () => {
-    for (const status of ["installed", "ready", "disabled", "error"]) {
+    for (const status of ["installed", "ready", "disabled", "upgrade_pending"]) {
       const { deps, installPlugin } = makeDeps({
         rows: {
           [K8S.pluginKey]: { id: "row-1", pluginKey: K8S.pluginKey, status },
@@ -258,7 +267,57 @@ describe("ensureBundledPlugins", () => {
       await ensureBundledPlugins([K8S], deps, { reinstallUninstalled: true });
       expect(installPlugin).not.toHaveBeenCalled();
       expect(deps.lifecycle.load).not.toHaveBeenCalled();
+      expect(deps.registry.updateStatus).not.toHaveBeenCalled();
     }
+  });
+
+  it("resets a bundled plugin that a previous activation left in error back to ready, without reinstalling it", async () => {
+    const { deps, installPlugin, updateStatus } = makeDeps({
+      rows: {
+        [K8S.pluginKey]: {
+          id: "row-1",
+          pluginKey: K8S.pluginKey,
+          status: "error",
+          lastError: 'RPC call "initialize" timed out after 15000ms',
+        },
+      },
+    });
+    await ensureBundledPlugins([K8S], deps, { reinstallUninstalled: false });
+    expect(installPlugin).not.toHaveBeenCalled();
+    // No lifecycle call: the row goes straight back to `ready` with its error
+    // cleared, and the startup loadAll() does the activation (and emits the
+    // lifecycle events only once the worker actually started).
+    expect(deps.lifecycle.load).not.toHaveBeenCalled();
+    expect(updateStatus).toHaveBeenCalledTimes(1);
+    expect(updateStatus).toHaveBeenCalledWith("row-1", { status: "ready", lastError: null });
+    // The prior failure is surfaced at warn level with its recorded cause, so
+    // an operator reading boot logs sees why the plugin needed a retry.
+    expect(deps.logger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        pluginKey: K8S.pluginKey,
+        lastError: 'RPC call "initialize" timed out after 15000ms',
+      }),
+      expect.stringContaining("re-enabling"),
+    );
+    expect(deps.logger.error).not.toHaveBeenCalled();
+  });
+
+  it("continues boot when resetting an errored bundled plugin fails", async () => {
+    const { deps, installPlugin, updateStatus } = makeDeps({
+      rows: {
+        [K8S.pluginKey]: { id: "row-1", pluginKey: K8S.pluginKey, status: "error" },
+      },
+    });
+    updateStatus.mockRejectedValueOnce(new Error("db down"));
+    await expect(
+      ensureBundledPlugins([K8S, DAYTONA], deps, { reinstallUninstalled: true }),
+    ).resolves.toBeUndefined();
+    expect(deps.logger.error).toHaveBeenCalledWith(
+      expect.objectContaining({ pluginKey: K8S.pluginKey }),
+      expect.stringContaining("continuing boot"),
+    );
+    // The later entry is still provisioned.
+    expect(installPlugin).toHaveBeenCalledWith({ localPath: DAYTONA.localPath });
   });
 
   it("reinstalls a soft-uninstalled plugin in managed mode", async () => {
