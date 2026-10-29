@@ -1124,9 +1124,15 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
     testActionPending,
   ]);
 
+  // Latest-callback ref: a parent that passes an inline callback (new identity
+  // every render) must not re-run this effect on each render, or the cleanup
+  // and the new report would loop through the parent's state forever.
+  const onTestFeedbackChangeRef = useRef(props.onTestFeedbackChange);
+  onTestFeedbackChangeRef.current = props.onTestFeedbackChange;
+  const hasTestFeedbackListener = Boolean(props.onTestFeedbackChange);
   useEffect(() => {
-    if (!props.onTestFeedbackChange) return;
-    props.onTestFeedbackChange({
+    if (!hasTestFeedbackListener) return;
+    onTestFeedbackChangeRef.current?.({
       errorMessage: testActionError
         ?? (testEnvironment.error instanceof Error
           ? testEnvironment.error.message
@@ -1142,10 +1148,10 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
           : null,
     });
     return () => {
-      props.onTestFeedbackChange?.({ errorMessage: null, result: null, login: null });
+      onTestFeedbackChangeRef.current?.({ errorMessage: null, result: null, login: null });
     };
   }, [
-    props.onTestFeedbackChange,
+    hasTestFeedbackListener,
     testActionError,
     testEnvironment.data,
     testEnvironment.error,
