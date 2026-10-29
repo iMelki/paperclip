@@ -590,6 +590,14 @@ async function isLikelyMatchingCommand(record: LocalServiceRegistryRecord) {
   ) {
     return true;
   }
+  // Upstream rule: a command with shell control syntax (`;`, `|`, `&`,
+  // redirects) has no stable argv once `shell -lc` execs into its last
+  // program, so a literal argv comparison proves nothing. Adoption then rests
+  // on the listener, process-group ownership and workspace cwd checks that
+  // every caller runs next (doesLocalServiceRecordMatchCwd).
+  if (process.platform !== "win32" && !isLocalServiceCommandLineComparable(record.command)) {
+    return true;
+  }
   try {
     const commandLine =
       process.platform === "win32"
