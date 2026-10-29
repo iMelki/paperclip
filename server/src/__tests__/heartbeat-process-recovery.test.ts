@@ -4968,7 +4968,7 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
       await expect(heartbeat.cancelRun(runId)).rejects.toThrow("db update unavailable");
       expect(mockTerminateLocalService).toHaveBeenCalledWith(
         expect.objectContaining({ pid: 12345, processGroupId: null }),
-        { forceAfterMs: 1000 },
+        { forceAfterMs: 1000, trustedPid: true, trustedProcessGroup: true },
       );
       expect(runningProcesses.has(runId)).toBe(false);
     } finally {
