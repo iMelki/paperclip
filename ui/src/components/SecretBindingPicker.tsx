@@ -178,6 +178,7 @@ export function SecretBindingPicker({
         <div className="relative flex-1">
           <KeyRound className="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
           <select
+            aria-label={label || placeholder}
             className={cn(
               "h-9 w-full rounded-md border border-border bg-background pl-7 pr-2 text-sm outline-none disabled:cursor-not-allowed disabled:opacity-60",
               selectedMissing && !calmMissing && "border-destructive text-destructive",

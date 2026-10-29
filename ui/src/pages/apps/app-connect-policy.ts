@@ -5,10 +5,17 @@ export function isMcpDirectOAuthConnectSlug(slug: string | null | undefined): bo
   return MCP_DIRECT_OAUTH_CONNECT_SLUGS.some((allowedSlug) => allowedSlug === slug);
 }
 
+/** Customer GitHub OAuth setup is separate from the direct MCP broker. */
+export function isGitHubOAuthConnectSource(slug: string | null | undefined): boolean {
+  return slug === "github";
+}
+
 export function appSourceConnectHref(slug: string): string {
   return `/apps/connect?${new URLSearchParams({ source: slug }).toString()}`;
 }
 
 export function canEnterAppsConnect(searchParams: URLSearchParams): boolean {
-  return searchParams.get("byo") === "1" || isMcpDirectOAuthConnectSlug(searchParams.get("source"));
+  return searchParams.get("byo") === "1" ||
+    isMcpDirectOAuthConnectSlug(searchParams.get("source")) ||
+    isGitHubOAuthConnectSource(searchParams.get("source"));
 }
