@@ -9,6 +9,7 @@ import {
   companyOnboardingSeeds,
   goals,
   issues,
+  principalPermissionGrants,
   projects,
 } from "@paperclipai/db";
 import { onboardingSeedRoutes } from "../routes/onboarding-seed.js";
@@ -314,6 +315,46 @@ describeEmbeddedPostgres("POST /api/companies/:companyId/onboarding-seed", () =>
     expect(response.status).toBe(403);
     expect(await ctx.db.select().from(agents).where(eq(agents.companyId, companyId))).toHaveLength(0);
     expect(await ctx.db.select().from(companyOnboardingSeeds)).toHaveLength(0);
+  });
+
+  // Allow side of the agents:create gate: the same operator member as the
+  // deny case above, now holding an explicit agents:create grant, must seed
+  // successfully. Without this, a gate that refused everyone would pass.
+  it("lets a company member with agents:create apply the seed", async () => {
+    const { companyId } = await seedCompany();
+    const operatorId = `user-${randomUUID()}`;
+    await ctx.db.insert(companyMemberships).values({
+      companyId,
+      principalType: "user",
+      principalId: operatorId,
+      status: "active",
+      membershipRole: "operator",
+      updatedAt: new Date(),
+    });
+    await ctx.db.insert(principalPermissionGrants).values({
+      companyId,
+      principalType: "user",
+      principalId: operatorId,
+      permissionKey: "agents:create",
+      scope: null,
+      grantedByUserId: null,
+    });
+    const operatorActor: BoardActor = {
+      type: "board",
+      source: "session",
+      userId: operatorId,
+      companyIds: [companyId],
+      memberships: [{ companyId, membershipRole: "operator", status: "active" }],
+      isInstanceAdmin: false,
+    };
+    const operatorApp = routeApp(ctx.db, operatorActor, onboardingSeedRoutes);
+
+    const response = await post(operatorApp, companyId, SEED);
+
+    expect(response.status).toBe(200);
+    expect(response.body.applied).toBe(true);
+    expect(await ctx.db.select().from(agents).where(eq(agents.companyId, companyId))).toHaveLength(1);
+    expect(await ctx.db.select().from(companyOnboardingSeeds)).toHaveLength(1);
   });
 
   it("refuses a same-company agent API key", async () => {
