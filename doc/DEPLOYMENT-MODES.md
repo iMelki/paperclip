@@ -87,7 +87,7 @@ Examples:
 
 ```sh
 pnpm paperclipai onboard --yes
-pnpm paperclipai onboard --yes --no-run
+npx paperclipai onboard --yes --no-run
 npx paperclipai onboard --yes --bind lan
 npx paperclipai run --bind tailnet
 ```
