@@ -332,79 +332,64 @@ export function CompanyAccess() {
           </div>
         ) : null}
 
-        <div className="overflow-x-auto">
-          <table className="w-full min-w-(--sz-44rem) text-left text-sm">
-            <thead>
-              <tr className="border-b border-border text-muted-foreground">
-                <th className="px-3 py-2 font-medium">Name</th>
-                <th className="px-3 py-2 font-medium">Email</th>
-                <th className="px-3 py-2 font-medium">Role</th>
-                <th className="px-3 py-2 font-medium">Status</th>
-                <th className="px-3 py-2 text-right font-medium">Action</th>
-              </tr>
-            </thead>
-            <tbody>
-              {members.length === 0 ? (
-                <tr>
-                  <td colSpan={5} className="px-3 py-8 text-muted-foreground">
-                    No user memberships found for this organization yet.
-                  </td>
-                </tr>
-              ) : members.map((member) => {
-                const removalReason = member.removal?.reason ?? null;
-                const canArchive = member.removal?.canArchive ?? true;
-                const displayName = memberDisplayName(member);
-                return (
-                  <tr key={member.id} className="border-b border-border last:border-b-0">
-                    <td className="px-3 py-3">
-                      <div className="flex min-w-0 items-center gap-2.5">
-                        <Avatar size="sm">
-                          {member.user?.image ? <AvatarImage src={member.user.image} alt={displayName} /> : null}
-                          <AvatarFallback>{memberInitials(member)}</AvatarFallback>
-                        </Avatar>
-                        <span className="truncate font-medium">{displayName}</span>
-                      </div>
-                    </td>
-                    <td className="px-3 py-3 text-muted-foreground">
-                      {member.user?.email || member.principalId}
-                    </td>
-                    <td className="px-3 py-3">
-                      {member.membershipRole
-                        ? HUMAN_COMPANY_MEMBERSHIP_ROLE_LABELS[member.membershipRole]
-                        : "Unset"}
-                    </td>
-                    <td className="px-3 py-3">
-                      <Badge variant={member.status === "active" ? "secondary" : member.status === "suspended" ? "destructive" : "outline"}>
-                        {member.status.replace("_", " ")}
-                      </Badge>
-                    </td>
-                    <td className="px-3 py-3 text-right">
-                      <div className="flex justify-end gap-2">
-                        <Button size="sm" variant="outline" onClick={() => setEditingMemberId(member.id)}>
-                          Edit
-                        </Button>
-                        <span
-                          className="inline-flex"
-                          title={!canArchive ? removalReason ?? undefined : undefined}
-                        >
-                          <Button
-                            size="sm"
-                            variant="outline"
-                            onClick={() => setRemovingMemberId(member.id)}
-                            disabled={!canArchive}
-                            title={!canArchive ? removalReason ?? undefined : undefined}
-                          >
-                            <Trash2 className="mr-1 h-3.5 w-3.5" />
-                            Remove
-                          </Button>
-                        </span>
-                      </div>
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
+        <div className="overflow-hidden rounded-xl border border-border">
+          <div className="hidden gap-3 border-b border-border px-4 py-3 text-xs font-medium uppercase tracking-wide text-muted-foreground md:grid md:grid-cols-(--gtc-24)">
+            <div>User account</div>
+            <div>Role</div>
+            <div>Status</div>
+            <div className="text-right">Action</div>
+          </div>
+          {members.length === 0 ? (
+            <div className="px-4 py-8 text-sm text-muted-foreground">No user memberships found for this company yet.</div>
+          ) : (
+            members.map((member) => {
+              const removalReason = member.removal?.reason ?? null;
+              const canArchive = member.removal?.canArchive ?? true;
+              return (
+                <div
+                  key={member.id}
+                  className="grid grid-cols-1 gap-3 border-b border-border px-4 py-3 last:border-b-0 md:grid-cols-(--gtc-24) md:items-center"
+                >
+                  <div className="min-w-0">
+                    <div className="truncate font-medium">{member.user?.name?.trim() || member.user?.email || member.principalId}</div>
+                    <div className="truncate text-xs text-muted-foreground">{member.user?.email || member.principalId}</div>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-2 text-sm">
+                    <span className="text-xs font-medium uppercase tracking-wide text-muted-foreground md:hidden">Role</span>
+                    {member.membershipRole
+                      ? HUMAN_COMPANY_MEMBERSHIP_ROLE_LABELS[member.membershipRole]
+                      : "Unset"}
+                  </div>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="text-xs font-medium uppercase tracking-wide text-muted-foreground md:hidden">Status</span>
+                    <Badge variant={member.status === "active" ? "secondary" : member.status === "suspended" ? "destructive" : "outline"}>
+                      {member.status.replace("_", " ")}
+                    </Badge>
+                  </div>
+                  <div className="space-y-1 md:text-right">
+                    <div className="flex flex-wrap gap-2 md:justify-end">
+                      <Button size="sm" variant="outline" onClick={() => setEditingMemberId(member.id)}>
+                        Edit
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() => setRemovingMemberId(member.id)}
+                        disabled={!canArchive}
+                        title={removalReason ?? undefined}
+                      >
+                        <Trash2 className="mr-1 h-3.5 w-3.5" />
+                        Remove
+                      </Button>
+                    </div>
+                    {removalReason ? (
+                      <div className="text-xs text-muted-foreground">{removalReason}</div>
+                    ) : null}
+                  </div>
+                </div>
+              );
+            })
+          )}
         </div>
       </section>
 

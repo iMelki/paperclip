@@ -19,6 +19,7 @@ import {
   userSecretDefinitions,
 } from "@paperclipai/db";
 import {
+  EMBEDDED_POSTGRES_TEST_SETUP_TIMEOUT_MS,
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
@@ -217,7 +218,7 @@ describeEmbeddedPostgres("agent service Claude OAuth binding claim", () => {
     stopDb = started.cleanup;
     connectionString = started.connectionString;
     db = createDb(connectionString);
-  }, 20_000);
+  }, EMBEDDED_POSTGRES_TEST_SETUP_TIMEOUT_MS);
 
   afterEach(async () => {
     await db.delete(activityLog);

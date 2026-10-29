@@ -72,6 +72,29 @@ type OnboardOptions = {
 
 type OnboardDefaults = Pick<PaperclipConfig, "database" | "logging" | "server" | "auth" | "storage" | "secrets">;
 
+// Fork contract (dev 9e37ea19): kept as thin wrappers over upstream's
+// shouldOfferForegroundStart so the start decision has one implementation.
+export function shouldStartAfterOnboard(opts: Pick<OnboardOptions, "run" | "yes">): boolean {
+  return opts.run ?? (opts.yes === true);
+}
+
+export function shouldPromptToStartAfterOnboard(
+  opts: Pick<OnboardOptions, "run" | "invokedByRun">,
+  shouldRunNow: boolean,
+  stdinIsTTY = process.stdin.isTTY,
+  stdoutIsTTY = process.stdout.isTTY,
+): boolean {
+  return (
+    opts.run === undefined &&
+    shouldOfferForegroundStart({
+      serviceInstalled: false,
+      startAlreadyDecided: shouldRunNow,
+      invokedByRun: opts.invokedByRun === true,
+      interactive: stdinIsTTY === true && stdoutIsTTY === true,
+    })
+  );
+}
+
 const TAILNET_BIND_WARNING =
   "No Tailscale address was detected during setup. The saved config will stay on loopback until Tailscale is available or PAPERCLIP_TAILNET_BIND_HOST is set.";
 

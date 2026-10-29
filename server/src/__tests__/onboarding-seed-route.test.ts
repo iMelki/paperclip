@@ -5,6 +5,7 @@ import { afterEach, expect, it, vi } from "vitest";
 import {
   activityLog,
   agents,
+  companyMemberships,
   companyOnboardingSeeds,
   goals,
   issues,
@@ -276,6 +277,57 @@ describeEmbeddedPostgres("POST /api/companies/:companyId/onboarding-seed", () =>
     const strangerApp = routeApp(ctx.db, strangerActor, onboardingSeedRoutes);
 
     const response = await post(strangerApp, companyId, SEED);
+
+    expect(response.status).toBe(403);
+    expect(await ctx.db.select().from(agents).where(eq(agents.companyId, companyId))).toHaveLength(0);
+    expect(await ctx.db.select().from(companyOnboardingSeeds)).toHaveLength(0);
+  });
+
+  // The seed creates a live CEO agent, so company access alone is not enough
+  // (Cursor security finding on #133): the route must refuse a member without
+  // agents:create and any agent API key, and create nothing for either.
+  // An operator passes the company write check (a viewer would not), so this
+  // case reaches and pins the agents:create decision itself.
+  it("refuses a company member without agents:create", async () => {
+    const { companyId } = await seedCompany();
+    const operatorId = `user-${randomUUID()}`;
+    await ctx.db.insert(companyMemberships).values({
+      companyId,
+      principalType: "user",
+      principalId: operatorId,
+      status: "active",
+      membershipRole: "operator",
+      updatedAt: new Date(),
+    });
+    const operatorActor: BoardActor = {
+      type: "board",
+      source: "session",
+      userId: operatorId,
+      companyIds: [companyId],
+      memberships: [{ companyId, membershipRole: "operator", status: "active" }],
+      isInstanceAdmin: false,
+    };
+    const operatorApp = routeApp(ctx.db, operatorActor, onboardingSeedRoutes);
+
+    const response = await post(operatorApp, companyId, SEED);
+
+    expect(response.status).toBe(403);
+    expect(await ctx.db.select().from(agents).where(eq(agents.companyId, companyId))).toHaveLength(0);
+    expect(await ctx.db.select().from(companyOnboardingSeeds)).toHaveLength(0);
+  });
+
+  it("refuses a same-company agent API key", async () => {
+    const { companyId } = await seedCompany();
+    const agentActor = {
+      type: "agent",
+      source: "agent_key",
+      agentId: randomUUID(),
+      companyId,
+      runId: null,
+    } as unknown as BoardActor;
+    const agentApp = routeApp(ctx.db, agentActor, onboardingSeedRoutes);
+
+    const response = await post(agentApp, companyId, SEED);
 
     expect(response.status).toBe(403);
     expect(await ctx.db.select().from(agents).where(eq(agents.companyId, companyId))).toHaveLength(0);

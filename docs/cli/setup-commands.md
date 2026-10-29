@@ -55,7 +55,7 @@ pnpm paperclipai onboard --yes
 Non-interactive config and key material without starting a server:
 
 ```sh
-pnpm paperclipai onboard --yes --no-run
+npx paperclipai onboard --yes --no-run
 ```
 
 On an existing install, `--yes` now preserves the current config and just starts Paperclip with that setup.

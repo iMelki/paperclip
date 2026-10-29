@@ -204,6 +204,7 @@ import {
   disableToolStdioCommandTemplateSchema,
   finishToolAppSchema,
   reconnectToolAppSchema,
+  reviewToolConnectionCatalogSchema,
   updateToolConnectionSchema,
   putToolConnectionInstallsSchema,
   toolConnectionTestCallSchema,
@@ -588,6 +589,14 @@ const responses = {
     description: "Internal server error",
     content: { "application/json": { schema: ErrorSchema } },
   },
+  badGateway: {
+    description: "Bad gateway",
+    content: { "application/json": { schema: ErrorSchema } },
+  },
+  notImplemented: {
+    description: "Not implemented",
+    content: { "application/json": { schema: ErrorSchema } },
+  },
   tooManyRequests: {
     description: "Too many requests",
     content: { "application/json": { schema: ErrorSchema } },
@@ -820,6 +829,7 @@ const PUBLIC_OPERATIONS = new Set([
   "GET /api/invites/{token}/test-resolution",
   "POST /api/invites/{token}/accept",
   "POST /api/join-requests/{requestId}/claim-api-key",
+  "POST /api/plugins/{pluginId}/webhooks/{endpointKey}",
   "GET /mcp/gateways/{gatewayPublicId}",
   "POST /mcp/gateways/{gatewayPublicId}",
   "GET /api/tool-gateway/gateways/{gatewayId}/mcp",
@@ -922,6 +932,7 @@ const BOARD_ONLY_OPERATIONS = new Set([
   "POST /api/tool-connections/{connectionId}/reconnect",
   "POST /api/tool-connections/{connectionId}/catalog/refresh",
   "GET /api/tool-connections/{connectionId}/catalog",
+  "POST /api/companies/{companyId}/tools/connections/{connectionId}/catalog/review",
   "GET /api/tool-connections/{connectionId}/activity",
   "GET /api/tool-connections/{connectionId}/test-agents",
   "POST /api/tool-connections/{connectionId}/test-calls",
@@ -2252,6 +2263,33 @@ registry.registerPath({
     body: jsonBody(createIssueSchema),
   },
   responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized, 422: r.unprocessable },
+});
+
+registry.registerPath({
+  method: "get",
+  path: "/api/companies/{companyId}/coordination/tasks",
+  tags: ["coordination"],
+  summary: "List coordination tasks for a company",
+  request: { params: z.object({ companyId: z.string() }) },
+  responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden },
+});
+
+registry.registerPath({
+  method: "get",
+  path: "/api/issues/{rootIssueId}/coordination",
+  tags: ["coordination"],
+  summary: "Get coordination details for a root issue",
+  request: { params: z.object({ rootIssueId: z.string() }) },
+  responses: { 200: r.ok(), 401: r.unauthorized, 404: r.notFound },
+});
+
+registry.registerPath({
+  method: "get",
+  path: "/api/issues/{rootIssueId}/coordination/v2",
+  tags: ["coordination"],
+  summary: "Get fail-closed coordination details for a root issue",
+  request: { params: z.object({ rootIssueId: z.string() }) },
+  responses: { 200: r.ok(), 401: r.unauthorized, 404: r.notFound },
 });
 
 registry.registerPath({
@@ -5926,9 +5964,23 @@ registry.registerPath({
   method: "get",
   path: "/api/plugins/{pluginId}/logs",
   tags: ["plugins"],
-  summary: "Get plugin logs",
-  request: { params: z.object({ pluginId: z.string() }) },
-  responses: { 200: r.ok(), 401: r.unauthorized },
+  summary: "Get company-scoped plugin logs",
+  request: {
+    params: z.object({ pluginId: z.string() }),
+    query: z.object({
+      companyId: z.string(),
+      limit: z.coerce.number().int().min(1).max(500).optional(),
+      level: z.string().optional(),
+      since: z.string().optional(),
+    }),
+  },
+  responses: {
+    200: r.ok(),
+    400: r.badRequest,
+    401: r.unauthorized,
+    403: r.forbidden,
+    404: r.notFound,
+  },
 });
 
 registry.registerPath({
@@ -5989,9 +6041,22 @@ registry.registerPath({
   method: "get",
   path: "/api/plugins/{pluginId}/jobs/{jobId}/runs",
   tags: ["plugins"],
-  summary: "List runs for a plugin job",
-  request: { params: z.object({ pluginId: z.string(), jobId: z.string() }) },
-  responses: { 200: r.ok(), 401: r.unauthorized },
+  summary: "List company-scoped runs for a plugin job",
+  request: {
+    params: z.object({ pluginId: z.string(), jobId: z.string() }),
+    query: z.object({
+      companyId: z.string(),
+      limit: z.coerce.number().int().min(1).max(500).optional(),
+    }),
+  },
+  responses: {
+    200: r.ok(),
+    400: r.badRequest,
+    401: r.unauthorized,
+    403: r.forbidden,
+    404: r.notFound,
+    501: r.notImplemented,
+  },
 });
 
 registry.registerPath({
@@ -6011,7 +6076,49 @@ registry.registerPath({
   request: {
     params: z.object({ pluginId: z.string(), endpointKey: z.string() }),
   },
-  responses: { 200: r.ok(), 401: r.unauthorized },
+  responses: {
+    200: r.ok(),
+    400: r.badRequest,
+    404: r.notFound,
+    409: r.conflict,
+    501: r.notImplemented,
+    502: r.badGateway,
+  },
+});
+
+const trustedLoopbackHttpRuleSchema = z.object({
+  method: z.string(),
+  origin: z.string(),
+  pathnamePattern: z.string(),
+});
+
+registry.registerPath({
+  method: "get",
+  path: "/api/plugins/{pluginId}/companies/{companyId}/trusted-loopback-http",
+  tags: ["plugins"],
+  summary: "Read host-owned trusted loopback HTTP policy",
+  request: {
+    params: z.object({ pluginId: z.string(), companyId: z.string() }),
+  },
+  responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden, 404: r.notFound },
+});
+
+registry.registerPath({
+  method: "put",
+  path: "/api/plugins/{pluginId}/companies/{companyId}/trusted-loopback-http",
+  tags: ["plugins"],
+  summary: "Replace host-owned trusted loopback HTTP policy",
+  request: {
+    params: z.object({ pluginId: z.string(), companyId: z.string() }),
+    body: jsonBody(z.object({ rules: z.array(trustedLoopbackHttpRuleSchema).max(100) })),
+  },
+  responses: {
+    200: r.ok(),
+    400: r.badRequest,
+    401: r.unauthorized,
+    403: r.forbidden,
+    404: r.notFound,
+  },
 });
 
 registry.registerPath({
@@ -6019,8 +6126,17 @@ registry.registerPath({
   path: "/api/plugins/{pluginId}/dashboard",
   tags: ["plugins"],
   summary: "Get plugin dashboard data",
-  request: { params: z.object({ pluginId: z.string() }) },
-  responses: { 200: r.ok(), 401: r.unauthorized },
+  request: {
+    params: z.object({ pluginId: z.string() }),
+    query: z.object({ companyId: z.string() }),
+  },
+  responses: {
+    200: r.ok(),
+    400: r.badRequest,
+    401: r.unauthorized,
+    403: r.forbidden,
+    404: r.notFound,
+  },
 });
 
 registry.registerPath({
@@ -7265,11 +7381,37 @@ registerCurrentRoute({
   summary: "Get tool connection usage",
 });
 
+const toolConnectionInstallSnapshotResponseSchema = z.object({
+  connectionId: z.string().uuid(),
+  installs: z.array(z.object({
+    id: z.string().uuid(),
+    companyId: z.string().uuid(),
+    connectionId: z.string().uuid(),
+    targetType: z.enum(["company", "agent"]),
+    targetId: z.string(),
+    createdByAgentId: z.string().uuid().nullable(),
+    createdByUserId: z.string().nullable(),
+    createdAt: z.string(),
+  })),
+  accessMode: z.enum(["reachability_only", "extend_connection_access"]),
+  reachabilityOnly: z.boolean(),
+  installOwnedAccessBindingCount: z.number().int().nonnegative(),
+  nonInstallOwnedAppBindingCount: z.number().int().nonnegative(),
+  removedLegacyAccessBindingCount: z.number().int().nonnegative().optional(),
+});
+
 registerCurrentRoute({
   method: "get",
   path: "/api/tool-connections/{connectionId}/installs",
   tags: ["tool-access"],
-  summary: "List tool connection installs",
+  summary: "Read tool connection installs and their effective access mode",
+  responses: {
+    200: r.ok(toolConnectionInstallSnapshotResponseSchema),
+    401: r.unauthorized,
+    403: r.forbidden,
+    404: r.notFound,
+    409: r.conflict,
+  },
 });
 
 registerCurrentRoute({
@@ -7278,6 +7420,15 @@ registerCurrentRoute({
   tags: ["tool-access"],
   summary: "Sync tool connection installs",
   body: putToolConnectionInstallsSchema,
+  responses: {
+    200: r.ok(toolConnectionInstallSnapshotResponseSchema),
+    400: r.badRequest,
+    401: r.unauthorized,
+    403: r.forbidden,
+    404: r.notFound,
+    409: r.conflict,
+    422: r.unprocessable,
+  },
 });
 
 registerCurrentRoute({
@@ -7323,6 +7474,22 @@ registerCurrentRoute({
   path: "/api/tool-connections/{connectionId}/catalog",
   tags: ["tool-access"],
   summary: "List a tool connection catalog",
+});
+
+registerCurrentRoute({
+  method: "post",
+  path: "/api/companies/{companyId}/tools/connections/{connectionId}/catalog/review",
+  tags: ["tool-access"],
+  summary: "Review quarantined tool catalog entries with hash preconditions",
+  body: reviewToolConnectionCatalogSchema,
+  responses: {
+    200: r.ok(),
+    400: r.badRequest,
+    401: r.unauthorized,
+    403: r.forbidden,
+    404: r.notFound,
+    409: r.conflict,
+  },
 });
 
 registerCurrentRoute({

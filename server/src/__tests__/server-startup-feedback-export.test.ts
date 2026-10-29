@@ -8,7 +8,14 @@ import { ensurePostgresDatabase, getPostgresDataDirectory } from "@paperclipai/d
 const { pgStartMock, pgCtorMock } = vi.hoisted(() => {
   const pgStartMock = vi.fn(async () => {});
   const pgCtorMock = vi.fn(function () {
-    return { initialise: vi.fn(async () => {}), start: pgStartMock, stop: vi.fn(async () => {}) };
+    // Upstream's embedded-postgres supervisor (#11651) monitors the child
+    // process; give it one that never exits so it does not report exhaustion.
+    return {
+      initialise: vi.fn(async () => {}),
+      start: pgStartMock,
+      stop: vi.fn(async () => {}),
+      process: { once: vi.fn() },
+    };
   });
   return { pgStartMock, pgCtorMock };
 });
