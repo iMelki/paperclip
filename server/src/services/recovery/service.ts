@@ -5376,7 +5376,6 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
             assigneeAgentId: issues.assigneeAgentId,
             blockedTransitionAt: issues.blockedTransitionAt,
             totalCount: sql<number>`count(*) over()::int`,
-            blockedTransitionAt: issues.blockedTransitionAt,
           })
           .from(issueRelations)
           .innerJoin(issues, eq(issueRelations.relatedIssueId, issues.id))
@@ -5393,7 +5392,6 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
           assigneeAgentId: issues.assigneeAgentId,
           blockedTransitionAt: issues.blockedTransitionAt,
           totalCount: sql<number>`count(*) over()::int`,
-          blockedTransitionAt: issues.blockedTransitionAt,
         })
         .from(issues)
         .where(and(...filters))
