@@ -1520,6 +1520,8 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
   });
 
   it("snapshots and drains a server-stdio ACP run before embedded database shutdown", async () => {
+    // Persisted start identity, recorded at spawn like persistRunProcessMetadata.
+    const childStartedAt = new Date();
     const child = spawnAliveProcess();
     childProcesses.add(child);
     expect(child.pid).toBeGreaterThan(0);
@@ -1527,6 +1529,7 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
       agentStatus: "running",
       processPid: child.pid ?? null,
       processGroupId: null,
+      processStartedAt: childStartedAt,
       contextSnapshot: {
         executionEngine: "acp",
         processTopology: "server_stdio",
@@ -1663,6 +1666,8 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
   });
 
   it("drains only server-stdio runs and preserves detached CLI adoption in a mixed restart", async () => {
+    // Persisted start identity, recorded at spawn like persistRunProcessMetadata.
+    const acpChildStartedAt = new Date();
     const acpChild = spawnAliveProcess();
     const cliChild = spawnAliveProcess();
     childProcesses.add(acpChild);
@@ -1674,6 +1679,7 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
       agentStatus: "running",
       processPid: acpChild.pid ?? null,
       processGroupId: null,
+      processStartedAt: acpChildStartedAt,
       contextSnapshot: {
         executionEngine: "acp",
         processTopology: "server_stdio",

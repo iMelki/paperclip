@@ -855,6 +855,99 @@ async function terminateWindowsProcessTree(pid: number) {
   }
 }
 
+/**
+ * Linux start-time identity (parity with the Windows CreationDate check).
+ *
+ * Reads field 22 (starttime, in clock ticks since boot) of /proc/<pid>/stat.
+ * The comm field (2) may contain spaces or parentheses, so fields are parsed
+ * only after the LAST ')' in the line. Ticks are converted to wall-clock ms
+ * with btime from /proc/stat and CLK_TCK from getconf.
+ *
+ * Tolerance: btime is whole seconds (up to 1000 ms truncation), plus one
+ * clock tick, plus the 1 ms precision of the recorded processStartedAt.
+ *
+ * Fails closed: any read or parse error, a missing /proc, a gone pid, or a
+ * non-Linux platform returns false (untrusted).
+ */
+export const LINUX_START_TIME_BTIME_PRECISION_MS = 1000;
+export const LINUX_START_TIME_RECORDED_PRECISION_MS = 1;
+
+export function parseLinuxProcStatStartTicks(statLine: string): number | null {
+  if (typeof statLine !== "string") return null;
+  const closeParen = statLine.lastIndexOf(")");
+  if (closeParen < 0) return null;
+  const rest = statLine.slice(closeParen + 1).trim().split(/\s+/);
+  // rest[0] is field 3 (state), so field 22 is rest[19].
+  const raw = rest[19];
+  if (raw === undefined || !/^\d+$/.test(raw)) return null;
+  const ticks = Number(raw);
+  return Number.isSafeInteger(ticks) ? ticks : null;
+}
+
+export function parseLinuxProcStatBootTimeSec(procStat: string): number | null {
+  if (typeof procStat !== "string") return null;
+  const match = /^btime\s+(\d+)\s*$/m.exec(procStat);
+  if (!match) return null;
+  const value = Number(match[1]);
+  return Number.isSafeInteger(value) && value > 0 ? value : null;
+}
+
+let cachedLinuxClockTicks: number | null = null;
+async function readLinuxClockTicksPerSecond(): Promise<number | null> {
+  if (cachedLinuxClockTicks !== null) return cachedLinuxClockTicks;
+  try {
+    const { stdout } = await execFileAsync("getconf", ["CLK_TCK"]);
+    const value = Number(String(stdout).trim());
+    if (!Number.isInteger(value) || value <= 0) return null;
+    cachedLinuxClockTicks = value;
+    return value;
+  } catch {
+    return null;
+  }
+}
+
+export interface LinuxStartIdentityDeps {
+  platform?: NodeJS.Platform;
+  readFile?: (filePath: string) => Promise<string>;
+  clockTicksPerSecond?: () => Promise<number | null>;
+}
+
+export async function matchesLinuxProcessStartIdentity(
+  pid: number,
+  expectedStartedAt: Date | string,
+  deps: LinuxStartIdentityDeps = {},
+): Promise<boolean> {
+  const platform = deps.platform ?? process.platform;
+  if (platform !== "linux") return false;
+  const normalizedPid = normalizeLocalServicePid(pid);
+  if (normalizedPid === null) return false;
+  const expected = expectedStartedAt instanceof Date
+    ? expectedStartedAt
+    : new Date(expectedStartedAt);
+  const expectedMs = expected.getTime();
+  if (Number.isNaN(expectedMs)) return false;
+  const readFile = deps.readFile ?? ((filePath: string) => fs.readFile(filePath, "utf8"));
+  try {
+    const [statLine, procStat, clockTicks] = await Promise.all([
+      readFile(`/proc/${normalizedPid}/stat`),
+      readFile("/proc/stat"),
+      (deps.clockTicksPerSecond ?? readLinuxClockTicksPerSecond)(),
+    ]);
+    const startTicks = parseLinuxProcStatStartTicks(statLine);
+    const bootTimeSec = parseLinuxProcStatBootTimeSec(procStat);
+    if (startTicks === null || bootTimeSec === null || !clockTicks || clockTicks <= 0) {
+      return false;
+    }
+    const actualMs = bootTimeSec * 1000 + (startTicks * 1000) / clockTicks;
+    const toleranceMs = LINUX_START_TIME_BTIME_PRECISION_MS
+      + 1000 / clockTicks
+      + LINUX_START_TIME_RECORDED_PRECISION_MS;
+    return Math.abs(actualMs - expectedMs) <= toleranceMs;
+  } catch {
+    return false;
+  }
+}
+
 async function matchesWindowsProcessCreationIdentity(
   pid: number,
   expectedStartedAt: Date | string,
@@ -1019,7 +1112,13 @@ export async function terminateLocalService(
   }
 
   const signal = opts?.signal ?? "SIGTERM";
-  const canTargetPid = opts?.trustedPid === true;
+  const canTargetPid = opts?.trustedPid === true
+    || (
+      pidAlive
+      && opts?.expectedStartedAt !== undefined
+      && opts.expectedStartedAt !== null
+      && await matchesLinuxProcessStartIdentity(pid, opts.expectedStartedAt)
+    );
   if (processGroupId === null && !canTargetPid) {
     return {
       pid,
