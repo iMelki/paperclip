@@ -59,6 +59,8 @@ const SENSITIVE_KEYS = new Set<string>([
     "one_time_password",
     "onetimepassword",
     "passcode",
+    // camelCase `passCode` normalizes to `pass_code`, so both spellings are listed.
+    "pass_code",
     "pin",
     "state",
   // The workspace login handoff ticket (PAP-17572). It is a signed bearer
