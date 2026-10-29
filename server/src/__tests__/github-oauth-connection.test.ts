@@ -238,7 +238,8 @@ describe("native GitHub OAuth service and routes (mandatory private PostgreSQL)"
     expect((saved.config.oauth as Record<string, unknown>).expiresAt).toBeNull();
     expect(saved.credentialSecretRefs.some((ref) => ref.configPath === "oauth.refresh_token")).toBe(false);
     const [oldSecret] = await db.select().from(companySecrets).where(eq(companySecrets.id, oldRefresh!.secretId));
-    expect(oldSecret.status).toBe("deleted");
+    // secrets.remove hard-deletes the row (or leaves it soft-deleted when a provider keeps history).
+    expect(oldSecret === undefined || oldSecret.status === "deleted").toBe(true);
     const before = tokenCalls().length;
     await fixture.service.checkHealth(saved.id, fixture.actor);
     expect(tokenCalls()).toHaveLength(before);
