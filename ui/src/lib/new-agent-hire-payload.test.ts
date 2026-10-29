@@ -4,9 +4,10 @@ import { buildNewAgentHirePayload, shouldUnlockHireSubmission } from "./new-agen
 import { ApiError } from "../api/client.js";
 
 describe("shouldUnlockHireSubmission", () => {
-  it("unlocks on a 4xx rejection and keeps the lock on 5xx or network errors", () => {
+  it("unlocks on a 4xx rejection and keeps the lock on 409, 5xx or network errors", () => {
     expect(shouldUnlockHireSubmission(new ApiError("bad", 400, null))).toBe(true);
-    expect(shouldUnlockHireSubmission(new ApiError("conflict", 409, null))).toBe(true);
+    expect(shouldUnlockHireSubmission(new ApiError("conflict", 409, null))).toBe(false);
+    expect(shouldUnlockHireSubmission(new ApiError("unprocessable", 422, null))).toBe(true);
     expect(shouldUnlockHireSubmission(new ApiError("down", 503, null))).toBe(false);
     expect(shouldUnlockHireSubmission(new TypeError("Failed to fetch"))).toBe(false);
   });

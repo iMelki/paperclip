@@ -3213,6 +3213,21 @@ export function agentRoutes(
     }
 
     const patchData = { ...(req.body as Record<string, unknown>) };
+    if (
+      existing.status === "paused" &&
+      patchData.status !== undefined && patchData.status !== "paused" && patchData.status !== "terminated" &&
+      isPausedAgentSetupUnconfigured({
+        metadata: existing.metadata,
+        adapterType: patchData.adapterType ?? existing.adapterType,
+        adapterConfig: patchData.adapterConfig ?? existing.adapterConfig,
+      })
+    ) {
+      res.status(409).json({
+        error: "Finish setup before resuming: this agent was created paused without a configured runtime",
+        code: "agent_paused_setup_unconfigured",
+      });
+      return;
+    }
     const replaceAdapterConfig = patchData.replaceAdapterConfig === true;
     delete patchData.replaceAdapterConfig;
 

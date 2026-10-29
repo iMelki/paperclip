@@ -116,6 +116,17 @@ describePostgres("paused setup approval remains inert", () => {
     return row;
   }
 
+  it("service resume and status update refuse an unconfigured paused setup, then allow it once configured", async () => {
+    const f = await fixture();
+    await db.update(agents).set({ status: "paused", pauseReason: "manual", pausedAt: new Date() }).where(eq(agents.id, f.pending.id));
+    await expect(f.service.resume(f.pending.id)).rejects.toMatchObject({ status: 409 });
+    await expect(f.service.update(f.pending.id, { status: "idle" })).rejects.toMatchObject({ status: 409 });
+    const [row] = await db.select().from(agents).where(eq(agents.id, f.pending.id));
+    expect(row!.status).toBe("paused");
+    await db.update(agents).set({ adapterType: "process", adapterConfig: { command: "echo" } }).where(eq(agents.id, f.pending.id));
+    await expect(f.service.resume(f.pending.id)).resolves.toMatchObject({ status: "idle" });
+  });
+
   it("keeps a marked pending setup paused after approval with a normal snapshot", async () => {
     const f = await fixture();
     const result = await f.service.activatePendingApproval(f.pending.id, {

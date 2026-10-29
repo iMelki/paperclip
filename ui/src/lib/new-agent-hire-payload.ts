@@ -60,5 +60,7 @@ export function buildNewAgentHirePayload(input: {
 /** A 4xx means the server rejected this exact request, so the form unlocks and the next submit gets a new idempotency key. */
 export function shouldUnlockHireSubmission(error: unknown): boolean {
   const status = (error as { status?: unknown } | null)?.status;
-  return typeof status === "number" && status >= 400 && status < 500;
+  // 409 can mean the same idempotency key is still in flight
+  // (server/src/services/agent-hire-idempotency.ts); keep the lock so a fresh key cannot duplicate the hire.
+  return typeof status === "number" && status >= 400 && status < 500 && status !== 409;
 }
