@@ -334,25 +334,34 @@ export function CompanyAccess() {
 
         <div className="overflow-hidden rounded-xl border border-border">
           <div className="hidden gap-3 border-b border-border px-4 py-3 text-xs font-medium uppercase tracking-wide text-muted-foreground md:grid md:grid-cols-(--gtc-24)">
-            <div>User account</div>
+            <div>
+              Name <span aria-hidden="true">/</span> Email
+            </div>
             <div>Role</div>
             <div>Status</div>
             <div className="text-right">Action</div>
           </div>
           {members.length === 0 ? (
-            <div className="px-4 py-8 text-sm text-muted-foreground">No user memberships found for this company yet.</div>
+            <div className="px-4 py-8 text-sm text-muted-foreground">No user memberships found for this organization yet.</div>
           ) : (
             members.map((member) => {
               const removalReason = member.removal?.reason ?? null;
               const canArchive = member.removal?.canArchive ?? true;
+              const displayName = memberDisplayName(member);
               return (
                 <div
                   key={member.id}
                   className="grid grid-cols-1 gap-3 border-b border-border px-4 py-3 last:border-b-0 md:grid-cols-(--gtc-24) md:items-center"
                 >
-                  <div className="min-w-0">
-                    <div className="truncate font-medium">{member.user?.name?.trim() || member.user?.email || member.principalId}</div>
-                    <div className="truncate text-xs text-muted-foreground">{member.user?.email || member.principalId}</div>
+                  <div className="flex min-w-0 items-center gap-2.5">
+                    <Avatar size="sm">
+                      {member.user?.image ? <AvatarImage src={member.user.image} alt={displayName} /> : null}
+                      <AvatarFallback>{memberInitials(member)}</AvatarFallback>
+                    </Avatar>
+                    <div className="min-w-0">
+                      <div className="truncate font-medium">{displayName}</div>
+                      <div className="truncate text-xs text-muted-foreground">{member.user?.email || member.principalId}</div>
+                    </div>
                   </div>
                   <div className="flex flex-wrap items-center gap-2 text-sm">
                     <span className="text-xs font-medium uppercase tracking-wide text-muted-foreground md:hidden">Role</span>
@@ -371,20 +380,22 @@ export function CompanyAccess() {
                       <Button size="sm" variant="outline" onClick={() => setEditingMemberId(member.id)}>
                         Edit
                       </Button>
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        onClick={() => setRemovingMemberId(member.id)}
-                        disabled={!canArchive}
-                        title={removalReason ?? undefined}
+                      <span
+                        className="inline-flex"
+                        title={!canArchive ? removalReason ?? undefined : undefined}
                       >
-                        <Trash2 className="mr-1 h-3.5 w-3.5" />
-                        Remove
-                      </Button>
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          onClick={() => setRemovingMemberId(member.id)}
+                          disabled={!canArchive}
+                          title={!canArchive ? removalReason ?? undefined : undefined}
+                        >
+                          <Trash2 className="mr-1 h-3.5 w-3.5" />
+                          Remove
+                        </Button>
+                      </span>
                     </div>
-                    {removalReason ? (
-                      <div className="text-xs text-muted-foreground">{removalReason}</div>
-                    ) : null}
                   </div>
                 </div>
               );
