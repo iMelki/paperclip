@@ -559,6 +559,46 @@ describe.sequential("agent permission routes", () => {
     }
   });
 
+  it.each([
+    ["saved runtime, empty partial config", { command: "echo" }, {}, 200],
+    ["no saved runtime, empty partial config", {}, {}, 409],
+    ["saved runtime, empty config with replace", { command: "echo" }, { replaceAdapterConfig: true }, 409],
+  ] as const)("PATCH status plus adapterConfig {} on a paused-setup agent (%s) returns %s", async (_label, saved, extra, expected) => {
+    mockAgentService.getById.mockResolvedValue({
+      ...baseAgent,
+      adapterType: "process",
+      adapterConfig: saved,
+      status: "paused",
+      pauseReason: "manual",
+      metadata: { "paperclip.pausedSetup": true },
+    });
+    const app = await createApp({
+      type: "board",
+      userId: "board-user",
+      source: "local_implicit",
+      isInstanceAdmin: true,
+      companyIds: [companyId],
+    });
+
+    const res = await requestApp(app, (baseUrl) => request(baseUrl)
+      .patch(`/api/agents/${agentId}`)
+      .send({ status: "idle", adapterConfig: {}, ...extra }));
+
+    if (expected === 409) {
+      expect(res.status, JSON.stringify(res.body)).toBe(409);
+      expect(res.body.code).toBe("agent_paused_setup_unconfigured");
+      expect(mockAgentService.update).not.toHaveBeenCalled();
+    } else {
+      expect(res.body?.code).not.toBe("agent_paused_setup_unconfigured");
+      expect(res.status, JSON.stringify(res.body)).toBe(200);
+      expect(mockAgentService.update).toHaveBeenCalledWith(
+        agentId,
+        expect.objectContaining({ status: "idle", adapterConfig: expect.objectContaining({ command: "echo" }) }),
+        expect.anything(),
+      );
+    }
+  });
+
   it("blocks agent updates for authenticated company members without agent admin permission", async () => {
     mockAccessService.canUser.mockResolvedValue(false);
 

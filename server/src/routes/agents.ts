@@ -3213,13 +3213,28 @@ export function agentRoutes(
     }
 
     const patchData = { ...(req.body as Record<string, unknown>) };
+    // Evaluate the guard against the config the update will actually persist:
+    // a partial adapterConfig (even {}) merges into the saved one unless the
+    // request replaces it or changes adapter type (see the merge path below).
+    const guardAdapterType = patchData.adapterType ?? existing.adapterType;
+    const guardRequestedConfig = hasOwn(patchData, "adapterConfig")
+      ? (asRecord(patchData.adapterConfig) ?? {})
+      : null;
+    const guardReplacesConfig =
+      patchData.replaceAdapterConfig === true
+      || (typeof patchData.adapterType === "string" && patchData.adapterType !== existing.adapterType);
+    const guardAdapterConfig = guardRequestedConfig === null
+      ? existing.adapterConfig
+      : guardReplacesConfig
+        ? guardRequestedConfig
+        : { ...(asRecord(existing.adapterConfig) ?? {}), ...guardRequestedConfig };
     if (
       existing.status === "paused" &&
       patchData.status !== undefined && patchData.status !== "paused" && patchData.status !== "terminated" &&
       isPausedAgentSetupUnconfigured({
         metadata: existing.metadata,
-        adapterType: patchData.adapterType ?? existing.adapterType,
-        adapterConfig: patchData.adapterConfig ?? existing.adapterConfig,
+        adapterType: guardAdapterType,
+        adapterConfig: guardAdapterConfig,
       })
     ) {
       res.status(409).json({

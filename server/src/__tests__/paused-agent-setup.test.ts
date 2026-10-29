@@ -4,6 +4,8 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   agents,
   agentWakeupRequests,
+  approvals,
+  budgetPolicies,
   companies,
   companySecretBindings,
   companySecrets,
@@ -13,6 +15,7 @@ import {
 } from "@paperclipai/db";
 import { PAUSED_AGENT_SETUP_KEY } from "@paperclipai/shared";
 import { agentService } from "../services/agents.js";
+import { approvalService } from "../services/approvals.js";
 import {
   EMBEDDED_POSTGRES_TEST_SETUP_TIMEOUT_MS,
   getEmbeddedPostgresTestSupport,
@@ -38,7 +41,7 @@ describePostgres("paused setup approval remains inert", () => {
     await tempDb?.cleanup();
   });
 
-  async function fixture(pausedSetup = true) {
+  async function fixture(pausedSetup = true, budgetMonthlyCents = 0) {
     const [company] = await db.insert(companies).values({
       name: "Paused setup test company",
       issuePrefix: `P${randomUUID().replace(/-/g, "").slice(0, 7).toUpperCase()}`,
@@ -67,7 +70,7 @@ describePostgres("paused setup approval remains inert", () => {
       metadata: pausedSetup
         ? { [PAUSED_AGENT_SETUP_KEY]: true, purpose: "finance-draft" }
         : { purpose: "ordinary-hire" },
-      budgetMonthlyCents: 0,
+      budgetMonthlyCents,
       spentMonthlyCents: 0,
       lastHeartbeatAt: null,
     }).returning();
@@ -112,6 +115,9 @@ describePostgres("paused setup approval remains inert", () => {
     } });
     expect(row.metadata).toEqual({ [PAUSED_AGENT_SETUP_KEY]: true, purpose: "finance-draft" });
     expect(row.lastHeartbeatAt).toBeNull();
+    expect(row.budgetMonthlyCents).toBe(0);
+    const policies = await db.select().from(budgetPolicies).where(eq(budgetPolicies.scopeId, agentId));
+    expect(policies).toHaveLength(0);
     await expectNoExecutionOrSecrets(companyId);
     return row;
   }
@@ -125,6 +131,43 @@ describePostgres("paused setup approval remains inert", () => {
     expect(row!.status).toBe("paused");
     await db.update(agents).set({ adapterType: "process", adapterConfig: { command: "echo" } }).where(eq(agents.id, f.pending.id));
     await expect(f.service.resume(f.pending.id)).resolves.toMatchObject({ status: "idle" });
+  });
+
+  it("clamps a 50000 budget to 0 with no spending policy when activation receives a budget", async () => {
+    const f = await fixture(true, 50_000);
+    const result = await f.service.activatePendingApproval(f.pending.id, {
+      name: f.pending.name,
+      role: f.pending.role,
+      adapterType: "process",
+      adapterConfig: {},
+      budgetMonthlyCents: 50_000,
+    });
+    expect(result).toMatchObject({ activated: true, agent: { id: f.pending.id, status: "paused" } });
+    await expectPersistedInert(f.pending.id, f.company.id);
+  });
+
+  it("clamps a 50000 budget to 0 with no spending policy through board approval", async () => {
+    const f = await fixture(true, 50_000);
+    const [approval] = await db.insert(approvals).values({
+      companyId: f.company.id,
+      type: "hire_agent",
+      status: "pending",
+      payload: {
+        name: f.pending.name,
+        role: f.pending.role,
+        adapterType: "process",
+        adapterConfig: {},
+        agentId: f.pending.id,
+        budgetMonthlyCents: 50_000,
+        metadata: { [PAUSED_AGENT_SETUP_KEY]: true, purpose: "finance-draft" },
+        permissions: { canCreateAgents: false, canCreateSkills: false, canAssignTasks: false },
+      },
+    }).returning();
+    const result = await approvalService(db).approve(approval!.id, "board", "setup only");
+    expect(result.applied).toBe(true);
+    await expectPersistedInert(f.pending.id, f.company.id);
+    const policies = await db.select().from(budgetPolicies).where(eq(budgetPolicies.companyId, f.company.id));
+    expect(policies).toHaveLength(0);
   });
 
   it("keeps a marked pending setup paused after approval with a normal snapshot", async () => {
