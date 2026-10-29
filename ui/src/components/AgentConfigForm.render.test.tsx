@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { flushSync } from "react-dom";
+import { act } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Agent, Environment, UserSecretDefinition } from "@paperclipai/shared";
@@ -182,13 +182,6 @@ vi.mock("./MarkdownEditor", () => ({
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
 
-async function act(callback: () => void | Promise<void>) {
-  let result: void | Promise<void> = undefined;
-  flushSync(() => {
-    result = callback();
-  });
-  await result;
-}
 
 async function flushReact() {
   await act(async () => {
@@ -2896,6 +2889,29 @@ describe("ModelDropdown model order", () => {
       (span) => span.getAttribute("title"),
     );
   }
+
+  it("names the clear-search button and clears filtering without changing the model", async () => {
+    const ids = ["gpt-6.1-sol", "gpt-6-astra"];
+    const { popover, onChange } = await renderDropdown({
+      models: ids.map((id) => ({ id, label: id })),
+      value: ids[0],
+    });
+    const input = popover.querySelector("input")!;
+    await act(async () => { setInputValue(input, "gpt-6-astra"); });
+    await flushReact();
+    expect(modelIds(popover)).toEqual(["gpt-6-astra"]);
+    const clear = popover.querySelector<HTMLButtonElement>('button[aria-label="Clear model search"]');
+    expect(clear).not.toBeNull();
+    expect(clear!.type).toBe("button");
+    clear!.focus();
+    expect(document.activeElement).toBe(clear);
+    await act(async () => { clear!.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
+    await flushReact();
+    expect(input.value).toBe("");
+    expect(modelIds(popover)).toEqual(ids);
+    expect(popover.querySelector('button[aria-label="Clear model search"]')).toBeNull();
+    expect(onChange).not.toHaveBeenCalled();
+  });
 
   it("keeps the adapter's newest-first ordinary order including unknown IDs", async () => {
     const ids = ["gpt-6.1-sol", "gpt-6-astra", "custom-local-v2", "gpt-5.6-sol", "codex-mini-latest"];

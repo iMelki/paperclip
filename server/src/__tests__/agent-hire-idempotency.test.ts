@@ -3,7 +3,7 @@ import express from "express";
 import request from "supertest";
 import { eq, sql } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { activityLog, agentHireRequests, agents, approvals, companies, createDb, heartbeatRuns } from "@paperclipai/db";
+import { activityLog, agentHireRequests, agents, agentWakeupRequests, approvals, companies, companySecretBindings, companySecrets, createDb, heartbeatRuns } from "@paperclipai/db";
 import { createAgentHireSchema } from "@paperclipai/shared";
 import { agentRoutes } from "../routes/agents.js";
 import { executeAgentHire, fingerprintHireRequest } from "../services/agent-hire-idempotency.js";
@@ -100,6 +100,42 @@ describePostgres("agent hire idempotency", () => {
     expect(second.body.agent.id).toBe(first.body.agent.id);
     expect(second.body.approval).toBeNull();
     expect(await counts(f.company.id)).toEqual(before);
+  });
+
+  it.each([true, false])("replays one inert paused setup with approval required=%s", async (requiresApproval) => {
+    const f = await fixture(requiresApproval);
+    const payload = { ...f.payload, name: "Finance setup", pausedSetup: true, adapterConfig: {} };
+    const first = await f.hire("paused:finance:revision:1", payload);
+    expect(first.status, JSON.stringify(first.body)).toBe(201);
+    const before = await counts(f.company.id);
+    const second = await f.hire("paused:finance:revision:1", payload);
+    expect(second.status).toBe(200);
+    expect(second.body.agent.id).toBe(first.body.agent.id);
+    expect(await counts(f.company.id)).toEqual(before);
+    expect(before.agents).toBe(1);
+    expect(before.approvals).toBe(requiresApproval ? 1 : 0);
+    expect(before.runs).toBe(0);
+    const rows = await db.select().from(agents).where(eq(agents.companyId, f.company.id));
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      status: requiresApproval ? "pending_approval" : "paused",
+      pauseReason: "manual", pausedAt: expect.any(Date),
+      adapterType: "process", adapterConfig: {}, defaultEnvironmentId: null,
+      permissions: { canCreateAgents: false, canCreateSkills: false, canAssignTasks: false },
+      runtimeConfig: { heartbeat: {
+        enabled: false, intervalSec: 0, wakeOnDemand: false, wakeOnAssignment: false,
+        wakeOnOnDemand: false, wakeOnAutomation: false, maxConcurrentRuns: 1,
+      } },
+      metadata: { "paperclip.pausedSetup": true }, lastHeartbeatAt: null,
+    });
+    const receipts = await db.select().from(agentHireRequests).where(eq(agentHireRequests.companyId, f.company.id));
+    expect(receipts).toHaveLength(1);
+    const wakes = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.companyId, f.company.id));
+    const secrets = await db.select().from(companySecrets).where(eq(companySecrets.companyId, f.company.id));
+    const bindings = await db.select().from(companySecretBindings).where(eq(companySecretBindings.companyId, f.company.id));
+    expect(wakes).toHaveLength(0);
+    expect(secrets).toHaveLength(0);
+    expect(bindings).toHaveLength(0);
   });
 
   it("rejects a different payload with the same key with 409", async () => {
