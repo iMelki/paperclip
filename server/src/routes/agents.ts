@@ -1,3 +1,4 @@
+import { isPausedAgentSetup, isPausedAgentSetupUnconfigured, pausedAgentSetupFields, pausedAgentSetupProblem } from "@paperclipai/shared";
 import { Router, type NextFunction, type Request, type Response } from "express";
 import { createHash, generateKeyPairSync, randomUUID } from "node:crypto";
 import path from "node:path";
@@ -2973,6 +2974,29 @@ export function agentRoutes(
     },
   );
 
+  // Board-only identity census includes archived and pending hires without configs.
+  router.get("/companies/:companyId/agent-census", async (req, res) => {
+    const companyId = req.params.companyId as string;
+    await assertBoardCanManageAgentsForCompany(req, companyId);
+    if (Object.keys(req.query).length > 0) {
+      res.status(400).json({ error: "Agent census does not accept query parameters" });
+      return;
+    }
+    const items = await db
+      .select({
+        id: agentsTable.id,
+        companyId: agentsTable.companyId,
+        name: agentsTable.name,
+        role: agentsTable.role,
+        status: agentsTable.status,
+        reportsTo: agentsTable.reportsTo,
+      })
+      .from(agentsTable)
+      .where(eq(agentsTable.companyId, companyId))
+      .orderBy(agentsTable.id);
+    res.json({ companyId, items });
+  });
+
   router.get("/companies/:companyId/agents", async (req, res) => {
     const companyId = req.params.companyId as string;
     assertCompanyAccess(req, companyId);
@@ -3351,11 +3375,19 @@ export function agentRoutes(
   router.post("/companies/:companyId/agent-hires", validate(createAgentHireSchema), async (req, res) => {
     const companyId = req.params.companyId as string;
     await assertCanCreateAgentsForCompany(req, companyId);
+    const pausedSetup = req.body.pausedSetup === true;
+    if (pausedSetup) {
+      assertBoard(req);
+      const problem = pausedAgentSetupProblem(req.body);
+      if (problem) throw unprocessable(problem, { code: "paused_setup_conflict" });
+      req.body = { ...req.body, ...pausedAgentSetupFields(req.body.metadata) };
+    }
     const sourceIssueIds = parseSourceIssueIds(req.body);
     const idempotencyKey = readHireIdempotencyKey(req.get("Idempotency-Key"), req.body.idempotencyKey);
     const fingerprint = idempotencyKey ? fingerprintHireRequest(req.body, sourceIssueIds) : "";
     const {
       idempotencyKey: _idempotencyKey,
+      pausedSetup: _pausedSetup,
       desiredSkills: requestedDesiredSkills,
       instructionsBundle,
       sourceIssueId: _sourceIssueId,
@@ -3392,7 +3424,7 @@ export function agentRoutes(
           rawHireAdapterConfig,
         ),
       );
-      const desiredSkillAssignment = await resolveDesiredSkillAssignment(
+      const desiredSkillAssignment = pausedSetup ? { adapterConfig: {}, desiredSkills: [] } : await resolveDesiredSkillAssignment(
         companyId,
         hireInput.adapterType,
         requestedAdapterConfig,
@@ -3437,13 +3469,14 @@ export function agentRoutes(
         }
 
         const requiresApproval = company.requireBoardApprovalForNewAgents;
-        const status = requiresApproval ? "pending_approval" : "idle";
+        const status = requiresApproval ? "pending_approval" : pausedSetup ? "paused" : "idle";
         const createdAgent = await hireAgents.create(
           companyId,
           {
             id: hiredAgentId,
             ...normalizedHireInput,
             status,
+            ...(pausedSetup ? { pausedAt: new Date(), pauseReason: "manual" as const } : {}),
             spentMonthlyCents: 0,
             lastHeartbeatAt: null,
           },
@@ -3458,7 +3491,7 @@ export function agentRoutes(
             },
           },
         );
-        const agent = await materializeDefaultInstructionsBundleForNewAgent(createdAgent, instructionsBundle, source);
+        const agent = pausedSetup ? createdAgent : await materializeDefaultInstructionsBundleForNewAgent(createdAgent, instructionsBundle, source);
 
         let approval: Awaited<ReturnType<typeof approvalsSvc.getById>> | null = null;
         const actor = getActorInfo(req);
@@ -3491,6 +3524,10 @@ export function agentRoutes(
                   : agent.budgetMonthlyCents,
               desiredSkills: desiredSkillAssignment.desiredSkills,
               metadata: requestedMetadata,
+              ...(pausedSetup ? {
+                permissions: normalizedHireInput.permissions,
+                defaultEnvironmentId: null,
+              } : {}),
               agentId: agent.id,
               requestedByAgentId: actor.actorType === "agent" ? actor.actorId : null,
               requestedConfigurationSnapshot: {
@@ -3541,7 +3578,7 @@ export function agentRoutes(
             desiredSkills: desiredSkillAssignment.desiredSkills,
           },
         }, publications);
-        await applyDefaultAgentTaskAssignGrant(
+        if (!pausedSetup) await applyDefaultAgentTaskAssignGrant(
           companyId,
           agent.id,
           actor.actorType === "user" ? actor.actorId : null,
@@ -3590,6 +3627,13 @@ export function agentRoutes(
   router.post("/companies/:companyId/agents", validate(createAgentSchema), async (req, res) => {
     const companyId = req.params.companyId as string;
     await assertCanCreateAgentsForCompany(req, companyId);
+    const pausedSetup = req.body.pausedSetup === true;
+    if (pausedSetup) {
+      assertBoard(req);
+      const problem = pausedAgentSetupProblem(req.body);
+      if (problem) throw unprocessable(problem, { code: "paused_setup_conflict" });
+      req.body = { ...req.body, ...pausedAgentSetupFields(req.body.metadata) };
+    }
 
     const company = await db
       .select()
@@ -3607,6 +3651,7 @@ export function agentRoutes(
     }
 
     const {
+      pausedSetup: _pausedSetup,
       desiredSkills: requestedDesiredSkills,
       instructionsBundle,
       // The stored-session claim is not an agent column. The server derives the
@@ -3636,7 +3681,7 @@ export function agentRoutes(
         rawCreateAdapterConfig,
       ),
     );
-    const desiredSkillAssignment = await resolveDesiredSkillAssignment(
+    const desiredSkillAssignment = pausedSetup ? { adapterConfig: {}, desiredSkills: [] } : await resolveDesiredSkillAssignment(
       companyId,
       createInput.adapterType,
       requestedAdapterConfig,
@@ -3670,7 +3715,8 @@ export function agentRoutes(
         ...createInput,
         adapterConfig: normalizedAdapterConfig,
         runtimeConfig: normalizedRuntimeConfig,
-        status: "idle",
+        status: pausedSetup ? "paused" : "idle",
+        ...(pausedSetup ? { pausedAt: new Date(), pauseReason: "manual" as const } : {}),
         spentMonthlyCents: 0,
         lastHeartbeatAt: null,
       },
@@ -3685,7 +3731,7 @@ export function agentRoutes(
         },
       },
     );
-    const agent = await materializeDefaultInstructionsBundleForNewAgent(createdAgent, instructionsBundle);
+    const agent = pausedSetup ? createdAgent : await materializeDefaultInstructionsBundleForNewAgent(createdAgent, instructionsBundle);
 
     const actor = getActorInfo(req);
     await logActivity(db, {
@@ -3709,12 +3755,12 @@ export function agentRoutes(
       trackAgentCreated(telemetryClient, { agentRole: agent.role, agentId: agent.id });
     }
 
-    await applyDefaultAgentTaskAssignGrant(
+    if (!pausedSetup) await applyDefaultAgentTaskAssignGrant(
       companyId,
       agent.id,
       req.actor.type === "board" ? (req.actor.userId ?? null) : null,
     );
-    await builtInAgentService(db).ensureCompanyDefaultAgentGrants(companyId);
+    if (!pausedSetup) await builtInAgentService(db).ensureCompanyDefaultAgentGrants(companyId);
 
     if (agent.budgetMonthlyCents > 0) {
       await budgets.upsertPolicy(
@@ -4030,6 +4076,21 @@ export function agentRoutes(
     }
 
     const patchData = { ...(req.body as Record<string, unknown>) };
+    if (
+      existing.status === "paused" &&
+      patchData.status !== undefined && patchData.status !== "paused" && patchData.status !== "terminated" &&
+      isPausedAgentSetupUnconfigured({
+        metadata: existing.metadata,
+        adapterType: patchData.adapterType ?? existing.adapterType,
+        adapterConfig: patchData.adapterConfig ?? existing.adapterConfig,
+      })
+    ) {
+      res.status(409).json({
+        error: "Finish setup before resuming: this agent was created paused without a configured runtime",
+        code: "agent_paused_setup_unconfigured",
+      });
+      return;
+    }
     const replaceAdapterConfig = patchData.replaceAdapterConfig === true;
     delete patchData.replaceAdapterConfig;
 
@@ -4253,6 +4314,13 @@ export function agentRoutes(
     if (existing.orgChainHealth?.status === "invalid_org_chain") {
       res.status(409).json({
         error: existing.orgChainHealth?.repairGuidance ?? "Repair this agent's reporting chain before resuming it",
+      });
+      return;
+    }
+    if (isPausedAgentSetupUnconfigured(existing)) {
+      res.status(409).json({
+        error: "Finish setup before resuming: this agent was created paused without a configured runtime",
+        code: "agent_paused_setup_unconfigured",
       });
       return;
     }

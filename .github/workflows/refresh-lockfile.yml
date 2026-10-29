@@ -32,6 +32,16 @@ jobs:
       BASE: ${{ inputs.base || 'master' }}
 
     steps:
+      # Only ever refresh dev or master. A dispatch naming a PR or feature
+      # branch as ref or base would otherwise land lockfile-bot commits on
+      # that branch's line (as happened on #133); refuse it before checkout.
+      - name: Refuse refs other than dev and master
+        env:
+          REF: ${{ inputs.ref || github.ref_name }}
+        run: |
+          case "$REF" in dev|master) ;; *) echo "Refusing ref '$REF': only dev and master are refreshed."; exit 1 ;; esac
+          case "$BASE" in dev|master) ;; *) echo "Refusing base '$BASE': only dev and master are refreshed."; exit 1 ;; esac
+
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:

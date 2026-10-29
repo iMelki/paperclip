@@ -907,6 +907,7 @@ const BOARD_ONLY_OPERATIONS = new Set([
   "POST /api/issues/{id}/interactions/{interactionId}/respond",
   "POST /api/issues/{id}/interactions/{interactionId}/withdraw",
   "GET /api/companies/{companyId}/tools/gallery",
+  "GET /api/companies/{companyId}/tools/github/oauth/setup",
   "POST /api/companies/{companyId}/tools/apps/connect",
   "POST /api/companies/{companyId}/tools/apps/{connectionId}/finish",
   "GET /api/companies/{companyId}/tools/apps/attention",
@@ -1699,6 +1700,15 @@ registry.registerPath({
   summary: "List agents in a company",
   request: { params: z.object({ companyId: z.string() }) },
   responses: { 200: r.ok(), 401: r.unauthorized },
+});
+
+registry.registerPath({
+  method: "get",
+  path: "/api/companies/{companyId}/agent-census",
+  tags: ["agents"],
+  summary: "List the board-only agent census for a company",
+  request: { params: z.object({ companyId: z.string() }) },
+  responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized },
 });
 
 registry.registerPath({
@@ -7225,6 +7235,14 @@ registerCurrentRoute({
   path: "/api/companies/{companyId}/tools/gallery",
   tags: ["tool-access"],
   summary: "List tool app gallery entries",
+});
+
+registerCurrentRoute({
+  method: "get",
+  path: "/api/companies/{companyId}/tools/github/oauth/setup",
+  tags: ["tool-access"],
+  summary: "Get GitHub OAuth app setup details (callback URL, registration URL, requested scopes)",
+  responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden },
 });
 
 registerCurrentRoute({

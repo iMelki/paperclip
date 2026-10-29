@@ -799,6 +799,9 @@ export function startWorkerRpcHost(options: WorkerRpcHostOptions): WorkerRpcHost
       },
 
       issues: {
+        async importedBoard(input) {
+          return callHost("issues.importedBoard", input);
+        },
         async list(input) {
           return callHost("issues.list", {
             companyId: input.companyId,
