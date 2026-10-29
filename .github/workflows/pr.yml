@@ -5,6 +5,7 @@ on:
     branches:
       - master
       - dev
+      - agent/codex/129-upstream-host-integration
 
 concurrency:
   group: pr-${{ github.event.pull_request.number }}
