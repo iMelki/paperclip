@@ -53,6 +53,15 @@ afterEach(async () => {
   await waitForExposureBasePairReleased();
 });
 
+async function waitForPortPairReleased(appPort: number, timeoutMs = 10_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (await isLoopbackPortFree(appPort) && await isLoopbackPortFree(deriveViteHmrPort(appPort))) return;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  throw new Error(`port pair ${appPort}/${deriveViteHmrPort(appPort)} was not released within ${timeoutMs}ms after stop`);
+}
+
 async function waitForExposureBasePairReleased(timeoutMs = 10_000): Promise<void> {
   const base = 42_000;
   const deadline = Date.now() + timeoutMs;
@@ -529,6 +538,12 @@ describe("automatic tailscale_https default for managed worktree runtimes", () =
       executionWorkspaceId: EXECUTION_WORKSPACE_ID,
       runtimeServiceId: first.id,
     });
+    // The stop signals the first backend, but its listeners can outlive the
+    // call by a moment. Starting again before they close makes the allocator
+    // see the pair as busy and move to the next one, which is a race in the
+    // test rather than the reuse behaviour under test. Poll the real condition:
+    // both ports of the first pair are free again (bounded, fails loudly).
+    await waitForPortPairReleased(firstPort!);
     calls.length = 0;
 
     const [second] = await startRuntimeServicesForWorkspaceControl(startInput({
