@@ -286,28 +286,30 @@ describeEmbeddedPostgres("POST /api/companies/:companyId/onboarding-seed", () =>
   // The seed creates a live CEO agent, so company access alone is not enough
   // (Cursor security finding on #133): the route must refuse a member without
   // agents:create and any agent API key, and create nothing for either.
+  // An operator passes the company write check (a viewer would not), so this
+  // case reaches and pins the agents:create decision itself.
   it("refuses a company member without agents:create", async () => {
     const { companyId } = await seedCompany();
-    const viewerId = `user-${randomUUID()}`;
+    const operatorId = `user-${randomUUID()}`;
     await ctx.db.insert(companyMemberships).values({
       companyId,
       principalType: "user",
-      principalId: viewerId,
+      principalId: operatorId,
       status: "active",
-      membershipRole: "viewer",
+      membershipRole: "operator",
       updatedAt: new Date(),
     });
-    const viewerActor: BoardActor = {
+    const operatorActor: BoardActor = {
       type: "board",
       source: "session",
-      userId: viewerId,
+      userId: operatorId,
       companyIds: [companyId],
-      memberships: [{ companyId, membershipRole: "viewer", status: "active" }],
+      memberships: [{ companyId, membershipRole: "operator", status: "active" }],
       isInstanceAdmin: false,
     };
-    const viewerApp = routeApp(ctx.db, viewerActor, onboardingSeedRoutes);
+    const operatorApp = routeApp(ctx.db, operatorActor, onboardingSeedRoutes);
 
-    const response = await post(viewerApp, companyId, SEED);
+    const response = await post(operatorApp, companyId, SEED);
 
     expect(response.status).toBe(403);
     expect(await ctx.db.select().from(agents).where(eq(agents.companyId, companyId))).toHaveLength(0);
