@@ -300,14 +300,18 @@ describe("native GitHub OAuth service and routes (mandatory private PostgreSQL)"
     expect(new URL(begun.started.authorizationUrl).searchParams.get("scope")).toBe("read:project public_repo offline_access");
     // A whole-config round trip that echoes the stored values is accepted, and a config that omits the
     // identity keys still leaves a GitHub connection.
-    await request(app).patch(`/api/tool-connections/${seeded.id}`).send({ config: { ...(await readConnection(seeded.id)).config, note: "n" } }).expect(200);
+    const echoed = (await readConnection(seeded.id)).config;
+    await request(app).patch(`/api/tool-connections/${seeded.id}`).send({ config: { ...echoed, note: "n",
+      oauth: { ...(echoed.oauth as Record<string, unknown>), expiresAt: "2000-01-01T00:00:00.000Z" } } }).expect(200);
+    expect(((await readConnection(seeded.id)).config.oauth as Record<string, unknown>).expiresAt)
+      .toBe((echoed.oauth as Record<string, unknown>).expiresAt);
     const { sourceTemplateKey: _s, methodKey: _m, ...noIdentity } = editable;
     await request(app).patch(`/api/tool-connections/${seeded.id}`).send({ config: noIdentity }).expect(200);
     expect((await readConnection(seeded.id)).config).toMatchObject({ sourceTemplateKey: "github", methodKey: "rest-oauth", githubPrivateRepoAccess: false });
     const before = await readConnection(seeded.id);
     await request(app).patch(`/api/tool-connections/${seeded.id}`).send({ config: { ...editable, methodKey: "synthetic-other" } }).expect(400);
-    for (const config of [{ githubPrivateRepoAccess: true }, { githubPrivateRepoAccess: null }, { githubPrivateRepoAccess: "false" }, { oauth: { scopes: ["repo", "project", "offline_access"] } },
-      { providerMetadata: { githubOAuth: { grantedScopes: ["repo"] } } }]) {
+    for (const config of [{ githubPrivateRepoAccess: true }, { githubPrivateRepoAccess: null }, { githubPrivateRepoAccess: "false" }, { oauth: { ...(seeded.config.oauth as Record<string, unknown>), scopes: ["repo", "project", "offline_access", "admin:org"] } },
+      { oauth: null }, { providerMetadata: { githubOAuth: { grantedScopes: ["repo"] } } }]) {
       const refused = await request(app).patch(`/api/tool-connections/${seeded.id}`).send({ config }).expect(400);
       expect(refused.body.error).toContain("reconnecting");
       expect((await readConnection(seeded.id)).config).toEqual(before.config);

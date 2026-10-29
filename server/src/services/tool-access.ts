@@ -1512,6 +1512,8 @@ export async function exchangeOAuthToken(
 }
 
 const GITHUB_OAUTH_PROTECTED_CONFIG_KEYS = ["githubPrivateRepoAccess", "oauth", "providerMetadata"] as const;
+const GITHUB_OAUTH_ACCESS_PATHS = [["githubPrivateRepoAccess"], ["oauth", "scopes"],
+  ["providerMetadata", "githubOAuth", "grantedScopes"]];
 const GITHUB_OAUTH_IDENTITY_CONFIG_KEYS = ["sourceTemplateKey", "methodKey"] as const;
 
 export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}) {
@@ -7308,9 +7310,14 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
         for (const supplied of [input.config, input.transportConfig]) {
           if (!supplied || typeof supplied !== "object") continue;
           const record = supplied as Record<string, unknown>;
-          // Echoing the stored value back (a whole-config round trip) is not a change; anything else is refused.
-          const changed = (key: string) => key in record && !isDeepStrictEqual(record[key], existing.config[key]);
-          if (GITHUB_OAUTH_PROTECTED_CONFIG_KEYS.some(changed)) {
+          // A whole-config round trip may echo a stale copy of server-owned OAuth state (refresh lease,
+          // expiry), so only the access-defining values are compared; all three keys are carried below.
+          const pick = (value: unknown, path: string[]) => path.reduce<unknown>((node, key) =>
+            node !== null && typeof node === "object" && !Array.isArray(node) ? (node as Record<string, unknown>)[key] : undefined, value);
+          const changed = (path: string[]) => path[0] in record && !isDeepStrictEqual(pick(record, path), pick(existing.config, path));
+          const malformed = (key: string) => key in record && key !== "githubPrivateRepoAccess"
+            && (record[key] === null || typeof record[key] !== "object" || Array.isArray(record[key]));
+          if (GITHUB_OAUTH_ACCESS_PATHS.some(changed) || GITHUB_OAUTH_PROTECTED_CONFIG_KEYS.some(malformed)) {
             throw badRequest("GitHub private repository access and OAuth settings cannot be changed here. Change private repository access by reconnecting.",
               { code: "github_oauth_config_immutable" });
           }
