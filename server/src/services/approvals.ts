@@ -188,7 +188,12 @@ export function approvalService(db: Db) {
       restoredPayload,
       pendingAgent as unknown as Record<string, unknown>,
     );
-    const activation = await scopedAgents.activatePendingApproval(agentId, guardedPayload);
+    // Second guard for paused-setup hires: never hand a raw (possibly tampered)
+    // budget to activation. activatePendingApproval clamps too and stays the real guard.
+    const activationPayload = isPausedAgentSetup(pendingAgent.metadata) || isPausedAgentSetup(guardedPayload.metadata)
+      ? { ...guardedPayload, budgetMonthlyCents: 0 }
+      : guardedPayload;
+    const activation = await scopedAgents.activatePendingApproval(agentId, activationPayload);
     if (activation?.activated) return activation.agent.id;
     throw unprocessable("Hire approval could not activate the pending agent", {
       code: "hire_approval_activation_not_applied",
