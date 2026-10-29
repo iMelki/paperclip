@@ -297,7 +297,7 @@ describe("native GitHub OAuth service and routes (mandatory private PostgreSQL)"
     const begun = await begin(fixture, seeded.id);
     expect(new URL(begun.started.authorizationUrl).searchParams.get("scope")).toBe("read:project public_repo offline_access");
     const before = await readConnection(seeded.id);
-    for (const config of [{ githubPrivateRepoAccess: true }, { oauth: { scopes: ["repo", "project", "offline_access"] } },
+    for (const config of [{ githubPrivateRepoAccess: true }, { githubPrivateRepoAccess: null }, { githubPrivateRepoAccess: "false" }, { oauth: { scopes: ["repo", "project", "offline_access"] } },
       { providerMetadata: { githubOAuth: { grantedScopes: ["repo"] } } }]) {
       const refused = await request(app).patch(`/api/tool-connections/${seeded.id}`).send({ config }).expect(400);
       expect(refused.body.error).toContain("reconnecting");
