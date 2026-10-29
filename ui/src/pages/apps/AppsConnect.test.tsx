@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 
-import { flushSync } from "react-dom";
-import { createRoot } from "react-dom/client";
+import { act } from "react";
+import { createRoot, type Root } from "react-dom/client";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { CONNECTABLE_APP_DEFINITIONS } from "@paperclipai/shared";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -71,14 +71,6 @@ vi.mock("@/context/ToastContext", () => ({
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
 
-async function act(callback: () => void | Promise<void>) {
-  let result: void | Promise<void> = undefined;
-  flushSync(() => {
-    result = callback();
-  });
-  await result;
-}
-
 async function flushReact() {
   await act(async () => {
     await Promise.resolve();
@@ -131,8 +123,13 @@ async function gotoLinkFrame(container: HTMLDivElement, url: string) {
 
 describe("AppsConnect — Connect with a link (M4 frame)", () => {
   let container: HTMLDivElement;
+  const roots = new Set<Root>();
+  const clients = new Set<QueryClient>();
+  const originalScrollIntoView = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "scrollIntoView");
 
   beforeEach(() => {
+    // jsdom has no layout/scroll implementation; keep this browser API observable.
+    Object.defineProperty(HTMLElement.prototype, "scrollIntoView", { configurable: true, value: vi.fn() });
     mockSearch.value = "";
     mockParams.appKey = undefined;
     container = document.createElement("div");
@@ -165,7 +162,12 @@ describe("AppsConnect — Connect with a link (M4 frame)", () => {
     ]);
   });
 
-  afterEach(() => {
+  afterEach(async () => {
+    await act(async () => { for (const root of roots) root.unmount(); });
+    for (const client of clients) client.clear();
+    roots.clear(); clients.clear();
+    if (originalScrollIntoView) Object.defineProperty(HTMLElement.prototype, "scrollIntoView", originalScrollIntoView);
+    else Reflect.deleteProperty(HTMLElement.prototype, "scrollIntoView");
     document.body.removeChild(container);
     document.body.innerHTML = "";
     vi.clearAllMocks();
@@ -174,6 +176,7 @@ describe("AppsConnect — Connect with a link (M4 frame)", () => {
   async function render(queryClient?: QueryClient) {
     const root = createRoot(container);
     const client = queryClient ?? new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    roots.add(root); clients.add(client);
     await act(async () => {
       root.render(
         <QueryClientProvider client={client}>
@@ -901,6 +904,8 @@ describe("AppsConnect — Connect with a link (M4 frame)", () => {
     });
 
     expect(mockNavigate).toHaveBeenCalledWith("/apps/connect?byo=1");
+    await flushReact();
+    expect(HTMLElement.prototype.scrollIntoView).toHaveBeenCalledWith({ block: "center" });
   });
 
   it("leaving the default name connects with the app name", async () => {

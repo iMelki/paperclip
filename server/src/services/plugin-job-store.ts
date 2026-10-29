@@ -134,7 +134,8 @@ export function pluginJobStore(db: Db) {
      * always reflects the manifest's declared jobs:
      *
      * - **New jobs** are inserted with status `active`.
-     * - **Existing jobs** have their `schedule` updated if it changed.
+     * - **Existing jobs** have their `schedule` updated if it changed, while
+     *   retaining their active, paused, or failed status.
      * - **Removed jobs** (present in DB but absent from the manifest) are
      *   set to `paused` so their history is preserved.
      *
@@ -170,15 +171,12 @@ export function pluginJobStore(db: Db) {
         const schedule = decl.schedule ?? "";
 
         if (existing) {
-          // Update schedule if it changed; re-activate if it was paused
+          // Reload is not an operator request to resume a paused job.
           const updates: Record<string, unknown> = {
             updatedAt: new Date(),
           };
           if (existing.schedule !== schedule) {
             updates.schedule = schedule;
-          }
-          if (existing.status === "paused") {
-            updates.status = "active";
           }
 
           await db

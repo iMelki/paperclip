@@ -90,7 +90,9 @@ function resolveDynamicForbiddenTokens(env = process.env, osModule = os) {
     // Some environments do not expose userInfo; env vars are enough fallback.
   }
 
-  return uniqueNonEmpty(candidates);
+  // The Cloud worker's generic service account is not an operator identifier.
+  // Explicit private/tracked tokens remain authoritative, even for this spelling.
+  return uniqueNonEmpty(candidates).filter((candidate) => candidate.toLowerCase() !== "agent");
 }
 
 function readForbiddenTokensFile(tokensFile) {
