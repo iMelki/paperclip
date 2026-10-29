@@ -126,7 +126,7 @@ describe("Browse store door (PAP-13254 door 1)", () => {
     expect(text).toContain("Connect your own tool");
   });
 
-  it("enables Notion, Zapier, and custom URLs while fading unfinished integrations", async () => {
+  it("enables GitHub OAuth, Notion, Zapier, and custom URLs while fading unfinished integrations", async () => {
     await renderBrowse();
 
     const zapierTiles = Array.from(container.querySelectorAll("button")).filter((button) =>
@@ -149,7 +149,10 @@ describe("Browse store door (PAP-13254 door 1)", () => {
     expect(zapierTiles.every((button) => !button.disabled)).toBe(true);
     expect(notionTiles).toHaveLength(2);
     expect(notionTiles.every((button) => !button.disabled)).toBe(true);
-    expect(githubTiles.every((button) => button.disabled)).toBe(true);
+    // GitHub has a real OAuth connect flow now: the header button plus its popular and gallery tiles.
+    expect(githubTiles).toHaveLength(3);
+    expect(githubTiles.every((button) => !button.disabled)).toBe(true);
+    expect(githubTiles.some((button) => button.textContent?.includes("Coming soon"))).toBe(false);
     expect(tile?.disabled).toBe(true);
     expect(byoCard?.disabled).toBe(false);
     expect(tile?.textContent).toContain("Coming soon");
@@ -164,6 +167,14 @@ describe("Browse store door (PAP-13254 door 1)", () => {
       notionTiles[0]?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     });
     expect(navigateMock).toHaveBeenCalledWith("/apps/connect?source=notion");
+
+    for (const githubButton of githubTiles) {
+      navigateMock.mockClear();
+      await act(async () => {
+        githubButton.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      });
+      expect(navigateMock).toHaveBeenCalledWith("/apps/connect?source=github");
+    }
 
     await act(async () => {
       byoCard?.dispatchEvent(new MouseEvent("click", { bubbles: true }));

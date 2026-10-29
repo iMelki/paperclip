@@ -3,7 +3,7 @@ import path from "node:path";
 import net from "node:net";
 import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
-import { applyPendingMigrations, ensurePostgresDatabase } from "@paperclipai/db";
+import { applyPendingMigrations, ensurePostgresDatabase, startEmbeddedPostgresTestDatabase } from "@paperclipai/db";
 
 export const BOARD_IMPORT_FIXTURE_SETUP_TIMEOUT_MS = 90_000;
 const normalize = (value: string) => process.platform === "win32" ? value.toLowerCase() : value;
@@ -227,8 +227,22 @@ async function migrateFixture(connectionString: string, adminUrl: string) {
   } finally { clearTimeout(timer); }
 }
 /** Mandatory native fixture. The caller's NativeJob owns every descendant; no process reaper is used. */
-export async function startBoardImportFixtureDatabase() {
-  if (process.platform !== "win32") throw new Error("This bounded fixture launcher is qualified only for native Windows");
+export type BoardImportFixtureDatabase = { connectionString: string; cleanup: () => Promise<void>;
+  artifactDir: string | null; dataDir: string | null; port: number | null };
+
+/**
+ * Platform-neutral entry point. Native Windows keeps the NativeJob-owned launcher below.
+ * Every other host uses the repo's cross-platform embedded PostgreSQL test launcher
+ * (same migrations, private cluster, owned cleanup). Failure to start is a hard error,
+ * never a skip, so these suites stay mandatory on Linux CI.
+ */
+export async function startBoardImportFixtureDatabase(): Promise<BoardImportFixtureDatabase> {
+  if (process.platform === "win32") return await startNativeWindowsBoardImportFixtureDatabase();
+  const db = await startEmbeddedPostgresTestDatabase("paperclip-board-import-fixture-");
+  return { connectionString: db.connectionString, cleanup: () => db.cleanup(), artifactDir: null, dataDir: null, port: null };
+}
+
+async function startNativeWindowsBoardImportFixtureDatabase(): Promise<BoardImportFixtureDatabase> {
   if (Object.keys(process.env).some(key => /^PG/i.test(key))) throw new Error("NativeJob fixture environment must omit PG* defaults and credential variables");
   const fixtureRoot = canonicalDirectory(process.env.PAPERCLIP_BOARD_FIXTURE_ROOT, true);
   const binRoot = canonicalDirectory(process.env.PAPERCLIP_BOARD_FIXTURE_PG_BIN_ROOT);
