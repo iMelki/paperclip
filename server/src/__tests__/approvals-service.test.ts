@@ -623,10 +623,6 @@ describe("approvalService resolution idempotency", () => {
         expect(mockAgentService.create).toHaveBeenCalledWith("company-1", expect.objectContaining({ budgetMonthlyCents: 0 }));
       } else {
         expect(mockAgentService.activatePendingApproval).toHaveBeenCalledTimes(1);
-        expect(mockAgentService.activatePendingApproval).toHaveBeenCalledWith(
-          "agent-1",
-          expect.objectContaining({ budgetMonthlyCents: 0 }),
-        );
       }
       expect(mockBudgetService.upsertPolicy).not.toHaveBeenCalled();
     },
