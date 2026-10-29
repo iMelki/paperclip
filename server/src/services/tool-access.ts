@@ -6399,10 +6399,29 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
         actor: input.actor,
         existingRefs: githubOAuth ? [] : stateRow.subjectUserId ? subjectCredentialSecretRefs : undefined,
       }));
-    } else {
-      const existingRefreshRef = subjectCredentialSecretRefs.find((ref) => ref.configPath === "oauth.refresh_token");
-      if (existingRefreshRef) nextCredentialSecretRefs.push(existingRefreshRef);
     }
+    const existingRefreshRef = token.refreshToken
+      ? undefined : subjectCredentialSecretRefs.find((ref) => ref.configPath === "oauth.refresh_token");
+    // A grant with no expires_in and no refresh_token is non-expiring (GitHub OAuth App token).
+    // Keeping an earlier refresh ref would make every health or tool call try to refresh it, so
+    // drop the ref and, once the new credentials are saved, delete that connection's own secret.
+    const staleRefreshRef = existingRefreshRef && !token.expiresIn ? existingRefreshRef : null;
+    if (existingRefreshRef && !staleRefreshRef) nextCredentialSecretRefs.push(existingRefreshRef);
+    const removeStaleRefreshSecret = async () => {
+      if (!staleRefreshRef) return;
+      if (nextCredentialSecretRefs.some((ref) => ref.secretId === staleRefreshRef.secretId)) return;
+      const [owned] = await db.select({ id: companySecrets.id }).from(companySecrets)
+        .where(and(eq(companySecrets.id, staleRefreshRef.secretId), eq(companySecrets.companyId, connection.companyId)));
+      if (!owned) return;
+      // Only this connection's own secret: refuse when any other connection or grant still binds it.
+      const needle = JSON.stringify([{ secretId: staleRefreshRef.secretId }]);
+      const [boundConnection] = await db.select({ id: toolConnections.id }).from(toolConnections)
+        .where(sql`${toolConnections.credentialSecretRefs} @> ${needle}::jsonb`).limit(1);
+      const [boundGrant] = await db.select({ id: connectionGrants.id }).from(connectionGrants)
+        .where(sql`${connectionGrants.credentialSecretRefs} @> ${needle}::jsonb`).limit(1);
+      if (boundConnection || boundGrant) return;
+      await secrets.remove(staleRefreshRef.secretId).catch(() => undefined);
+    };
     const expiresAt = token.expiresIn ? new Date(Date.now() + token.expiresIn * 1000).toISOString() : null;
     if (stateRow.subjectUserId) {
       const grantValues = {
@@ -6415,6 +6434,7 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
       };
       if (existingUserGrant) {
         await db.update(connectionGrants).set(grantValues).where(eq(connectionGrants.id, existingUserGrant.id));
+        await removeStaleRefreshSecret();
       } else {
         await db.insert(connectionGrants).values({
           companyId: connection.companyId,
@@ -6497,6 +6517,7 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
         updatedAt: new Date(),
       }, githubOAuth);
     await syncCredentialBindings(connection);
+    await removeStaleRefreshSecret();
 
     await checkConnectionHealth(connection.id, input.actor);
     const refresh = await refreshCatalog(connection.id, input.actor);

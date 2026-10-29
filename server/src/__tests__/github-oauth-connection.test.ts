@@ -225,6 +225,26 @@ describe("native GitHub OAuth service and routes (mandatory private PostgreSQL)"
     await expectNoAgentEffects(fixture.companyId);
   });
 
+  it("drops the old refresh ref and secret when reconnecting from an expiring to a non-expiring token", async () => {
+    const fixture = await seed();
+    const expiring = await active(fixture);
+    const oldRefresh = expiring.credentialSecretRefs.find((ref) => ref.configPath === "oauth.refresh_token");
+    expect(oldRefresh).toBeDefined();
+    const { expires_in: _expiresIn, refresh_token: _refresh, ...oauthAppToken } = token("reconnect");
+    io.tokenPayload = oauthAppToken;
+    const { state } = await begin(fixture, expiring.id);
+    const reconnected = await complete(fixture, state);
+    const saved = await readConnection(reconnected.connectionId);
+    expect((saved.config.oauth as Record<string, unknown>).expiresAt).toBeNull();
+    expect(saved.credentialSecretRefs.some((ref) => ref.configPath === "oauth.refresh_token")).toBe(false);
+    const [oldSecret] = await db.select().from(companySecrets).where(eq(companySecrets.id, oldRefresh!.secretId));
+    expect(oldSecret.status).toBe("deleted");
+    const before = tokenCalls().length;
+    await fixture.service.checkHealth(saved.id, fixture.actor);
+    expect(tokenCalls()).toHaveLength(before);
+    await expectNoAgentEffects(fixture.companyId);
+  });
+
   it("runs the actual setup/connect/callback routes with finite expiry, PKCE and private token storage", async () => {
     const fixture = await seed(); const app = routeApp(routeActor(fixture));
     const setup = await request(app).get(`/api/companies/${fixture.companyId}/tools/github/oauth/setup`).expect(200);
