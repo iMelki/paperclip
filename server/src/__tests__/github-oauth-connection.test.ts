@@ -14,6 +14,8 @@ import { toolAccessService } from "../services/tool-access.js";
 import { toolAccessRoutes } from "../routes/tool-access.js";
 import { errorHandler } from "../middleware/index.js";
 import { logger } from "../middleware/logger.js";
+import { createHttpLogger } from "../middleware/http-logger.js";
+import pino from "pino";
 import { githubOAuthToolDescriptors } from "../services/github-oauth-transport.js";
 import { BOARD_IMPORT_FIXTURE_SETUP_TIMEOUT_MS, startBoardImportFixtureDatabase } from "./helpers/board-import-fixture-db.js";
 
@@ -31,9 +33,9 @@ type Fixture = { companyId: string; secretId: string; actor: Actor; service: Ser
 const CALLBACK = "https://paperclip.fixture.test:5113/api/tools/oauth/callback";
 const USER = { id: 42, login: "synthetic-operator", type: "User" };
 const token = (suffix = "initial") => ({ access_token: `synthetic-access-${suffix}`,
-  refresh_token: `synthetic-refresh-${suffix}`, expires_in: 28800, token_type: "bearer", scope: "repo,project" });
+  refresh_token: `synthetic-refresh-${suffix}`, expires_in: 28800, token_type: "bearer", scope: "read:project,public_repo" });
 const hash = (value: string) => createHash("sha256").update(value).digest("hex");
-const json = (payload: unknown, scopes: string | null = "repo,project") => Response.json(payload, {
+const json = (payload: unknown, scopes: string | null = "read:project,public_repo") => Response.json(payload, {
   headers: scopes === null ? {} : { "X-OAuth-Scopes": scopes },
 });
 function deferred<T>() {
@@ -43,13 +45,13 @@ function deferred<T>() {
 }
 const io = {
   tokenPayload: token() as Record<string, unknown>, userPayload: USER as unknown,
-  currentScopes: "repo,project" as string | null,
+  currentScopes: "read:project,public_repo" as string | null,
   tokenHandler: null as null | ((body: URLSearchParams) => Promise<Response>),
   userHandler: null as null | (() => Promise<Response>),
   calls: [] as Array<{ url: string; method: string; body: unknown }>,
 };
 function resetTransport() {
-  io.tokenPayload = token(); io.userPayload = USER; io.currentScopes = "repo,project";
+  io.tokenPayload = token(); io.userPayload = USER; io.currentScopes = "read:project,public_repo";
   io.tokenHandler = null; io.userHandler = null; io.calls = [];
 }
 function tokenCalls() { return io.calls.filter((call) => call.url === "https://github.com/login/oauth/access_token"); }
@@ -221,7 +223,7 @@ describe("native GitHub OAuth service and routes (mandatory private PostgreSQL)"
     const saved = await readConnection(connected.body.connectionId);
     const oauth = saved.config.oauth as Record<string, unknown>;
     expect(Date.parse(String(oauth.expiresAt)) - Date.now()).toBeGreaterThan(28_700_000);
-    expect(saved.config.providerMetadata).toMatchObject({ githubOAuth: { accountId: 42, login: USER.login, grantedScopes: ["repo", "project"] } });
+    expect(saved.config.providerMetadata).toMatchObject({ githubOAuth: { accountId: 42, login: USER.login, grantedScopes: ["read:project", "public_repo"] } });
     expect(JSON.stringify(callback.body)).not.toContain("synthetic-access-initial");
     expect(callback.body.catalog).toHaveLength(githubOAuthToolDescriptors().length);
     expect(callback.body.catalog.every((entry: { status: string }) => entry.status === "quarantined")).toBe(true);
@@ -250,10 +252,32 @@ describe("native GitHub OAuth service and routes (mandatory private PostgreSQL)"
     expect(new URL(begun.started.authorizationUrl).searchParams.get("scope")).toBe("repo project offline_access");
     io.tokenPayload.scope = "read:project,public_repo"; io.currentScopes = "read:project,public_repo";
     await expect(complete(fixture, begun.state)).rejects.toMatchObject({ status: 422 });
-    resetTransport(); const retry = await begin(fixture, connected.connectionId);
+    resetTransport(); io.tokenPayload.scope = "repo,project"; io.currentScopes = "repo,project";
+    const retry = await begin(fixture, connected.connectionId);
     await complete(fixture, retry.state);
     expect((await readConnection(connected.connectionId)).config.providerMetadata)
       .toMatchObject({ githubOAuth: { grantedScopes: ["repo", "project"] } });
+    await expectNoAgentEffects(fixture.companyId);
+  });
+
+  it("refuses a default connection whose grant is wider than chosen with a 422 and stores nothing", async () => {
+    const fixture = await seed(); const app = routeApp(routeActor(fixture));
+    const connected = await request(app).post(`/api/companies/${fixture.companyId}/tools/apps/connect`).send(connectInput(fixture)).expect(201);
+    expect((await readConnection(connected.body.connectionId)).config.githubPrivateRepoAccess).toBe(false);
+    const before = await readConnection(connected.body.connectionId);
+    // An earlier, broader consent makes GitHub return full repo access for a public-only request.
+    io.tokenPayload.scope = "repo,project"; io.currentScopes = "repo,project";
+    const consent = new URL(connected.body.auth.startUrl);
+    const refused = await request(app).get("/api/tools/oauth/callback").set("Accept", "application/json")
+      .query({ state: consent.searchParams.get("state"), code: "synthetic-code" }).expect(422);
+    expect(refused.body.code).toBe("github_oauth_scopes_too_broad");
+    expect(refused.body.error).toContain("Include private repositories");
+    expect(refused.body.error).toContain("revoke");
+    expect(JSON.stringify(refused.body)).not.toContain("synthetic-access-initial");
+    const after = await readConnection(connected.body.connectionId);
+    expect(after.config.providerMetadata ?? null).toEqual(before.config.providerMetadata ?? null);
+    expect(after.credentialSecretRefs.filter((ref) => ref.configPath === "oauth.access_token")).toEqual([]);
+    expect(after.status).toBe(before.status);
     await expectNoAgentEffects(fixture.companyId);
   });
 
@@ -261,19 +285,33 @@ describe("native GitHub OAuth service and routes (mandatory private PostgreSQL)"
     const levels = ["trace", "debug", "info", "warn", "error", "fatal"] as const;
     const spies = [...levels.map((level) => vi.spyOn(logger, level)),
       ...(["log", "info", "warn", "error", "debug"] as const).map((method) => vi.spyOn(console, method).mockImplementation(() => {}))];
+    // The production HTTP logger factory on a capturing pino sink, so the 422 entry is observed, not assumed.
+    const lines: string[] = [];
+    const sink = pino({ level: "trace" }, { write: (line: string) => { lines.push(line); } });
     try {
-      const fixture = await seed(); const app = routeApp(routeActor(fixture));
+      const fixture = await seed();
+      const app = express(); app.use(express.json()); app.use(createHttpLogger(sink));
+      app.use((req, _res, next) => { req.actor = routeActor(fixture); next(); });
+      app.use("/api", toolAccessRoutes(db)); app.use(errorHandler);
       const connected = await request(app).post(`/api/companies/${fixture.companyId}/tools/apps/connect`).send(connectInput(fixture)).expect(201);
       const consent = new URL(connected.body.auth.startUrl);
       await request(app).get("/api/tools/oauth/callback").set("Accept", "application/json")
         .query({ state: consent.searchParams.get("state"), code: "synthetic-code" }).expect(200);
-      // A failing callback goes through the real error handler, which logs.
+      // A failing callback goes through the real error handler and HTTP logger.
       resetTransport(); io.userPayload = { ...USER, id: 43 };
       const again = await fixture.service.startOAuth(fixture.companyId, connected.body.connectionId, { redirectUri: CALLBACK, actor: fixture.actor });
       await request(app).get("/api/tools/oauth/callback").set("Accept", "application/json")
         .query({ state: new URL(again.authorizationUrl).searchParams.get("state"), code: "synthetic-code" }).expect(422);
+      await vi.waitFor(() => {
+        const entries = lines.map((line) => JSON.parse(line) as { level: number; msg?: string; res?: { statusCode?: number } });
+        const failed = entries.filter((entry) => entry.res?.statusCode === 422);
+        expect(failed).toHaveLength(1);
+        expect(failed[0].level).toBe(40); // pino "warn"
+        expect(failed[0].msg).toContain("/api/tools/oauth/callback 422");
+      });
       const logged = JSON.stringify(spies.flatMap((spy) => spy.mock.calls), (_key, value) =>
-        value instanceof Error ? { message: value.message, stack: value.stack } : value);
+        value instanceof Error ? { message: value.message, stack: value.stack } : value) + lines.join("\n");
+      expect(lines.length).toBeGreaterThanOrEqual(3);
       for (const secret of ["synthetic-access-initial", "synthetic-refresh-initial", "synthetic-client-secret"]) {
         expect(logged).not.toContain(secret);
       }

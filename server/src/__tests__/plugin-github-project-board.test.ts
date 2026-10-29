@@ -346,10 +346,39 @@ describe.skipIf(WINDOWS_NATIVE_FIXTURE_MISSING)(
     expect(listed.connections.map(connection => connection.connectionId)).toEqual([setup.connectionId]);
     expect(pageReader).not.toHaveBeenCalled(); expect(await state(setup)).toEqual([]); expect(await state(foreign)).toEqual([]);
   });
+  it("refuses company B's user reading, binding or importing company A's board and issues", async () => {
+    const a = await seed(), b = await seed();
+    await binding(a); pageReader.mockClear();
+    const aState = await state(a), aIssues = await db.select().from(issues).where(eq(issues.companyId, a.companyId));
+    const bActor = b.context.invocationScope.actor;
+    // B's user claiming company A's invocation scope (not a member of A).
+    const asB_inA = { invocationScope: { companyId: a.companyId, actor: bActor } };
+    const page = { ownerType: "user", owner: "example", number: 12, first: 50, after: null };
+    const attempts: Array<[Record<string, unknown>, unknown]> = [
+      [{ ...a.scope, op: "listProjectConnections" }, asB_inA],
+      [{ ...a.scope, op: "listProjectConnections" }, b.context],
+      [{ ...a.scope, op: "readProjectPage", page }, asB_inA],
+      [{ ...a.scope, op: "readProjectPage", page }, b.context],
+      [{ ...a.bind, op: "bindProjectBoard" }, asB_inA],
+      [{ ...b.bind, connectionId: a.connectionId, op: "bindProjectBoard" }, b.context],
+      [{ companyId: a.companyId, op: "begin", intent: importIntent(a) }, asB_inA],
+      [{ companyId: a.companyId, op: "begin", intent: importIntent(a) }, b.context],
+      [{ companyId: b.companyId, op: "begin", intent: importIntent(a) }, b.context],
+      [{ companyId: a.companyId, op: "commit", intent: importIntent(a) }, asB_inA],
+    ];
+    for (const [params, context] of attempts) {
+      await expect(a.rpc["issues.importedBoard"](params as never, context as never)).rejects.toThrow();
+    }
+    expect(pageReader).not.toHaveBeenCalled();
+    expect(await state(a)).toEqual(aState); expect(await state(b)).toEqual([]);
+    expect(await db.select().from(issues).where(eq(issues.companyId, a.companyId))).toEqual(aIssues);
+    expect(await db.select().from(issues).where(eq(issues.companyId, b.companyId))).toEqual([]);
+  });
   it("accepts the least-access default grant and requires full repo/project only after an explicit private opt-in", async () => {
     const setup = await seed();
-    const withScopes = async (grantedScopes: string[], privateOptIn: boolean) => {
-      const config = { ...setup.config, ...(privateOptIn ? { githubPrivateRepoAccess: true } : {}),
+    const withScopes = async (grantedScopes: string[], privateOptIn: boolean | undefined) => {
+      const config = { ...setup.config, ...(privateOptIn === undefined ? {} : { githubPrivateRepoAccess: privateOptIn }),
+        oauth: { ...setup.config.oauth, scopes: privateOptIn === undefined ? ["repo", "project", "offline_access"] : setup.config.oauth.scopes },
         providerMetadata: { githubOAuth: { accountId: 42, login: "example", grantedScopes, checkedAt: "2026-10-13T00:00:00Z" } } };
       await db.update(toolConnections).set({ config, transportConfig: config }).where(eq(toolConnections.id, setup.connectionId));
       const listed = await setup.rpc["issues.importedBoard"]({ ...setup.scope, op: "listProjectConnections" }, setup.context) as {
@@ -357,7 +386,10 @@ describe.skipIf(WINDOWS_NATIVE_FIXTURE_MISSING)(
       return listed.connections.length;
     };
     expect(await withScopes(["read:project", "public_repo"], false)).toBe(1);
-    expect(await withScopes(["repo", "project"], false)).toBe(1); // broader grant still satisfies the default tier
+    expect(await withScopes(["repo", "project"], false)).toBe(0); // wider than the chosen public tier: refused
+    expect(await withScopes(["read:project", "public_repo", "repo"], false)).toBe(0);
+    // Legacy connection saved before the flag existed, with full repo scope: treated as opted in.
+    expect(await withScopes(["repo", "project"], undefined)).toBe(1);
     expect(await withScopes(["public_repo"], false)).toBe(0);
     expect(await withScopes(["read:project", "public_repo"], true)).toBe(0);
     expect(await withScopes(["repo", "read:project"], true)).toBe(0);

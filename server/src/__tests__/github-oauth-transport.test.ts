@@ -14,7 +14,7 @@ import type { GitHubGuardedFetch } from "../services/github-oauth-transport.js";
 const headers = { Authorization: "Bearer synthetic-access" };
 const user = { id: 42, login: "test-operator", type: "User" };
 const authorization = () => ({ accessToken: "synthetic-access", scope: "repo,project",
-  expiresIn: 28800, refreshToken: "synthetic-refresh", expectedLogin: "test-operator", expectedAccountId: 42 });
+  expiresIn: 28800, refreshToken: "synthetic-refresh", expectedLogin: "test-operator", expectedAccountId: 42, privateRepoAccess: true });
 const config = () => ({ sourceTemplateKey: "github", serverUrl: "https://api.github.com", methodKey: "rest-oauth", oauth: {
   provider: "github", authorizationUrl: "https://github.com/login/oauth/authorize",
   tokenUrl: "https://github.com/login/oauth/access_token",
@@ -93,7 +93,7 @@ describe("fixed GitHub authenticated-account proof", () => {
   it("provides health/reconnect account verification without requiring refresh-token access", async () => {
     const io = harness();
     const facts = await verifyGitHubOAuthAccount({ headers: { ...headers, Host: "evil.test", Cookie: "synthetic-cookie" },
-      scope: "repo project", expectedLogin: "TEST-OPERATOR", expectedAccountId: 42 }, io.fetch);
+      scope: "repo project", expectedLogin: "TEST-OPERATOR", expectedAccountId: 42, privateRepoAccess: true }, io.fetch);
     expect(facts.accountId).toBe(42);
     expect(io.calls[0].init.headers).not.toHaveProperty("Host");
     expect(io.calls[0].init.headers).not.toHaveProperty("Cookie");
@@ -126,8 +126,20 @@ describe("fixed GitHub authenticated-account proof", () => {
     await expect(verifyGitHubOAuthAuthorization({ ...authorization(), scope: "read:project" }, harness().fetch))
       .rejects.toThrow("github_oauth_scopes_insufficient");
     const io = harness(() => Response.json(user, { headers: { "X-OAuth-Scopes": "read:project, public_repo" } }));
-    const facts = await verifyGitHubOAuthAuthorization({ ...authorization(), scope: "read:project,public_repo" }, io.fetch);
+    const facts = await verifyGitHubOAuthAuthorization({ ...authorization(), scope: "read:project,public_repo", privateRepoAccess: false }, io.fetch);
     expect(facts.grantedScopes).toEqual(["read:project", "public_repo"]);
+  });
+
+  it("refuses a public-only connection whose grant is wider than chosen, with an actionable 422", async () => {
+    for (const [token, current] of [["repo,project", "repo,project"], ["read:project,public_repo", "read:project,public_repo,repo"]]) {
+      const io = harness(() => Response.json(user, { headers: { "X-OAuth-Scopes": current } }));
+      const refused = await verifyGitHubOAuthAuthorization({ ...authorization(), scope: token, privateRepoAccess: false }, io.fetch)
+        .then(() => null, (error: unknown) => error as { status: number; code: string; message: string });
+      expect(refused).toMatchObject({ status: 422, code: "github_oauth_scopes_too_broad" });
+      expect(refused!.message).toContain("Include private repositories");
+      expect(refused!.message).toContain("revoke");
+      expect(refused!.message).not.toContain("synthetic-access");
+    }
   });
 
   it("derives current grant facts from GET/user header and retains original token-response scope separately", async () => {
