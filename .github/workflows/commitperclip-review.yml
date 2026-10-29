@@ -1,11 +1,12 @@
 name: commitperclip PR Review
 
 on:
-  pull_request_target:
+  pull_request:
     types: [opened, synchronize, reopened]
 
-# Always runs from base branch context — never executes PR code.
-# pull_request_target gives access to secrets for untrusted fork PRs.
+# Runs only for same-repository pull requests on the rf-paperclip runner.
+# The checkout uses the trusted PR base commit, never the PR head.
+# The workflow definition itself comes from the PR under pull_request.
 
 permissions:
   pull-requests: write
@@ -15,13 +16,22 @@ permissions:
 
 jobs:
   review:
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [rf-paperclip]
+    # Budget includes up to 30 minutes in the rf-slot job-started hook.
+    timeout-minutes: 35
     steps:
+      - name: Refuse Dependabot PRs (read-only token, no gate signal)
+        if: ${{ github.event.pull_request.user.login == 'dependabot[bot]' || github.actor == 'dependabot[bot]' }}
+        run: |
+          echo "::error::Dependabot PR: the read-only token and missing secrets cannot record a security gate result. A maintainer must review this dependency PR by hand."
+          exit 1
+
       - name: Checkout base branch (never PR code)
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           ref: ${{ github.event.pull_request.base.sha }}
+          persist-credentials: false
 
       - name: Dependency Review
         if: ${{ !github.event.repository.fork }}

@@ -13,6 +13,25 @@ test("the real PR workflow covers master and dev without a push event", () => {
   assert.deepEqual(validatePrWorkflowTrigger(realWorkflow), []);
 });
 
+test("required jobs accept only the approved same-repository guard and runner", () => {
+  const guard = "    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository";
+  for (const job of ["secret-scan", "policy"]) {
+    const start = realWorkflow.indexOf(`  ${job}:\n`);
+    const guardAt = realWorkflow.indexOf(guard, start);
+    assert.ok(guardAt > start);
+    for (const replacement of ["", "    if: false", "    if: true", `${guard} || true`, `${guard}\n    if: false`]) {
+      const broken = realWorkflow.slice(0, guardAt) + replacement + realWorkflow.slice(guardAt + guard.length);
+      assert.ok(validatePrWorkflowTrigger(broken).some((failure) => failure.startsWith(`${job} job`)), replacement);
+    }
+    const runnerAt = realWorkflow.indexOf("    runs-on: [rf-paperclip]", start);
+    assert.ok(runnerAt > start);
+    for (const runner of ["ubuntu-latest", "self-hosted", "[self-hosted]", "[rf-paperclip, unapproved]"]) {
+      const broken = realWorkflow.slice(0, runnerAt) + `    runs-on: ${runner}` + realWorkflow.slice(runnerAt + "    runs-on: [rf-paperclip]".length);
+      assert.ok(validatePrWorkflowTrigger(broken).includes(`${job} job must run exactly once on rf-paperclip`), runner);
+    }
+  }
+});
+
 test("the policy job must run the stable Vitest runner regression suite", () => {
   const broken = realWorkflow.replace(
     "./scripts/__tests__/run-vitest-stable-shard.test.mjs",
@@ -211,7 +230,7 @@ test("job defaults, continue-on-error, custom shells, and missing validations fa
     const broken = realWorkflow.replace(/^  policy:\s*$/m, `  policy:\n${maskingConfig}`);
     assert.ok(
       validatePrWorkflowTrigger(broken).includes(
-        "policy job must run unconditionally without custom defaults",
+        "policy job must not mask failures or set custom defaults",
       ),
     );
   }
@@ -307,18 +326,18 @@ test("global and required-job execution context cannot replace the validated too
   }
 
   const selfHosted = realWorkflow.replace(
-    /^(  secret-scan:[\s\S]*?)^    runs-on: ubuntu-latest$/m,
+    /^(  secret-scan:[\s\S]*?)^    runs-on: \[rf-paperclip\]$/m,
     "$1    runs-on: self-hosted",
   );
   assert.notEqual(selfHosted, realWorkflow, "negative fixture must replace the secret-scan runner");
   assert.ok(
     validatePrWorkflowTrigger(selfHosted).includes(
-      "secret-scan job must run exactly once on ubuntu-latest",
+      "secret-scan job must run exactly once on rf-paperclip",
     ),
   );
 
   const duplicateRunner = realWorkflow.replace(
-    /^(  secret-scan:[\s\S]*?^    runs-on: ubuntu-latest)$/m,
+    /^(  secret-scan:[\s\S]*?^    runs-on: \[rf-paperclip\])$/m,
     "$1\n    runs-on: self-hosted",
   );
   assert.notEqual(duplicateRunner, realWorkflow, "negative fixture must duplicate a job key");
