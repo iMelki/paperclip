@@ -281,6 +281,54 @@ describe("native GitHub OAuth service and routes (mandatory private PostgreSQL)"
     await expectNoAgentEffects(fixture.companyId);
   });
 
+  it("keeps GitHub private-repo access and OAuth state across a generic PATCH and refuses changing them there", async () => {
+    resetTransport(); const fixture = await seed(); const app = routeApp(routeActor(fixture));
+    const connected = await fixture.service.connectGalleryApp(fixture.companyId, connectInput(fixture), fixture.actor);
+    // Least access, but saved scopes include full repo: dropping the flag would re-derive private access.
+    const seeded = await changeConnection(await readConnection(connected.connectionId), { ...(await readConnection(connected.connectionId)).config,
+      githubPrivateRepoAccess: false, oauth: { ...((await readConnection(connected.connectionId)).config.oauth as Record<string, unknown>),
+        scopes: ["repo", "project", "offline_access"] }, providerMetadata: { githubOAuth: { grantedScopes: ["repo", "project"] } } });
+    await request(app).patch(`/api/tool-connections/${seeded.id}`).send({ config: { expectedGitHubLogin: "x" } }).expect(200);
+    const kept = await readConnection(seeded.id);
+    expect(kept.config.expectedGitHubLogin).toBe("x");
+    expect(kept.config.githubPrivateRepoAccess).toBe(false);
+    expect(kept.config.oauth).toEqual(seeded.config.oauth); expect(kept.config.providerMetadata).toEqual(seeded.config.providerMetadata);
+    expect(kept.transportConfig.githubPrivateRepoAccess).toBe(false);
+    const begun = await begin(fixture, seeded.id);
+    expect(new URL(begun.started.authorizationUrl).searchParams.get("scope")).toBe("read:project public_repo offline_access");
+    const before = await readConnection(seeded.id);
+    for (const config of [{ githubPrivateRepoAccess: true }, { oauth: { scopes: ["repo", "project", "offline_access"] } },
+      { providerMetadata: { githubOAuth: { grantedScopes: ["repo"] } } }]) {
+      const refused = await request(app).patch(`/api/tool-connections/${seeded.id}`).send({ config }).expect(400);
+      expect(refused.body.error).toContain("reconnecting");
+      expect((await readConnection(seeded.id)).config).toEqual(before.config);
+    }
+  });
+
+  it("derives a legacy flagless connection's access from its saved scopes on reconnect", async () => {
+    for (const [scopes, expected] of [[["repo", "project", "offline_access"], "repo project offline_access"],
+      [["read:project", "public_repo", "offline_access"], "read:project public_repo offline_access"]] as const) {
+      resetTransport(); const fixture = await seed();
+      const connected = await fixture.service.connectGalleryApp(fixture.companyId, connectInput(fixture), fixture.actor);
+      const row = await readConnection(connected.connectionId);
+      const { githubPrivateRepoAccess: _flag, ...legacy } = row.config;
+      const saved = await changeConnection(row, { ...legacy, oauth: { ...(row.config.oauth as Record<string, unknown>), scopes: [...scopes] } });
+      expect("githubPrivateRepoAccess" in saved.config).toBe(false);
+      const begun = await begin(fixture, saved.id);
+      expect(new URL(begun.started.authorizationUrl).searchParams.get("scope")).toBe(expected);
+    }
+  });
+
+  it("leaves a non-GitHub connection PATCH unchanged", async () => {
+    const fixture = await seed(); const app = routeApp(routeActor(fixture));
+    const connected = await fixture.service.connectGalleryApp(fixture.companyId, connectInput(fixture), fixture.actor);
+    const row = await readConnection(connected.connectionId);
+    const other = await changeConnection(row, { ...row.config, methodKey: "synthetic-other", oauth: { scopes: ["a"] } });
+    const next = { ...other.config, oauth: { scopes: ["b"] }, githubPrivateRepoAccess: true, note: "n" };
+    await request(app).patch(`/api/tool-connections/${other.id}`).send({ config: next }).expect(200);
+    expect((await readConnection(other.id)).config).toEqual(next);
+  });
+
   it("never writes access, refresh or client-secret values to the server logger or console", async () => {
     const levels = ["trace", "debug", "info", "warn", "error", "fatal"] as const;
     const spies = [...levels.map((level) => vi.spyOn(logger, level)),

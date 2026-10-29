@@ -7286,8 +7286,32 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
 
     updateConnection: async (connectionId: string, input: UpdateToolConnection): Promise<ToolConnection> => {
       const existing = await getConnectionRow(connectionId);
-      const config = normalizeGoogleSheetsConnectionConfig(input.config ?? input.transportConfig ?? existing.config);
-      const transportConfig = isGoogleSheetsConnectionConfig(config) ? config : input.transportConfig ?? config;
+      let config = normalizeGoogleSheetsConnectionConfig(input.config ?? input.transportConfig ?? existing.config);
+      let transportConfig = isGoogleSheetsConnectionConfig(config) ? config : input.transportConfig ?? config;
+      if (existing.config.methodKey === GITHUB_OAUTH_METHOD_KEY) {
+        // Private-repository access and OAuth state are set only by the connect/reconnect flow.
+        // A generic update can neither drop them (which would re-derive access from legacy scopes)
+        // nor widen them (which would skip the create-time opt-in).
+        for (const supplied of [input.config, input.transportConfig]) {
+          if (!supplied || typeof supplied !== "object") continue;
+          const record = supplied as Record<string, unknown>;
+          if (("githubPrivateRepoAccess" in record && record.githubPrivateRepoAccess !== existing.config.githubPrivateRepoAccess)
+            || "oauth" in record || "providerMetadata" in record) {
+            throw badRequest("GitHub private repository access and OAuth settings cannot be changed here. Change private repository access by reconnecting.",
+              { code: "github_oauth_config_immutable" });
+          }
+        }
+        const carry = (value: Record<string, unknown>) => {
+          const next: Record<string, unknown> = { ...value };
+          for (const key of ["githubPrivateRepoAccess", "oauth", "providerMetadata"] as const) {
+            if (key in existing.config) next[key] = existing.config[key];
+            else delete next[key];
+          }
+          return next;
+        };
+        config = carry(config);
+        transportConfig = carry(transportConfig);
+      }
       if (existing.transport === "mcp_remote") {
         assertRemoteMcpHeaderPolicy(config, transportConfig);
         await assertRemoteEndpointAllowed(config);
