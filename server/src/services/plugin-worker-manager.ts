@@ -18,7 +18,7 @@
  * @see PLUGIN_SPEC.md §13 — Host-Worker Protocol
  */
 
-import { fork, type ChildProcess } from "node:child_process";
+import { fork, type ChildProcess, type ForkOptions, type SpawnOptions } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { createInterface, type Interface as ReadlineInterface } from "node:readline";
@@ -772,6 +772,17 @@ export function createPluginWorkerHandle(
   ): PluginInvocationScope | null {
     if (!isRecord(params)) return null;
 
+    // Preserve the authenticated action principal even when the route also supplies
+    // a top-level companyId. Nested calls echo only an opaque invocation id.
+    if (method === "performAction" && isRecord(params.actorContext)) {
+      const companyId = readNonEmptyString(params.actorContext.companyId);
+      const directCompanyId = readNonEmptyString(params.companyId);
+      if (!companyId || (directCompanyId && directCompanyId !== companyId)) return null;
+      const type = params.actorContext.type;
+      if (type !== "user" && type !== "agent" && type !== "system") return null;
+      return { companyId, actor: { type, userId: readNonEmptyString(params.actorContext.userId) } };
+    }
+
     const directCompanyId = readNonEmptyString(params.companyId);
     if (directCompanyId) return { companyId: directCompanyId };
 
@@ -786,11 +797,6 @@ export function createPluginWorkerHandle(
     // worker-controlled settings or company lists.
     if (method === "runJob" && proactiveCompanyScopes.size === 1) {
       return { companyId: proactiveCompanyScopes.values().next().value! };
-    }
-
-    if (method === "performAction" && isRecord(params.actorContext)) {
-      const companyId = readNonEmptyString(params.actorContext.companyId);
-      return companyId ? { companyId } : null;
     }
 
     if (method === "executeTool" && isRecord(params.runContext)) {
@@ -1248,13 +1254,16 @@ export function createPluginWorkerHandle(
       TZ: process.env.TZ ?? "UTC",
     };
 
-    const child = fork(options.entrypointPath, [], {
+    // Node supports this fork option; the locked Node typings omit it from ForkOptions.
+    const workerOptions: ForkOptions & Pick<SpawnOptions, "windowsHide"> = {
       stdio: ["pipe", "pipe", "pipe", "ipc"],
       execArgv: options.execArgv ?? [],
       env: workerEnv,
+      windowsHide: true,
       // Don't let the child keep the parent alive
       detached: false,
-    });
+    };
+    const child = fork(options.entrypointPath, [], workerOptions);
 
     return child;
   }

@@ -22,6 +22,7 @@ import {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
+import { BOARD_IMPORT_FIXTURE_SETUP_TIMEOUT_MS, startBoardImportFixtureDatabase } from "./helpers/board-import-fixture-db.js";
 
 const mockLifecycle = vi.hoisted(() => ({
   load: vi.fn(),
@@ -43,7 +44,11 @@ vi.mock("../services/live-events.js", () => ({
   publishGlobalLiveEvent: vi.fn(),
 }));
 
-const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
+// Native Windows uses the same explicitly configured, outer-Job-owned fixture as board tests.
+// Do not launch the generic vendor support probe before that custody is established.
+const embeddedPostgresSupport: Awaited<ReturnType<typeof getEmbeddedPostgresTestSupport>> = process.platform === "win32"
+  ? { supported: true }
+  : await getEmbeddedPostgresTestSupport();
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe.sequential : describe.skip;
 
 if (!embeddedPostgresSupport.supported) {
@@ -148,18 +153,20 @@ async function createInstallApp(db: ReturnType<typeof createDb>) {
 
 describeEmbeddedPostgres("plugin install route security floor", () => {
   let db!: ReturnType<typeof createDb>;
-  let tempDb: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>> | null = null;
+  let tempDb: { connectionString: string; cleanup(): Promise<void> } | null = null;
   const cleanupPaths = new Set<string>();
   const originalManagedConfig = process.env["PAPERCLIP_MANAGED_CONFIG"];
 
   beforeAll(async () => {
-    tempDb = await startEmbeddedPostgresTestDatabase("paperclip-plugin-install-guard-");
+    tempDb = process.platform === "win32"
+      ? await startBoardImportFixtureDatabase()
+      : await startEmbeddedPostgresTestDatabase("paperclip-plugin-install-guard-");
     db = createDb(tempDb.connectionString);
-  }, EMBEDDED_POSTGRES_TEST_SETUP_TIMEOUT_MS);
+  }, process.platform === "win32" ? BOARD_IMPORT_FIXTURE_SETUP_TIMEOUT_MS : EMBEDDED_POSTGRES_TEST_SETUP_TIMEOUT_MS);
 
   afterEach(async () => {
     vi.clearAllMocks();
-    await db.delete(plugins);
+    if (db) await db.delete(plugins);
     for (const cleanupPath of cleanupPaths) {
       await rm(cleanupPath, { recursive: true, force: true });
     }
@@ -172,7 +179,7 @@ describeEmbeddedPostgres("plugin install route security floor", () => {
   });
 
   afterAll(async () => {
-    await tempDb?.cleanup();
+    try { await db?.$client.end({ timeout: 5 }); } finally { await tempDb?.cleanup(); }
   }, 30_000);
 
   describe("cloud-managed instances", () => {
@@ -354,6 +361,88 @@ describeEmbeddedPostgres("plugin install route security floor", () => {
       expect(res.body.packagePath).toBe(await realpath(fixture.packageRoot));
       expect(mockLifecycle.load).toHaveBeenCalledTimes(1);
     }, 30_000);
+  });
+
+  describe("explicit deferred installation and replacement", () => {
+    it.each([null, "false", 0, {}])("rejects nonboolean activation %j before install", async (activate) => {
+      delete process.env["PAPERCLIP_MANAGED_CONFIG"];
+      const app = await createInstallApp(db);
+      const res = await request(app).post("/api/plugins/install")
+        .send({ packageName: "unused", activate });
+      expect(res.status).toBe(400);
+      expect(res.body.error).toContain("activate must be a boolean");
+      expect(await db.select().from(plugins)).toEqual([]);
+      expect(mockLifecycle.load).not.toHaveBeenCalled();
+    });
+
+    it("persists a local install without loading its runtime", async () => {
+      delete process.env["PAPERCLIP_MANAGED_CONFIG"];
+      const dir = await mkdtemp(path.join(os.tmpdir(), "guard-deferred-"));
+      cleanupPaths.add(dir);
+      const fixture = await createBuiltPluginFixture(dir, "deferred");
+      const app = await createInstallApp(db);
+      const res = await request(app).post("/api/plugins/install")
+        .send({ packageName: fixture.packageRoot, isLocalPath: true, activate: false });
+      expect(res.status).toBe(200);
+      expect(res.body).toMatchObject({ pluginKey: fixture.pluginKey, status: "installed" });
+      expect(mockLifecycle.load).not.toHaveBeenCalled();
+      expect(await db.select().from(plugins)).toHaveLength(1);
+    }, 30_000);
+
+    it("cannot bypass the cloud source floor by deferring activation", async () => {
+      process.env["PAPERCLIP_MANAGED_CONFIG"] = CLOUD_MANAGED_CONFIG;
+      const app = await createInstallApp(db);
+      const res = await request(app).post("/api/plugins/install")
+        .send({ packageName: "unused", activate: false });
+      expect(res.status).toBe(403);
+      expect(mockLifecycle.load).not.toHaveBeenCalled();
+    });
+
+    it.each([null, "false", 0, {}])("rejects nonboolean upgrade activation %j", async (activate) => {
+      const app = await createInstallApp(db);
+      const res = await request(app).post("/api/plugins/missing/upgrade").send({ activate });
+      expect(res.status).toBe(400);
+      expect(res.body.error).toContain("activate must be a boolean");
+      expect(mockLifecycle.upgrade).not.toHaveBeenCalled();
+    });
+
+    it.each([null, "", "  ", 0, {}])("rejects malformed upgrade localPath %j", async (localPath) => {
+      const app = await createInstallApp(db);
+      const res = await request(app).post("/api/plugins/missing/upgrade")
+        .send({ localPath, activate: false });
+      expect(res.status).toBe(400);
+      expect(res.body.error).toContain("localPath must be a nonempty string");
+      expect(mockLifecycle.upgrade).not.toHaveBeenCalled();
+    });
+
+    it("forwards the canonical replacement path and explicit hold without reinstalling identity", async () => {
+      delete process.env["PAPERCLIP_MANAGED_CONFIG"];
+      const dir = await mkdtemp(path.join(os.tmpdir(), "guard-upgrade-"));
+      cleanupPaths.add(dir);
+      const fixture = await createBuiltPluginFixture(dir, "replace");
+      const app = await createInstallApp(db);
+      const installed = await request(app).post("/api/plugins/install")
+        .send({ packageName: fixture.packageRoot, isLocalPath: true, activate: false });
+      expect(installed.status).toBe(200);
+      mockLifecycle.upgrade.mockResolvedValueOnce({ ...installed.body, status: "upgrade_pending" });
+      const res = await request(app).post(`/api/plugins/${installed.body.id}/upgrade`)
+        .send({ localPath: path.join(fixture.packageRoot, "."), activate: false });
+      expect(res.status).toBe(200);
+      expect(mockLifecycle.upgrade).toHaveBeenCalledWith(installed.body.id, undefined, {
+        localPath: await realpath(fixture.packageRoot), activate: false,
+      });
+      expect(await db.select().from(plugins)).toHaveLength(1);
+      expect(mockLifecycle.load).not.toHaveBeenCalled();
+    }, 30_000);
+
+    it("rejects a deferred local upgrade outside the cloud bundled root before lifecycle mutation", async () => {
+      process.env["PAPERCLIP_MANAGED_CONFIG"] = CLOUD_MANAGED_CONFIG;
+      const app = await createInstallApp(db);
+      const res = await request(app).post("/api/plugins/missing/upgrade")
+        .send({ localPath: path.join(REPO_ROOT, "server"), activate: false });
+      expect(res.status).toBe(403);
+      expect(mockLifecycle.upgrade).not.toHaveBeenCalled();
+    });
   });
 
   describe("self-hosted npm installs (behavior unchanged)", () => {

@@ -1,13 +1,15 @@
 import { useEffect, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Link2, Search } from "lucide-react";
-import { useNavigate } from "@/lib/router";
+import { Link, useNavigate } from "@/lib/router";
 import { useCompany } from "@/context/CompanyContext";
 import { useBreadcrumbs } from "@/context/BreadcrumbContext";
 import { queryKeys } from "@/lib/queryKeys";
 import { toolsApi } from "@/api/tools";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Button } from "@/components/ui/button";
 import { AppLogo } from "./AppLogo";
+import { appSourceConnectHref } from "./app-connect-policy";
 import {
   appApplicationSourceSlug,
   appDefinitionDescription,
@@ -27,6 +29,7 @@ import {
 
 function connectHrefFor(entry: AppGalleryDisplayEntry): string | null {
   const slug = appDefinitionSlug(entry);
+  if (slug === "github") return appSourceConnectHref("github");
   if (slug === "notion") return NOTION_CONNECT_HREF;
   if (slug === "zapier") return ZAPIER_CONNECT_HREF;
   return null;
@@ -140,6 +143,10 @@ export function Browse() {
         <p className="mt-1 text-sm text-muted-foreground">
           Choose an app or connect your own MCP server.
         </p>
+        {/* Navigation, so it is a link (keyboard, middle-click and screen readers treat it as one). */}
+        <Button className="mt-4" variant="outline" asChild>
+          <Link to={appSourceConnectHref("github")}>Connect GitHub OAuth</Link>
+        </Button>
       </header>
 
       <div className="relative max-w-md">

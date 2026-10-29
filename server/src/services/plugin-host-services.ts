@@ -34,6 +34,11 @@ import { agentService } from "./agents.js";
 import { projectService } from "./projects.js";
 import { executionWorkspaceService } from "./execution-workspaces.js";
 import { issueService } from "./issues.js";
+import { pluginImportedIssuesService } from "./plugin-imported-issues.js";
+import { BOARD_IMPORT_NAMESPACE, boardImportOrigins } from "./plugin-imported-issues-contract.js";
+import { GITHUB_PROJECT_BINDING_NAMESPACE, pluginGitHubProjectBoardService,
+  validateGitHubProjectBoardRequest } from "./plugin-github-project-board.js";
+import { toolAccessService } from "./tool-access.js";
 import { issueThreadInteractionService } from "./issue-thread-interactions.js";
 import { goalService } from "./goals.js";
 import { documentService } from "./documents.js";
@@ -738,6 +743,16 @@ export function buildHostServices(
   const projects = projectService(db);
   const executionWorkspaces = executionWorkspaceService(db);
   const issues = issueService(db);
+  const githubProjectBoards = pluginGitHubProjectBoardService(db, { pluginId, pluginKey },
+    toolAccessService(db).readVerifiedGitHubProjectPage);
+  const importedIssues = pluginImportedIssuesService(db, { pluginId, pluginKey },
+    async (executor, context, intent) => { await githubProjectBoards.assertImportBinding(context, intent, executor); });
+  const assertWorkerStateNamespace = (namespace: unknown) => {
+    if (typeof namespace === "string" && [BOARD_IMPORT_NAMESPACE, GITHUB_PROJECT_BINDING_NAMESPACE].includes(namespace.trim())) {
+      throw new Error("Native board import journal and OAuth binding are host-owned");
+    }
+  };
+  const boardOrigins = boardImportOrigins(pluginKey);
   const documents = documentService(db);
   const goals = goalService(db);
   const access = accessService(db);
@@ -1503,12 +1518,14 @@ export function buildHostServices(
 
     state: {
       async get(params) {
+        assertWorkerStateNamespace(params.namespace);
         return stateStore.get(pluginId, params.scopeKind as any, params.stateKey, {
           scopeId: params.scopeId,
           namespace: params.namespace,
         });
       },
       async set(params) {
+        assertWorkerStateNamespace(params.namespace);
         await stateStore.set(pluginId, {
           scopeKind: params.scopeKind as any,
           scopeId: params.scopeId,
@@ -1518,6 +1535,7 @@ export function buildHostServices(
         });
       },
       async delete(params) {
+        assertWorkerStateNamespace(params.namespace);
         await stateStore.delete(pluginId, params.scopeKind as any, params.stateKey, {
           scopeId: params.scopeId,
           namespace: params.namespace,
@@ -1912,6 +1930,36 @@ export function buildHostServices(
     },
 
     issues: {
+      async importedBoard(params, hostContext) {
+        if (["listProjectConnections", "readProjectBinding", "bindProjectBoard", "readProjectPage"].includes(params.op)) {
+          validateGitHubProjectBoardRequest(params);
+        }
+        const companyId = ensureCompanyId(params.companyId);
+        await ensurePluginAvailableForCompany(companyId);
+        const scope = hostContext?.invocationScope;
+        if (hostContext?.invalidInvocationScope || scope?.companyId !== companyId) {
+          throw new Error("Authenticated matching import company scope is required");
+        }
+        const context = { companyId, actor: scope.actor ?? { type: "system" as const } };
+        switch (params.op) {
+          case "capabilities": return importedIssues.capabilities(context);
+          case "sources": return importedIssues.getExcludedSources(context);
+          case "readTask": return importedIssues.readTask(context, { githubIssueNodeId: params.githubIssueNodeId });
+          case "readOperation": return importedIssues.readOperation(context, { operationId: params.operationId });
+          case "begin":
+            return importedIssues.begin(context, { intent: params.intent });
+          case "commit":
+            return importedIssues.commit(context, { intent: params.intent });
+          case "readReceipt": return importedIssues.readReceipt(context, { operationId: params.operationId });
+          case "listProjectConnections": return githubProjectBoards.listConnections(context, { companyId, projectId: params.projectId });
+          case "readProjectBinding": return githubProjectBoards.readBinding(context, { companyId, projectId: params.projectId });
+          case "bindProjectBoard": return githubProjectBoards.bind(context,
+            { companyId, projectId: params.projectId, boardUrl: params.boardUrl, connectionId: params.connectionId });
+          case "readProjectPage": return githubProjectBoards.readProjectPage(context,
+            { companyId, projectId: params.projectId, page: params.page });
+          default: throw new Error("Unknown imported-board operation");
+        }
+      },
       async list(params) {
         const companyId = ensureCompanyId(params.companyId);
         await ensurePluginAvailableForCompany(companyId);
@@ -1933,7 +1981,14 @@ export function buildHostServices(
             ? pluginOperationIssueOriginKind(pluginKey)
             : originKind,
         );
-        const issue = (await issues.create(companyId, {
+        if (normalizedOriginKind === boardOrigins.task || normalizedOriginKind === boardOrigins.root) {
+          throw new Error("Board import origins require the native atomic importer");
+        }
+        const stockGitHubOrigin = normalizedOriginKind === `plugin:${pluginKey}:github-issue`;
+        if (stockGitHubOrigin && typeof params.originId !== "string") {
+          throw new Error("GitHub sync creation requires its canonical source URL");
+        }
+        const creationInput = {
           ...(issueInput as any),
           originKind: normalizedOriginKind,
           originId: params.originId ?? null,
@@ -1942,7 +1997,11 @@ export function buildHostServices(
           createdByUserId: actorUserId ?? null,
           actorResponsibleUserId: actorUserId ?? null,
           trustExplicitResponsibleUserId: true,
-        })) as Issue;
+        };
+        const issue = (stockGitHubOrigin
+          ? await importedIssues.withStockCreationFence(companyId, params.originId!,
+            executor => issueService(executor).create(companyId, creationInput))
+          : await issues.create(companyId, creationInput)) as Issue;
         await logPluginActivity({
           companyId,
           action: "issue.created",
@@ -1964,6 +2023,9 @@ export function buildHostServices(
         const companyId = ensureCompanyId(params.companyId);
         await ensurePluginAvailableForCompany(companyId);
         const existing = requireInCompany("Issue", await issues.getById(params.issueId), companyId);
+        if (/^plugin:[^:\s]+:github-board-(?:manual|quarantine)$/.test(existing.originKind)) {
+          throw new Error("Repository sync cannot mutate a protected board-import task");
+        }
         const patch = { ...(params.patch as Record<string, unknown>) };
         const actorAgentId = typeof patch.actorAgentId === "string" ? patch.actorAgentId : null;
         const actorUserId = typeof patch.actorUserId === "string" ? patch.actorUserId : null;
@@ -1973,6 +2035,9 @@ export function buildHostServices(
         delete patch.actorRunId;
         if (patch.originKind !== undefined) {
           patch.originKind = normalizePluginOriginKind(patch.originKind);
+          if (patch.originKind === boardOrigins.task || patch.originKind === boardOrigins.root) {
+            throw new Error("Board import origins require the native atomic importer");
+          }
         }
         const updated = (await issues.update(params.issueId, {
           ...(patch as any),

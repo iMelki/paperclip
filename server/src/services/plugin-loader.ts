@@ -338,6 +338,11 @@ export interface PluginInstallOptions {
   installDir?: string;
 }
 
+/** Internal lifecycle staging, never capability approval or activation. */
+export interface PluginPackageUpgradeOptions extends Omit<PluginInstallOptions, "installDir"> {
+  stageForApproval?: boolean;
+}
+
 // ---------------------------------------------------------------------------
 // Runtime options — services needed for initializing loaded plugins
 // ---------------------------------------------------------------------------
@@ -541,7 +546,7 @@ export interface PluginLoader {
    *
    * @see PLUGIN_SPEC.md §25.3 — Upgrade Lifecycle
    */
-  upgradePlugin(pluginId: string, options: Omit<PluginInstallOptions, "installDir">): Promise<{
+  upgradePlugin(pluginId: string, options: PluginPackageUpgradeOptions): Promise<{
     oldManifest: PaperclipPluginManifestV1;
     newManifest: PaperclipPluginManifestV1;
     discovered: DiscoveredPlugin;
@@ -1778,7 +1783,7 @@ export function pluginLoader(
      */
     async upgradePlugin(
       pluginId: string,
-      upgradeOptions: Omit<PluginInstallOptions, "installDir">,
+      upgradeOptions: PluginPackageUpgradeOptions,
     ): Promise<{
       oldManifest: PaperclipPluginManifestV1;
       newManifest: PaperclipPluginManifestV1;
@@ -1789,9 +1794,14 @@ export function pluginLoader(
         packageName: string;
         packagePath: string | null;
         manifestJson: PaperclipPluginManifestV1;
+        status: PluginRecord["status"];
       } | null;
       if (!plugin) throw new Error(`Plugin not found: ${pluginId}`);
 
+      const staging = upgradeOptions.stageForApproval === true;
+      if (staging && plugin.status !== "upgrade_pending") {
+        throw new Error("Capability staging requires a persisted upgrade_pending hold.");
+      }
       const oldManifest = plugin.manifestJson;
       const {
         packageName = plugin.packageName,
@@ -1829,7 +1839,7 @@ export function pluginLoader(
       const newCaps = newManifest.capabilities ?? [];
       const escalated = newCaps.filter((c) => !oldCaps.has(c));
 
-      if (escalated.length > 0) {
+      if (escalated.length > 0 && !staging) {
         log.warn(
           { pluginId, escalated, oldVersion: oldManifest.version, newVersion: newManifest.version },
           "plugin-loader: upgrade introduces new capabilities — requires admin approval",
@@ -1842,11 +1852,20 @@ export function pluginLoader(
       }
 
       // 4. Update the existing record
-      await registry.update(pluginId, {
+      const replacement = {
         packageName: discovered.packageName,
+        packagePath: discovered.source === "local-filesystem" ? discovered.packagePath : null,
         version: discovered.version,
         manifest: newManifest,
-      });
+      };
+      if (staging) {
+        const updated = await registry.update(pluginId, replacement, {
+          status: "upgrade_pending", manifest: oldManifest,
+        });
+        if (!updated) throw new Error("Plugin activation hold changed before replacement.");
+      } else {
+        await registry.update(pluginId, replacement);
+      }
 
       return {
         oldManifest,
