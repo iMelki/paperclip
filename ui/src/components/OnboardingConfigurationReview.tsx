@@ -16,6 +16,12 @@ interface OnboardingConfigurationReviewProps {
   environmentResult: AdapterEnvironmentTestResult | null;
   environmentLoading: boolean;
   environmentError: string | null;
+  /**
+   * Set when the server hired a different adapter than the one requested.
+   * Review then always shows a warning, even if the readback of the hired
+   * agent verifies.
+   */
+  adapterMismatch?: { requestedAdapterType: string; hiredAdapterType: string } | null;
 }
 
 type SavedConfigurationCardProps = Pick<
@@ -139,11 +145,39 @@ function EnvironmentProbeCard({
   );
 }
 
+function AdapterMismatchWarning({
+  requestedAdapterType,
+  hiredAdapterType,
+}: {
+  requestedAdapterType: string;
+  hiredAdapterType: string;
+}) {
+  const hired = getAdapterDisplay(hiredAdapterType).label;
+  const requested = getAdapterDisplay(requestedAdapterType).label;
+  return (
+    <div
+      role="alert"
+      data-testid="onboarding-adapter-mismatch-warning"
+      className="rounded-md border border-amber-500/40 bg-amber-500/10 p-3 text-sm"
+    >
+      <p className="font-medium">
+        Connected with {hired} ({hiredAdapterType}), not the requested {requested} ({requestedAdapterType}).
+      </p>
+      <p className="mt-1 text-muted-foreground">
+        The server saved a different adapter than you chose. Check it before you start.
+      </p>
+    </div>
+  );
+}
+
 export function OnboardingConfigurationReview(
   props: OnboardingConfigurationReviewProps,
 ) {
   return (
     <div className="space-y-3">
+      {props.adapterMismatch ? (
+        <AdapterMismatchWarning {...props.adapterMismatch} />
+      ) : null}
       <SavedConfigurationCard
         savedConfig={props.savedConfig}
         savedConfigVerified={props.savedConfigVerified}

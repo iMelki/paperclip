@@ -1531,7 +1531,11 @@ function OnboardingWizardInner({
         }
       }
       if (!stillTheSameCompany(createdCompanyId)) return;
-      setPersistedAdapterTypeExpectation(agent.adapterType);
+      setPersistedAdapterTypeExpectation(
+        typeof agent.adapterType === "string" && agent.adapterType
+          ? agent.adapterType
+          : null,
+      );
       setPersistedAdapterConfigExpectation(expectation);
       // Advance to the Review step — the lead is now online. The user drives
       // strategy + hiring from the planning chat after "Get started".
@@ -2442,6 +2446,15 @@ function OnboardingWizardInner({
                   environmentResult={adapterEnvResult}
                   environmentLoading={adapterEnvLoading}
                   environmentError={adapterEnvError}
+                  adapterMismatch={
+                    persistedAdapterTypeExpectation !== null
+                    && persistedAdapterTypeExpectation !== adapterType
+                      ? {
+                          requestedAdapterType: adapterType,
+                          hiredAdapterType: persistedAdapterTypeExpectation,
+                        }
+                      : null
+                  }
                 />
               )}
 
