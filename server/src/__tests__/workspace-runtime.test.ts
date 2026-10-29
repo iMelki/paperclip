@@ -6353,7 +6353,12 @@ describeEmbeddedPostgres("workspace runtime service control persistence", () => 
       }
       throw new Error("Timed out waiting for runtime service process marker");
     };
-    const waitForPersistedStatus = async (status: string) => {
+    // `requirePid`: the "starting" status is persisted before the child is
+    // spawned (providerRef null), and the pid lands in a second write after
+    // spawnLocalRuntimeService returns. The child can write its marker before
+    // that second write, so a poll keyed on status alone may read the
+    // pre-spawn row and see providerRef null.
+    const waitForPersistedStatus = async (status: string, requirePid = false) => {
       const deadline = Date.now() + 5_000;
       while (Date.now() < deadline) {
         const row = await db
@@ -6361,7 +6366,7 @@ describeEmbeddedPostgres("workspace runtime service control persistence", () => 
           .from(workspaceRuntimeServices)
           .where(eq(workspaceRuntimeServices.executionWorkspaceId, executionWorkspaceId))
           .then((rows) => rows[0] ?? null);
-        if (row?.status === status) return row;
+        if (row?.status === status && (!requirePid || row.providerRef !== null)) return row;
         await new Promise((resolve) => setTimeout(resolve, 25));
       }
       throw new Error(`Timed out waiting for persisted runtime service status ${status}`);
@@ -6428,7 +6433,7 @@ describeEmbeddedPostgres("workspace runtime service control persistence", () => 
       expect(existsSync(markerPath)).toBe(false);
 
       await waitForMarker(markerPath);
-      const startingRow = await waitForPersistedStatus("starting");
+      const startingRow = await waitForPersistedStatus("starting", true);
       expect(startingRow).toMatchObject({
         companyId,
         projectId,

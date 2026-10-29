@@ -550,6 +550,14 @@ describe("automatic tailscale_https default for managed worktree runtimes", () =
     };
     installDeps({
       broker,
+      // Host port state is not what this test measures. The default probe binds
+      // real loopback ports, and other test files running in parallel workers
+      // spawn real backends in the same 42xxx/52xxx range, so the lowest free
+      // pair could move between attempts and fail the assertion below even with
+      // no leaked claim ("expected 2 to be 1"). Every port reads free here, so
+      // the only thing that can move an attempt onto a new pair is the
+      // in-process pair claim this test is about.
+      isPortAvailable: async () => true,
       resolveHostname: async () => {
         throw new Error("MagicDNS unavailable");
       },
