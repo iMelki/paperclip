@@ -231,6 +231,9 @@ export interface HostServices {
 
   /** Provides issue read/write, relation, checkout, wakeup, summary, comment methods. */
   issues: {
+    importedBoard?(
+      params: WorkerToHostMethods["issues.importedBoard"][0], context?: WorkerHostCallContext,
+    ): Promise<unknown>;
     list(params: WorkerToHostMethods["issues.list"][0]): Promise<WorkerToHostMethods["issues.list"][1]>;
     get(params: WorkerToHostMethods["issues.get"][0]): Promise<WorkerToHostMethods["issues.get"][1]>;
     create(params: WorkerToHostMethods["issues.create"][0]): Promise<WorkerToHostMethods["issues.create"][1]>;
@@ -454,6 +457,7 @@ const METHOD_CAPABILITY_MAP: Record<WorkerToHostMethodName, PluginCapability | n
   // Issues
   "issues.list": "issues.read",
   "issues.get": "issues.read",
+  "issues.importedBoard": "issues.read",
   "issues.create": "issues.create",
   "issues.update": "issues.update",
   "issues.relations.get": "issue.relations.read",
@@ -880,6 +884,25 @@ export function createHostClientHandlers(
     }),
 
     // Issues
+    "issues.importedBoard": gated("issues.importedBoard", async (params, context) => {
+      if (["listProjectConnections", "readProjectBinding", "bindProjectBoard", "readProjectPage", "begin", "commit"].includes(params.op)
+        && !capabilitySet.has("projects.read")) {
+        throw new CapabilityDeniedError(pluginId, "issues.importedBoard", "projects.read");
+      }
+      if (params.op !== "sources") {
+        const actor = context?.invocationScope?.actor;
+        if (actor?.type !== "user" || !readNonEmptyString(actor.userId)) {
+          throw new InvocationScopeDeniedError(pluginId, "issues.importedBoard", "a signed-in operator action is required");
+        }
+      }
+      if (params.op === "begin" || params.op === "commit") {
+        for (const capability of ["issues.create", "issues.update"] as const) {
+          if (!capabilitySet.has(capability)) throw new CapabilityDeniedError(pluginId, "issues.importedBoard", capability);
+        }
+      }
+      if (!services.issues.importedBoard) throw new Error("The host does not implement atomic board imports");
+      return services.issues.importedBoard(params, context);
+    }),
     "issues.list": gated("issues.list", async (params) => {
       return services.issues.list(params);
     }),

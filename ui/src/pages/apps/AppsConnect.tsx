@@ -44,7 +44,8 @@ import { cn } from "@/lib/utils";
 import { copyTextToClipboard } from "@/lib/clipboard";
 import { navigateTopLevel } from "@/lib/browserNavigation";
 import { AppLogo } from "./AppLogo";
-import { appSourceConnectHref, isMcpDirectOAuthConnectSlug } from "./app-connect-policy";
+import { appSourceConnectHref, isGitHubOAuthConnectSource, isMcpDirectOAuthConnectSlug } from "./app-connect-policy";
+import { GitHubOAuthConnect } from "./GitHubOAuthConnect";
 import { parseGoogleSheetIds } from "./google-sheets";
 import { autoExtendNotice, INSTALL_ALL_WARNING, installInfoNotice, installPayload } from "@/lib/tool-installs";
 
@@ -133,6 +134,13 @@ function reusableOAuthConnection(
 }
 
 export function AppsConnect() {
+  const [searchParams] = useSearchParams();
+  return isGitHubOAuthConnectSource(searchParams.get("source"))
+    ? <GitHubOAuthConnect />
+    : <AppsConnectWizard />;
+}
+
+function AppsConnectWizard() {
   const navigate = useNavigate();
   const routeParams = useParams<{ appKey?: string }>();
   const { selectedCompany, selectedCompanyId } = useCompany();
@@ -544,6 +552,10 @@ export function AppsConnect() {
           byo={searchParams.get("byo") === "1"}
           source={searchParams.get("source")}
           onPick={(picked) => {
+            if (picked.slug === "github") {
+              navigate(appSourceConnectHref("github"));
+              return;
+            }
             if (
               getAvailableConnectionMethod(picked)?.auth === "oauth" &&
               isMcpDirectOAuthConnectSlug(picked.slug)

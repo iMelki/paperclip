@@ -772,6 +772,17 @@ export function createPluginWorkerHandle(
   ): PluginInvocationScope | null {
     if (!isRecord(params)) return null;
 
+    // Preserve the authenticated action principal even when the route also supplies
+    // a top-level companyId. Nested calls echo only an opaque invocation id.
+    if (method === "performAction" && isRecord(params.actorContext)) {
+      const companyId = readNonEmptyString(params.actorContext.companyId);
+      const directCompanyId = readNonEmptyString(params.companyId);
+      if (!companyId || (directCompanyId && directCompanyId !== companyId)) return null;
+      const type = params.actorContext.type;
+      if (type !== "user" && type !== "agent" && type !== "system") return null;
+      return { companyId, actor: { type, userId: readNonEmptyString(params.actorContext.userId) } };
+    }
+
     const directCompanyId = readNonEmptyString(params.companyId);
     if (directCompanyId) return { companyId: directCompanyId };
 
@@ -786,11 +797,6 @@ export function createPluginWorkerHandle(
     // worker-controlled settings or company lists.
     if (method === "runJob" && proactiveCompanyScopes.size === 1) {
       return { companyId: proactiveCompanyScopes.values().next().value! };
-    }
-
-    if (method === "performAction" && isRecord(params.actorContext)) {
-      const companyId = readNonEmptyString(params.actorContext.companyId);
-      return companyId ? { companyId } : null;
     }
 
     if (method === "executeTool" && isRecord(params.runContext)) {

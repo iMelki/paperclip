@@ -1,6 +1,7 @@
 import type {
   ToolApplication,
   ToolConnection,
+  ToolCredentialSecretRef,
   ToolConnectionInstall,
   ToolConnectionInstallSnapshot,
   ConnectToolAppResult,
@@ -234,11 +235,17 @@ export const toolsApi = {
   // --- Applications ---
   listGallery: (companyId: string) =>
     api.get<ToolGalleryResponse>(`/companies/${companyId}/tools/gallery`),
+  getGitHubOAuthSetup: (companyId: string) =>
+    api.get<{ callbackUrl: string; registrationUrl: string; requestedScopes: string[] }>(
+      `/companies/${companyId}/tools/github/oauth/setup`,
+    ),
   connectApp: (companyId: string, input: {
     galleryKey?: string;
+    methodKey?: string;
     link?: string;
     name?: string;
     credentialValues?: Record<string, string>;
+    credentialSecretRefs?: ToolCredentialSecretRef[];
     configValues?: Record<string, unknown>;
     applicationId?: string;
   }) =>

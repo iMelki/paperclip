@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "slug": "github",
   "name": "GitHub",
-  "description": "Read code and pull requests, and coordinate repository work.",
+  "description": "Connect repositories, issues, pull requests, and GitHub Projects.",
   "categories": [
     "developer"
   ],
@@ -13,6 +13,8 @@
   "urlPatterns": [
     "https://api.githubcopilot.com/mcp/*"
   ],
+  "docsUrl": "https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/scopes-for-oauth-apps",
+  "redirectConstraints": "https-or-loopback-http",
   "methods": [
     {
       "key": "mcp-key",
@@ -45,6 +47,56 @@
       "requiredResourceFilters": [
         "organization",
         "repository"
+      ]
+    },
+    {
+      "key": "rest-oauth",
+      "transport": "rest_api",
+      "auth": "oauth",
+      "ownershipModes": [
+        "customer"
+      ],
+      "whenToUse": "Authorize a dedicated Paperclip OAuth App for repositories, issues, and personal or organization Projects.",
+      "defaults": {
+        "serverUrl": "https://api.github.com",
+        "authorizationEndpoint": "https://github.com/login/oauth/authorize",
+        "tokenEndpoint": "https://github.com/login/oauth/access_token",
+        "scopesHint": [
+          "repo",
+          "project",
+          "offline_access"
+        ]
+      },
+      "guidanceMd": "Register an operator-owned GitHub OAuth App with Paperclip's exact displayed callback URL and expiring user tokens. Enter the public client ID and select the client secret from Paperclip's company-scoped secret store. Review GitHub's consent screen yourself. Connecting does not grant agents access, activate discovered operations, or start synchronization.",
+      "riskTier": "S3",
+      "credentialFields": [
+        {
+          "key": "clientId",
+          "label": "Client ID",
+          "type": "text",
+          "required": true,
+          "placeholder": "Paste the public OAuth client ID",
+          "secret": false
+        },
+        {
+          "key": "clientSecret",
+          "label": "Client secret",
+          "type": "password",
+          "required": true,
+          "placeholder": "Select the saved client secret",
+          "secret": true
+        }
+      ],
+      "consoleLinks": {
+        "register": "https://github.com/settings/applications/new",
+        "settings": "https://github.com/settings/developers",
+        "docs": "https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/authorizing-oauth-apps"
+      },
+      "warnings": [
+        "The repo scope permits broad read and write access to public and private repositories available to the authorizing account; OAuth Apps cannot select individual repositories at consent.",
+        "The project scope permits reading and updating personal and organization Projects. Repository and organization policies can still restrict access.",
+        "offline_access requests expiring access tokens and refresh support; Paperclip must verify the actual response before saving a connection.",
+        "GitHub consent is separate from Paperclip agent access and approval for each write operation. No import or agent run starts merely by connecting."
       ]
     }
   ]
