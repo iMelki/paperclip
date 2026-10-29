@@ -6402,10 +6402,12 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
     }
     const existingRefreshRef = token.refreshToken
       ? undefined : subjectCredentialSecretRefs.find((ref) => ref.configPath === "oauth.refresh_token");
-    // A grant with no expires_in and no refresh_token is non-expiring (GitHub OAuth App token).
+    // A GitHub grant with no expires_in and no refresh_token is a non-expiring OAuth App token.
     // Keeping an earlier refresh ref would make every health or tool call try to refresh it, so
     // drop the ref and, once the new credentials are saved, delete that connection's own secret.
-    const staleRefreshRef = existingRefreshRef && !token.expiresIn ? existingRefreshRef : null;
+    // GitHub only: other providers (Slack and others) often omit both fields on reconnect while the
+    // prior refresh token stays valid, so their refresh ref is kept.
+    const staleRefreshRef = githubOAuth && existingRefreshRef && !token.expiresIn ? existingRefreshRef : null;
     if (existingRefreshRef && !staleRefreshRef) nextCredentialSecretRefs.push(existingRefreshRef);
     const removeStaleRefreshSecret = async () => {
       if (!staleRefreshRef) return;
