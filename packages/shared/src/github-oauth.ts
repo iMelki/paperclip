@@ -78,13 +78,14 @@ export const GITHUB_OAUTH_PRIVATE_TIER_ONLY_SCOPES = ["repo", "project"] as cons
 
 /**
  * Allowlist per tier: the tier's requested scopes plus their documented child scopes
- * (https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/scopes-for-oauth-apps),
- * plus read-only `read:org`, which an earlier consent may carry and grants no write access.
+ * (https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/scopes-for-oauth-apps).
+ * Deny by default: any scope not listed here, including `read:org`, is refused. No code path
+ * calls an organization API that needs `read:org`.
  */
-export const GITHUB_OAUTH_PUBLIC_ALLOWED_SCOPES = ["read:project", "public_repo", "read:org"] as const;
+export const GITHUB_OAUTH_PUBLIC_ALLOWED_SCOPES = ["read:project", "public_repo"] as const;
 export const GITHUB_OAUTH_PRIVATE_ALLOWED_SCOPES = [
   "repo", "repo:status", "repo_deployment", "public_repo", "repo:invite", "security_events",
-  "project", "read:project", "read:org",
+  "project", "read:project",
 ] as const;
 
 /** True when the grant holds any scope outside the chosen tier's allowlist. */

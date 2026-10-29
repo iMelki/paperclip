@@ -110,11 +110,13 @@ describe("dedicated GitHub OAuth provider metadata", () => {
 
 describe("actual GitHub OAuth grant verification", () => {
   it("retains raw scope evidence and stable identity without profile or token fields", () => {
-    const raw = " repo,\tproject\nrepo, read:org ";
+    const raw = " repo,\tproject\nrepo, repo:status ";
     expect(verifyGitHubOAuthGrant(grant({ grantedScopes: raw, expectedAccountId: 42 }))).toEqual({
       provider: "github", accountId: 42, login: "test-operator",
-      rawGrantedScopes: raw, grantedScopes: ["repo", "project", "read:org"],
+      rawGrantedScopes: raw, grantedScopes: ["repo", "project", "repo:status"],
     });
+    expectRefusal(() => verifyGitHubOAuthGrant(grant({ grantedScopes: " repo,\tproject\nrepo, read:org ", expectedAccountId: 42 })),
+      "github_oauth_scopes_too_broad");
   });
 
   it("accepts case-insensitive account identity, not case-insensitive scope names", () => {
@@ -132,7 +134,7 @@ describe("actual GitHub OAuth grant verification", () => {
     },
   );
 
-  it.each(["read:project,public_repo", "public_repo,read:project,read:org"])(
+  it.each(["read:project,public_repo", "public_repo,read:project"])(
     "default tier accepts an exact least-access grant: %s", (scopes) => {
       expect(verifyGitHubOAuthGrant(grant({ grantedScopes: scopes, privateRepoAccess: false })).accountId).toBe(42);
     },
@@ -145,7 +147,7 @@ describe("actual GitHub OAuth grant verification", () => {
     },
   );
 
-  it.each(["admin:org", "delete_repo", "workflow", "write:packages", "user", "gist", "offline_access"])(
+  it.each(["read:org", "admin:org", "delete_repo", "workflow", "write:packages", "user", "gist", "offline_access"])(
     "allowlist refuses %s in both tiers even from an earlier broader consent", (extra) => {
       expectRefusal(() => verifyGitHubOAuthGrant(grant({ grantedScopes: `read:project,public_repo,${extra}`, privateRepoAccess: false })),
         "github_oauth_scopes_too_broad");
@@ -157,7 +159,16 @@ describe("actual GitHub OAuth grant verification", () => {
 
   it("private opt-in allows the documented repo and project child scopes", () => {
     expect(githubScopesExceed(["repo", "project", "repo:status", "repo_deployment", "public_repo", "repo:invite",
-      "security_events", "read:project", "read:org"], true)).toBe(false);
+      "security_events", "read:project"], true)).toBe(false);
+  });
+
+  it("allowlist denies by default: an unlisted made-up scope is refused in both tiers", () => {
+    expect(githubScopesExceed(["read:project", "public_repo", "foo:bar"], false)).toBe(true);
+    expect(githubScopesExceed(["repo", "project", "foo:bar"], true)).toBe(true);
+    expectRefusal(() => verifyGitHubOAuthGrant(grant({ grantedScopes: "read:project,public_repo,foo:bar", privateRepoAccess: false })),
+      "github_oauth_scopes_too_broad");
+    expectRefusal(() => verifyGitHubOAuthGrant(grant({ grantedScopes: "repo,project,foo:bar", privateRepoAccess: true })),
+      "github_oauth_scopes_too_broad");
   });
 
   it("private opt-in accepts the full repo grant", () => {
