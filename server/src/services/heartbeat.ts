@@ -193,7 +193,7 @@ import {
   isRuntimeOwnedGitBranch,
 } from "./execution-workspace-branch-ownership.js";
 import { workspaceOperationService, type WorkspaceOperationRecorder } from "./workspace-operations.js";
-import { isProcessGroupAlive, terminateLocalService } from "./local-service-supervisor.js";
+import { isProcessGroupAlive, terminateLocalService, type LocalServiceTerminationResult } from "./local-service-supervisor.js";
 import {
   HEARTBEAT_RUN_SCRATCH_MARKER,
   buildHeartbeatRunScratchEnv,
@@ -6406,13 +6406,16 @@ function isProcessAlive(pid: number | null | undefined) {
 async function terminateHeartbeatRunProcess(input: {
   pid: number | null | undefined;
   processGroupId: number | null | undefined;
+  expectedStartedAt?: Date | string | null;
   graceMs?: number;
-}) {
+  trustedPid?: boolean;
+  trustedProcessGroup?: boolean;
+}): Promise<LocalServiceTerminationResult | null> {
   const pid = input.pid ?? null;
   const processGroupId = input.processGroupId ?? null;
-  if (typeof pid !== "number" && typeof processGroupId !== "number") return;
+  if (typeof pid !== "number" && typeof processGroupId !== "number") return null;
 
-  await terminateLocalService(
+  return await terminateLocalService(
     {
       pid:
         typeof pid === "number" && Number.isInteger(pid) && pid > 0
@@ -6423,7 +6426,14 @@ async function terminateHeartbeatRunProcess(input: {
           ? processGroupId
           : null,
     },
-    input.graceMs ? { forceAfterMs: input.graceMs } : undefined,
+    input.graceMs || input.trustedPid || input.trustedProcessGroup || input.expectedStartedAt
+      ? {
+          ...(input.graceMs ? { forceAfterMs: input.graceMs } : {}),
+          ...(input.trustedPid ? { trustedPid: true } : {}),
+          ...(input.trustedProcessGroup ? { trustedProcessGroup: true } : {}),
+          ...(input.expectedStartedAt ? { expectedStartedAt: input.expectedStartedAt } : {}),
+        }
+      : undefined,
   );
 }
 
@@ -9915,6 +9925,43 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     return Number(row?.maxSeq ?? 0) + 1;
   }
 
+  async function retainRunForUnverifiedTermination(input: {
+    run: typeof heartbeatRuns.$inferSelect;
+    result: LocalServiceTerminationResult;
+    operation: "cancel" | "agent_pause" | "shutdown";
+  }) {
+    const message = [
+      `Process termination could not be verified during ${input.operation}.`,
+      `Outcome: ${input.result.outcome}.`,
+      "The run and issue execution lock were retained to prevent another mutating run from starting; operator review is required.",
+    ].join(" ");
+    const [updated] = await db
+      .update(heartbeatRuns)
+      .set({
+        error: message,
+        errorCode: "process_termination_unverified_needs_human",
+        updatedAt: new Date(),
+      })
+      .where(and(eq(heartbeatRuns.id, input.run.id), eq(heartbeatRuns.status, "running")))
+      .returning();
+    if (updated) {
+      await appendRunEvent(updated, await nextRunEventSeq(updated.id), {
+        eventType: "lifecycle",
+        stream: "system",
+        level: "error",
+        message,
+        payload: {
+          needsHuman: true,
+          operation: input.operation,
+          terminationOutcome: input.result.outcome,
+          terminationAttempted: input.result.attempted,
+          processPid: input.result.pid,
+        },
+      });
+    }
+    return updated ?? input.run;
+  }
+
   async function persistRunProcessMetadata(
     runId: string,
     meta: { pid: number; processGroupId: number | null; startedAt: string },
@@ -10838,22 +10885,29 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
 
     for (const { run, agent } of activeRuns) {
       const running = runningProcesses.get(run.id);
-      try {
-        if (running) {
-          await terminateHeartbeatRunProcess({
+      const runningChildIsLive = running
+        ? (running.child.exitCode == null && running.child.signalCode == null)
+        : false;
+      const termination = running
+        ? await terminateHeartbeatRunProcess({
             pid: running.child.pid ?? run.processPid,
             processGroupId: running.processGroupId ?? run.processGroupId,
+            expectedStartedAt: run.processStartedAt,
             graceMs: Math.max(1, running.graceSec) * 1000,
-          });
-        } else if (run.processPid || run.processGroupId) {
-          await terminateHeartbeatRunProcess({
-            pid: run.processPid,
-            processGroupId: run.processGroupId,
-          });
-        }
-      } finally {
-        runningProcesses.delete(run.id);
+            ...(runningChildIsLive ? { trustedPid: true, trustedProcessGroup: true } : {}),
+          })
+        : run.processPid || run.processGroupId
+          ? await terminateHeartbeatRunProcess({
+              pid: run.processPid,
+              processGroupId: run.processGroupId,
+              expectedStartedAt: run.processStartedAt,
+            })
+          : null;
+      if (termination?.confirmedStopped === false) {
+        await retainRunForUnverifiedTermination({ run, result: termination, operation: "shutdown" });
+        continue;
       }
+      if (running) runningProcesses.delete(run.id);
 
       const message = `Interrupted by graceful server shutdown (${signal}); retry queued for restart recovery`;
       const interruptedStatus = await setRunStatusIfRunning(run.id, "interrupted", {
@@ -13759,11 +13813,19 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
 
       let descendantOnlyCleanup = false;
       if (processGroupAlive) {
-        descendantOnlyCleanup = true;
-        await terminateHeartbeatRunProcess({
+        // A bare historical PGID is not enough: the run's persisted start
+        // identity must back the process-group assertion, or nothing is killed.
+        const termination = await terminateHeartbeatRunProcess({
           pid: run.processPid,
           processGroupId: run.processGroupId,
+          expectedStartedAt: run.processStartedAt,
+          trustedProcessGroup: true,
         });
+        if (termination?.confirmedStopped === false) {
+          await retainRunForUnverifiedTermination({ run, result: termination, operation: "shutdown" });
+          continue;
+        }
+        descendantOnlyCleanup = termination?.confirmedStopped === true;
       }
 
       const runContext = parseObject(run.contextSnapshot);
@@ -19321,22 +19383,33 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       : options.resultJson;
 
     const running = runningProcesses.get(run.id);
-    try {
-      if (running) {
-        await terminateHeartbeatRunProcess({
+    const runningChildIsLive = running
+      ? (running.child.exitCode == null && running.child.signalCode == null)
+      : false;
+    const termination = running
+      ? await terminateHeartbeatRunProcess({
           pid: running.child.pid ?? run.processPid,
           processGroupId: running.processGroupId ?? run.processGroupId,
+          expectedStartedAt: run.processStartedAt,
           graceMs: Math.max(1, running.graceSec) * 1000,
-        });
-      } else if (run.processPid || run.processGroupId) {
-        await terminateHeartbeatRunProcess({
-          pid: run.processPid,
-          processGroupId: run.processGroupId,
-        });
-      }
-    } finally {
-      runningProcesses.delete(run.id);
+          ...(runningChildIsLive ? { trustedPid: true, trustedProcessGroup: true } : {}),
+        })
+      : run.processPid || run.processGroupId
+        ? await terminateHeartbeatRunProcess({
+            pid: run.processPid,
+            processGroupId: run.processGroupId,
+            expectedStartedAt: run.processStartedAt,
+          })
+        : null;
+    if (termination?.confirmedStopped === false) {
+      await retainRunForUnverifiedTermination({ run, result: termination, operation: "cancel" });
+      throw conflict("Run process termination could not be verified; the run and issue lock were retained", {
+        code: "process_termination_unverified_needs_human",
+        needsHuman: true,
+        terminationOutcome: termination.outcome,
+      });
     }
+    if (running) runningProcesses.delete(run.id);
 
     const finishedAt = new Date();
     const cancelled = await setRunStatus(run.id, "cancelled", {
@@ -19396,17 +19469,23 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       });
 
       const running = runningProcesses.get(run.id);
+      const runningChildIsLive = running
+        ? (running.child.exitCode == null && running.child.signalCode == null)
+        : false;
       if (running) {
         await terminateHeartbeatRunProcess({
           pid: running.child.pid ?? run.processPid,
           processGroupId: running.processGroupId ?? run.processGroupId,
+          expectedStartedAt: run.processStartedAt,
           graceMs: Math.max(1, running.graceSec) * 1000,
+          ...(runningChildIsLive ? { trustedPid: true, trustedProcessGroup: true } : {}),
         });
         runningProcesses.delete(run.id);
       } else if (run.processPid || run.processGroupId) {
         await terminateHeartbeatRunProcess({
           pid: run.processPid,
           processGroupId: run.processGroupId,
+          expectedStartedAt: run.processStartedAt,
         });
       }
       await releaseIssueExecutionAndPromote(run);

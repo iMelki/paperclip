@@ -266,6 +266,9 @@ async function cancelActiveRunsForCleanup(
 }
 
 async function spawnOrphanedProcessGroup() {
+  // The run's persisted start identity: recorded before the leader starts, the
+  // way the heartbeat records processStartedAt when it launches a run.
+  const startedAt = new Date();
   const leader = spawn(
     process.execPath,
     [
@@ -302,6 +305,7 @@ async function spawnOrphanedProcessGroup() {
     processPid: leader.pid ?? null,
     processGroupId: leader.pid ?? null,
     descendantPid,
+    startedAt,
   };
 }
 
@@ -489,6 +493,7 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     runStatus?: "running" | "queued" | "failed";
     processPid?: number | null;
     processGroupId?: number | null;
+    processStartedAt?: Date | null;
     processLossRetryCount?: number;
     includeIssue?: boolean;
     runErrorCode?: string | null;
@@ -549,6 +554,7 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
         : { ...(input?.contextSnapshot ?? {}), issueId },
       processPid: input?.processPid ?? null,
       processGroupId: input?.processGroupId ?? null,
+      processStartedAt: input?.processStartedAt ?? null,
       processLossRetryCount: input?.processLossRetryCount ?? 0,
       errorCode: input?.runErrorCode ?? null,
       error: input?.runError ?? null,
@@ -2385,6 +2391,7 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
       agentStatus: "idle",
       processPid: orphan.processPid,
       processGroupId: orphan.processGroupId,
+      processStartedAt: orphan.startedAt,
     });
     const heartbeat = heartbeatService(db);
 
@@ -2425,6 +2432,34 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
       .where(eq(issues.id, issueId))
       .then((rows) => rows[0] ?? null);
     expect(issue?.executionRunId).toBe(retryRun?.id ?? null);
+  });
+
+  it.skipIf(process.platform === "win32")("does not kill a reused process group whose recorded leader is already dead", async () => {
+    // The recorded leader exited; its PGID now names a different, live group
+    // led by an unrelated process. Holding a start identity must not be enough
+    // to signal that group: the fork refuses a bare historical PGID.
+    const deadLeader = spawn(process.execPath, ["-e", "process.exit(0)"], { stdio: "ignore" });
+    await new Promise<void>((resolve) => deadLeader.once("exit", () => resolve()));
+    const unrelated = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
+      detached: true,
+      stdio: "ignore",
+    });
+    childProcesses.add(unrelated);
+    cleanupPids.add(unrelated.pid!);
+    expect(isPidAlive(unrelated.pid!)).toBe(true);
+
+    await seedRunFixture({
+      agentStatus: "idle",
+      processPid: deadLeader.pid!,
+      processGroupId: unrelated.pid!,
+      processStartedAt: new Date(Date.now() - 60_000),
+    });
+    const heartbeat = heartbeatService(db);
+
+    await heartbeat.reapOrphanedRuns();
+
+    expect(await waitForPidExit(unrelated.pid!, 500)).toBe(false);
+    expect(isPidAlive(unrelated.pid!)).toBe(true);
   });
 
   it("blocks the issue when process-loss retry is exhausted and the immediate continuation recovery also fails", async () => {

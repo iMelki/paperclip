@@ -1006,6 +1006,10 @@ export async function terminateLocalService(
       && !pidAlive
       && opts.expectedStartedAt !== undefined
       && opts.expectedStartedAt !== null
+      // Orphaned descendants of a dead leader keep its PGID, but the leader
+      // itself (pid === PGID) must be gone. A live process holding that pid
+      // means the PGID was reused by an unrelated group: refuse.
+      && !isPidAlive(recordedProcessGroupId)
     ) {
       const ownProcessGroupId = await readLocalServiceProcessGroupId(process.pid);
       if (ownProcessGroupId === null || recordedProcessGroupId !== ownProcessGroupId) {
