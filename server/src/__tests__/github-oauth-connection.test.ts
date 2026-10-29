@@ -272,7 +272,7 @@ describe("native GitHub OAuth service and routes (mandatory private PostgreSQL)"
     const connected = await fixture.service.connectGalleryApp(fixture.companyId, { ...connectInput(fixture),
       configValues: { expectedGitHubLogin: USER.login, githubPrivateRepoAccess: true } }, fixture.actor);
     expect(connected.connection.config).toMatchObject({ githubPrivateRepoAccess: true,
-      oauth: { scopes: ["repo", "project", "offline_access"] } });
+      oauth: { scopes: ["repo", "project"] } });
     const begun = await begin(fixture, connected.connectionId);
     expect(new URL(begun.started.authorizationUrl).searchParams.get("scope")).toBe("repo project");
     io.tokenPayload.scope = "read:project,public_repo"; io.currentScopes = "read:project,public_repo";
