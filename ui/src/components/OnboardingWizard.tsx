@@ -462,6 +462,11 @@ function OnboardingWizardInner({
   // localStorage, and after a reload the customer must save again.
   const [persistedAdapterConfigExpectation, setPersistedAdapterConfigExpectation] =
     useState<Record<string, unknown> | null>(null);
+  // Fresh hire: the adapter type the server reports it hired. Review verifies
+  // the readback against the hire response (server-authoritative), not the
+  // request. Null means the wizard's own adapterType is the expectation.
+  const [persistedAdapterTypeExpectation, setPersistedAdapterTypeExpectation] =
+    useState<string | null>(null);
   const persistOnboardingAgentConfig = usePersistOnboardingAgentConfig();
 
   // Created entity IDs — pre-populate from existing company when skipping step 1
@@ -881,6 +886,7 @@ function OnboardingWizardInner({
     setModelTouched(false);
     setUrlTouched(false);
     setPersistedAdapterConfigExpectation(null);
+    setPersistedAdapterTypeExpectation(null);
     setCommand("");
     setArgs("");
     setUrl("");
@@ -1072,7 +1078,7 @@ function OnboardingWizardInner({
   } = useOnboardingAgentConfigReview({
     companyId: createdCompanyId,
     agentId: createdAgentId,
-    adapterType,
+    adapterType: persistedAdapterTypeExpectation ?? adapterType,
     adapterConfig: persistedAdapterConfigExpectation ?? {},
     exactAdapterConfig: true,
     enabled:
@@ -1377,6 +1383,7 @@ function OnboardingWizardInner({
         });
         if (!persisted) return;
         if (!stillTheSameCompany(createdCompanyId)) return;
+        setPersistedAdapterTypeExpectation(null);
         setPersistedAdapterConfigExpectation(persisted.expectedAdapterConfig);
         setStep(5);
       } catch (err) {
@@ -1514,7 +1521,7 @@ function OnboardingWizardInner({
           const readback = await agentsApi.get(agent.id, createdCompanyId);
           const readbackConfig = (readback.adapterConfig ?? {}) as Record<string, unknown>;
           if (
-            readback.adapterType === adapterType
+            readback.adapterType === agent.adapterType
             && adapterConfigIncludes(readbackConfig, hiredConfig)
           ) {
             expectation = readbackConfig;
@@ -1524,6 +1531,7 @@ function OnboardingWizardInner({
         }
       }
       if (!stillTheSameCompany(createdCompanyId)) return;
+      setPersistedAdapterTypeExpectation(agent.adapterType);
       setPersistedAdapterConfigExpectation(expectation);
       // Advance to the Review step — the lead is now online. The user drives
       // strategy + hiring from the planning chat after "Get started".
