@@ -5,6 +5,7 @@ import { Badge } from "@/components/ui/badge";
 import { getAdapterDisplay } from "../adapters/adapter-display-registry";
 import type { OnboardingAgentConfigReview } from "../lib/onboarding-agent-config";
 import { taskStatusVar } from "../lib/status-colors";
+import { InlineBanner } from "./InlineBanner";
 import { StatusGlyph } from "./StatusGlyph";
 
 interface OnboardingConfigurationReviewProps {
@@ -16,6 +17,12 @@ interface OnboardingConfigurationReviewProps {
   environmentResult: AdapterEnvironmentTestResult | null;
   environmentLoading: boolean;
   environmentError: string | null;
+  /**
+   * Set when the server hired a different adapter than the one requested.
+   * Review then always shows a warning, even if the readback of the hired
+   * agent verifies.
+   */
+  adapterMismatch?: { requestedAdapterType: string; hiredAdapterType: string } | null;
 }
 
 type SavedConfigurationCardProps = Pick<
@@ -139,11 +146,42 @@ function EnvironmentProbeCard({
   );
 }
 
+/** Display label for an adapter type; falls back to the raw type, never blank. */
+export function adapterMismatchLabel(adapterType: string): string {
+  const label = getAdapterDisplay(adapterType)?.label;
+  return typeof label === "string" && label.trim() ? label : adapterType;
+}
+
+function AdapterMismatchWarning({
+  requestedAdapterType,
+  hiredAdapterType,
+}: {
+  requestedAdapterType: string;
+  hiredAdapterType: string;
+}) {
+  const hired = adapterMismatchLabel(hiredAdapterType);
+  const requested = adapterMismatchLabel(requestedAdapterType);
+  return (
+    <InlineBanner
+      tone="warning"
+      role="alert"
+      compact
+      data-testid="onboarding-adapter-mismatch-warning"
+      title={`Connected with ${hired} (${hiredAdapterType}), not the requested ${requested} (${requestedAdapterType}).`}
+    >
+      The server saved a different adapter than you chose. Check it before you start.
+    </InlineBanner>
+  );
+}
+
 export function OnboardingConfigurationReview(
   props: OnboardingConfigurationReviewProps,
 ) {
   return (
     <div className="space-y-3">
+      {props.adapterMismatch ? (
+        <AdapterMismatchWarning {...props.adapterMismatch} />
+      ) : null}
       <SavedConfigurationCard
         savedConfig={props.savedConfig}
         savedConfigVerified={props.savedConfigVerified}

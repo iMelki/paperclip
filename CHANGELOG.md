@@ -20,6 +20,11 @@ All notable changes to this repository should be recorded here.
 
 ## Unreleased
 
+- **[#129, candidate only]** Integrate upstream `v2026.831.1` with the fork's
+  deployed migration history, company-scoped contracts, and Windows process
+  ownership safeguards. Add regression proof for the restored Git Bash fallback
+  and verified runtime shutdown. Live migration and deployment remain gated;
+  see the dated Factory host integration qualification checkpoint.
 - **Fix:** embedded PostgreSQL start-up now survives slow crash recovery on
   Windows. When `pg_ctl` stops waiting (60 s) while the server log shows crash
   recovery (fsync of the data directory, WAL redo, end-of-recovery checkpoint)

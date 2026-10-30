@@ -255,6 +255,8 @@ function WorkspacePatchDiff({
   const { ref } = useFileDiffInstance({
     fileDiff,
     options,
+    // This tab only shows a diff; it does not open an edit session.
+    edit: false,
     editorOptions: undefined,
     metrics: undefined,
     lineAnnotations: undefined,
@@ -263,7 +265,6 @@ function WorkspacePatchDiff({
     hasGutterRenderUtility: false,
     hasCustomHeader: false,
     disableWorkerPool: false,
-    edit: false,
   });
 
   return createElement(DIFFS_TAG_NAME, { ref });

@@ -5,6 +5,7 @@ on:
     branches:
       - master
       - dev
+      - agent/codex/129-upstream-host-integration
 
 concurrency:
   group: pr-${{ github.event.pull_request.number }}
@@ -59,6 +60,7 @@ jobs:
           fetch-depth: 0
 
       - name: Block manual lockfile edits
+        id: lockfile_edit
         if: >-
           github.head_ref != 'chore/refresh-lockfile' &&
           !(github.event.pull_request.user.login == 'github-actions[bot]' &&
@@ -69,8 +71,11 @@ jobs:
           # do not masquerade as changes made by the PR itself.
           changed="$(git diff --name-only "${{ github.event.pull_request.base.sha }}...${{ github.event.pull_request.head.sha }}")"
           if printf '%s\n' "$changed" | grep -qx 'pnpm-lock.yaml'; then
-            echo "Do not commit pnpm-lock.yaml in pull requests. CI owns lockfile updates."
-            exit 1
+            # A committed lockfile passes only if CI can reproduce it exactly
+            # from the head manifests (checked after pnpm is set up below).
+            # Hand edits do not reproduce and stay blocked.
+            echo "pnpm-lock.yaml changed; it must match a pinned pnpm --lockfile-only regeneration."
+            echo "must_reproduce=1" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Setup pnpm
@@ -84,8 +89,27 @@ jobs:
         with:
           node-version: 24
 
+      - name: Require committed lockfile to match a pinned regeneration
+        if: steps.lockfile_edit.outputs.must_reproduce == '1'
+        run: |
+          pnpm install --lockfile-only --ignore-scripts
+          if ! git diff --exit-code --stat pnpm-lock.yaml; then
+            echo "Do not commit pnpm-lock.yaml in pull requests unless it is exactly what pnpm 9.15.4 --lockfile-only produces. CI owns lockfile updates."
+            exit 1
+          fi
+          echo "LOCKFILE_REPRODUCED: committed pnpm-lock.yaml matches pnpm 9.15.4 --lockfile-only --ignore-scripts"
+
+      - name: Validate migration ordering against target branch
+        run: >-
+          node .github/scripts/check-pr-migration-order.mjs
+          "${{ github.event.pull_request.base.sha }}"
+          "${{ github.event.pull_request.head.sha }}"
+
       - name: Validate Dockerfile deps stage
         run: node ./scripts/check-docker-deps-stage.mjs
+
+      - name: Validate Node version policy
+        run: pnpm check:node-version
 
       - name: Test embedded PostgreSQL pg_ctl lifecycle without a database
         run: node --test --test-isolation=none scripts/embedded-postgres-pgctl.test.mjs
@@ -121,6 +145,8 @@ jobs:
           ./scripts/scan-pre-push-secrets.test.mjs
           ./scripts/run-pre-push-tests.test.mjs
           ./scripts/verify-gitleaks.test.mjs
+      - name: Test PR quality-gate scripts
+        run: node --test '.github/scripts/tests/*.test.mjs'
 
       - name: Test general-server shard partition
         run: node --test ./scripts/__tests__/run-vitest-stable-shard.test.mjs
@@ -244,8 +270,20 @@ jobs:
             group_label: server (5/5)
             shard_index: 4
             shard_count: 5
+          # workspaces-a was the slowest check in the fully-green PR run
+          # 31371439296 (2026-08-10) at 319s, with the ui project's single
+          # vitest invocation accounting for ~224s and the paperclipai CLI
+          # ~37s. Two shards use Vitest's native --shard on each project's
+          # file list (ui: 439 files, cli: 54), bringing each job to roughly
+          # half the suite time (~130s + setup) without a duration manifest.
           - group: general-workspaces-a
-            group_label: workspaces-a
+            group_label: workspaces-a (1/2)
+            shard_index: 0
+            shard_count: 2
+          - group: general-workspaces-a
+            group_label: workspaces-a (2/2)
+            shard_index: 1
+            shard_count: 2
           - group: general-workspaces-b
             group_label: workspaces-b
 
@@ -283,11 +321,70 @@ jobs:
             pnpm test:run:general -- --group '${{ matrix.group }}'
           fi
 
+  daytona_plugin_tests:
+    name: Daytona plugin tests
+    needs: [policy]
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+        with:
+          version: 9.15.4
+
+      - name: Restore regenerated PR lockfile (if policy uploaded one)
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        continue-on-error: true
+        with:
+          name: pr-lockfile
+          path: .
+
+      - name: Setup Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          cache: pnpm
+
+      # The Daytona plugin is outside the pnpm workspace, but its vitest config
+      # aliases @paperclipai/plugin-sdk to the SDK sources, which import
+      # @paperclipai/shared. Install only the SDK and its workspace deps, frozen.
+      - name: Install plugin SDK dependencies (frozen)
+        run: pnpm install --frozen-lockfile --filter '@paperclipai/plugin-sdk...'
+
+      # The plugin has its own committed lockfile, so this install is frozen.
+      # It uses the repo's pinned pnpm (9.15.4) with --ignore-workspace.
+      - name: Install Daytona plugin dependencies (frozen)
+        working-directory: packages/plugins/sandbox-providers/daytona
+        run: pnpm install --ignore-workspace --frozen-lockfile
+
+      - name: Run Daytona plugin tests
+        working-directory: packages/plugins/sandbox-providers/daytona
+        run: |
+          report="$RUNNER_TEMP/daytona-vitest.json"
+          pnpm exec vitest run --config vitest.config.ts --passWithNoTests=false \
+            --exclude '**/*.live.test.ts' --exclude '**/node_modules/**' \
+            --reporter=default --reporter=json --outputFile.json="$report"
+          ran="$(node -e 'const r=require(process.argv[1]); console.log(r.numPassedTests + r.numFailedTests)' "$report")"
+          echo "Daytona plugin tests executed: $ran"
+          if [ "$ran" -lt 1 ]; then
+            echo "::error::Daytona plugin test step ran 0 tests"
+            exit 1
+          fi
+
   verify:
     # Preserve the legacy required-check name while the underlying work runs in parallel.
     name: verify
     if: ${{ always() }}
-    needs: [typecheck_release_registry, general_tests, build]
+    needs: [typecheck_release_registry, general_tests, build, daytona_plugin_tests]
     runs-on: ubuntu-latest
     timeout-minutes: 5
 
@@ -297,10 +394,12 @@ jobs:
           TYPECHECK_RELEASE_REGISTRY_RESULT: ${{ needs.typecheck_release_registry.result }}
           GENERAL_TESTS_RESULT: ${{ needs.general_tests.result }}
           BUILD_RESULT: ${{ needs.build.result }}
+          DAYTONA_PLUGIN_TESTS_RESULT: ${{ needs.daytona_plugin_tests.result }}
         run: |
           test "$TYPECHECK_RELEASE_REGISTRY_RESULT" = "success"
           test "$GENERAL_TESTS_RESULT" = "success"
           test "$BUILD_RESULT" = "success"
+          test "$DAYTONA_PLUGIN_TESTS_RESULT" = "success"
 
   build:
     name: Build
@@ -333,6 +432,9 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Verify Paperclip Runner
+        run: pnpm --filter @paperclipai/paperclip-runner check:all
+
       - name: Build
         run: pnpm build
 
@@ -345,9 +447,11 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # A successful PR run on 2026-08-04 (30876682788) spent 256s in
-          # serialized shard 2/4, making its 305s job the run's slowest check.
-          # Five shards reduce the measured 739s suite total to about 148s per
+          # A successful PR run on 2026-08-17 (32012408876) spent 291s in
+          # serialized shard 1/5 while its siblings ran 170-201s: round-robin
+          # clustered the heavy suites on one runner. Shards are now balanced
+          # by recorded duration (scripts/serialized-shard-durations.json),
+          # which levels the measured 968s suite total to about 194s per
           # runner before setup overhead.
           - shard_index: 0
             shard_count: 5

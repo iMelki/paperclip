@@ -430,14 +430,22 @@ describe("sortAttentionItems", () => {
   });
 });
 
+// `attentionDateBucket` walks back from the start of the *local* day
+// (`setHours(0, 0, 0, 0)`), so every date fixture below is local too. Pinned to
+// UTC instants they drift across the boundary under test: `2026-07-09T23:00:00Z`
+// is 08:00 on the 10th at UTC+9 and buckets as "today", and at UTC+14 and UTC-11
+// even the mid-morning fixtures land on the wrong calendar day.
+const localTime = (month: number, day: number, hour: number) =>
+  new Date(2026, month - 1, day, hour, 0, 0, 0);
+
 describe("attentionDateBucket", () => {
-  const now = new Date(2026, 6, 10, 12).getTime();
+  const now = localTime(7, 10, 12).getTime();
 
   it("buckets by rolling calendar-day windows relative to now", () => {
-    expect(attentionDateBucket(new Date(2026, 6, 10, 9).toISOString(), now)).toBe("today");
-    expect(attentionDateBucket(new Date(2026, 6, 9, 23).toISOString(), now)).toBe("yesterday");
-    expect(attentionDateBucket(new Date(2026, 6, 6, 9).toISOString(), now)).toBe("this_week");
-    expect(attentionDateBucket(new Date(2026, 5, 1, 9).toISOString(), now)).toBe("earlier");
+    expect(attentionDateBucket(localTime(7, 10, 9).toISOString(), now)).toBe("today");
+    expect(attentionDateBucket(localTime(7, 9, 23).toISOString(), now)).toBe("yesterday");
+    expect(attentionDateBucket(localTime(7, 6, 9).toISOString(), now)).toBe("this_week");
+    expect(attentionDateBucket(localTime(6, 1, 9).toISOString(), now)).toBe("earlier");
   });
 
   it("treats invalid timestamps as earlier", () => {
@@ -446,13 +454,13 @@ describe("attentionDateBucket", () => {
 });
 
 describe("groupAttentionItems", () => {
-  const now = new Date(2026, 6, 10, 12).getTime();
+  const now = localTime(7, 10, 12).getTime();
 
   it("leaves None as one unlabeled group that preserves caller sort order", () => {
     const items = sortAttentionItems(
       [
-        buildItem({ id: "old", activityAt: new Date(2026, 6, 10, 8).toISOString() }),
-        buildItem({ id: "new", activityAt: new Date(2026, 6, 10, 10).toISOString() }),
+        buildItem({ id: "old", activityAt: "2026-07-10T08:00:00Z" }),
+        buildItem({ id: "new", activityAt: "2026-07-10T10:00:00Z" }),
       ],
       "newest",
     );
@@ -464,9 +472,9 @@ describe("groupAttentionItems", () => {
 
   it("groups by date into fixed Today/Yesterday/This week/Earlier order", () => {
     const items = [
-      buildItem({ id: "earlier", activityAt: new Date(2026, 5, 1).toISOString() }),
-      buildItem({ id: "today", activityAt: new Date(2026, 6, 10, 8).toISOString() }),
-      buildItem({ id: "yesterday", activityAt: new Date(2026, 6, 9, 8).toISOString() }),
+      buildItem({ id: "earlier", activityAt: localTime(6, 1, 9).toISOString() }),
+      buildItem({ id: "today", activityAt: localTime(7, 10, 8).toISOString() }),
+      buildItem({ id: "yesterday", activityAt: localTime(7, 9, 8).toISOString() }),
     ];
     const groups = groupAttentionItems(items, "date", { now });
     expect(groups.map((g) => g.label)).toEqual(["Today", "Yesterday", "Earlier"]);
@@ -508,8 +516,8 @@ describe("groupAttentionItems", () => {
   it("preserves the caller-provided intra-group order (sort governs within a bucket)", () => {
     const items = sortAttentionItems(
       [
-        buildItem({ id: "t1", activityAt: new Date(2026, 6, 10, 8).toISOString() }),
-        buildItem({ id: "t2", activityAt: new Date(2026, 6, 10, 10).toISOString() }),
+        buildItem({ id: "t1", activityAt: localTime(7, 10, 8).toISOString() }),
+        buildItem({ id: "t2", activityAt: localTime(7, 10, 10).toISOString() }),
       ],
       "newest",
     );

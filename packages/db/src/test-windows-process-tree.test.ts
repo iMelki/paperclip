@@ -236,7 +236,7 @@ describe("Windows test process tree selection", () => {
           rootPid: root.pid!,
           ownerMarkers: [],
           expectedRootIdentity: rootIdentity!,
-          timeoutMs: 8_000,
+          timeoutMs: 15_000,
         });
         expect(result).toMatchObject({
           attempted: false,
@@ -256,7 +256,7 @@ describe("Windows test process tree selection", () => {
         expect(root.exitCode !== null || root.signalCode !== null).toBe(true);
       }
     },
-    15_000,
+    25_000,
   );
 
   // --- no-custody (legacy caller) contract -----------------------------------

@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
+import fsSync from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
@@ -97,6 +98,32 @@ function assertSafeServiceKey(serviceKey: string) {
   ) {
     throw new Error("Invalid local service registry key.");
   }
+}
+
+function getRuntimeServiceLogsDir() {
+  return path.resolve(resolvePaperclipInstanceRoot(), "runtime-service-logs");
+}
+
+export function resolveLocalServiceLogPath(serviceKey: string) {
+  if (!/^[a-z0-9._-]+$/.test(serviceKey)) {
+    throw new Error("Invalid local service key for log path");
+  }
+  return path.resolve(getRuntimeServiceLogsDir(), `${serviceKey}.log`);
+}
+
+/**
+ * Open a managed service's durable append-only output file.
+ *
+ * The returned descriptor is intended to be passed directly to spawn(). The
+ * child receives its own duplicate, so the caller can close this handle as soon
+ * as spawn returns without tying the service's stdio lifetime to Paperclip's.
+ */
+export async function openLocalServiceLogFile(serviceKey: string) {
+  await fs.mkdir(getRuntimeServiceLogsDir(), { recursive: true });
+  const logPath = resolveLocalServiceLogPath(serviceKey);
+  const handle = await fs.open(logPath, "a+", 0o600);
+  const startOffset = (await handle.stat()).size;
+  return { handle, logPath, startOffset };
 }
 
 function getRuntimeServiceRegistryPath(serviceKey: string) {
@@ -429,56 +456,131 @@ export function isProcessGroupAlive(processGroupId: number | null | undefined) {
   if (typeof processGroupId !== "number" || !Number.isInteger(processGroupId) || processGroupId <= 0) return false;
   try {
     process.kill(-processGroupId, 0);
+  } catch {
+    return false;
+  }
+
+  if (process.platform === "linux") {
+    const liveMember = readLinuxProcessGroupActivity(processGroupId);
+    if (liveMember !== null) return liveMember;
+  }
+  return true;
+}
+
+function readLinuxProcessGroupActivity(processGroupId: number): boolean | null {
+  let entries: fsSync.Dirent[];
+  try {
+    entries = fsSync.readdirSync("/proc", { withFileTypes: true });
+  } catch {
+    return null;
+  }
+
+  let foundMember = false;
+  for (const entry of entries) {
+    if (!entry.isDirectory() || !/^\d+$/.test(entry.name)) continue;
+    try {
+      const stat = fsSync.readFileSync(`/proc/${entry.name}/stat`, "utf8");
+      const commandEnd = stat.lastIndexOf(")");
+      if (commandEnd < 0) continue;
+      const fields = stat.slice(commandEnd + 1).trim().split(/\s+/);
+      const state = fields[0];
+      const memberProcessGroupId = Number.parseInt(fields[2] ?? "", 10);
+      if (memberProcessGroupId !== processGroupId) continue;
+      foundMember = true;
+      if (state !== "Z" && state !== "X") return true;
+    } catch {
+      // The process can exit while /proc is scanned.
+    }
+  }
+
+  // kill(-pgid, 0) also succeeds for a group that contains only zombies. Such
+  // processes cannot run or own a listener and are waiting only for their
+  // parent to reap them, so termination is complete for service-control use.
+  return foundMember ? false : null;
+}
+
+function tokenizeCommandLine(value: string) {
+  return value.match(/"(?:\\.|[^"\\])*"|'[^']*'|\S+/g) ?? [];
+}
+
+function normalizeCommandToken(value: string) {
+  const unquoted = value.replace(/^["']|["']$/g, "");
+  const basename = path.basename(unquoted.replace(/\\/g, "/"));
+  const launcher = basename.replace(/\.(?:cjs|mjs|js|cmd|exe)$/i, "");
+  return /^(?:bun|node|nodejs|npm|npx|pnpm|yarn)$/i.test(launcher) ? launcher : unquoted;
+}
+
+/**
+ * Return whether the configured shell command has a stable argv that can be
+ * compared with the operating system's process command line.
+ *
+ * Managed local services are started through `shell -lc`. Once a command uses
+ * shell control syntax, the surviving process-group leader can be the result of
+ * that program rather than the configured shell expression. In that case a
+ * literal argv comparison is not evidence that the process belongs to a
+ * different service; adoption instead relies on the listener, process group,
+ * and workspace cwd checks.
+ */
+export function isLocalServiceCommandLineComparable(recordedCommand: string) {
+  let quote: "'" | '"' | null = null;
+  let escaped = false;
+
+  for (const character of recordedCommand) {
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (character === "\\" && quote !== "'") {
+      escaped = true;
+      continue;
+    }
+    if (quote) {
+      if (character === quote) quote = null;
+      continue;
+    }
+    if (character === "'" || character === '"') {
+      quote = character;
+      continue;
+    }
+    if ([";", "|", "&", "<", ">", "\n"].includes(character)) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+/**
+ * Compare a configured service command with the argv exposed by the OS.
+ *
+ * Package-manager launchers commonly replace `pnpm dev` with
+ * `node /path/to/pnpm.cjs dev` after the shell starts. A literal substring
+ * check rejects that surviving process even though the executable and all
+ * configured arguments are still present. Normalize executable paths and
+ * script extensions, then require the configured argv to remain contiguous.
+ */
+export function doesLocalServiceCommandLineMatch(input: {
+  commandLine: string;
+  recordedCommand: string;
+  serviceName: string;
+}) {
+  const normalize = (value: string) => value.replace(/["']/g, "").replace(/\s+/g, " ").trim();
+  const normalizedCommandLine = normalize(input.commandLine);
+  const normalizedRecordedCommand = normalize(input.recordedCommand);
+  if (
+    normalizedCommandLine.includes(normalizedRecordedCommand)
+    || normalizedCommandLine.includes(input.serviceName)
+  ) {
     return true;
-  } catch {
-    return false;
   }
-}
 
-async function terminateWindowsProcessTree(pid: number) {
-  if (!Number.isInteger(pid) || pid <= 0) {
-    return { ok: false, error: "invalid_pid" };
-  }
-  try {
-    await execFileAsync(taskkillCommand, ["/pid", String(pid), "/t", "/f"]);
-    return { ok: true };
-  } catch (error) {
-    return {
-      ok: false,
-      error: error instanceof Error ? error.message : String(error),
-    };
-  }
-}
+  const actualTokens = tokenizeCommandLine(input.commandLine).map(normalizeCommandToken);
+  const recordedTokens = tokenizeCommandLine(input.recordedCommand).map(normalizeCommandToken);
+  if (recordedTokens.length === 0 || recordedTokens.length > actualTokens.length) return false;
 
-async function matchesWindowsProcessCreationIdentity(
-  pid: number,
-  expectedStartedAt: Date | string,
-) {
-  if (process.platform !== "win32") return false;
-  const expected = expectedStartedAt instanceof Date
-    ? expectedStartedAt
-    : new Date(expectedStartedAt);
-  if (Number.isNaN(expected.getTime())) return false;
-  const script = [
-    "$ErrorActionPreference = 'Stop'",
-    `$item = Get-CimInstance Win32_Process -Filter 'ProcessId = ${pid}'`,
-    "if (-not $item) { exit 3 }",
-    "[Console]::Out.Write($item.CreationDate.ToUniversalTime().ToString('o'))",
-  ].join("\n");
-  try {
-    const { stdout } = await execFileAsync(windowsPowerShellCommand, [
-      "-NoLogo",
-      "-NoProfile",
-      "-NonInteractive",
-      "-Command",
-      script,
-    ]);
-    const actual = new Date(stdout.trim());
-    if (Number.isNaN(actual.getTime())) return false;
-    return Math.abs(actual.getTime() - expected.getTime()) <= 60_000;
-  } catch {
-    return false;
-  }
+  return actualTokens.some((_, start) => recordedTokens.every(
+    (token, offset) => actualTokens[start + offset] === token,
+  ));
 }
 
 async function isLikelyMatchingCommand(record: LocalServiceRegistryRecord) {
@@ -486,6 +588,14 @@ async function isLikelyMatchingCommand(record: LocalServiceRegistryRecord) {
     process.platform === "win32" &&
     verifiedWindowsRegistryIdentities.has(record)
   ) {
+    return true;
+  }
+  // Upstream rule: a command with shell control syntax (`;`, `|`, `&`,
+  // redirects) has no stable argv once `shell -lc` execs into its last
+  // program, so a literal argv comparison proves nothing. Adoption then rests
+  // on the listener, process-group ownership and workspace cwd checks that
+  // every caller runs next (doesLocalServiceRecordMatchCwd).
+  if (process.platform !== "win32" && !isLocalServiceCommandLineComparable(record.command)) {
     return true;
   }
   try {
@@ -605,6 +715,39 @@ async function readProcessGroupId(pid: number) {
   return readLocalServiceProcessGroupId(pid);
 }
 
+export async function isLocalServiceProcessOwnedBy(pid: number, ownerProcessId: number) {
+  if (pid === ownerProcessId) return true;
+  if (process.platform !== "win32") {
+    return (await readLocalServiceProcessGroupId(pid)) === ownerProcessId;
+  }
+
+  try {
+    const script = [
+      `$currentProcessId = ${pid}`,
+      "while ($currentProcessId -gt 0) {",
+      "  $process = Get-CimInstance Win32_Process -Filter \"ProcessId = $currentProcessId\" -ErrorAction SilentlyContinue",
+      "  if ($null -eq $process) { break }",
+      "  $parentProcessId = [int]$process.ParentProcessId",
+      "  Write-Output $parentProcessId",
+      "  if ($parentProcessId -eq $currentProcessId) { break }",
+      "  $currentProcessId = $parentProcessId",
+      "}",
+    ].join("\n");
+    const { stdout } = await execFileAsync("powershell.exe", [
+      "-NoProfile",
+      "-NonInteractive",
+      "-Command",
+      script,
+    ]);
+    return stdout
+      .split(/\r?\n/)
+      .map((line) => Number.parseInt(line.trim(), 10))
+      .some((ancestorPid) => ancestorPid === ownerProcessId);
+  } catch {
+    return false;
+  }
+}
+
 async function adoptLocalServiceFromPortOwner(input: {
   serviceKey: string;
   profileKind?: string | null;
@@ -697,8 +840,151 @@ export async function touchLocalServiceRegistryRecord(
   return next;
 }
 
+async function terminateWindowsProcessTree(pid: number) {
+  if (!Number.isInteger(pid) || pid <= 0) {
+    return { ok: false, error: "invalid_pid" };
+  }
+  try {
+    await execFileAsync(taskkillCommand, ["/pid", String(pid), "/t", "/f"]);
+    return { ok: true };
+  } catch (error) {
+    return {
+      ok: false,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
+/**
+ * Linux start-time identity (parity with the Windows CreationDate check).
+ *
+ * Reads field 22 (starttime, in clock ticks since boot) of /proc/<pid>/stat.
+ * The comm field (2) may contain spaces or parentheses, so fields are parsed
+ * only after the LAST ')' in the line. Ticks are converted to wall-clock ms
+ * with btime from /proc/stat and CLK_TCK from getconf.
+ *
+ * Tolerance: btime is whole seconds (up to 1000 ms truncation), plus one
+ * clock tick, plus the 1 ms precision of the recorded processStartedAt.
+ * btime is derived from the current wall clock minus uptime, so it can also
+ * shift slightly when the system clock is adjusted (NTP slew or step). That
+ * drift is one more reason the tolerance exists; a larger clock step makes the
+ * check fail closed rather than trust a pid.
+ *
+ * Fails closed: any read or parse error, a missing /proc, a gone pid, or a
+ * non-Linux platform returns false (untrusted).
+ */
+export const LINUX_START_TIME_BTIME_PRECISION_MS = 1000;
+export const LINUX_START_TIME_RECORDED_PRECISION_MS = 1;
+
+export function parseLinuxProcStatStartTicks(statLine: string): number | null {
+  if (typeof statLine !== "string") return null;
+  const closeParen = statLine.lastIndexOf(")");
+  if (closeParen < 0) return null;
+  const rest = statLine.slice(closeParen + 1).trim().split(/\s+/);
+  // rest[0] is field 3 (state), so field 22 is rest[19].
+  const raw = rest[19];
+  if (raw === undefined || !/^\d+$/.test(raw)) return null;
+  const ticks = Number(raw);
+  return Number.isSafeInteger(ticks) ? ticks : null;
+}
+
+export function parseLinuxProcStatBootTimeSec(procStat: string): number | null {
+  if (typeof procStat !== "string") return null;
+  const match = /^btime\s+(\d+)\s*$/m.exec(procStat);
+  if (!match) return null;
+  const value = Number(match[1]);
+  return Number.isSafeInteger(value) && value > 0 ? value : null;
+}
+
+let cachedLinuxClockTicks: number | null = null;
+async function readLinuxClockTicksPerSecond(): Promise<number | null> {
+  if (cachedLinuxClockTicks !== null) return cachedLinuxClockTicks;
+  try {
+    const { stdout } = await execFileAsync("getconf", ["CLK_TCK"]);
+    const value = Number(String(stdout).trim());
+    if (!Number.isInteger(value) || value <= 0) return null;
+    cachedLinuxClockTicks = value;
+    return value;
+  } catch {
+    return null;
+  }
+}
+
+export interface LinuxStartIdentityDeps {
+  platform?: NodeJS.Platform;
+  readFile?: (filePath: string) => Promise<string>;
+  clockTicksPerSecond?: () => Promise<number | null>;
+}
+
+export async function matchesLinuxProcessStartIdentity(
+  pid: number,
+  expectedStartedAt: Date | string,
+  deps: LinuxStartIdentityDeps = {},
+): Promise<boolean> {
+  const platform = deps.platform ?? process.platform;
+  if (platform !== "linux") return false;
+  const normalizedPid = normalizeLocalServicePid(pid);
+  if (normalizedPid === null) return false;
+  const expected = expectedStartedAt instanceof Date
+    ? expectedStartedAt
+    : new Date(expectedStartedAt);
+  const expectedMs = expected.getTime();
+  if (Number.isNaN(expectedMs)) return false;
+  const readFile = deps.readFile ?? ((filePath: string) => fs.readFile(filePath, "utf8"));
+  try {
+    const [statLine, procStat, clockTicks] = await Promise.all([
+      readFile(`/proc/${normalizedPid}/stat`),
+      readFile("/proc/stat"),
+      (deps.clockTicksPerSecond ?? readLinuxClockTicksPerSecond)(),
+    ]);
+    const startTicks = parseLinuxProcStatStartTicks(statLine);
+    const bootTimeSec = parseLinuxProcStatBootTimeSec(procStat);
+    if (startTicks === null || bootTimeSec === null || !clockTicks || clockTicks <= 0) {
+      return false;
+    }
+    const actualMs = bootTimeSec * 1000 + (startTicks * 1000) / clockTicks;
+    const toleranceMs = LINUX_START_TIME_BTIME_PRECISION_MS
+      + 1000 / clockTicks
+      + LINUX_START_TIME_RECORDED_PRECISION_MS;
+    return Math.abs(actualMs - expectedMs) <= toleranceMs;
+  } catch {
+    return false;
+  }
+}
+
+async function matchesWindowsProcessCreationIdentity(
+  pid: number,
+  expectedStartedAt: Date | string,
+) {
+  if (process.platform !== "win32") return false;
+  const expected = expectedStartedAt instanceof Date
+    ? expectedStartedAt
+    : new Date(expectedStartedAt);
+  if (Number.isNaN(expected.getTime())) return false;
+  const script = [
+    "$ErrorActionPreference = 'Stop'",
+    `$item = Get-CimInstance Win32_Process -Filter 'ProcessId = ${pid}'`,
+    "if (-not $item) { exit 3 }",
+    "[Console]::Out.Write($item.CreationDate.ToUniversalTime().ToString('o'))",
+  ].join("\n");
+  try {
+    const { stdout } = await execFileAsync(windowsPowerShellCommand, [
+      "-NoLogo",
+      "-NoProfile",
+      "-NonInteractive",
+      "-Command",
+      script,
+    ]);
+    const actual = new Date(stdout.trim());
+    if (Number.isNaN(actual.getTime())) return false;
+    return Math.abs(actual.getTime() - expected.getTime()) <= 60_000;
+  } catch {
+    return false;
+  }
+}
+
 export async function terminateLocalService(
-  record: Pick<LocalServiceRegistryRecord, "pid" | "processGroupId">,
+  record: Pick<LocalServiceRegistryRecord, "pid" | "processGroupId"> & Partial<Pick<LocalServiceRegistryRecord, "port">>,
   opts?: {
     signal?: NodeJS.Signals;
     forceAfterMs?: number;
@@ -817,6 +1103,10 @@ export async function terminateLocalService(
       && !pidAlive
       && opts.expectedStartedAt !== undefined
       && opts.expectedStartedAt !== null
+      // Orphaned descendants of a dead leader keep its PGID, but the leader
+      // itself (pid === PGID) must be gone. A live process holding that pid
+      // means the PGID was reused by an unrelated group: refuse.
+      && !isPidAlive(recordedProcessGroupId)
     ) {
       const ownProcessGroupId = await readLocalServiceProcessGroupId(process.pid);
       if (ownProcessGroupId === null || recordedProcessGroupId !== ownProcessGroupId) {
@@ -826,7 +1116,13 @@ export async function terminateLocalService(
   }
 
   const signal = opts?.signal ?? "SIGTERM";
-  const canTargetPid = opts?.trustedPid === true;
+  const canTargetPid = opts?.trustedPid === true
+    || (
+      pidAlive
+      && opts?.expectedStartedAt !== undefined
+      && opts.expectedStartedAt !== null
+      && await matchesLinuxProcessStartIdentity(pid, opts.expectedStartedAt)
+    );
   if (processGroupId === null && !canTargetPid) {
     return {
       pid,
@@ -960,13 +1256,50 @@ export async function readLocalServicePortOwner(port: number) {
   }
 }
 
+/**
+ * Resolve a running process's working directory.
+ *
+ * Linux reads it straight off procfs. macOS has no procfs, so it asks `lsof`
+ * for the process's `cwd` descriptor, the same tool this module already shells
+ * out to for port ownership, so this adds no new dependency. `-d cwd` narrows
+ * the output to the working directory.
+ *
+ * `-F0n` terminates each field with NUL instead of a newline. The parser does
+ * not trim the path or split it on newlines. That matters because the caller
+ * compares this value against a workspace root: a directory name may contain
+ * leading or trailing spaces, or even a newline, and changing the path would
+ * report a different directory than the one the process runs in.
+ *
+ * Returning a real path on macOS is what lets `adoptLocalServiceFromPortOwner`
+ * verify a listener actually belongs to the workspace. While this returned
+ * null off Linux, that check could never pass, so port-owner adoption always
+ * failed there and still-running services were reconciled to `stopped`.
+ */
 export async function readLocalServiceProcessCwd(pid: number) {
-  if (!Number.isInteger(pid) || pid <= 0 || process.platform !== "linux") return null;
-  try {
-    return await fs.readlink(`/proc/${pid}/cwd`);
-  } catch {
-    return null;
+  if (!Number.isInteger(pid) || pid <= 0) return null;
+  if (process.platform === "linux") {
+    try {
+      return await fs.readlink(`/proc/${pid}/cwd`);
+    } catch {
+      return null;
+    }
   }
+  if (process.platform === "darwin") {
+    try {
+      const { stdout } = await execFileAsync("lsof", ["-a", "-d", "cwd", "-p", String(pid), "-F0n"]);
+      // Each field ends with NUL. The newline that ends a field set carries
+      // into the next field, so drop it before reading the `n` tag; anything
+      // after the tag is the path exactly as lsof reported it.
+      const cwdField = stdout
+        .split("\0")
+        .map((field) => field.replace(/^\n+/, ""))
+        .find((field) => field.startsWith("n"));
+      return cwdField ? cwdField.slice(1) || null : null;
+    } catch {
+      return null;
+    }
+  }
+  return null;
 }
 
 export async function readLocalServiceProcessGroupId(pid: number) {
@@ -994,7 +1327,7 @@ export async function isLocalServiceProcessInWorkspace(processCwd: string, works
 }
 
 export async function isLocalServiceRegistryCwdCompatible(processCwd: string | null, workspaceCwd: string) {
-  if (!processCwd) return process.platform !== "linux";
+  if (!processCwd) return process.platform !== "linux" && process.platform !== "darwin";
   return isLocalServiceProcessInWorkspace(processCwd, workspaceCwd);
 }
 
@@ -1002,6 +1335,9 @@ async function doesLocalServiceRecordMatchCwd(record: LocalServiceRegistryRecord
   if (!record.port) return true;
   const ownerPid = await readLocalServicePortOwner(record.port);
   if (!ownerPid) return false;
+  if (!(await isLocalServiceProcessOwnedBy(ownerPid, record.processGroupId ?? record.pid))) {
+    return false;
+  }
   const ownerCwd = await readLocalServiceProcessCwd(ownerPid);
   return isLocalServiceRegistryCwdCompatible(ownerCwd, record.cwd);
 }

@@ -397,10 +397,15 @@ describe("native GitHub OAuth service and routes (mandatory private PostgreSQL)"
       { type: "none", source: "none" }, routeActor(fixture, { userId: "synthetic-other-user" }),
       routeActor(fixture, { sessionId: "synthetic-other-session" }),
       routeActor(fixture, { memberships: [{ companyId: fixture.companyId, membershipRole: "viewer", status: "active" }] }),
-      routeActor(fixture, { companyIds: [], memberships: [] }),
     ];
     for (const actor of actors) await request(routeApp(actor)).get("/api/tools/oauth/callback")
       .set("Accept", "application/json").query({ state: begun.state, code: "synthetic-code" }).expect(403);
+    // A foreign-company actor gets the same 400 as an unknown state, not 403:
+    // upstream #9589 makes inaccessible OAuth state indistinguishable from a
+    // missing one so the callback is not a cross-tenant state oracle.
+    await request(routeApp(routeActor(fixture, { companyIds: [], memberships: [] }))).get("/api/tools/oauth/callback")
+      .set("Accept", "application/json").query({ state: begun.state, code: "synthetic-code" })
+      .expect(400, /Invalid or expired OAuth state/);
     expect(await db.select().from(toolOauthStates).where(eq(toolOauthStates.state, begun.state))).toHaveLength(1);
     expect(tokenCalls()).toHaveLength(0); await complete(fixture, begun.state); await expectNoAgentEffects(fixture.companyId);
   });

@@ -124,13 +124,20 @@ function splitMigrationStatements(content: string): string[] {
 }
 
 export type MigrationState =
-  | { status: "upToDate"; tableCount: number; availableMigrations: string[]; appliedMigrations: string[] }
+  | {
+      status: "upToDate";
+      tableCount: number;
+      availableMigrations: string[];
+      appliedMigrations: string[];
+      journalEntryCount: number;
+    }
   | {
       status: "needsMigrations";
       tableCount: number;
       availableMigrations: string[];
       appliedMigrations: string[];
       pendingMigrations: string[];
+      journalEntryCount: number;
       reason: "no-migration-journal-empty-db" | "no-migration-journal-non-empty-db" | "pending-migrations";
     };
 
@@ -563,6 +570,25 @@ async function columnExists(
   return rows[0]?.exists ?? false;
 }
 
+async function columnHasDataType(
+  sql: ReturnType<typeof postgres>,
+  tableName: string,
+  columnName: string,
+  dataType: string,
+): Promise<boolean> {
+  const rows = await sql<{ dataType: string; udtName: string }[]>`
+    SELECT data_type AS "dataType", udt_name AS "udtName"
+    FROM information_schema.columns
+    WHERE table_schema = 'public'
+      AND table_name = ${tableName}
+      AND column_name = ${columnName}
+  `;
+  const expected = dataType.toLowerCase();
+  return rows.some((row) => (
+    row.dataType.toLowerCase() === expected || row.udtName.toLowerCase() === expected
+  ));
+}
+
 async function indexExists(
   sql: ReturnType<typeof postgres>,
   indexName: string,
@@ -596,6 +622,57 @@ async function constraintExists(
   return rows[0]?.exists ?? false;
 }
 
+async function functionExists(
+  sql: ReturnType<typeof postgres>,
+  functionName: string,
+): Promise<boolean> {
+  const rows = await sql<{ exists: boolean }[]>`
+    SELECT EXISTS (
+      SELECT 1
+      FROM pg_proc p
+      JOIN pg_namespace n ON n.oid = p.pronamespace
+      WHERE n.nspname = 'public'
+        AND p.proname = ${functionName}
+    ) AS exists
+  `;
+  return rows[0]?.exists ?? false;
+}
+
+async function triggerExists(
+  sql: ReturnType<typeof postgres>,
+  triggerName: string,
+): Promise<boolean> {
+  const rows = await sql<{ exists: boolean }[]>`
+    SELECT EXISTS (
+      SELECT 1
+      FROM pg_trigger t
+      JOIN pg_class c ON c.oid = t.tgrelid
+      JOIN pg_namespace n ON n.oid = c.relnamespace
+      WHERE n.nspname = 'public'
+        AND t.tgname = ${triggerName}
+        AND NOT t.tgisinternal
+    ) AS exists
+  `;
+  return rows[0]?.exists ?? false;
+}
+
+async function heartbeatNextEventSequencesAreCurrent(
+  sql: ReturnType<typeof postgres>,
+): Promise<boolean> {
+  const rows = await sql<{ current: boolean }[]>`
+    SELECT NOT EXISTS (
+      SELECT 1
+      FROM heartbeat_runs run
+      WHERE run.next_event_seq IS DISTINCT FROM COALESCE((
+        SELECT max(event.seq) + 1
+        FROM heartbeat_run_events event
+        WHERE event.run_id = run.id
+      ), 1)
+    ) AS current
+  `;
+  return rows[0]?.current ?? false;
+}
+
 async function migrationStatementAlreadyApplied(
   sql: ReturnType<typeof postgres>,
   statement: string,
@@ -617,13 +694,23 @@ async function migrationStatementAlreadyApplied(
     return columnExists(sql, addColumnMatch[1], addColumnMatch[2]);
   }
 
+  const alterColumnTypeMatch = normalized.match(
+    /^ALTER TABLE "([^"]+)" ALTER COLUMN "([^"]+)" SET DATA TYPE ([A-Za-z0-9_]+)/i,
+  );
+  if (alterColumnTypeMatch) {
+    return columnHasDataType(
+      sql,
+      alterColumnTypeMatch[1],
+      alterColumnTypeMatch[2],
+      alterColumnTypeMatch[3],
+    );
+  }
+
   const createIndexMatch = normalized.match(
     /^CREATE (?:UNIQUE )?INDEX(?: IF NOT EXISTS)? "([^"]+)" ON "([^"]+)"/i,
   );
   if (createIndexMatch) {
-    if (await indexExists(sql, createIndexMatch[1])) {
-      return true;
-    }
+    if (await indexExists(sql, createIndexMatch[1])) return true;
     const tableName = createIndexMatch[2];
     const onIndex = normalized.toUpperCase().indexOf(" ON ");
     const afterOn = onIndex >= 0 ? normalized.slice(onIndex) : "";
@@ -631,18 +718,14 @@ async function migrationStatementAlreadyApplied(
       .map((match) => match[1])
       .filter((name) => name !== tableName);
     for (const columnName of columnNames) {
-      if (!(await columnExists(sql, tableName, columnName))) {
-        return true;
-      }
+      if (!(await columnExists(sql, tableName, columnName))) return true;
     }
     return false;
   }
 
   const addConstraintMatch = normalized.match(/^ALTER TABLE "([^"]+)" ADD CONSTRAINT "([^"]+)"/i);
   if (addConstraintMatch) {
-    if (await constraintExists(sql, addConstraintMatch[2])) {
-      return true;
-    }
+    if (await constraintExists(sql, addConstraintMatch[2])) return true;
     const fkColumnMatch = normalized.match(/FOREIGN KEY \("([^"]+)"\)/i);
     if (fkColumnMatch && !(await columnExists(sql, addConstraintMatch[1], fkColumnMatch[1]))) {
       return true;
@@ -653,29 +736,41 @@ async function migrationStatementAlreadyApplied(
   const dropColumnMatch = normalized.match(
     /^ALTER TABLE "([^"]+)" DROP COLUMN(?: IF EXISTS)? "([^"]+)"/i,
   );
-  if (dropColumnMatch) {
-    const present = await columnExists(sql, dropColumnMatch[1], dropColumnMatch[2]);
-    return !present;
-  }
+  if (dropColumnMatch) return !(await columnExists(sql, dropColumnMatch[1], dropColumnMatch[2]));
 
   const dropConstraintMatch = normalized.match(
     /^ALTER TABLE "([^"]+)" DROP CONSTRAINT(?: IF EXISTS)? "([^"]+)"/i,
   );
-  if (dropConstraintMatch) {
-    const present = await constraintExists(sql, dropConstraintMatch[2]);
-    return !present;
-  }
+  if (dropConstraintMatch) return !(await constraintExists(sql, dropConstraintMatch[2]));
 
   const dropTableMatch = normalized.match(/^DROP TABLE(?: IF EXISTS)? "([^"]+)"/i);
-  if (dropTableMatch) {
-    const present = await tableExists(sql, dropTableMatch[1]);
-    return !present;
-  }
+  if (dropTableMatch) return !(await tableExists(sql, dropTableMatch[1]));
 
   const dropIndexMatch = normalized.match(/^DROP (?:UNIQUE )?INDEX(?: IF EXISTS)? "([^"]+)"/i);
-  if (dropIndexMatch) {
-    const present = await indexExists(sql, dropIndexMatch[1]);
-    return !present;
+  if (dropIndexMatch) return !(await indexExists(sql, dropIndexMatch[1]));
+
+  const createFunctionMatch = normalized.match(
+    /^CREATE OR REPLACE FUNCTION "?([A-Za-z_][A-Za-z0-9_]*)"?\s*\(/i,
+  );
+  if (createFunctionMatch) {
+    return functionExists(sql, createFunctionMatch[1]);
+  }
+
+  const createTriggerMatch = normalized.match(
+    /^CREATE TRIGGER "?([A-Za-z_][A-Za-z0-9_]*)"?/i,
+  );
+  if (createTriggerMatch) {
+    return triggerExists(sql, createTriggerMatch[1]);
+  }
+
+  // This native-runner cursor backfill has a persistent postcondition. Verify it
+  // instead of replaying it when a restored database is missing only the
+  // migration-history row.
+  if (
+    normalized.startsWith('UPDATE "heartbeat_runs" AS run')
+    && normalized.includes('SET "next_event_seq" = COALESCE')
+  ) {
+    return heartbeatNextEventSequencesAreCurrent(sql);
   }
 
   // If we cannot reason about a statement safely, require manual migration.
@@ -896,6 +991,7 @@ export async function inspectMigrations(url: string): Promise<MigrationState> {
           availableMigrations,
           appliedMigrations: [],
           pendingMigrations: availableMigrations,
+          journalEntryCount: 0,
           reason: "no-migration-journal-non-empty-db",
         };
       }
@@ -906,10 +1002,16 @@ export async function inspectMigrations(url: string): Promise<MigrationState> {
         availableMigrations,
         appliedMigrations: [],
         pendingMigrations: availableMigrations,
+        journalEntryCount: 0,
         reason: "no-migration-journal-empty-db",
       };
     }
 
+    const qualifiedMigrationTable = `${quoteIdentifier(migrationTableSchema)}.${quoteIdentifier(DRIZZLE_MIGRATIONS_TABLE)}`;
+    const journalCountRows = await sql.unsafe<{ count: number }[]>(
+      `SELECT count(*)::int AS count FROM ${qualifiedMigrationTable}`,
+    );
+    const journalEntryCount = journalCountRows[0]?.count ?? 0;
     const appliedMigrations = await loadAppliedMigrations(sql, migrationTableSchema, availableMigrations);
     const pendingMigrations = availableMigrations.filter((name) => !appliedMigrations.includes(name));
     if (pendingMigrations.length === 0) {
@@ -918,6 +1020,7 @@ export async function inspectMigrations(url: string): Promise<MigrationState> {
         tableCount,
         availableMigrations,
         appliedMigrations,
+        journalEntryCount,
       };
     }
 
@@ -927,6 +1030,7 @@ export async function inspectMigrations(url: string): Promise<MigrationState> {
       availableMigrations,
       appliedMigrations,
       pendingMigrations,
+      journalEntryCount,
       reason: "pending-migrations",
     };
   } finally {

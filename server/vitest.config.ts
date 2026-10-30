@@ -1,4 +1,5 @@
 import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { configDefaults, defineConfig } from "vitest/config";
 
 function loadAdditionalExcludes(): string[] {
@@ -15,9 +16,20 @@ function loadAdditionalExcludes(): string[] {
 }
 
 export default defineConfig({
+  resolve: {
+    alias: [
+      {
+        find: /^@paperclipai\/paperclip-runner$/,
+        replacement: fileURLToPath(
+          new URL("../packages/paperclip-runner/src/index.ts", import.meta.url),
+        ),
+      },
+    ],
+  },
   test: {
     exclude: [...configDefaults.exclude, ...loadAdditionalExcludes()],
     environment: "node",
+    include: ["src/**/*.test.ts"],
     // Each server suite boots + tears down its own embedded Postgres in
     // beforeAll/afterAll. Under the loaded serial shard (maxWorkers=1) the
     // graceful shutdown can occasionally cross vitest's default 10s hookTimeout,
@@ -27,6 +39,7 @@ export default defineConfig({
     // mirrors it for the same reason.
     hookTimeout: 30000,
     teardownTimeout: 30000,
+    testTimeout: 15000,
     isolate: true,
     maxConcurrency: 1,
     maxWorkers: 1,
