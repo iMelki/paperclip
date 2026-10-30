@@ -266,4 +266,96 @@ describe("OnboardingWizard saved adapter persistence", () => {
     expect(warning?.textContent).toContain("(http)");
     expect(warning?.textContent).toContain("(claude_local)");
   });
+  function saveFreshHireState() {
+    window.localStorage.setItem(
+      "paperclip-onboarding-state",
+      JSON.stringify({
+        step: 4,
+        onboardingPath: "create",
+        companyName: "Example Co",
+        companyGoal: "Ship safely",
+        missionPath: "direct",
+        missionConfirmed: true,
+        agentName: "Chief of staff",
+        adapterType: "claude_local",
+        model: "claude-sonnet-4-6",
+        modelTouched: false,
+        command: "",
+        args: "",
+        url: "",
+        urlTouched: false,
+        cwd: "",
+        createdCompanyId: "company-1",
+        createdCompanyPrefix: "EX",
+        createdAgentId: null,
+        createdCompanyGoalId: "goal-1",
+      }),
+    );
+    agentsApiMock.instructionsBundle.mockResolvedValue({ entryFile: "AGENTS.md" });
+    agentsApiMock.saveInstructionsFile.mockResolvedValue(undefined);
+  }
+
+  async function connectFreshHire() {
+    await renderWizard();
+    const connect = findButton("Connect") ?? findButton("Give it a heartbeat");
+    expect(connect).toBeDefined();
+    click(connect!);
+    await flushReact();
+    await flushReact();
+  }
+
+  function mismatchWarning() {
+    return document.body.querySelector(
+      '[data-testid="onboarding-adapter-mismatch-warning"]',
+    );
+  }
+
+  it("shows no mismatch warning when the hire returns the requested adapter", async () => {
+    saveFreshHireState();
+    const hiredAgent = makeAgent({
+      adapterType: "claude_local",
+      adapterConfig: { model: "claude-sonnet-4-6" },
+    });
+    agentsApiMock.hire.mockResolvedValue({ agent: hiredAgent, approval: null });
+    agentsApiMock.get.mockResolvedValue(hiredAgent);
+
+    await connectFreshHire();
+
+    expect(agentsApiMock.hire).toHaveBeenCalledWith(
+      "company-1",
+      expect.objectContaining({ adapterType: "claude_local" }),
+    );
+    expect(document.body.textContent).toContain("Saved configuration");
+    expect(mismatchWarning()).toBeNull();
+    expect(findButton("Get started")?.disabled).toBe(false);
+  });
+
+  it("shows no mismatch warning and verifies against the requested type when the hire response has no adapter type", async () => {
+    saveFreshHireState();
+    const hiredAgent = makeAgent({ adapterConfig: { model: "claude-sonnet-4-6" } });
+    const hireResponseAgent = { ...hiredAgent, adapterType: undefined } as unknown as typeof hiredAgent;
+    agentsApiMock.hire.mockResolvedValue({ agent: hireResponseAgent, approval: null });
+    agentsApiMock.get.mockResolvedValue(hiredAgent);
+
+    await connectFreshHire();
+
+    expect(mismatchWarning()).toBeNull();
+    // Readback is claude_local, the requested type, so Review verifies.
+    expect(findButton("Get started")?.disabled).toBe(false);
+  });
+
+  it("blocks Get started when the hire response has no adapter type and the readback differs from the requested type", async () => {
+    saveFreshHireState();
+    const requested = makeAgent({ adapterConfig: { model: "claude-sonnet-4-6" } });
+    const hireResponseAgent = { ...requested, adapterType: undefined } as unknown as typeof requested;
+    agentsApiMock.hire.mockResolvedValue({ agent: hireResponseAgent, approval: null });
+    agentsApiMock.get.mockResolvedValue(
+      makeAgent({ adapterType: "http", adapterConfig: { model: "claude-sonnet-4-6" } }),
+    );
+
+    await connectFreshHire();
+
+    expect(mismatchWarning()).toBeNull();
+    expect(findButton("Get started")?.disabled).toBe(true);
+  });
 });
