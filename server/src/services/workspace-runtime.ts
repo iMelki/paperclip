@@ -4545,6 +4545,14 @@ async function spawnLocalRuntimeService(input: StartLocalRuntimeServiceInput): P
   };
 
   if (child.pid) {
+    // Make the pid durable before readiness can race ahead of the caller's
+    // own post-spawn save (and so a crash during startup keeps the pid).
+    try {
+      await persistRuntimeServiceRecord(input.db, record);
+    } catch (error) {
+      await terminateChildProcess(child);
+      throw error;
+    }
     await writeLocalServiceRegistryRecord({
       version: 1,
       serviceKey,
@@ -4592,6 +4600,9 @@ async function spawnLocalRuntimeService(input: StartLocalRuntimeServiceInput): P
     record.lastUsedAt = new Date().toISOString();
     record.stoppedAt = new Date().toISOString();
     await removeLocalServiceRegistryRecord(record.serviceKey).catch(() => undefined);
+    if (child.pid) {
+      await persistRuntimeServiceRecord(input.db, record).catch(() => undefined);
+    }
     throw new Error(
       `Failed to start runtime service "${serviceName}": ${err instanceof Error ? err.message : String(err)}${stderrExcerpt ? ` | stderr: ${stderrExcerpt.trim()}` : ""}`,
     );
