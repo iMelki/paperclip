@@ -2901,6 +2901,51 @@ describeEmbeddedPostgres("tool access service", () => {
     expect(updated.transportConfig).toEqual(updated.config);
   });
 
+  it("keeps a non-GitHub refresh ref and secret when a reconnect returns no refresh_token and no expires_in", async () => {
+    vi.stubEnv("PAPERCLIP_TOOL_OAUTH_SLACK_CLIENT_ID", "slack-client-id");
+    vi.stubEnv("PAPERCLIP_TOOL_OAUTH_SLACK_CLIENT_SECRET", "slack-client-secret");
+    const company = await createCompany(db);
+    const service = toolAccessService(db);
+    const connected = await service.connectGalleryApp(company.id, { galleryKey: "slack", name: "Slack reconnect keeps refresh" });
+    const actor = { actorType: "user" as const, actorId: "workspace-owner" };
+    const redirectUri = "https://paperclip.example/api/tools/oauth/callback";
+    let reconnect = false;
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (url) => {
+      const href = String(url);
+      if (href === "https://slack.com/api/oauth.v2.access") {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => (reconnect
+            ? { access_token: "second-access-token" }
+            : { access_token: "first-access-token", refresh_token: "first-refresh-token", expires_in: 3600 }),
+        } as Response;
+      }
+      if (href === "https://mcp.slack.com/mcp") {
+        return mcpHttpResponse({ jsonrpc: "2.0", id: "paperclip-catalog-refresh", result: { tools: [] } });
+      }
+      throw new Error(`unexpected fetch ${href}`);
+    });
+    const signIn = async () => {
+      const started = await service.startOAuth(company.id, connected.connectionId, { redirectUri, actor });
+      await service.completeOAuthCallback({
+        state: new URL(started.authorizationUrl).searchParams.get("state")!,
+        code: "authorization-code", redirectUri, actor,
+      });
+      const [row] = await db.select().from(toolConnections).where(eq(toolConnections.id, connected.connectionId));
+      return row;
+    };
+    const first = await signIn();
+    const firstRefresh = first.credentialSecretRefs.find((ref) => ref.configPath === "oauth.refresh_token");
+    expect(firstRefresh).toBeDefined();
+    reconnect = true;
+    const second = await signIn();
+    expect(second.credentialSecretRefs.find((ref) => ref.configPath === "oauth.refresh_token")?.secretId)
+      .toBe(firstRefresh!.secretId);
+    const [secret] = await db.select().from(companySecrets).where(eq(companySecrets.id, firstRefresh!.secretId));
+    expect(secret).toMatchObject({ status: "active", deletedAt: null });
+  });
+
   it("creates and resolves an agent-initiated user authorization grant card", async () => {
     vi.stubEnv("PAPERCLIP_TOOL_OAUTH_SLACK_CLIENT_ID", "slack-client-id");
     vi.stubEnv("PAPERCLIP_TOOL_OAUTH_SLACK_CLIENT_SECRET", "slack-client-secret");

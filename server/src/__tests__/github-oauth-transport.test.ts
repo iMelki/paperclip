@@ -143,10 +143,12 @@ describe("fixed GitHub authenticated-account proof", () => {
   });
 
   it("derives current grant facts from GET/user header and retains original token-response scope separately", async () => {
-    const io = harness(() => Response.json(user, { headers: { "X-OAuth-Scopes": "repo,project,read:org" } }));
+    const io = harness(() => Response.json(user, { headers: { "X-OAuth-Scopes": "repo,project,repo:status" } }));
     const facts = await verifyGitHubOAuthAuthorization({ ...authorization(), scope: " repo project " }, io.fetch);
-    expect(facts.rawGrantedScopes).toBe("repo,project,read:org");
-    expect(facts.grantedScopes).toEqual(["repo", "project", "read:org"]);
+    expect(facts.rawGrantedScopes).toBe("repo,project,repo:status");
+    expect(facts.grantedScopes).toEqual(["repo", "project", "repo:status"]);
+    const orgIo = harness(() => Response.json(user, { headers: { "X-OAuth-Scopes": "repo,project,read:org" } }));
+    await expect(verifyGitHubOAuthAuthorization({ ...authorization(), scope: " repo project " }, orgIo.fetch)).rejects.toThrow();
     expect(facts.rawTokenGrantedScopes).toBe(" repo project ");
     expect(facts.tokenGrantedScopes).toEqual(["repo", "project"]);
   });
