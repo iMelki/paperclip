@@ -4654,6 +4654,21 @@ async function prepareRuntimeProvisioning(
   }
 }
 
+let runtimeServiceAfterSpawnHookForTests:
+  | ((record: RuntimeServiceRecord) => Promise<void>)
+  | null = null;
+
+/**
+ * Test-only: run a hook after a local runtime service process is spawned and
+ * before the caller's own post-spawn save. Lets tests observe the persisted row
+ * in the window where readiness can still win. Pass null to clear.
+ */
+export function setRuntimeServiceAfterSpawnHookForTests(
+  hook: ((record: { id: string; providerRef: string | null }) => Promise<void>) | null,
+) {
+  runtimeServiceAfterSpawnHookForTests = hook;
+}
+
 async function startLocalRuntimeService(
   input: StartLocalRuntimeServiceInput,
   options?: { deferReadiness?: boolean },
@@ -4669,6 +4684,9 @@ async function startLocalRuntimeService(
       ...input,
       runtimeServiceId: provisioningRecord?.id ?? input.runtimeServiceId,
     });
+    if (runtimeServiceAfterSpawnHookForTests) {
+      await runtimeServiceAfterSpawnHookForTests(started.record);
+    }
     if (runtimeProvisionCommand) {
       await persistRuntimeServiceRecord(input.db, started.record);
     }
