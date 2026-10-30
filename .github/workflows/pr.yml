@@ -111,6 +111,9 @@ jobs:
           node --test ./scripts/refresh-lockfile.test.mjs
           ./.github/scripts/tests/check-pr-lockfile.test.mjs
 
+      - name: Test commitperclip review trigger policy
+        run: node --test ./.github/scripts/tests/commitperclip-review-trigger.test.mjs
+
       - name: Test deterministic pre-push selection and protocol
         run: >-
           node --test
