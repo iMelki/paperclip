@@ -1,11 +1,15 @@
 name: commitperclip PR Review
 
 on:
-  pull_request_target:
+  pull_request:
     types: [opened, synchronize, reopened]
 
-# Always runs from base branch context — never executes PR code.
-# pull_request_target gives access to secrets for untrusted fork PRs.
+# Checks out and runs only the base branch scripts, never PR code.
+# On pull_request, PRs from forks get a read-only token and no secrets, so the
+# steps that need the commitperclip bot token (and post results) run only when
+# the PR head lives in this repository and the author is not Dependabot
+# (pull_request does not expose Actions secrets to Dependabot). Those PRs
+# still get the base checkout and the dependency checks.
 
 permissions:
   pull-requests: write
@@ -46,6 +50,9 @@ jobs:
 
       - name: Generate commitperclip token
         id: token
+        if: >-
+          github.event.pull_request.head.repo.full_name == github.repository &&
+          github.event.pull_request.user.login != 'dependabot[bot]'
         run: |
           TOKEN=$(node .github/scripts/get-bot-token.mjs)
           echo "::add-mask::$TOKEN"
@@ -55,7 +62,9 @@ jobs:
 
       - name: Run quality gates
         id: quality
-        if: github.event.pull_request.user.login != 'dependabot[bot]'
+        if: >-
+          github.event.pull_request.head.repo.full_name == github.repository &&
+          github.event.pull_request.user.login != 'dependabot[bot]'
         run: node .github/scripts/run-quality-gates.mjs
         continue-on-error: true
         env:
@@ -66,6 +75,9 @@ jobs:
           PR_BRANCH: ${{ github.event.pull_request.head.ref }}
 
       - name: Run security gates
+        if: >-
+          github.event.pull_request.head.repo.full_name == github.repository &&
+          github.event.pull_request.user.login != 'dependabot[bot]'
         run: node .github/scripts/check-pr-security.mjs
         continue-on-error: true
         timeout-minutes: 3
@@ -77,6 +89,7 @@ jobs:
 
       - name: Fail if quality gates failed
         if: >-
+          github.event.pull_request.head.repo.full_name == github.repository &&
           github.event.pull_request.user.login != 'dependabot[bot]' &&
           steps.quality.outcome == 'failure'
         run: |
