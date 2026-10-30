@@ -240,17 +240,15 @@ async function flushReact() {
 }
 
 async function waitForAssertion(assertion: () => void) {
-  let lastError: unknown;
-  for (let i = 0; i < 20; i += 1) {
-    await flushReact();
-    try {
+  // Time-based wait: CI runners vary in speed, so a fixed number of flushes
+  // can expire before the UI settles (#233).
+  await vi.waitFor(
+    async () => {
+      await flushReact();
       assertion();
-      return;
-    } catch (error) {
-      lastError = error;
-    }
-  }
-  throw lastError;
+    },
+    { timeout: 5000, interval: 10 },
+  );
 }
 
 function testProviderButtons(container: HTMLElement): HTMLButtonElement[] {
@@ -766,12 +764,15 @@ describe("CompanyEnvironments — test provider button", () => {
     await flushReact();
 
     await act(async () => click(findButton(page, "Save")));
-    await flushReact();
-    expect(page.textContent).not.toContain("Unsaved changes");
+    await waitForAssertion(() => {
+      expect(page.textContent).not.toContain("Unsaved changes");
+    });
 
-    const beforeUnload = new Event("beforeunload", { cancelable: true });
-    window.dispatchEvent(beforeUnload);
-    expect(beforeUnload.defaultPrevented).toBe(true);
+    await waitForAssertion(() => {
+      const beforeUnload = new Event("beforeunload", { cancelable: true });
+      window.dispatchEvent(beforeUnload);
+      expect(beforeUnload.defaultPrevented).toBe(true);
+    });
 
     const link = document.createElement("a");
     link.href = "/agents/dashboard";
@@ -784,13 +785,16 @@ describe("CompanyEnvironments — test provider button", () => {
 
     // Navigation is blocked immediately; the action-review dialog asks about the draft (#48).
     expect(clickEvent.defaultPrevented).toBe(true);
-    const reviewDialog = document.body.querySelector('[data-slot="alert-dialog-content"]');
-    expect(reviewDialog?.textContent).toContain("Discard unsaved environment changes?");
+    await waitForAssertion(() => {
+      const reviewDialog = document.body.querySelector('[data-slot="alert-dialog-content"]');
+      expect(reviewDialog?.textContent).toContain("Discard unsaved environment changes?");
+    });
     await act(async () =>
       click(document.body.querySelector<HTMLButtonElement>('[data-slot="alert-dialog-cancel"]')),
     );
-    await flushReact();
-    expect(getEnvironmentFormPage()).not.toBeNull();
+    await waitForAssertion(() => {
+      expect(getEnvironmentFormPage()).not.toBeNull();
+    });
     link.remove();
   });
 
