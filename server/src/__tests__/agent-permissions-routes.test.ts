@@ -559,6 +559,90 @@ describe.sequential("agent permission routes", () => {
     }
   });
 
+  it.each([
+    ["saved runtime, empty partial config", { command: "echo" }, {}, 200],
+    ["no saved runtime, empty partial config", {}, {}, 409],
+    ["saved runtime, empty config with replace", { command: "echo" }, { replaceAdapterConfig: true }, 409],
+  ] as const)("PATCH status plus adapterConfig {} on a paused-setup agent (%s) returns %s", async (_label, saved, extra, expected) => {
+    mockAgentService.getById.mockResolvedValue({
+      ...baseAgent,
+      adapterType: "process",
+      adapterConfig: saved,
+      status: "paused",
+      pauseReason: "manual",
+      metadata: { "paperclip.pausedSetup": true },
+    });
+    const app = await createApp({
+      type: "board",
+      userId: "board-user",
+      source: "local_implicit",
+      isInstanceAdmin: true,
+      companyIds: [companyId],
+    });
+
+    const res = await requestApp(app, (baseUrl) => request(baseUrl)
+      .patch(`/api/agents/${agentId}`)
+      .send({ status: "idle", adapterConfig: {}, ...extra }));
+
+    if (expected === 409) {
+      expect(res.status, JSON.stringify(res.body)).toBe(409);
+      expect(res.body.code).toBe("agent_paused_setup_unconfigured");
+      expect(mockAgentService.update).not.toHaveBeenCalled();
+    } else {
+      expect(res.body?.code).not.toBe("agent_paused_setup_unconfigured");
+      expect(res.status, JSON.stringify(res.body)).toBe(200);
+      expect(mockAgentService.update).toHaveBeenCalledWith(
+        agentId,
+        expect.objectContaining({ status: "idle", adapterConfig: expect.objectContaining({ command: "echo" }) }),
+        expect.anything(),
+      );
+    }
+  });
+
+  async function pausedSetupAdminApp(saved: Record<string, unknown>) {
+    mockAgentService.getById.mockResolvedValue({
+      ...baseAgent,
+      adapterType: "process",
+      adapterConfig: saved,
+      status: "paused",
+      pauseReason: "manual",
+      metadata: { "paperclip.pausedSetup": true },
+    });
+    return createApp({
+      type: "board",
+      userId: "board-user",
+      source: "local_implicit",
+      isInstanceAdmin: true,
+      companyIds: [companyId],
+    });
+  }
+
+  it("M1: re-checks the adapterConfig that will be saved, not the early merged copy", async () => {
+    const app = await pausedSetupAdminApp({ command: "echo" });
+    // The persistence path strips the runtime; the early merged copy still looks configured.
+    mockSecretService.normalizeAdapterConfigForPersistence.mockImplementation(async () => ({}));
+
+    const res = await requestApp(app, (baseUrl) => request(baseUrl)
+      .patch(`/api/agents/${agentId}`)
+      .send({ status: "idle", adapterConfig: {} }));
+
+    expect(res.status, JSON.stringify(res.body)).toBe(409);
+    expect(res.body.code).toBe("agent_paused_setup_unconfigured");
+    expect(mockAgentService.update).not.toHaveBeenCalled();
+  });
+
+  it("M2: a null adapterConfig with a resume never resumes a paused-setup agent", async () => {
+    const app = await pausedSetupAdminApp({ command: "echo" });
+
+    const res = await requestApp(app, (baseUrl) => request(baseUrl)
+      .patch(`/api/agents/${agentId}`)
+      .send({ status: "idle", adapterConfig: null }));
+
+    expect(res.status, JSON.stringify(res.body)).toBeGreaterThanOrEqual(400);
+    expect(res.status).toBeLessThan(500);
+    expect(mockAgentService.update).not.toHaveBeenCalled();
+  });
+
   it("blocks agent updates for authenticated company members without agent admin permission", async () => {
     mockAccessService.canUser.mockResolvedValue(false);
 

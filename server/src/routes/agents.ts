@@ -3213,13 +3213,33 @@ export function agentRoutes(
     }
 
     const patchData = { ...(req.body as Record<string, unknown>) };
-    if (
+    // Evaluate the guard against the config the update will actually persist:
+    // a partial adapterConfig (even {}) merges into the saved one unless the
+    // request replaces it or changes adapter type (see the merge path below).
+    const guardAdapterType = patchData.adapterType ?? existing.adapterType;
+    const guardHasConfig = hasOwn(patchData, "adapterConfig");
+    const guardRequestedConfig = guardHasConfig ? asRecord(patchData.adapterConfig) : null;
+    const guardReplacesConfig =
+      patchData.replaceAdapterConfig === true
+      || (typeof patchData.adapterType === "string" && patchData.adapterType !== existing.adapterType);
+    // A present but null or non-object adapterConfig fails closed: it never
+    // inherits the saved runtime through the merge.
+    const guardAdapterConfig = !guardHasConfig
+      ? existing.adapterConfig
+      : guardRequestedConfig === null
+        ? {}
+        : guardReplacesConfig
+          ? guardRequestedConfig
+          : { ...(asRecord(existing.adapterConfig) ?? {}), ...guardRequestedConfig };
+    const resumesPausedSetup =
       existing.status === "paused" &&
-      patchData.status !== undefined && patchData.status !== "paused" && patchData.status !== "terminated" &&
+      patchData.status !== undefined && patchData.status !== "paused" && patchData.status !== "terminated";
+    if (
+      resumesPausedSetup &&
       isPausedAgentSetupUnconfigured({
         metadata: existing.metadata,
-        adapterType: patchData.adapterType ?? existing.adapterType,
-        adapterConfig: patchData.adapterConfig ?? existing.adapterConfig,
+        adapterType: guardAdapterType,
+        adapterConfig: guardAdapterConfig,
       })
     ) {
       res.status(409).json({
@@ -3361,6 +3381,23 @@ export function agentRoutes(
       await assertCanApplyAgentProfileChange(req, existing);
     } else {
       await assertCanUpdateAgent(req, existing);
+    }
+
+    // Re-check against the exact adapter type and config that svc.update will save,
+    // so the early guard cannot drift from the merge/normalize path above.
+    if (
+      resumesPausedSetup &&
+      isPausedAgentSetupUnconfigured({
+        metadata: existing.metadata,
+        adapterType: hasOwn(patchData, "adapterType") ? requestedAdapterType : existing.adapterType,
+        adapterConfig: hasOwn(patchData, "adapterConfig") ? patchData.adapterConfig : existing.adapterConfig,
+      })
+    ) {
+      res.status(409).json({
+        error: "Finish setup before resuming: this agent was created paused without a configured runtime",
+        code: "agent_paused_setup_unconfigured",
+      });
+      return;
     }
 
     const actor = getActorInfo(req);
