@@ -316,6 +316,56 @@ describeEmbeddedPostgres("POST /api/companies/:companyId/onboarding-seed", () =>
     expect(await ctx.db.select().from(companyOnboardingSeeds)).toHaveLength(0);
   });
 
+  // Cursor security finding on #133 (cloud_tenant bypass): Cloud header auth
+  // gives every stack role, including member and support, the cloud_tenant
+  // source, so that source alone must not skip agents:create.
+  it("refuses a Cloud tenant member without agents:create", async () => {
+    const { companyId } = await seedCompany();
+    const memberId = `user-${randomUUID()}`;
+    await ctx.db.insert(companyMemberships).values({
+      companyId,
+      principalType: "user",
+      principalId: memberId,
+      status: "active",
+      membershipRole: "operator",
+      updatedAt: new Date(),
+    });
+    const cloudMember: BoardActor = {
+      type: "board",
+      source: "cloud_tenant",
+      userId: memberId,
+      companyIds: [companyId],
+      memberships: [{ companyId, membershipRole: "operator", status: "active" }],
+      isInstanceAdmin: false,
+    };
+    const memberApp = routeApp(ctx.db, cloudMember, onboardingSeedRoutes);
+
+    const response = await post(memberApp, companyId, SEED);
+
+    expect(response.status).toBe(403);
+    expect(await ctx.db.select().from(agents).where(eq(agents.companyId, companyId))).toHaveLength(0);
+    expect(await ctx.db.select().from(companyOnboardingSeeds)).toHaveLength(0);
+  });
+
+  it("applies the seed for the attested Cloud owner (instance admin)", async () => {
+    const { companyId } = await seedCompany();
+    const ownerId = `user-${randomUUID()}`;
+    const cloudOwner: BoardActor = {
+      type: "board",
+      source: "cloud_tenant",
+      userId: ownerId,
+      companyIds: [companyId],
+      memberships: [{ companyId, membershipRole: "owner", status: "active" }],
+      isInstanceAdmin: true,
+    };
+    const ownerApp = routeApp(ctx.db, cloudOwner, onboardingSeedRoutes);
+
+    const response = await post(ownerApp, companyId, SEED);
+
+    expect(response.status).toBe(200);
+    expect(await ctx.db.select().from(agents).where(eq(agents.companyId, companyId))).toHaveLength(1);
+  });
+
   it("refuses a same-company agent API key", async () => {
     const { companyId } = await seedCompany();
     const agentActor = {
