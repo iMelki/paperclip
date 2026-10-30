@@ -98,10 +98,67 @@ function normalizePayloadKey(key: string): string {
     .toLowerCase();
 }
 
+// Separator-free, lowercase form: `pass-code`, `pass_code`, `passCode` and
+// `PASS CODE` all become `passcode`, and `verification-code` becomes
+// `verificationcode`.
+function compactPayloadKey(key: string): string {
+  return key.toLowerCase().replace(/[-_\s.]/g, "");
+}
+
+const SENSITIVE_COMPACT_KEYS = new Set<string>(
+  [...SENSITIVE_KEYS].map((entry) => entry.replace(/_/g, "")),
+);
+
+// Compound keys (userPassCode, one_time_passcode, smsVerificationCode) are
+// redacted when their compact form contains one of these unambiguous
+// credential tokens. Short or ambiguous tokens (code, pin, state, secret,
+// token) stay exact-match or segment-match only, so keys like barcode,
+// spinner, secretary or tokenCount are not over-redacted.
+const SENSITIVE_COMPACT_SUBSTRINGS = [
+  "password",
+  "passwd",
+  "passcode",
+  "passphrase",
+  "onetimepass",
+  "verificationcode",
+  "securitycode",
+  "authorizationcode",
+  "browsercode",
+  "privatekey",
+  "apikey",
+  "clientsecret",
+  "accesstoken",
+  "refreshtoken",
+  "sessiontoken",
+  "authtoken",
+];
+
+// `idtoken` is too short to match inside the compact form: validToken and
+// paidTokens compact to validtoken and paidtokens, which contain "idtoken".
+// It is matched on the normalized form instead, where `id` must start a word:
+// id_token, idToken, id-token, IDToken and userIdToken match, validToken and
+// paidTokens do not.
+const SENSITIVE_BOUNDED_TOKEN_RE = /(?:^|[_\-\s.])id[_\-\s.]?token/;
+
+// Whole-word credential tokens, matched on the normalized form so each must sit
+// between word boundaries (start, end, `_`, `-`, space, `.` or a camelCase
+// hump). `sid` and `totp` are short, so substring matching would hit side,
+// insider, considerations or totpal; segment matching does not. By the same
+// contract any key whose own segment is one of these words is redacted, so
+// bearerToken and bearerTrend are both redacted while bearerish is not.
+const SENSITIVE_WORD_TOKEN_RE =
+  /(?:^|[_\-\s.])(?:bearer|mfa[_\-\s.]?code|totp|two[_\-\s.]?factor[_\-\s.]?code|oauth[_\-\s.]?code|credentials?|session[_\-\s.]?id|sid)(?:$|[_\-\s.])/;
+
 function isSensitiveKey(key: string): boolean {
   const normalized = normalizePayloadKey(key);
   if (NON_SENSITIVE_METRIC_KEYS.has(normalized)) return false;
-  return SENSITIVE_KEYS.has(normalized) || SENSITIVE_KEY_SEGMENT_RE.test(normalized);
+  const compact = compactPayloadKey(key);
+  return SENSITIVE_KEYS.has(normalized)
+    || SENSITIVE_COMPACT_KEYS.has(compact)
+    || SENSITIVE_KEY_SEGMENT_RE.test(normalized)
+    || SENSITIVE_BOUNDED_TOKEN_RE.test(normalized)
+    || SENSITIVE_WORD_TOKEN_RE.test(normalized)
+    || SENSITIVE_COMPACT_SUBSTRINGS.some((token) => compact.includes(token));
 }
 
 function isUrlishKey(key: string): boolean {

@@ -222,4 +222,86 @@ describe("redactSensitive", () => {
     expect(json).not.toContain("null");
     expect(json).not.toContain("[1,2,3]");
   });
+
+  it("redacts hyphenated and compound passcode and verification-code keys", () => {
+    const keys = [
+      "pass-code", "Pass-Code", "PASS_CODE", "userPassCode", "one_time_passcode", "oneTimePasscode",
+      "verification-code", "verification_code", "VerificationCode", "smsVerificationCode",
+      "email-verification-code", "security-code", "user_password_hash", "newPass-word", "api-key",
+    ];
+    const out = redactSensitive(Object.fromEntries(keys.map((k) => [k, "v"]))) as Record<string, unknown>;
+    for (const key of keys) expect(out[key], key).toBe("[REDACTED]");
+  });
+
+  it("does not over-redact harmless keys that only resemble credential words", () => {
+    const input = {
+      passport: "p", bypassMode: "b", barcode: "c", zipCode: "z", countryCode: "cc", encoder: "e",
+      spinner: "s", stateName: "n", secretary: "y", tokenCount: 3, monkey: "m", keep: "ok",
+    };
+    expect(redactSensitive(input)).toEqual(input);
+  });
+
+  it("matches idtoken only at a word boundary", () => {
+    const out = redactSensitive({
+      id_token: "a", idToken: "b", "id-token": "c", IDToken: "d", userIdToken: "e", paidTokens: 2,
+    }) as Record<string, unknown>;
+    expect(out).toEqual({
+      id_token: "[REDACTED]", idToken: "[REDACTED]", "id-token": "[REDACTED]", IDToken: "[REDACTED]",
+      userIdToken: "[REDACTED]", paidTokens: 2,
+    });
+  });
+
+  it("redacts whole-word mfa, totp, bearer, oauth-code, credentials and session id keys", () => {
+    const keys = [
+      "bearer", "Bearer", "bearerToken", "mfaCode", "mfa_code", "mfa-code", "totp", "TOTP", "userTotp",
+      "twoFactorCode", "two_factor_code", "oauthCode", "oauth_code", "credentials", "credential",
+      "sessionId", "session_id", "sid", "SID", "user_sid",
+    ];
+    const out = redactSensitive(Object.fromEntries(keys.map((k) => [k, "v"]))) as Record<string, unknown>;
+    for (const key of keys) expect(out[key], key).toBe("[REDACTED]");
+  });
+
+  it("keeps keys that only contain the short words inside another word", () => {
+    const input = {
+      side: "l", insider: "i", sidebar: "s", considerations: "c", totpal: "t", bearerish: "b", outside: "o",
+    };
+    expect(redactSensitive(input)).toEqual(input);
+  });
+
+  it("redacts compound and whole-word credential keys nested inside objects and arrays", () => {
+    const out = redactSensitive({
+      login: {
+        "pass-code": "a",
+        userPassCode: "b",
+        profile: { one_time_passcode: "c", zipCode: "94110", passport: "visible" },
+        mfa: { mfaCode: "m1", totp: "t1", twoFactorCode: "f1" },
+      },
+      steps: [
+        { "verification-code": "d", paidTokens: 3 },
+        { oauthCode: "o1", sessionId: "s1", sid: "s2", bearer: "b1", credentials: { user: "x" } },
+        [{ zipCode: "10001", side: "left", considerations: "notes", totpal: "t" }],
+      ],
+    });
+
+    expect(out).toEqual({
+      login: {
+        "pass-code": "[REDACTED]",
+        userPassCode: "[REDACTED]",
+        profile: { one_time_passcode: "[REDACTED]", zipCode: "94110", passport: "visible" },
+        mfa: { mfaCode: "[REDACTED]", totp: "[REDACTED]", twoFactorCode: "[REDACTED]" },
+      },
+      steps: [
+        { "verification-code": "[REDACTED]", paidTokens: 3 },
+        {
+          oauthCode: "[REDACTED]", sessionId: "[REDACTED]", sid: "[REDACTED]", bearer: "[REDACTED]",
+          credentials: "[REDACTED]",
+        },
+        [{ zipCode: "10001", side: "left", considerations: "notes", totpal: "t" }],
+      ],
+    });
+  });
+
+  it("still redacts validToken through the existing token segment rule, like githubToken", () => {
+    expect((redactSensitive({ validToken: "v" }) as Record<string, unknown>).validToken).toBe("[REDACTED]");
+  });
 });
