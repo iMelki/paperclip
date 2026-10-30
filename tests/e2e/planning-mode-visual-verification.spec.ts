@@ -79,6 +79,7 @@ test("captures planning mode UI for desktop and mobile", async ({ page }) => {
     "Connected with",
     { timeout: 20_000 },
   );
+  await expect(page.getByTestId("onboarding-adapter-mismatch-warning")).toContainText("(http)");
   await page.getByRole("button", { name: /Get started/ }).click();
   // The wizard now drops the user straight onto the first task's detail page,
   // and must not bounce through the dashboard (PAP-404).

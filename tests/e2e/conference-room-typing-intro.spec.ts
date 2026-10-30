@@ -97,6 +97,7 @@ async function runOnboardingWizard(page: Page, companyName: string) {
     "Connected with",
     { timeout: 20_000 },
   );
+  await expect(page.getByTestId("onboarding-adapter-mismatch-warning")).toContainText("(http)");
   await getStarted.click();
 }
 
