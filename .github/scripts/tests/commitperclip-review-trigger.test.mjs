@@ -40,3 +40,15 @@ test('every uses: line in commitperclip-review.yml is pinned to a full sha', () 
     assert.match(line, /@[0-9a-f]{40}(\s|$)/, line);
   }
 });
+
+test('commitperclip-review.yml skips every bot-token step for Dependabot PRs', () => {
+  const steps = workflow.split('- name: ');
+  for (const name of ['Generate commitperclip token', 'Run quality gates', 'Run security gates']) {
+    const step = steps.find((s) => s.startsWith(name));
+    assert.ok(step, `${name} step present`);
+    assert.ok(
+      step.includes("github.event.pull_request.user.login != 'dependabot[bot]'"),
+      `${name} must skip Dependabot PRs, which get no Actions secrets on pull_request`,
+    );
+  }
+});
