@@ -5,6 +5,7 @@ import { Badge } from "@/components/ui/badge";
 import { getAdapterDisplay } from "../adapters/adapter-display-registry";
 import type { OnboardingAgentConfigReview } from "../lib/onboarding-agent-config";
 import { taskStatusVar } from "../lib/status-colors";
+import { InlineBanner } from "./InlineBanner";
 import { StatusGlyph } from "./StatusGlyph";
 
 interface OnboardingConfigurationReviewProps {
@@ -145,6 +146,12 @@ function EnvironmentProbeCard({
   );
 }
 
+/** Display label for an adapter type; falls back to the raw type, never blank. */
+export function adapterMismatchLabel(adapterType: string): string {
+  const label = getAdapterDisplay(adapterType)?.label;
+  return typeof label === "string" && label.trim() ? label : adapterType;
+}
+
 function AdapterMismatchWarning({
   requestedAdapterType,
   hiredAdapterType,
@@ -152,21 +159,18 @@ function AdapterMismatchWarning({
   requestedAdapterType: string;
   hiredAdapterType: string;
 }) {
-  const hired = getAdapterDisplay(hiredAdapterType).label;
-  const requested = getAdapterDisplay(requestedAdapterType).label;
+  const hired = adapterMismatchLabel(hiredAdapterType);
+  const requested = adapterMismatchLabel(requestedAdapterType);
   return (
-    <div
+    <InlineBanner
+      tone="warning"
       role="alert"
+      compact
       data-testid="onboarding-adapter-mismatch-warning"
-      className="rounded-md border border-amber-500/40 bg-amber-500/10 p-3 text-sm"
+      title={`Connected with ${hired} (${hiredAdapterType}), not the requested ${requested} (${requestedAdapterType}).`}
     >
-      <p className="font-medium">
-        Connected with {hired} ({hiredAdapterType}), not the requested {requested} ({requestedAdapterType}).
-      </p>
-      <p className="mt-1 text-muted-foreground">
-        The server saved a different adapter than you chose. Check it before you start.
-      </p>
-    </div>
+      The server saved a different adapter than you chose. Check it before you start.
+    </InlineBanner>
   );
 }
 
