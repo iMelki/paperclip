@@ -756,8 +756,15 @@ export function companyRoutes(db: Db, storage?: StorageService, options?: Compan
       throw unprocessable("Sum of part byte sizes must equal totalBytes");
     }
 
+    // Content plus, when the caller sends one, its import intent: the same
+    // bytes imported into another company or with other options are a new
+    // request, not a retry of a completed run (#133 review). Without an
+    // intentKey the key is byte-identical to the content-only key, so
+    // in-flight transfers from older clients still resume.
+    const contentIdentity: unknown[] = [declared.zipSha256, declared.parts.map((part) => part.sha256)];
+    if (declared.intentKey) contentIdentity.push(declared.intentKey);
     const idempotencyKey = createHash("sha256")
-      .update(JSON.stringify([declared.zipSha256, declared.parts.map((part) => part.sha256)]))
+      .update(JSON.stringify(contentIdentity))
       .digest("hex");
     const { run, alreadyCompleted } = await companyTransferRunService.resumeOrCreate(db, {
       direction: "import",

@@ -56,6 +56,17 @@ export const companyImportTransferDeclarationSchema = z.object({
     .describe("sha256 of the whole .zip, 64 lowercase hex characters"),
   partSizeBytes: z.number().int().min(1),
   parts: z.array(companyImportTransferDeclaredPartSchema).min(1).max(COMPANY_IMPORT_TRANSFER_MAX_PARTS),
+  /**
+   * Optional sha256 of the caller's import intent (target, include, agents,
+   * collision and adapter choices). When present it joins the content hash in
+   * the transfer's idempotency key, so the same bytes imported with a
+   * different intent start a new transfer instead of matching a completed
+   * one. Omitted: content-only key, unchanged behavior.
+   */
+  intentKey: z
+    .string()
+    .regex(SHA256_HEX_RE, "intentKey must be 64 lowercase hex characters")
+    .optional(),
 });
 
 export type CompanyImportTransferDeclaredPart = z.infer<typeof companyImportTransferDeclaredPartSchema>;

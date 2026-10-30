@@ -9,6 +9,7 @@ import { readZipArchive } from "@paperclipai/shared/portability-zip";
 import {
   CHUNKED_IMPORT_THRESHOLD_BYTES,
   IMPORT_TRANSFER_PART_SIZE_BYTES,
+  buildImportTransferIntentKey,
   buildImportTransferManifest,
   registerCompanyCommands,
   EXISTING_COMPANY_CHUNKED_IMPORT_THRESHOLD_BYTES,
@@ -304,6 +305,29 @@ describe("uploadCompanyImportTransfer", () => {
 
     await expect(uploadCompanyImportTransfer(api, zipBytes)).rejects.toThrow("socket hang up");
     expect(putRaw).toHaveBeenCalledTimes(3);
+  });
+
+  it("sends the import intent key with the declaration", async () => {
+    const post = vi.fn().mockResolvedValue({
+      transferId: "transfer-1",
+      status: "pending",
+      alreadyCompleted: false,
+      totalParts: 2,
+      missingParts: [],
+    });
+    const { api } = fakeApi({ post });
+    const intentKey = buildImportTransferIntentKey({ target: { mode: "new_company" } });
+    await uploadCompanyImportTransfer(api, zipBytes, { intentKey });
+    expect(post.mock.calls[0]![1]).toMatchObject({ intentKey });
+  });
+
+  it("derives different intent keys for different targets or options", () => {
+    const a = buildImportTransferIntentKey({ target: { mode: "new_company" }, collisionStrategy: "rename" });
+    const b = buildImportTransferIntentKey({ target: { mode: "existing_company", companyId: "c1" }, collisionStrategy: "rename" });
+    const c = buildImportTransferIntentKey({ target: { mode: "new_company" }, collisionStrategy: "skip" });
+    expect(a).toMatch(/^[0-9a-f]{64}$/);
+    expect(new Set([a, b, c]).size).toBe(3);
+    expect(buildImportTransferIntentKey({ target: { mode: "new_company" }, collisionStrategy: "rename" })).toBe(a);
   });
 
   it("refuses a transfer whose content was already applied", async () => {
