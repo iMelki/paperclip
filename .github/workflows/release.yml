@@ -25,6 +25,9 @@ concurrency:
   group: release-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: false
 
+permissions:
+  contents: read
+
 jobs:
   verify_canary:
     if: github.event_name == 'push'
@@ -115,6 +118,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
+          persist-credentials: false
           fetch-depth: 0
           ref: ${{ inputs.source_ref }}
 
