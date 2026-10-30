@@ -785,7 +785,13 @@ async function syncInFileMappings(input: {
     // decompresses its `.zst` scratch to the raw scratch name with `zstd -d -o`,
     // applies the mapping's mode (if set) with `chmod`, then removes the `.zst`
     // scratch after the `mv -f` promotes the raw scratch.
-    const renameScript: string[] = [];
+    // Restored from fork dev (#133 security review): each `mv -f` lands through
+    // a pinned parent-directory handle. For each target, re-canonicalize its
+    // parent, confirm it is inside the workspace root, open it as fd 8,
+    // re-verify /proc/self/fd/8, then rename into /proc/self/fd/8/<base>. A
+    // parent swapped for an out-of-root symlink after the earlier guard fails
+    // closed (exit 42) or cannot redirect the already-open inode.
+    const renameScript: string[] = [...canonicalizerPreamble(shellQuote(remoteDir))];
     for (const plan of plans) {
       if (plan.compressed) {
         // `zstd -d -o` copies the mode of its INPUT (the uploaded `.zst`
@@ -805,7 +811,15 @@ async function syncInFileMappings(input: {
         );
       }
       renameScript.push(
-        `mv -f ${shellQuote(plan.rawScratch)} ${shellQuote(plan.mapping.targetPath)} || { echo "rename failed"; exit 43; };`,
+        `_pc_tgt=${shellQuote(plan.mapping.targetPath)};`,
+        `_pc_tgt_dir=$(_pc_resolve "$(dirname -- "$_pc_tgt")") || { echo "ESCAPE"; exit 42; };`,
+        `case "$_pc_tgt_dir/" in "$_pc_root"/*) : ;; *) echo "ESCAPE"; exit 42 ;; esac;`,
+        `_pc_base=$(basename -- "$_pc_tgt");`,
+        `exec 8<"$_pc_tgt_dir" || { echo "open failed"; exit 47; };`,
+        `_pc_fd_dir=$(_pc_resolve /proc/self/fd/8) || { echo "ESCAPE"; exit 42; };`,
+        `case "$_pc_fd_dir/" in "$_pc_root"/*) : ;; *) echo "ESCAPE"; exit 42 ;; esac;`,
+        `mv -f ${shellQuote(plan.rawScratch)} "/proc/self/fd/8/$_pc_base" || { echo "rename failed"; exit 43; };`,
+        `exec 8>&-;`,
       );
       if (plan.compressed) {
         // Clean up the `.zst` scratch after a successful promotion. `|| true`
@@ -938,8 +952,22 @@ async function syncInDirectoryMapping(input: {
       });
       // Extract the uploaded tarball onto the already-created target directory,
       // then remove the scratch tarball.
+      // Restored from fork dev (#133 security review): bind validation and
+      // extraction into ONE sandbox invocation and extract into an OPEN directory
+      // inode, not a path string. Open fd 9 on the resolved target (pins the
+      // inode), re-canonicalize /proc/self/fd/9 and confirm it is still inside
+      // the workspace root, then `tar -C /proc/self/fd/9`. A sandbox process that
+      // swaps a parent for an out-of-root symlink after the earlier guard either
+      // fails the fd re-verify (exit 42) or cannot redirect the pinned inode.
       const extractScript = [
-        `tar -xf ${shellQuote(remoteTar)} -C ${shellQuote(mapping.targetPath)} || { echo "extract failed"; exit 43; };`,
+        ...canonicalizerPreamble(shellQuote(remoteDir)),
+        `_pc_real=$(_pc_resolve ${shellQuote(mapping.targetPath)}) || { echo "ESCAPE"; exit 42; };`,
+        `case "$_pc_real/" in "$_pc_root"/*) : ;; *) echo "ESCAPE"; exit 42 ;; esac;`,
+        `exec 9<"$_pc_real" || { echo "open failed"; exit 46; };`,
+        `_pc_fd_real=$(_pc_resolve /proc/self/fd/9) || { echo "ESCAPE"; exit 42; };`,
+        `case "$_pc_fd_real/" in "$_pc_root"/*) : ;; *) echo "ESCAPE"; exit 42 ;; esac;`,
+        `tar -xf ${shellQuote(remoteTar)} -C /proc/self/fd/9 || { echo "extract failed"; exit 43; };`,
+        `exec 9>&-;`,
         `rm -f ${shellQuote(remoteTar)};`,
       ].join("\n");
       // `extractTarball` span: one round trip — re-check the path, `tar -xf`, and
@@ -985,7 +1013,23 @@ async function runPostUploadCommands(input: {
   const { sandbox, commands, remoteDir, timeoutSeconds } = input;
   for (const command of commands) {
     // Absent cwd defaults to the remote dir, never a process default cwd.
-    const cwd = command.cwd ?? remoteDir;
+    // Restored from fork dev (#133 security review): an explicit cwd is
+    // re-confined before exec, lexically (rejects `..` and absolute paths
+    // outside the root) and in-sandbox through realpath (rejects a path a
+    // sandbox symlink retargets outside the root). Fail closed before the
+    // privileged command runs.
+    let cwd = remoteDir;
+    if (command.cwd != null) {
+      assertConfinedSandboxPath(remoteDir, command.cwd, "post-upload command cwd");
+      await assertSandboxPathsConfined({
+        sandbox,
+        remoteDir,
+        paths: [command.cwd],
+        timeoutSeconds,
+        label: "post-upload command cwd symlink-escape guard",
+      });
+      cwd = command.cwd;
+    }
     // Run the command VERBATIM with a structured cwd (no string rewrite). The
     // first non-zero exit or timeout throws and aborts the remaining commands.
     const commandTimeoutSeconds =
