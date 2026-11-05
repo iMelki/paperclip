@@ -7106,8 +7106,10 @@ describeEmbeddedPostgres("workspace runtime service control persistence", () => 
     const fakeBin = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-runtime-no-lsof-"));
     const fakeLsof = path.join(fakeBin, "lsof");
     const previousPath = process.env.PATH;
+    const previousDisableProcOwner = process.env.PAPERCLIP_DISABLE_PROC_PORT_OWNER;
     await fs.writeFile(fakeLsof, "#!/bin/sh\nexit 1\n", { mode: 0o755 });
     process.env.PATH = `${fakeBin}${path.delimiter}${previousPath ?? ""}`;
+    process.env.PAPERCLIP_DISABLE_PROC_PORT_OWNER = "1";
 
     try {
       await expect(startRuntimeServicesForWorkspaceControl({
@@ -7129,6 +7131,8 @@ describeEmbeddedPostgres("workspace runtime service control persistence", () => 
     } finally {
       if (previousPath === undefined) delete process.env.PATH;
       else process.env.PATH = previousPath;
+      if (previousDisableProcOwner === undefined) delete process.env.PAPERCLIP_DISABLE_PROC_PORT_OWNER;
+      else process.env.PAPERCLIP_DISABLE_PROC_PORT_OWNER = previousDisableProcOwner;
       await stopRuntimeServicesForExecutionWorkspace({
         db,
         executionWorkspaceId: workspace.id,

@@ -1245,15 +1245,88 @@ export async function readLocalServicePortOwner(port: number) {
     }
   }
   try {
-    const { stdout } = await execFileAsync("lsof", ["-nP", `-iTCP:${port}`, "-sTCP:LISTEN", "-t"]);
+    // lsof can stall on a busy runner. A hung lookup turns a bind retry into a
+    // test-length wait, so give up and let /proc (or "unknown") decide.
+    const { stdout } = await execFileAsync(
+      "lsof",
+      ["-nP", `-iTCP:${port}`, "-sTCP:LISTEN", "-t"],
+      { timeout: 1_000 },
+    );
     const firstPid = stdout
       .split("\n")
       .map((line) => Number.parseInt(line.trim(), 10))
       .find((value) => Number.isInteger(value) && value > 0);
-    return firstPid ?? null;
+    if (firstPid) return firstPid;
+  } catch {
+    // Fall through to the Linux procfs read when lsof is missing, slow, or empty.
+  }
+  if (process.platform === "linux") {
+    const procOwner = readLinuxListeningPid(port);
+    if (procOwner) return procOwner;
+  }
+  return null;
+}
+
+/** Listening socket inodes for `port` from `/proc/net/tcp{,6}`, or null if /proc cannot be read. */
+function readLinuxListenInodes(port: number): Set<string> | null {
+  const inodes = new Set<string>();
+  let readable = false;
+  const portHex = port.toString(16).toUpperCase().padStart(4, "0");
+  for (const table of ["/proc/net/tcp", "/proc/net/tcp6"]) {
+    let content: string;
+    try {
+      content = fsSync.readFileSync(table, "utf8");
+    } catch {
+      continue;
+    }
+    readable = true;
+    for (const line of content.split("\n").slice(1)) {
+      const cols = line.trim().split(/\s+/);
+      if (cols.length < 10) continue;
+      const local = cols[1] ?? "";
+      const portPart = local.split(":")[1]?.toUpperCase();
+      // 0A is TCP_LISTEN.
+      if (portPart !== portHex || cols[3]?.toUpperCase() !== "0A") continue;
+      const inode = cols[9];
+      if (inode && inode !== "0") inodes.add(inode);
+    }
+  }
+  return readable ? inodes : null;
+}
+
+function readLinuxListeningPid(port: number): number | null {
+  // Tests that simulate "ownership tool unavailable" set this so a live /proc
+  // cannot answer the lookup lsof was forced to miss.
+  if (process.env.PAPERCLIP_DISABLE_PROC_PORT_OWNER === "1") return null;
+  const inodes = readLinuxListenInodes(port);
+  if (!inodes || inodes.size === 0) return null;
+  let entries: fsSync.Dirent[];
+  try {
+    entries = fsSync.readdirSync("/proc", { withFileTypes: true });
   } catch {
     return null;
   }
+  for (const entry of entries) {
+    if (!entry.isDirectory() || !/^\d+$/.test(entry.name)) continue;
+    const pid = Number.parseInt(entry.name, 10);
+    let fds: string[];
+    try {
+      fds = fsSync.readdirSync(`/proc/${entry.name}/fd`);
+    } catch {
+      continue;
+    }
+    for (const fd of fds) {
+      let link: string;
+      try {
+        link = fsSync.readlinkSync(`/proc/${entry.name}/fd/${fd}`);
+      } catch {
+        continue;
+      }
+      const match = /^socket:\[(\d+)\]$/.exec(link);
+      if (match && inodes.has(match[1]!)) return pid;
+    }
+  }
+  return null;
 }
 
 /**

@@ -539,6 +539,7 @@ export async function resetRuntimeServicesForTests(
   runtimeReplacementClaimsByReuseKey.clear();
   quarantinedRuntimeExposurePorts.clear();
   exposurePortPairClaims.clear();
+  resetRuntimeServicePortReservationsForTests();
   workspaceRuntimeExposureDeps = defaultWorkspaceRuntimeExposureDeps();
 }
 
@@ -4573,17 +4574,39 @@ async function allocateAndReserveExposure(input: {
 async function canBindRuntimePort(port: number): Promise<boolean> {
   return await new Promise<boolean>((resolve, reject) => {
     const server = net.createServer();
+    let settled = false;
+    const finish = (value: boolean) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(value);
+    };
+    // A listen that never callbacks used to park the whole start until the
+    // caller's test timeout. Treat that as "not bindable" so allocation moves on.
+    const timer = setTimeout(() => {
+      server.close();
+      finish(false);
+    }, 1_000);
     server.once("error", (error: NodeJS.ErrnoException) => {
       if (error.code === "EADDRINUSE" || error.code === "EACCES") {
-        resolve(false);
+        finish(false);
         return;
       }
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
       reject(error);
     });
     server.listen(port, "127.0.0.1", () => {
       server.close((error) => {
-        if (error) reject(error);
-        else resolve(true);
+        if (error) {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          reject(error);
+          return;
+        }
+        finish(true);
       });
     });
   });
@@ -5757,29 +5780,15 @@ function createProvisioningRuntimeServiceRecord(
 
 async function terminateChildProcess(child: ChildProcess) {
   if (!child.pid) return;
-  if (process.platform === "win32") {
-    // `child` is the shell wrapper (`spawn(shell, ["-lc", command], ...)`), not
-    // the real service process -- a bare SIGTERM to this one pid leaves the
-    // actual command (e.g. the node process a service's `command` starts)
-    // running as an orphan with the port still held. terminateLocalService
-    // already does a trusted, tree-aware Windows kill (double taskkill /T
-    // attempt with polling) for exactly this shape of process; reuse it
-    // instead of a single-pid signal that only reaches the wrapper.
-    await terminateLocalService(
-      { pid: child.pid, processGroupId: child.pid },
-      { trustedPid: true },
-    );
-    return;
-  }
-  try {
-    process.kill(-child.pid, "SIGTERM");
-    return;
-  } catch {
-    // Fall through to the direct child kill.
-  }
-  if (!child.killed) {
-    child.kill("SIGTERM");
-  }
+  // The child is the shell wrapper (`spawn(shell, ["-lc", command], ...)`), not
+  // the real service process. A bare SIGTERM to that one pid leaves the node
+  // process holding the port, and `kill(-pid)` before setsid can signal the
+  // caller's process group. terminateLocalService waits until the group is
+  // actually gone so a retry does not bind against a dying listener.
+  await terminateLocalService(
+    { pid: child.pid, processGroupId: child.pid },
+    { trustedPid: true },
+  );
 }
 
 async function spawnLocalRuntimeService(input: StartLocalRuntimeServiceInput): Promise<LocalRuntimeServiceStart> {
@@ -6295,6 +6304,8 @@ async function spawnLocalRuntimeService(input: StartLocalRuntimeServiceInput): P
     try {
       await persistRuntimeServiceRecord(input.db, record);
     } catch (error) {
+      releasePortReservation(reservedPort);
+      releasePortReservation(claimedIdentityPort);
       await terminateChildProcess(child);
       throw error;
     }
