@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { lookup } from "node:dns/promises";
 import express from "express";
 import request from "supertest";
-import { and, eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   agents, agentWakeupRequests, companies, companyMemberships, companySecrets, companySecretVersions,
@@ -200,18 +200,127 @@ describe("native GitHub OAuth service and routes (mandatory private PostgreSQL)"
     expect(tokenCalls()).toHaveLength(0); await expectNoAgentEffects(fixture.companyId);
   });
 
+  it("refuses a disabled or deleted same-company client secret at connect time", async () => {
+    for (const change of ["disabled", "deleted"] as const) {
+      const fixture = await seed();
+      await db.update(companySecrets).set(change === "disabled" ? { status: "disabled" } : { deletedAt: new Date() })
+        .where(eq(companySecrets.id, fixture.secretId));
+      await expect(fixture.service.connectGalleryApp(fixture.companyId, connectInput(fixture), fixture.actor))
+        .rejects.toMatchObject({ status: 422 });
+      expect(tokenCalls()).toHaveLength(0); await expectNoAgentEffects(fixture.companyId);
+    }
+  });
+
+  it("accepts a non-expiring OAuth App token (no expires_in, no refresh_token) and never tries to refresh it", async () => {
+    const fixture = await seed();
+    const { expires_in: _expiresIn, refresh_token: _refresh, ...oauthAppToken } = token();
+    io.tokenPayload = oauthAppToken;
+    const saved = await active(fixture);
+    expect((saved.config.oauth as Record<string, unknown>).expiresAt).toBeNull();
+    expect(saved.credentialSecretRefs.some((ref) => ref.configPath === "oauth.access_token")).toBe(true);
+    expect(saved.credentialSecretRefs.some((ref) => ref.configPath === "oauth.refresh_token")).toBe(false);
+    const before = tokenCalls().length;
+    await fixture.service.checkHealth(saved.id, fixture.actor);
+    expect(tokenCalls()).toHaveLength(before);
+    await expectNoAgentEffects(fixture.companyId);
+  });
+
+  it("drops the old refresh ref and secret when reconnecting from an expiring to a non-expiring token", async () => {
+    const fixture = await seed();
+    const expiring = await active(fixture);
+    const oldRefresh = expiring.credentialSecretRefs.find((ref) => ref.configPath === "oauth.refresh_token");
+    expect(oldRefresh).toBeDefined();
+    const { expires_in: _expiresIn, refresh_token: _refresh, ...oauthAppToken } = token("reconnect");
+    io.tokenPayload = oauthAppToken;
+    const { state } = await begin(fixture, expiring.id);
+    const reconnected = await complete(fixture, state);
+    const saved = await readConnection(reconnected.connectionId);
+    expect((saved.config.oauth as Record<string, unknown>).expiresAt).toBeNull();
+    expect(saved.credentialSecretRefs.some((ref) => ref.configPath === "oauth.refresh_token")).toBe(false);
+    const [oldSecret] = await db.select().from(companySecrets).where(eq(companySecrets.id, oldRefresh!.secretId));
+    // secrets.remove hard-deletes the row (or leaves it soft-deleted when a provider keeps history).
+    expect(oldSecret === undefined || oldSecret.status === "deleted").toBe(true);
+    const before = tokenCalls().length;
+    await fixture.service.checkHealth(saved.id, fixture.actor);
+    expect(tokenCalls()).toHaveLength(before);
+    await expectNoAgentEffects(fixture.companyId);
+  });
+
+  it("keeps the old refresh ref and secret when the reconnect save fails partway through", async () => {
+    const fixture = await seed();
+    const expiring = await active(fixture);
+    const oldRefresh = expiring.credentialSecretRefs.find((ref) => ref.configPath === "oauth.refresh_token")!;
+    expect(oldRefresh).toBeDefined();
+    const { expires_in: _expiresIn, refresh_token: _refresh, ...oauthAppToken } = token("reconnect");
+    io.tokenPayload = oauthAppToken;
+    const { state } = await begin(fixture, expiring.id);
+    const fn = `synthetic_fail_${randomUUID().replace(/-/g, "")}`;
+    // A real database failure on the credential-ref write of this one connection.
+    await db.execute(sql.raw(`create function ${fn}() returns trigger language plpgsql as $$ begin
+      if new.id = '${expiring.id}' and new.credential_secret_refs is distinct from old.credential_secret_refs then
+        raise exception 'synthetic connection update failure'; end if; return new; end $$`));
+    await db.execute(sql.raw(`create trigger ${fn} before update on tool_connections for each row execute function ${fn}()`));
+    try {
+      const failure = await complete(fixture, state).then(() => null, (error: unknown) => error as Error & { cause?: Error });
+      expect(failure).not.toBeNull();
+      expect(`${failure?.message} ${failure?.cause?.message}`).toMatch(/synthetic connection update failure/);
+    } finally {
+      await db.execute(sql.raw(`drop trigger if exists ${fn} on tool_connections`));
+      await db.execute(sql.raw(`drop function if exists ${fn}()`));
+    }
+    const kept = await readConnection(expiring.id);
+    expect(kept.credentialSecretRefs.find((ref) => ref.configPath === "oauth.refresh_token")?.secretId).toBe(oldRefresh.secretId);
+    const [oldSecret] = await db.select().from(companySecrets).where(eq(companySecrets.id, oldRefresh.secretId));
+    expect(oldSecret).toBeDefined();
+    expect(oldSecret.status).toBe("active");
+    expect(oldSecret.deletedAt).toBeNull();
+  });
+
+  it("still completes a non-expiring reconnect and drops the ref when removing the old secret throws", async () => {
+    const fixture = await seed();
+    const expiring = await active(fixture);
+    const oldRefresh = expiring.credentialSecretRefs.find((ref) => ref.configPath === "oauth.refresh_token")!;
+    expect(oldRefresh).toBeDefined();
+    const { expires_in: _expiresIn, refresh_token: _refresh, ...oauthAppToken } = token("reconnect");
+    io.tokenPayload = oauthAppToken;
+    const { state } = await begin(fixture, expiring.id);
+    const fn = `synthetic_fail_${randomUUID().replace(/-/g, "")}`;
+    // secrets.remove starts by marking the row deleted; fail exactly that write for the old secret.
+    await db.execute(sql.raw(`create function ${fn}() returns trigger language plpgsql as $$ begin
+      if new.id = '${oldRefresh.secretId}' then raise exception 'synthetic secret remove failure'; end if;
+      return new; end $$`));
+    await db.execute(sql.raw(`create trigger ${fn} before update on company_secrets for each row execute function ${fn}()`));
+    const warn = vi.spyOn(logger, "warn");
+    let reconnected!: Awaited<ReturnType<typeof complete>>;
+    try {
+      reconnected = await complete(fixture, state);
+    } finally {
+      await db.execute(sql.raw(`drop trigger if exists ${fn} on company_secrets`));
+      await db.execute(sql.raw(`drop function if exists ${fn}()`));
+    }
+    const saved = await readConnection(reconnected.connectionId);
+    expect(saved.status).toBe("active");
+    expect((saved.config.oauth as Record<string, unknown>).expiresAt).toBeNull();
+    expect(saved.credentialSecretRefs.some((ref) => ref.configPath === "oauth.refresh_token")).toBe(false);
+    expect(warn).toHaveBeenCalledWith(expect.objectContaining({ secretId: oldRefresh.secretId }),
+      "Could not remove stale GitHub OAuth refresh secret after reconnect");
+    expect(JSON.stringify(warn.mock.calls)).not.toContain("synthetic-refresh-");
+    warn.mockRestore();
+    await expectNoAgentEffects(fixture.companyId);
+  });
+
   it("runs the actual setup/connect/callback routes with finite expiry, PKCE and private token storage", async () => {
     const fixture = await seed(); const app = routeApp(routeActor(fixture));
     const setup = await request(app).get(`/api/companies/${fixture.companyId}/tools/github/oauth/setup`).expect(200);
     expect(setup.body.callbackUrl).toBe(CALLBACK);
-    expect(setup.body.requestedScopes).toEqual(["read:project", "public_repo", "offline_access"]);
-    expect(setup.body.privateRepoRequestedScopes).toEqual(["repo", "project", "offline_access"]);
+    expect(setup.body.requestedScopes).toEqual(["read:project", "public_repo"]);
+    expect(setup.body.privateRepoRequestedScopes).toEqual(["repo", "project"]);
     const connected = await request(app).post(`/api/companies/${fixture.companyId}/tools/apps/connect`).send(connectInput(fixture)).expect(201);
     const consent = new URL(connected.body.auth.startUrl);
     expect(consent.origin + consent.pathname).toBe("https://github.com/login/oauth/authorize");
     expect(consent.searchParams.get("redirect_uri")).toBe(CALLBACK); expect(consent.searchParams.get("login")).toBe(USER.login);
     // Least access by default: no `repo` (private repositories) without an explicit opt-in.
-    expect(consent.searchParams.get("scope")).toBe("read:project public_repo offline_access");
+    expect(consent.searchParams.get("scope")).toBe("read:project public_repo");
     expect(consent.searchParams.get("code_challenge_method")).toBe("S256"); expect(consent.searchParams.get("code_challenge")).toMatch(/^[\w-]{43}$/);
     const callback = await request(app).get("/api/tools/oauth/callback").set("Accept", "application/json")
       .query({ state: consent.searchParams.get("state"), code: "synthetic-code" }).expect(200);
@@ -241,15 +350,15 @@ describe("native GitHub OAuth service and routes (mandatory private PostgreSQL)"
         configValues: { expectedGitHubLogin: USER.login, githubPrivateRepoAccess: optIn } }, fixture.actor);
       expect(connected.connection.config.githubPrivateRepoAccess).toBe(false);
       const begun = await begin(fixture, connected.connectionId);
-      expect(new URL(begun.started.authorizationUrl).searchParams.get("scope")).toBe("read:project public_repo offline_access");
+      expect(new URL(begun.started.authorizationUrl).searchParams.get("scope")).toBe("read:project public_repo");
     }
     resetTransport(); const fixture = await seed();
     const connected = await fixture.service.connectGalleryApp(fixture.companyId, { ...connectInput(fixture),
       configValues: { expectedGitHubLogin: USER.login, githubPrivateRepoAccess: true } }, fixture.actor);
     expect(connected.connection.config).toMatchObject({ githubPrivateRepoAccess: true,
-      oauth: { scopes: ["repo", "project", "offline_access"] } });
+      oauth: { scopes: ["repo", "project"] } });
     const begun = await begin(fixture, connected.connectionId);
-    expect(new URL(begun.started.authorizationUrl).searchParams.get("scope")).toBe("repo project offline_access");
+    expect(new URL(begun.started.authorizationUrl).searchParams.get("scope")).toBe("repo project");
     io.tokenPayload.scope = "read:project,public_repo"; io.currentScopes = "read:project,public_repo";
     await expect(complete(fixture, begun.state)).rejects.toMatchObject({ status: 422 });
     resetTransport(); io.tokenPayload.scope = "repo,project"; io.currentScopes = "repo,project";
@@ -297,7 +406,7 @@ describe("native GitHub OAuth service and routes (mandatory private PostgreSQL)"
     expect(kept.config.oauth).toEqual(seeded.config.oauth); expect(kept.config.providerMetadata).toEqual(seeded.config.providerMetadata);
     expect(kept.transportConfig.githubPrivateRepoAccess).toBe(false);
     const begun = await begin(fixture, seeded.id);
-    expect(new URL(begun.started.authorizationUrl).searchParams.get("scope")).toBe("read:project public_repo offline_access");
+    expect(new URL(begun.started.authorizationUrl).searchParams.get("scope")).toBe("read:project public_repo");
     // A whole-config round trip that echoes the stored values is accepted, and a config that omits the
     // identity keys still leaves a GitHub connection.
     const echoed = (await readConnection(seeded.id)).config;
@@ -319,8 +428,8 @@ describe("native GitHub OAuth service and routes (mandatory private PostgreSQL)"
   });
 
   it("derives a legacy flagless connection's access from its saved scopes on reconnect", async () => {
-    for (const [scopes, expected] of [[["repo", "project", "offline_access"], "repo project offline_access"],
-      [["read:project", "public_repo", "offline_access"], "read:project public_repo offline_access"]] as const) {
+    for (const [scopes, expected] of [[["repo", "project", "offline_access"], "repo project"],
+      [["read:project", "public_repo", "offline_access"], "read:project public_repo"]] as const) {
       resetTransport(); const fixture = await seed();
       const connected = await fixture.service.connectGalleryApp(fixture.companyId, connectInput(fixture), fixture.actor);
       const row = await readConnection(connected.connectionId);

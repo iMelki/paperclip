@@ -6263,6 +6263,14 @@ async function spawnLocalRuntimeService(input: StartLocalRuntimeServiceInput): P
   };
 
   if (child.pid) {
+    // Make the pid durable before readiness can race ahead of the caller's
+    // own post-spawn save (and so a crash during startup keeps the pid).
+    try {
+      await persistRuntimeServiceRecord(input.db, record);
+    } catch (error) {
+      await terminateChildProcess(child);
+      throw error;
+    }
     await writeLocalServiceRegistryRecord({
       version: 1,
       serviceKey,
@@ -6486,6 +6494,8 @@ async function spawnLocalRuntimeService(input: StartLocalRuntimeServiceInput): P
     await removeLocalServiceRegistryRecord(record.serviceKey).catch(() => undefined);
     if (exposureConfig) {
       await persistRuntimeServiceRecord(record.db, record).catch(() => undefined);
+    } else if (child.pid) {
+      await persistRuntimeServiceRecord(input.db, record).catch(() => undefined);
     }
     if (bindCollision && port) throw new RuntimeServicePortBindCollision(port);
     if (exposureHostCollision && port) {
@@ -6581,6 +6591,21 @@ async function prepareRuntimeProvisioning(
   }
 }
 
+let runtimeServiceAfterSpawnHookForTests:
+  | ((record: RuntimeServiceRecord) => Promise<void>)
+  | null = null;
+
+/**
+ * Test-only: run a hook after a local runtime service process is spawned and
+ * before the caller's own post-spawn save. Lets tests observe the persisted row
+ * in the window where readiness can still win. Pass null to clear.
+ */
+export function setRuntimeServiceAfterSpawnHookForTests(
+  hook: ((record: { id: string; providerRef: string | null }) => Promise<void>) | null,
+) {
+  runtimeServiceAfterSpawnHookForTests = hook;
+}
+
 async function startLocalRuntimeService(
   input: StartLocalRuntimeServiceInput,
   options?: { deferReadiness?: boolean },
@@ -6608,6 +6633,9 @@ async function startLocalRuntimeService(
           excludedPorts,
           runtimeServiceId: provisioningRecord?.id ?? input.runtimeServiceId,
         });
+        if (runtimeServiceAfterSpawnHookForTests) {
+          await runtimeServiceAfterSpawnHookForTests(started.record);
+        }
         if (runtimeProvisionCommand) {
           await persistRuntimeServiceRecord(input.db, started.record);
         }

@@ -114,6 +114,7 @@ import type {
 import { CLASS3_STATIC_LEASE_ALLOWLIST, credentialConfigPath, getAvailableConnectionMethod, getConnectableAppDefinition, isToolConnectionAttentionHealth, recommendedDefaultsForApp } from "@paperclipai/shared";
 import { badRequest, conflict, forbidden, HttpError, notFound, unprocessable } from "../errors.js";
 import { logActivity } from "./activity-log.js";
+import { logger } from "../middleware/logger.js";
 import { mcpHttpRequestHeaders, parseMcpHttpResponseBody } from "./mcp-http.js";
 import {
   buildRemoteMcpHeaders,
@@ -4509,6 +4510,12 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
     return connection.credentialSecretRefs.find((ref) => ref.configPath === configPath) ?? null;
   }
 
+  function isNonExpiringGitHubOAuth(connection: typeof toolConnections.$inferSelect, expiresAtMs: number | null): boolean {
+    return expiresAtMs === null
+      && oauthConfig(connection).provider === "github"
+      && !oauthSecretRef(connection, "oauth.refresh_token");
+  }
+
   function oauthExpiresAtMs(connection: typeof toolConnections.$inferSelect): number | null {
     const expiresAt = oauthConfig(connection).expiresAt;
     if (typeof expiresAt !== "string") return null;
@@ -5200,6 +5207,8 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
     if (typeof oauth.tokenUrl !== "string" || typeof oauth.provider !== "string") return connection;
     const expiresAtMs = oauthExpiresAtMs(connection);
     if (expiresAtMs && expiresAtMs > Date.now() + 60_000) return connection;
+    // GitHub OAuth App tokens do not expire: no expiry and no refresh token means nothing to refresh.
+    if (isNonExpiringGitHubOAuth(connection, expiresAtMs)) return connection;
     const grantType = oauth.grantType === "client_credentials" || oauth.clientCredentials === true
       ? "client_credentials" as const
       : "refresh_token" as const;
@@ -5396,6 +5405,8 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
     if (typeof oauth.tokenUrl !== "string" || typeof oauth.provider !== "string") return connection;
     const expiresAtMs = oauthExpiresAtMs(connection);
     if (expiresAtMs && expiresAtMs > Date.now() + 60_000) return connection;
+    // GitHub OAuth App tokens do not expire: no expiry and no refresh token means nothing to refresh.
+    if (isNonExpiringGitHubOAuth(connection, expiresAtMs)) return connection;
     return oauthSingleFlight(oauthRefreshFlights, connection.id, async () => {
       const lease = await acquireOAuthRefreshLease(connection);
       if (!lease.leaseId) return lease.connection;
@@ -5460,6 +5471,13 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
       const refs = input.credentialSecretRefs ?? [];
       if (refs.length !== 1 || refs[0].configPath !== "oauth.client_secret") {
         throw badRequest("Select one company-scoped OAuth client secret");
+      }
+      const [clientSecret] = await db.select({ id: companySecrets.id }).from(companySecrets).where(and(
+        eq(companySecrets.id, refs[0].secretId), eq(companySecrets.companyId, companyId),
+        eq(companySecrets.status, "active"), isNull(companySecrets.deletedAt),
+      )).limit(1);
+      if (!clientSecret) {
+        throw unprocessable("Select an active OAuth client secret saved in this company", { code: "github_oauth_client_secret_invalid" });
       }
       config = {
         sourceTemplateKey: "github", methodKey: GITHUB_OAUTH_METHOD_KEY, serverUrl: method?.defaults?.serverUrl,
@@ -6382,10 +6400,37 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
         actor: input.actor,
         existingRefs: githubOAuth ? [] : stateRow.subjectUserId ? subjectCredentialSecretRefs : undefined,
       }));
-    } else {
-      const existingRefreshRef = subjectCredentialSecretRefs.find((ref) => ref.configPath === "oauth.refresh_token");
-      if (existingRefreshRef) nextCredentialSecretRefs.push(existingRefreshRef);
     }
+    const existingRefreshRef = token.refreshToken
+      ? undefined : subjectCredentialSecretRefs.find((ref) => ref.configPath === "oauth.refresh_token");
+    // A GitHub grant with no expires_in and no refresh_token is a non-expiring OAuth App token.
+    // Keeping an earlier refresh ref would make every health or tool call try to refresh it, so
+    // drop the ref and, once the new credentials are saved, delete that connection's own secret.
+    // GitHub only: other providers (Slack and others) often omit both fields on reconnect while the
+    // prior refresh token stays valid, so their refresh ref is kept.
+    const staleRefreshRef = githubOAuth && existingRefreshRef && !token.expiresIn ? existingRefreshRef : null;
+    if (existingRefreshRef && !staleRefreshRef) nextCredentialSecretRefs.push(existingRefreshRef);
+    const removeStaleRefreshSecret = async () => {
+      if (!staleRefreshRef) return;
+      if (nextCredentialSecretRefs.some((ref) => ref.secretId === staleRefreshRef.secretId)) return;
+      const [owned] = await db.select({ id: companySecrets.id }).from(companySecrets)
+        .where(and(eq(companySecrets.id, staleRefreshRef.secretId), eq(companySecrets.companyId, connection.companyId)));
+      if (!owned) return;
+      // Only this connection's own secret: refuse when any other connection or grant still binds it.
+      const needle = JSON.stringify([{ secretId: staleRefreshRef.secretId }]);
+      const [boundConnection] = await db.select({ id: toolConnections.id }).from(toolConnections)
+        .where(sql`${toolConnections.credentialSecretRefs} @> ${needle}::jsonb`).limit(1);
+      const [boundGrant] = await db.select({ id: connectionGrants.id }).from(connectionGrants)
+        .where(sql`${connectionGrants.credentialSecretRefs} @> ${needle}::jsonb`).limit(1);
+      if (boundConnection || boundGrant) return;
+      // Best effort: the reconnect is already saved without the ref, so a failed delete only leaves an
+      // unreferenced secret. Log the id and error class only, never secret values.
+      await secrets.remove(staleRefreshRef.secretId).catch((error: unknown) => {
+        logger.warn({ connectionId: connection.id, secretId: staleRefreshRef.secretId,
+          errorName: error instanceof Error ? error.name : typeof error },
+        "Could not remove stale GitHub OAuth refresh secret after reconnect");
+      });
+    };
     const expiresAt = token.expiresIn ? new Date(Date.now() + token.expiresIn * 1000).toISOString() : null;
     if (stateRow.subjectUserId) {
       const grantValues = {
@@ -6398,6 +6443,7 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
       };
       if (existingUserGrant) {
         await db.update(connectionGrants).set(grantValues).where(eq(connectionGrants.id, existingUserGrant.id));
+        await removeStaleRefreshSecret();
       } else {
         await db.insert(connectionGrants).values({
           companyId: connection.companyId,
@@ -6480,6 +6526,7 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
         updatedAt: new Date(),
       }, githubOAuth);
     await syncCredentialBindings(connection);
+    await removeStaleRefreshSecret();
 
     await checkConnectionHealth(connection.id, input.actor);
     const refresh = await refreshCatalog(connection.id, input.actor);

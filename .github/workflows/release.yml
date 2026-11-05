@@ -49,6 +49,9 @@ concurrency:
   group: release-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: false
 
+permissions:
+  contents: read
+
 env:
   # npm accepts a publish immediately, but the registry's CDN can lag packument
   # propagation by several minutes (observed 2.5-4+ minutes on 2026-08-21,
@@ -905,6 +908,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
+          persist-credentials: false
           fetch-depth: 0
           ref: ${{ needs.preflight_stable.outputs.sha }}
 

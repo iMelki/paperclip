@@ -21,6 +21,9 @@ concurrency:
   group: refresh-lockfile-${{ inputs.base || 'master' }}
   cancel-in-progress: false
 
+permissions:
+  contents: read
+
 jobs:
   refresh:
     runs-on: ubuntu-latest
