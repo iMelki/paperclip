@@ -10,7 +10,11 @@ import { fileURLToPath } from 'node:url';
 // are listed here with the reason.
 const CHECKOUT_ALLOWLIST = new Map([
   ['release.yml:publish_canary', 'pushes the canary release tag with git push origin refs/tags/...'],
+  ['release.yml:publish_nightly', 'pushes the nightly release tag with git push origin refs/tags/...'],
+  ['release.yml:publish_beta', 'pushes the beta release tag with git push origin refs/tags/...'],
+  ['release.yml:draft_stable_notes', 'force-pushes the machine-owned release-notes branch with git push -f origin'],
   ['release.yml:publish_stable', 'pushes the stable release tag with git push origin refs/tags/...'],
+  ['release.yml:canonicalize_stable_notes', 'force-pushes the canonicalization branch with git push -f origin'],
   ['refresh-lockfile.yml:refresh', 'commits the refreshed lockfile and runs git push to the bot branch'],
 ]);
 
