@@ -156,7 +156,15 @@ jobs:
           ./scripts/run-pre-push-tests.test.mjs
           ./scripts/verify-gitleaks.test.mjs
       - name: Test PR quality-gate scripts
-        run: node --test '.github/scripts/tests/*.test.mjs'
+        run: |
+          set -euo pipefail
+          files=(.github/scripts/tests/*.test.mjs)
+          printf '%s\n' "${files[@]}"
+          node --test "${files[@]}"
+          node --test --test-reporter=tap ./.github/scripts/tests/workflow-credential-hygiene.test.mjs | tee "$RUNNER_TEMP/workflow-credential-hygiene.tap"
+          passed="$(awk '/^# pass / { p = $3 } END { print p }' "$RUNNER_TEMP/workflow-credential-hygiene.tap")"
+          echo ".github/scripts/tests/workflow-credential-hygiene.test.mjs: ${passed} passed (${passed})"
+          test "$passed" -ge 1
 
       - name: Test general-server shard partition
         run: node --test ./scripts/__tests__/run-vitest-stable-shard.test.mjs
