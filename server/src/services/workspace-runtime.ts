@@ -539,7 +539,11 @@ export async function resetRuntimeServicesForTests(
   runtimeReplacementClaimsByReuseKey.clear();
   quarantinedRuntimeExposurePorts.clear();
   exposurePortPairClaims.clear();
+  quarantinedUnconfirmedStopPorts.clear();
   resetRuntimeServicePortReservationsForTests();
+  forceUnconfirmedChildStopForTests = false;
+  failNextPostSpawnRuntimeSaveForTests = false;
+  lastUnconfirmedSpawnStopForTests = null;
   workspaceRuntimeExposureDeps = defaultWorkspaceRuntimeExposureDeps();
 }
 
@@ -4248,14 +4252,41 @@ export async function cleanupExecutionWorkspaceArtifacts(input: {
  * start makes concurrent allocations distinct.
  */
 const inFlightAllocatedPorts = new Map<number, number>();
+/**
+ * Ports whose listener survived a failed post-spawn save. TTL expiry must not
+ * hand these to a concurrent start while the old process is still bound.
+ */
+const quarantinedUnconfirmedStopPorts = new Set<number>();
 const PORT_RESERVATION_TTL_MS = 120_000;
 const PORT_ALLOCATION_ATTEMPTS = 12;
+let forceUnconfirmedChildStopForTests = false;
+let failNextPostSpawnRuntimeSaveForTests = false;
+let lastUnconfirmedSpawnStopForTests: {
+  child: ChildProcess;
+  ports: number[];
+} | null = null;
+
+/** Test-only: the next post-spawn runtime save throws before the row is durable. */
+export function setFailNextPostSpawnRuntimeSaveForTests(value: boolean) {
+  failNextPostSpawnRuntimeSaveForTests = value;
+}
+
+/** Test-only: report the child stop as unconfirmed and leave the listener running. */
+export function setForceUnconfirmedChildStopForTests(value: boolean) {
+  forceUnconfirmedChildStopForTests = value;
+}
+
+/** Test-only: the child and ports kept after an unconfirmed stop. */
+export function readUnconfirmedSpawnStopForTests() {
+  return lastUnconfirmedSpawnStopForTests;
+}
 
 export function resetRuntimeServicePortReservationsForTests() {
   inFlightAllocatedPorts.clear();
 }
 
 function reservePortIfFree(port: number, now = Date.now()): boolean {
+  if (quarantinedUnconfirmedStopPorts.has(port)) return false;
   const heldUntil = inFlightAllocatedPorts.get(port);
   if (heldUntil !== undefined && heldUntil > now) return false;
   inFlightAllocatedPorts.set(port, now + PORT_RESERVATION_TTL_MS);
@@ -4276,6 +4307,19 @@ export function claimRuntimeServiceBindPort(bindPort: number, alreadyReservedPor
 
 function releasePortReservation(port: number | null | undefined) {
   if (typeof port !== "number") return;
+  if (quarantinedUnconfirmedStopPorts.has(port)) return;
+  inFlightAllocatedPorts.delete(port);
+}
+
+function quarantineUnconfirmedStopPort(port: number | null | undefined) {
+  if (typeof port !== "number") return;
+  quarantinedUnconfirmedStopPorts.add(port);
+  inFlightAllocatedPorts.set(port, Number.POSITIVE_INFINITY);
+}
+
+function releaseConfirmedStopPort(port: number | null | undefined) {
+  if (typeof port !== "number") return;
+  quarantinedUnconfirmedStopPorts.delete(port);
   inFlightAllocatedPorts.delete(port);
 }
 
@@ -5778,17 +5822,45 @@ function createProvisioningRuntimeServiceRecord(
   };
 }
 
-async function terminateChildProcess(child: ChildProcess) {
-  if (!child.pid) return;
+async function terminateChildProcess(child: ChildProcess): Promise<boolean> {
+  if (!child.pid) return true;
+  if (forceUnconfirmedChildStopForTests) return false;
   // The child is the shell wrapper (`spawn(shell, ["-lc", command], ...)`), not
   // the real service process. A bare SIGTERM to that one pid leaves the node
   // process holding the port, and `kill(-pid)` before setsid can signal the
   // caller's process group. terminateLocalService waits until the group is
   // actually gone so a retry does not bind against a dying listener.
-  await terminateLocalService(
+  const result = await terminateLocalService(
     { pid: child.pid, processGroupId: child.pid },
     { trustedPid: true },
   );
+  return result.confirmedStopped;
+}
+
+/**
+ * Stop the child from a failed post-spawn save, then free its port claims only
+ * when that stop is confirmed. An unconfirmed stop quarantines the claims so a
+ * concurrent spawn cannot bind the port while the old listener is still alive.
+ */
+export async function settleFailedSpawnPortClaims(
+  child: ChildProcess,
+  ports: Array<number | null>,
+): Promise<boolean> {
+  const confirmed = await terminateChildProcess(child);
+  const concretePorts = ports.filter((port): port is number => typeof port === "number");
+  if (!confirmed) {
+    for (const port of concretePorts) quarantineUnconfirmedStopPort(port);
+    lastUnconfirmedSpawnStopForTests = { child, ports: concretePorts };
+    return false;
+  }
+  for (const port of concretePorts) releaseConfirmedStopPort(port);
+  if (
+    lastUnconfirmedSpawnStopForTests
+    && concretePorts.some((port) => lastUnconfirmedSpawnStopForTests!.ports.includes(port))
+  ) {
+    lastUnconfirmedSpawnStopForTests = null;
+  }
+  return true;
 }
 
 async function spawnLocalRuntimeService(input: StartLocalRuntimeServiceInput): Promise<LocalRuntimeServiceStart> {
@@ -6302,11 +6374,17 @@ async function spawnLocalRuntimeService(input: StartLocalRuntimeServiceInput): P
     // Make the pid durable before readiness can race ahead of the caller's
     // own post-spawn save (and so a crash during startup keeps the pid).
     try {
+      if (failNextPostSpawnRuntimeSaveForTests) {
+        failNextPostSpawnRuntimeSaveForTests = false;
+        throw new Error("post-spawn runtime save failed");
+      }
       await persistRuntimeServiceRecord(input.db, record);
     } catch (error) {
-      releasePortReservation(reservedPort);
-      releasePortReservation(claimedIdentityPort);
-      await terminateChildProcess(child);
+      // The readiness race is abandoned with the save. Swallow its later
+      // rejection so stopping the child does not surface as unhandled.
+      earlyExitPromise.catch(() => undefined);
+      spawnErrorPromise.catch(() => undefined);
+      await settleFailedSpawnPortClaims(child, [reservedPort, claimedIdentityPort]);
       throw error;
     }
     await writeLocalServiceRegistryRecord({
