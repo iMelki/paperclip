@@ -7,6 +7,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
+import { shellQuotePath } from "@paperclipai/adapter-utils/shell-path";
 import { parse as parseEnvContents } from "dotenv";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import {

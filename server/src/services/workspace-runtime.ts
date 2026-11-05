@@ -5755,6 +5755,33 @@ function createProvisioningRuntimeServiceRecord(
   };
 }
 
+async function terminateChildProcess(child: ChildProcess) {
+  if (!child.pid) return;
+  if (process.platform === "win32") {
+    // `child` is the shell wrapper (`spawn(shell, ["-lc", command], ...)`), not
+    // the real service process -- a bare SIGTERM to this one pid leaves the
+    // actual command (e.g. the node process a service's `command` starts)
+    // running as an orphan with the port still held. terminateLocalService
+    // already does a trusted, tree-aware Windows kill (double taskkill /T
+    // attempt with polling) for exactly this shape of process; reuse it
+    // instead of a single-pid signal that only reaches the wrapper.
+    await terminateLocalService(
+      { pid: child.pid, processGroupId: child.pid },
+      { trustedPid: true },
+    );
+    return;
+  }
+  try {
+    process.kill(-child.pid, "SIGTERM");
+    return;
+  } catch {
+    // Fall through to the direct child kill.
+  }
+  if (!child.killed) {
+    child.kill("SIGTERM");
+  }
+}
+
 async function spawnLocalRuntimeService(input: StartLocalRuntimeServiceInput): Promise<LocalRuntimeServiceStart> {
   const leaseRunId = input.leaseRunId === undefined ? input.runId : input.leaseRunId;
   const startedByRunId = input.startedByRunId === undefined ? input.runId : input.startedByRunId;
