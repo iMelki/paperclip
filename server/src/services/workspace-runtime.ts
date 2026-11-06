@@ -55,8 +55,10 @@ import {
   openLocalServiceLogFile,
   readLocalServiceProcessCwd,
   readLocalServiceProcessGroupId,
+  PORT_OWNER_INSPECTION_BUDGET_MS,
   readLocalServicePortOwner,
   removeLocalServiceRegistryRecord,
+  withPortOwnerInspectionBudget,
   terminateLocalService,
   touchLocalServiceRegistryRecord,
   writeLocalServiceRegistryRecord,
@@ -282,6 +284,7 @@ const exposurePortPairClaims = new ExposurePortPairClaims();
 const OPEN_EXECUTION_WORKSPACE_LEASE_STATUSES = ["active", "idle", "in_review"] as const;
 const DEFAULT_EXECUTE_PROCESS_OUTPUT_BYTES = 256 * 1024;
 export const WORKSPACE_RUNTIME_PORT_ALLOCATION_ATTEMPTS = 32;
+export { PORT_OWNER_INSPECTION_BUDGET_MS };
 const ACTIVE_RUNTIME_PORT_RESERVATION_STATUSES = ["provisioning", "starting", "running"] as const;
 const DEFAULT_TAILSCALE_BROKER_SOCKET = "/run/paperclip-tailscale-broker/broker.sock";
 
@@ -5280,24 +5283,22 @@ async function waitForAllocatedPortBind(input: {
       return;
     }
 
-    // A present listener proves only that some listener appeared. If listener ownership cannot
-    // be attributed to this child after a stability delay, retry instead of accepting a sibling.
-    // The presence read never binds the port, so it cannot steal the port from the child.
+    // A present listener with no owner is not yet proof that attribution is
+    // impossible: the socket can appear before its pid is visible. Recheck once.
+    // A second miss is the first unattributed result, so the caller fails the
+    // bounded range instead of paying another lsof timeout on every later port.
+    // The presence read never binds the port.
     if (await hasLoopbackPortListener(input.port)) {
-      const childPid = input.child.pid ?? null;
-      const ownerNow = await readLocalServicePortOwner(input.port);
-      // Ownership tools failed. Do not spend the stability delay or the readiness
-      // budget treating an unattributed listener as ours. The caller retries the
-      // next port, and 32 of those waits must finish inside the test budget.
-      if (!ownerNow) {
-        throw new RuntimeServicePortBindCollision(input.port, null, false, true);
-      }
       await delay(250);
       if (input.child.exitCode !== null || input.child.signalCode !== null) {
         throw new Error("service process exited after losing its allocated port");
       }
-      const stableOwnerPid = await readLocalServicePortOwner(input.port);
-      if (stableOwnerPid && childPid && await isLocalServiceProcessOwnedBy(stableOwnerPid, childPid)) return;
+      const childPid = input.child.pid ?? null;
+      const ownerNow = await readLocalServicePortOwner(input.port);
+      if (ownerNow && childPid && await isLocalServiceProcessOwnedBy(ownerNow, childPid)) return;
+      if (!ownerNow) {
+        throw new RuntimeServicePortBindCollision(input.port, null, false, true);
+      }
       throw new RuntimeServicePortBindCollision(input.port);
     }
     await delay(50);
@@ -7748,6 +7749,16 @@ async function discardFailedDeferredRuntimeStart(db: Db, record: RuntimeServiceR
 }
 
 async function startRuntimeServicesForWorkspaceControlInvocation(
+  input: StartRuntimeServicesForWorkspaceControlInput,
+): Promise<RuntimeServiceRef[]> {
+  // One budget covers every port in this start, including deferred readiness
+  // retries. A slow lsof cannot spend a second on each of the 32 candidates.
+  return withPortOwnerInspectionBudget(PORT_OWNER_INSPECTION_BUDGET_MS, () =>
+    startRuntimeServicesForWorkspaceControlWithinInspectionBudget(input),
+  );
+}
+
+async function startRuntimeServicesForWorkspaceControlWithinInspectionBudget(
   input: StartRuntimeServicesForWorkspaceControlInput,
 ): Promise<RuntimeServiceRef[]> {
   const rawServices = selectRuntimeServiceEntries({

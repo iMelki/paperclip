@@ -8,6 +8,35 @@ import { promisify } from "node:util";
 import { resolvePaperclipInstanceRoot } from "../home-paths.js";
 
 const execFileAsync = promisify(execFile);
+const LSOF_CALL_TIMEOUT_MS = 1_000;
+
+/**
+ * Ceiling for every `lsof` invocation inside one runtime-service start.
+ * Each call is still capped at {@link LSOF_CALL_TIMEOUT_MS}, and the calls
+ * share this budget so a 32-port scan cannot spend 32 seconds in `lsof`.
+ */
+export const PORT_OWNER_INSPECTION_BUDGET_MS = 2_000;
+
+type PortOwnerInspectionScope = { deadline: number };
+let portOwnerInspectionScope: PortOwnerInspectionScope | null = null;
+
+export async function withPortOwnerInspectionBudget<T>(budgetMs: number, work: () => Promise<T>): Promise<T> {
+  const previous = portOwnerInspectionScope;
+  const deadline = Date.now() + budgetMs;
+  portOwnerInspectionScope = {
+    deadline: previous ? Math.min(previous.deadline, deadline) : deadline,
+  };
+  try {
+    return await work();
+  } finally {
+    portOwnerInspectionScope = previous;
+  }
+}
+
+function remainingLsofTimeoutMs() {
+  if (!portOwnerInspectionScope) return LSOF_CALL_TIMEOUT_MS;
+  return Math.max(0, Math.min(LSOF_CALL_TIMEOUT_MS, portOwnerInspectionScope.deadline - Date.now()));
+}
 const taskkillCommand = path.join(process.env.SystemRoot ?? "C:\\Windows", "System32", "taskkill.exe");
 const windowsPowerShellCommand = path.join(
   process.env.SystemRoot ?? "C:\\Windows",
@@ -1244,21 +1273,26 @@ export async function readLocalServicePortOwner(port: number) {
       return null;
     }
   }
-  try {
-    // lsof can stall on a busy runner. A hung lookup turns a bind retry into a
-    // test-length wait, so give up and let /proc (or "unknown") decide.
-    const { stdout } = await execFileAsync(
-      "lsof",
-      ["-nP", `-iTCP:${port}`, "-sTCP:LISTEN", "-t"],
-      { timeout: 1_000 },
-    );
-    const firstPid = stdout
-      .split("\n")
-      .map((line) => Number.parseInt(line.trim(), 10))
-      .find((value) => Number.isInteger(value) && value > 0);
-    if (firstPid) return firstPid;
-  } catch {
-    // Fall through to the Linux procfs read when lsof is missing, slow, or empty.
+  const lsofTimeoutMs = remainingLsofTimeoutMs();
+  if (lsofTimeoutMs > 0) {
+    try {
+      // lsof can stall on a busy runner. A hung lookup turns a bind retry into a
+      // test-length wait, so give up and let /proc (or "unknown") decide.
+      // The per-call cap is also clipped to the start's remaining inspection
+      // budget, so later ports do not each pay another full second.
+      const { stdout } = await execFileAsync(
+        "lsof",
+        ["-nP", `-iTCP:${port}`, "-sTCP:LISTEN", "-t"],
+        { timeout: lsofTimeoutMs },
+      );
+      const firstPid = stdout
+        .split("\n")
+        .map((line) => Number.parseInt(line.trim(), 10))
+        .find((value) => Number.isInteger(value) && value > 0);
+      if (firstPid) return firstPid;
+    } catch {
+      // Fall through to the Linux procfs read when lsof is missing, slow, or empty.
+    }
   }
   if (process.platform === "linux") {
     const procOwner = readLinuxListeningPid(port);
