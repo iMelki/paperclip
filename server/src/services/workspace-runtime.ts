@@ -300,7 +300,19 @@ class RuntimeServicePortBindCollision extends Error {
    */
   readonly exposureReallocatable: boolean;
 
-  constructor(port: number, diagnosis: string | null = null, exposureReallocatable = false) {
+  /**
+   * True when a listener was present but neither lsof nor /proc could name its
+   * owner. Retrying the rest of the range cannot attribute that listener, so
+   * callers fail the bounded allocation immediately.
+   */
+  readonly ownershipUnavailable: boolean;
+
+  constructor(
+    port: number,
+    diagnosis: string | null = null,
+    exposureReallocatable = false,
+    ownershipUnavailable = false,
+  ) {
     super(
       `Runtime service could not bind allocated port ${port}` +
         (diagnosis ? ` (${diagnosis})` : ""),
@@ -309,6 +321,7 @@ class RuntimeServicePortBindCollision extends Error {
     this.port = port;
     this.diagnosis = diagnosis;
     this.exposureReallocatable = exposureReallocatable;
+    this.ownershipUnavailable = ownershipUnavailable;
   }
 }
 
@@ -4835,6 +4848,38 @@ async function buildRuntimePortAllocationConflict(input: {
   );
 }
 
+function boundedAllocationPortRange(preferredPort: number) {
+  const ports: number[] = [];
+  const lastPort = Math.min(65_535, preferredPort + WORKSPACE_RUNTIME_PORT_ALLOCATION_ATTEMPTS - 1);
+  for (let port = preferredPort; port <= lastPort; port += 1) ports.push(port);
+  return ports;
+}
+
+async function allocationExhaustedAfterUnattributedListener(input: {
+  db?: Db;
+  companyId: string;
+  executionWorkspaceId: string | null;
+  preferredPort: number;
+  fixedPortFallback: boolean;
+}) {
+  const attemptedPorts = boundedAllocationPortRange(input.preferredPort);
+  if (input.fixedPortFallback && input.executionWorkspaceId) {
+    return buildRuntimePortAllocationConflict({
+      db: input.db,
+      companyId: input.companyId,
+      executionWorkspaceId: input.executionWorkspaceId,
+      preferredPort: input.preferredPort,
+      attemptedPorts,
+    });
+  }
+  return conflict("No safe automatically allocated runtime service port is available.", {
+    code: "workspace_runtime_port_allocation_exhausted",
+    port: input.preferredPort,
+    attemptedPortCount: attemptedPorts.length,
+    remediation: "Retry the start or configure a different runtime service port.",
+  });
+}
+
 async function allocateIsolatedWorkspacePort(input: {
   db?: Db;
   companyId: string;
@@ -5239,12 +5284,19 @@ async function waitForAllocatedPortBind(input: {
     // be attributed to this child after a stability delay, retry instead of accepting a sibling.
     // The presence read never binds the port, so it cannot steal the port from the child.
     if (await hasLoopbackPortListener(input.port)) {
+      const childPid = input.child.pid ?? null;
+      const ownerNow = await readLocalServicePortOwner(input.port);
+      // Ownership tools failed. Do not spend the stability delay or the readiness
+      // budget treating an unattributed listener as ours. The caller retries the
+      // next port, and 32 of those waits must finish inside the test budget.
+      if (!ownerNow) {
+        throw new RuntimeServicePortBindCollision(input.port, null, false, true);
+      }
       await delay(250);
       if (input.child.exitCode !== null || input.child.signalCode !== null) {
         throw new Error("service process exited after losing its allocated port");
       }
       const stableOwnerPid = await readLocalServicePortOwner(input.port);
-      const childPid = input.child.pid ?? null;
       if (stableOwnerPid && childPid && await isLocalServiceProcessOwnedBy(stableOwnerPid, childPid)) return;
       throw new RuntimeServicePortBindCollision(input.port);
     }
@@ -6613,7 +6665,14 @@ async function spawnLocalRuntimeService(input: StartLocalRuntimeServiceInput): P
     } else if (child.pid) {
       await persistRuntimeServiceRecord(input.db, record).catch(() => undefined);
     }
-    if (bindCollision && port) throw new RuntimeServicePortBindCollision(port);
+    if (bindCollision && port) {
+      throw new RuntimeServicePortBindCollision(
+        port,
+        null,
+        false,
+        err instanceof RuntimeServicePortBindCollision && err.ownershipUnavailable,
+      );
+    }
     if (exposureHostCollision && port) {
       // A verified host listener holds the assigned exposure port. Quarantine the
       // pair so the bounded re-allocation never re-offers it, then throw a retryable
@@ -6770,6 +6829,15 @@ async function startLocalRuntimeService(
           || !(retryBindCollisions || error.exposureReallocatable)
         ) {
           throw error;
+        }
+        if (error.ownershipUnavailable) {
+          throw await allocationExhaustedAfterUnattributedListener({
+            db: input.db,
+            companyId: input.agent.companyId,
+            executionWorkspaceId: input.executionWorkspaceId ?? null,
+            preferredPort: explicitPort > 0 ? explicitPort : error.port,
+            fixedPortFallback: fixedPortFallbackEnabled,
+          });
         }
         excludedPorts.add(error.port);
         started = null;
@@ -7822,6 +7890,18 @@ async function startRuntimeServicesForWorkspaceControlInvocation(
             throw error;
           }
 
+          if (error.ownershipUnavailable) {
+            const portConfig = parseObject(pending.service.port);
+            const portType = asString(portConfig.type, "");
+            const preferredPort = asNumber(portConfig.value, asNumber(pending.service.port, 0));
+            throw await allocationExhaustedAfterUnattributedListener({
+              db: input.db,
+              companyId: input.actor.companyId,
+              executionWorkspaceId: input.executionWorkspaceId ?? null,
+              preferredPort: preferredPort > 0 ? preferredPort : error.port,
+              fixedPortFallback: allowFixedPortFallback && portType !== "auto",
+            });
+          }
           excludedPorts.add(error.port);
           if (excludedPorts.size >= WORKSPACE_RUNTIME_PORT_ALLOCATION_ATTEMPTS) {
             const portConfig = parseObject(pending.service.port);
