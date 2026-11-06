@@ -7,6 +7,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
+import { shellQuotePath } from "@paperclipai/adapter-utils/shell-path";
 import { parse as parseEnvContents } from "dotenv";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import {
@@ -38,10 +39,16 @@ import {
   releaseRuntimeServicesForRun,
   UnresolvedWorkspaceBaseRefError,
   resetRuntimeServicesForTests,
+  claimRuntimeServiceBindPort,
+  readUnconfirmedSpawnStopForTests,
   resolveRuntimeProvisionCommand,
+  setFailNextPostSpawnRuntimeSaveForTests,
+  setForceUnconfirmedChildStopForTests,
+  settleFailedSpawnPortClaims,
   resolveWorkspaceRuntimeReadinessTimeoutSec,
   resolveShell,
   sanitizeRuntimeServiceBaseEnv,
+  setRuntimeServiceAfterSpawnHookForTests,
   setWorkspaceRuntimeExposureDepsForTests,
   startRuntimeServicesForWorkspaceControl,
   stopRuntimeServicesForExecutionWorkspace,
@@ -7104,8 +7111,10 @@ describeEmbeddedPostgres("workspace runtime service control persistence", () => 
     const fakeBin = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-runtime-no-lsof-"));
     const fakeLsof = path.join(fakeBin, "lsof");
     const previousPath = process.env.PATH;
+    const previousDisableProcOwner = process.env.PAPERCLIP_DISABLE_PROC_PORT_OWNER;
     await fs.writeFile(fakeLsof, "#!/bin/sh\nexit 1\n", { mode: 0o755 });
     process.env.PATH = `${fakeBin}${path.delimiter}${previousPath ?? ""}`;
+    process.env.PAPERCLIP_DISABLE_PROC_PORT_OWNER = "1";
 
     try {
       await expect(startRuntimeServicesForWorkspaceControl({
@@ -7127,6 +7136,8 @@ describeEmbeddedPostgres("workspace runtime service control persistence", () => 
     } finally {
       if (previousPath === undefined) delete process.env.PATH;
       else process.env.PATH = previousPath;
+      if (previousDisableProcOwner === undefined) delete process.env.PAPERCLIP_DISABLE_PROC_PORT_OWNER;
+      else process.env.PAPERCLIP_DISABLE_PROC_PORT_OWNER = previousDisableProcOwner;
       await stopRuntimeServicesForExecutionWorkspace({
         db,
         executionWorkspaceId: workspace.id,
@@ -8057,6 +8068,242 @@ describeEmbeddedPostgres("workspace runtime startup reconciliation", () => {
       await fs.rm(workspaceRoot, { recursive: true, force: true });
     }
   }, 20_000);
+
+  it("persists the spawned pid before the post-spawn save when runtime provisioning ran", async () => {
+    const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-runtime-pid-durable-"));
+    const paperclipHome = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-runtime-pid-home-"));
+    const previousPaperclipHome = process.env.PAPERCLIP_HOME;
+    const previousPaperclipInstanceId = process.env.PAPERCLIP_INSTANCE_ID;
+    process.env.PAPERCLIP_HOME = paperclipHome;
+    process.env.PAPERCLIP_INSTANCE_ID = `runtime-pid-durable-${randomUUID()}`;
+    const serviceScriptPath = path.join(workspaceRoot, "runtime-service.cjs");
+    await fs.writeFile(
+      serviceScriptPath,
+      "require('node:http').createServer((_req,res)=>res.end('ok')).listen(Number(process.env.PORT), '127.0.0.1');",
+      "utf8",
+    );
+    const command = `${shellQuotePath(process.execPath)} ${shellQuotePath(serviceScriptPath)}`;
+    const provisionCommand = `${shellQuotePath(process.execPath)} -e ""`;
+
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    const runId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values({
+      id: agentId,
+      companyId,
+      name: "Codex Coder",
+      role: "engineer",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+    await db.insert(heartbeatRuns).values({
+      id: runId,
+      companyId,
+      agentId,
+      invocationSource: "manual",
+      status: "running",
+      startedAt: new Date(),
+      updatedAt: new Date(),
+    });
+
+    const workspace = {
+      ...buildWorkspace(workspaceRoot),
+      projectId: null,
+      workspaceId: null,
+    };
+    leasedRunIds.add(runId);
+
+    // Deterministic version of the startup race: pause after the process is
+    // spawned (and readiness has started) but before the caller's own save, and
+    // read what is durable in the database at that moment.
+    const observed: Array<{ status: string | null; providerRef: string | null; pid: string | null }> = [];
+    setRuntimeServiceAfterSpawnHookForTests(async (record) => {
+      await new Promise((resolve) => setTimeout(resolve, 400));
+      const row = await db
+        .select()
+        .from(workspaceRuntimeServices)
+        .where(eq(workspaceRuntimeServices.id, record.id))
+        .then((rows) => rows[0] ?? null);
+      observed.push({
+        status: row?.status ?? null,
+        providerRef: row?.providerRef ?? null,
+        pid: record.providerRef,
+      });
+    });
+
+    try {
+      const services = await ensureRuntimeServicesForRun({
+        db,
+        runId,
+        agent: { id: agentId, name: "Codex Coder", companyId },
+        issue: null,
+        workspace,
+        config: {
+          runtimeProvisionCommand: provisionCommand,
+          workspaceRuntime: {
+            services: [
+              {
+                name: "web",
+                command,
+                port: { type: "auto" },
+                readiness: {
+                  type: "http",
+                  urlTemplate: "http://127.0.0.1:{{port}}",
+                  timeoutSec: 10,
+                  intervalMs: 50,
+                },
+                lifecycle: "shared",
+                reuseScope: "agent",
+                stopPolicy: { type: "manual" },
+              },
+            ],
+          },
+        },
+        adapterEnv: {},
+      });
+
+      expect(services).toHaveLength(1);
+      expect(observed).toHaveLength(1);
+      expect(observed[0]!.pid).toMatch(/^\d+$/);
+      expect(observed[0]!.status).toMatch(/^(starting|running)$/);
+      expect(observed[0]!.providerRef).toBe(observed[0]!.pid);
+
+      const persisted = await db
+        .select()
+        .from(workspaceRuntimeServices)
+        .where(eq(workspaceRuntimeServices.id, services[0]!.id))
+        .then((rows) => rows[0] ?? null);
+      expect(persisted?.status).toBe("running");
+      expect(persisted?.providerRef).toBe(observed[0]!.pid);
+    } finally {
+      setRuntimeServiceAfterSpawnHookForTests(null);
+      await releaseRuntimeServicesForRun(runId);
+      leasedRunIds.delete(runId);
+      await resetRuntimeServicesForTests();
+      await fs.rm(paperclipHome, { recursive: true, force: true });
+      if (previousPaperclipHome === undefined) delete process.env.PAPERCLIP_HOME;
+      else process.env.PAPERCLIP_HOME = previousPaperclipHome;
+      if (previousPaperclipInstanceId === undefined) delete process.env.PAPERCLIP_INSTANCE_ID;
+      else process.env.PAPERCLIP_INSTANCE_ID = previousPaperclipInstanceId;
+    }
+  }, 30_000);
+
+  it("keeps the port claim quarantined when a failed post-spawn save cannot confirm the child stopped", async () => {
+    const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-runtime-unconfirmed-stop-"));
+    const paperclipHome = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-runtime-unconfirmed-home-"));
+    const previousPaperclipHome = process.env.PAPERCLIP_HOME;
+    const previousPaperclipInstanceId = process.env.PAPERCLIP_INSTANCE_ID;
+    process.env.PAPERCLIP_HOME = paperclipHome;
+    process.env.PAPERCLIP_INSTANCE_ID = `runtime-unconfirmed-stop-${randomUUID()}`;
+    const serviceScriptPath = path.join(workspaceRoot, "runtime-service.cjs");
+    await fs.writeFile(
+      serviceScriptPath,
+      "require('node:http').createServer((_req,res)=>res.end('ok')).listen(Number(process.env.PORT), '127.0.0.1');",
+      "utf8",
+    );
+    const command = `${shellQuotePath(process.execPath)} ${shellQuotePath(serviceScriptPath)}`;
+
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    const runId = randomUUID();
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values({
+      id: agentId,
+      companyId,
+      name: "Codex Coder",
+      role: "engineer",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+    await db.insert(heartbeatRuns).values({
+      id: runId,
+      companyId,
+      agentId,
+      invocationSource: "manual",
+      status: "running",
+      startedAt: new Date(),
+      updatedAt: new Date(),
+    });
+    leasedRunIds.add(runId);
+    setFailNextPostSpawnRuntimeSaveForTests(true);
+    setForceUnconfirmedChildStopForTests(true);
+
+    try {
+      await expect(ensureRuntimeServicesForRun({
+        db,
+        runId,
+        agent: { id: agentId, name: "Codex Coder", companyId },
+        issue: null,
+        workspace: { ...buildWorkspace(workspaceRoot), projectId: null, workspaceId: null },
+        config: {
+          workspaceRuntime: {
+            services: [{
+              name: "web",
+              command,
+              port: { type: "auto" },
+              readiness: {
+                type: "http",
+                urlTemplate: "http://127.0.0.1:{{port}}",
+                timeoutSec: 5,
+                intervalMs: 50,
+              },
+              lifecycle: "shared",
+              reuseScope: "agent",
+              stopPolicy: { type: "manual" },
+            }],
+          },
+        },
+        adapterEnv: {},
+      })).rejects.toThrow(/post-spawn runtime save failed/);
+
+      const pending = readUnconfirmedSpawnStopForTests();
+      expect(pending?.ports.length).toBeGreaterThan(0);
+      const port = pending!.ports[0]!;
+      expect(claimRuntimeServiceBindPort(port, null)).toBe(false);
+
+      setForceUnconfirmedChildStopForTests(false);
+      await expect(settleFailedSpawnPortClaims(pending!.child, pending!.ports)).resolves.toBe(true);
+      expect(claimRuntimeServiceBindPort(port, null)).toBe(true);
+    } finally {
+      setFailNextPostSpawnRuntimeSaveForTests(false);
+      setForceUnconfirmedChildStopForTests(false);
+      const pending = readUnconfirmedSpawnStopForTests();
+      if (pending?.child.pid) {
+        try {
+          process.kill(pending.child.pid, "SIGKILL");
+        } catch {
+          // The confirmed stop already reaped the child.
+        }
+      }
+      await releaseRuntimeServicesForRun(runId).catch(() => undefined);
+      leasedRunIds.delete(runId);
+      await resetRuntimeServicesForTests();
+      await fs.rm(paperclipHome, { recursive: true, force: true });
+      await fs.rm(workspaceRoot, { recursive: true, force: true });
+      if (previousPaperclipHome === undefined) delete process.env.PAPERCLIP_HOME;
+      else process.env.PAPERCLIP_HOME = previousPaperclipHome;
+      if (previousPaperclipInstanceId === undefined) delete process.env.PAPERCLIP_INSTANCE_ID;
+      else process.env.PAPERCLIP_INSTANCE_ID = previousPaperclipInstanceId;
+    }
+  }, 30_000);
 
   it("does not reuse a stopped auto-port service port while another process owns it", async () => {
     const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-runtime-unhealthy-adopt-"));

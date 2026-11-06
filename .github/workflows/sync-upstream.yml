@@ -6,6 +6,9 @@ on:
     - cron: '0 4 * * 1'
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   sync:
     name: Sync fork master with paperclipai/paperclip

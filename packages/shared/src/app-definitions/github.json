@@ -63,11 +63,10 @@
         "tokenEndpoint": "https://github.com/login/oauth/access_token",
         "scopesHint": [
           "read:project",
-          "public_repo",
-          "offline_access"
+          "public_repo"
         ]
       },
-      "guidanceMd": "Register an operator-owned GitHub OAuth App with Paperclip's exact displayed callback URL and expiring user tokens. Enter the public client ID and select the client secret from Paperclip's company-scoped secret store. Review GitHub's consent screen yourself. Connecting does not grant agents access, activate discovered operations, or start synchronization.",
+      "guidanceMd": "Register an operator-owned GitHub OAuth App with Paperclip's exact displayed callback URL. Enter the public client ID and select the client secret from Paperclip's company-scoped secret store. Review GitHub's consent screen yourself. Connecting does not grant agents access, activate discovered operations, or start synchronization.",
       "riskTier": "S3",
       "credentialFields": [
         {
@@ -95,7 +94,7 @@
       "warnings": [
         "By default Paperclip requests only read:project and public_repo: Projects are read-only and only public repositories are reachable. Full repo and project scopes (broad read and write access to every private repository available to the authorizing account; OAuth Apps cannot select individual repositories at consent) are requested only when you explicitly opt in to private repositories.",
         "The project scope permits reading and updating personal and organization Projects. Repository and organization policies can still restrict access.",
-        "offline_access requests expiring access tokens and refresh support; Paperclip must verify the actual response before saving a connection.",
+        "OAuth App user tokens normally do not expire. If GitHub returns an expiring token, Paperclip requires both expires_in and a refresh token and verifies the actual response before saving a connection.",
         "GitHub consent is separate from Paperclip agent access and approval for each write operation. No import or agent run starts merely by connecting."
       ]
     }

@@ -628,6 +628,28 @@ describe("approvalService resolution idempotency", () => {
     },
   );
 
+  it("passes budget 0 to activatePendingApproval for a paused-setup pending hire with a tampered budget", async () => {
+    const metadata = { "paperclip.pausedSetup": true, purpose: "finance-draft" };
+    mockAgentService.getById.mockResolvedValue({
+      id: "agent-1", companyId: "company-1", status: "pending_approval",
+      role: "general", adapterType: "process", adapterConfig: {}, runtimeConfig: {},
+      metadata, permissions: { canCreateAgents: false, canCreateSkills: false, canAssignTasks: false },
+    });
+    const payload = {
+      name: "Finance setup", role: "general", adapterType: "process", agentId: "agent-1",
+      metadata: { "paperclip.pausedSetup": false },
+      budgetMonthlyCents: 50_000,
+      permissions: { canCreateAgents: false, canCreateSkills: false, canAssignTasks: false },
+    };
+    const approved = { ...createApproval("approved"), payload };
+    const dbStub = createDbStub([[{ ...createApproval("pending"), payload }]], [approved]);
+    await approvalService(dbStub.db as any).approve("approval-1", "board", "setup only");
+    expect(mockAgentService.activatePendingApproval).toHaveBeenCalledTimes(1);
+    const passed = mockAgentService.activatePendingApproval.mock.calls[0]![1];
+    expect(passed.budgetMonthlyCents).toBe(0);
+    expect(JSON.stringify(passed)).not.toContain("50000");
+  });
+
   it("creates a legacy standalone marked hire paused with no executable or grants", async () => {
     const payload = {
       name: "Finance setup", role: "general", adapterType: "process",
