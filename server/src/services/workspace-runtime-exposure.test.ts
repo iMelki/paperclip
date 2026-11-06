@@ -582,6 +582,14 @@ describe("automatic tailscale_https default for managed worktree runtimes", () =
     };
     installDeps({
       broker,
+      // Host port state is not what this test measures. The default probe binds
+      // real loopback ports, and other test files running in parallel workers
+      // spawn real backends in the same 42xxx/52xxx range, so the lowest free
+      // pair could move between attempts and fail the assertion below even with
+      // no leaked claim ("expected 2 to be 1"). Every port reads free here, so
+      // the only thing that can move an attempt onto a new pair is the
+      // in-process pair claim this test is about.
+      isPortAvailable: async () => true,
       resolveHostname: async () => {
         throw new Error("MagicDNS unavailable");
       },
@@ -597,6 +605,55 @@ describe("automatic tailscale_https default for managed worktree runtimes", () =
     // onto a fresh pair instead.
     expect(reservedAppPorts).toHaveLength(3);
     expect(new Set(reservedAppPorts).size).toBe(1);
+  }, 25_000);
+});
+
+/**
+ * The allocator against real host port state: no fake probe. A real loopback
+ * listener holds the lowest free app port of the dedicated range, and the
+ * suite's default probe (a real bind, like production) must skip it and pick
+ * the next free app/HMR pair. Sequential so nothing else in this file binds
+ * the range while the listener is held; the server vitest config already runs
+ * files one at a time (pool forks, maxWorkers 1, sequence.concurrent false).
+ */
+describe.sequential("real-port allocation skips a held loopback port", () => {
+  it("picks the next free pair when the lowest free app port is held by a real listener", async () => {
+    const heldPort = await findFreeExposureAppPort(RUNTIME_EXPOSURE_APP_PORT_MIN);
+    const holder = net.createServer();
+    try {
+      await new Promise<void>((resolve, reject) => {
+        holder.once("error", reject);
+        holder.listen(heldPort, "127.0.0.1", () => resolve());
+      });
+      const expectedAppPort = await findFreeExposureAppPort(heldPort + 1);
+
+      const { broker } = createBroker();
+      const reservedPorts: number[][] = [];
+      const recordingBroker: BrokerClient = {
+        ...broker,
+        async reserve(runtimeId, requested) {
+          reservedPorts.push(requested.map((listener) => listener.port));
+          return broker.reserve(runtimeId, requested);
+        },
+      };
+      // No isPortAvailable override: the default real bind probe runs.
+      installDeps({ broker: recordingBroker });
+
+      const [runtime] = await startRuntimeServicesForWorkspaceControl(startInput());
+      expect(runtime.port).toBe(expectedAppPort);
+      expect(runtime.port).not.toBe(heldPort);
+      expect(reservedPorts[0]).toEqual([expectedAppPort, deriveViteHmrPort(expectedAppPort)]);
+
+      await stopRuntimeServicesForExecutionWorkspace({
+        executionWorkspaceId: EXECUTION_WORKSPACE_ID,
+        runtimeServiceId: runtime.id,
+      });
+    } finally {
+      await new Promise<void>((resolve) => {
+        if (!holder.listening) return resolve();
+        holder.close(() => resolve());
+      });
+    }
   }, 25_000);
 });
 
