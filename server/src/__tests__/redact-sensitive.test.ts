@@ -32,6 +32,18 @@ describe("redactSensitive", () => {
     }
   });
 
+  it("redacts every passcode spelling, including camelCase passCode", () => {
+    const input = { passCode: "a1", pass_code: "b2", PASSCODE: "c3", passcode: "d4", PassCode: "e5", keep: "ok" };
+    expect(redactSensitive(input)).toEqual({
+      passCode: "[REDACTED]",
+      pass_code: "[REDACTED]",
+      PASSCODE: "[REDACTED]",
+      passcode: "[REDACTED]",
+      PassCode: "[REDACTED]",
+      keep: "ok",
+    });
+  });
+
   it("redacts bounded credential-code aliases while preserving ordinary fields", () => {
     const out = redactSensitive({
       code: "claim-code",

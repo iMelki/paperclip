@@ -98,6 +98,9 @@ const SCANNABLE_EXTENSIONS = new Set([
   ".yaml",
   ".yml",
   ".toml",
+  // Text fixtures (captured CLI output) are scanned, not skipped: the gate
+  // reads them like any other file instead of failing on an unknown type.
+  ".txt",
 ]);
 
 const DECLARED_GENERATED_DIRECTORY_NAMES = new Set([

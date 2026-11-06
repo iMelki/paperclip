@@ -379,11 +379,8 @@ export async function startEmbeddedPostgresTestDatabase(
     return {
       connectionString,
       cleanup: async () => {
-        // End every client a caller created against this cluster first. A
-        // client that still holds a reserved connection when the cluster
-        // stops can crash the process: the stop kills the backend socket,
-        // but a queued write on that connection still fires later and finds
-        // a null socket.
+        // Close callers' pooled clients before the bounded Windows-aware
+        // shutdown so queued writes cannot target a stopped backend socket.
         await closeRegisteredClients(connectionString);
         await stopEmbeddedPostgresBounded(instance, dataDir, () => {
           if (dataDir) cleanupEmbeddedPostgresTestDirs(dataDir);

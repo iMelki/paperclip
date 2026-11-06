@@ -51,7 +51,7 @@ export function Browse() {
 
   useEffect(() => {
     setBreadcrumbs([
-      { label: selectedCompany?.name ?? "Company", href: "/dashboard" },
+      { label: selectedCompany?.name ?? "Organization", href: "/dashboard" },
       { label: "Apps" },
     ]);
     return () => setBreadcrumbs([]);
@@ -118,7 +118,7 @@ export function Browse() {
   }, [applicationsQuery.data, connectionsQuery.data]);
 
   if (!selectedCompanyId) {
-    return <div className="p-6 text-sm text-muted-foreground">Select a company to browse apps.</div>;
+    return <div className="p-6 text-sm text-muted-foreground">Select an organization to browse apps.</div>;
   }
 
   const loading = galleryQuery.isLoading || applicationsQuery.isLoading || connectionsQuery.isLoading;
