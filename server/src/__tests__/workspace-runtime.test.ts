@@ -6251,6 +6251,26 @@ describeEmbeddedPostgres("workspace dirty quarantine branch repair", () => {
   }, 20_000);
 });
 
+async function deleteCompaniesAfterRuntimeServices(database: ReturnType<typeof createDb>) {
+  // A timed-out start can insert workspace_runtime_services after the first
+  // delete. That row references the company with no ON DELETE CASCADE, so
+  // drop it again and retry the company delete.
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    await database.delete(workspaceRuntimeServices);
+    try {
+      await database.delete(companies);
+      return;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const cause = error instanceof Error && "cause" in error ? String(error.cause) : "";
+      const leftoverService = `${message} ${cause}`.includes("workspace_runtime_services_company_id_companies_id_fk");
+      if (!leftoverService || attempt === 3) {
+        throw error;
+      }
+    }
+  }
+}
+
 describeEmbeddedPostgres("workspace runtime service control persistence", () => {
   let db!: ReturnType<typeof createDb>;
   let tempDb: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>> | null = null;
@@ -6281,7 +6301,7 @@ describeEmbeddedPostgres("workspace runtime service control persistence", () => 
     await db.delete(issues);
     await db.delete(projects);
     await db.delete(agents);
-    await db.delete(companies);
+    await deleteCompaniesAfterRuntimeServices(db);
   });
 
   it("persists provisioning before starting and excludes provision time from readiness timeout", async () => {
@@ -7334,7 +7354,7 @@ describeEmbeddedPostgres("workspace runtime startup reconciliation", () => {
     // company to respect the activity_log.company_id foreign key.
     await db.delete(activityLog);
     await db.delete(agents);
-    await db.delete(companies);
+    await deleteCompaniesAfterRuntimeServices(db);
   });
 
   it("restores desired services when one row is stopped and a live registered service has no row", async () => {
