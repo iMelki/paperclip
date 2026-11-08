@@ -183,6 +183,18 @@ export interface PluginJobScheduler {
   unregisterPlugin(pluginId: string): Promise<void>;
 
   /**
+   * Initialize the schedule pointer (`nextRunAt`) of one active job.
+   *
+   * Used when a paused job is resumed: a null or already-past `nextRunAt` is
+   * recomputed from the job's cron schedule (same rule as
+   * {@link registerPlugin}); a future value is kept. No-op for a missing or
+   * non-active job.
+   *
+   * @param jobId - UUID of the job
+   */
+  scheduleJob(jobId: string): Promise<void>;
+
+  /**
    * Manually trigger a specific job (outside of the cron schedule).
    *
    * Creates a run with `trigger: "manual"` and dispatches immediately,
@@ -774,6 +786,49 @@ export function createPluginJobScheduler(
   }
 
   /**
+   * Ensure one job has a usable `nextRunAt`. A missing or already-past value
+   * is recomputed from now (a missed run is skipped, not replayed); a future
+   * value is kept. Jobs without a valid cron schedule are left untouched.
+   */
+  async function ensureNextRunTimestamp(
+    job: typeof pluginJobs.$inferSelect,
+  ): Promise<void> {
+    // Skip jobs that already have a valid nextRunAt in the future
+    if (job.nextRunAt && job.nextRunAt.getTime() > Date.now()) {
+      return;
+    }
+
+    // Skip jobs without a schedule
+    if (!job.schedule) {
+      return;
+    }
+
+    const validationError = validateCron(job.schedule);
+    if (validationError) {
+      log.warn(
+        { jobId: job.id, jobKey: job.jobKey, schedule: job.schedule, error: validationError },
+        "skipping job with invalid cron schedule",
+      );
+      return;
+    }
+
+    const cron = parseCron(job.schedule);
+    const nextRunAt = nextCronTick(cron, new Date());
+
+    if (nextRunAt) {
+      await jobStore.updateRunTimestamps(
+        job.id,
+        job.lastRunAt ?? new Date(0),
+        nextRunAt,
+      );
+      log.debug(
+        { jobId: job.id, jobKey: job.jobKey, nextRunAt: nextRunAt.toISOString() },
+        "computed nextRunAt for job",
+      );
+    }
+  }
+
+  /**
    * Ensure all active jobs for a plugin have a `nextRunAt` value.
    * Called when a plugin is registered with the scheduler.
    */
@@ -781,40 +836,20 @@ export function createPluginJobScheduler(
     const jobs = await jobStore.listJobs(pluginId, "active");
 
     for (const job of jobs) {
-      // Skip jobs that already have a valid nextRunAt in the future
-      if (job.nextRunAt && job.nextRunAt.getTime() > Date.now()) {
-        continue;
-      }
-
-      // Skip jobs without a schedule
-      if (!job.schedule) {
-        continue;
-      }
-
-      const validationError = validateCron(job.schedule);
-      if (validationError) {
-        log.warn(
-          { jobId: job.id, jobKey: job.jobKey, schedule: job.schedule, error: validationError },
-          "skipping job with invalid cron schedule",
-        );
-        continue;
-      }
-
-      const cron = parseCron(job.schedule);
-      const nextRunAt = nextCronTick(cron, new Date());
-
-      if (nextRunAt) {
-        await jobStore.updateRunTimestamps(
-          job.id,
-          job.lastRunAt ?? new Date(0),
-          nextRunAt,
-        );
-        log.debug(
-          { jobId: job.id, jobKey: job.jobKey, nextRunAt: nextRunAt.toISOString() },
-          "computed nextRunAt for job",
-        );
-      }
+      await ensureNextRunTimestamp(job);
     }
+  }
+
+  /**
+   * Initialize the schedule pointer of a single job (used when a paused job
+   * is resumed). Does nothing for a missing or non-active job.
+   */
+  async function scheduleJob(jobId: string): Promise<void> {
+    const job = await jobStore.getJobById(jobId);
+    if (!job || job.status !== "active") {
+      return;
+    }
+    await ensureNextRunTimestamp(job);
   }
 
   // -----------------------------------------------------------------------
@@ -932,6 +967,7 @@ export function createPluginJobScheduler(
     stop,
     registerPlugin,
     unregisterPlugin,
+    scheduleJob,
     triggerJob,
     tick,
     diagnostics,

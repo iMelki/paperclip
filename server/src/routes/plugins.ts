@@ -2739,7 +2739,10 @@ export function pluginRoutes(
    *
    * Plugin reload deliberately does not resume a paused job, so this is the
    * only way to resume one. A job whose status already equals the requested
-   * status is left untouched (no write, no audit entry).
+   * status is left untouched (no write, no audit entry). Resuming also
+   * initializes the job's `nextRunAt` from its schedule (null or past values
+   * are recomputed; a missed run is not replayed). Pausing leaves `nextRunAt`
+   * as it is: the scheduler only fires active jobs.
    *
    * Body: `{ status: "active" | "paused" }` (unknown fields are rejected).
    *
@@ -2796,6 +2799,11 @@ export function pluginRoutes(
     }
 
     await jobDeps.jobStore.updateJobStatus(job.id, requestedStatus);
+    if (requestedStatus === "active") {
+      // Resuming must also arm the schedule: the scheduler tick ignores a
+      // null `nextRunAt`, and a stale one is recomputed rather than replayed.
+      await jobDeps.scheduler.scheduleJob(job.id);
+    }
     await logPluginMutationActivity(req, "plugin.job_status_changed", job.id, {
       pluginId: plugin.id,
       jobId: job.id,

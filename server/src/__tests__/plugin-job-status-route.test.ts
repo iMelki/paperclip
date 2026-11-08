@@ -51,7 +51,8 @@ function makeJobDeps(job: Record<string, unknown> | null) {
     getJobByIdForPlugin: vi.fn().mockResolvedValue(job),
     updateJobStatus: vi.fn().mockResolvedValue(undefined),
   };
-  return { jobStore, jobDeps: { scheduler: {}, jobStore } };
+  const scheduler = { scheduleJob: vi.fn().mockResolvedValue(undefined) };
+  return { jobStore, scheduler, jobDeps: { scheduler, jobStore } };
 }
 
 async function createApp(actor: Record<string, unknown>, jobDeps?: unknown) {
@@ -94,7 +95,7 @@ describe.sequential("PATCH /plugins/:pluginId/jobs/:jobId", { timeout: 30_000 },
   });
 
   it("lets an instance admin resume a paused job and writes one audit entry", async () => {
-    const { jobStore, jobDeps } = makeJobDeps(pausedJob);
+    const { jobStore, scheduler, jobDeps } = makeJobDeps(pausedJob);
     const app = await createApp(adminActor(), jobDeps);
 
     const res = await request(app).patch(url).send({ status: "active" });
@@ -108,6 +109,13 @@ describe.sequential("PATCH /plugins/:pluginId/jobs/:jobId", { timeout: 30_000 },
       changed: true,
     });
     expect(jobStore.updateJobStatus).toHaveBeenCalledTimes(1);
+    // The schedule pointer is initialized after the status write, so a job
+    // whose nextRunAt is null or stale actually fires again.
+    expect(scheduler.scheduleJob).toHaveBeenCalledTimes(1);
+    expect(scheduler.scheduleJob).toHaveBeenCalledWith("job-1");
+    expect(jobStore.updateJobStatus.mock.invocationCallOrder[0]).toBeLessThan(
+      scheduler.scheduleJob.mock.invocationCallOrder[0] as number,
+    );
     expect(jobStore.updateJobStatus).toHaveBeenCalledWith("job-1", "active");
     expect(mockLogActivity).toHaveBeenCalledTimes(1);
     expect(mockLogActivity.mock.calls[0]?.[1]).toMatchObject({
@@ -126,24 +134,27 @@ describe.sequential("PATCH /plugins/:pluginId/jobs/:jobId", { timeout: 30_000 },
   });
 
   it("lets an instance admin pause an active job", async () => {
-    const { jobStore, jobDeps } = makeJobDeps({ ...pausedJob, status: "active" });
+    const { jobStore, scheduler, jobDeps } = makeJobDeps({ ...pausedJob, status: "active" });
     const app = await createApp(adminActor(), jobDeps);
 
     const res = await request(app).patch(url).send({ status: "paused" });
 
     expect(res.status).toBe(200);
+    // Pausing keeps nextRunAt as it is (the tick only fires active jobs).
+    expect(scheduler.scheduleJob).not.toHaveBeenCalled();
     expect(res.body).toMatchObject({ status: "paused", previousStatus: "active", changed: true });
     expect(jobStore.updateJobStatus).toHaveBeenCalledWith("job-1", "paused");
     expect(mockLogActivity).toHaveBeenCalledTimes(1);
   });
 
   it("returns changed:false without a write or audit entry when the status is unchanged", async () => {
-    const { jobStore, jobDeps } = makeJobDeps(pausedJob);
+    const { jobStore, scheduler, jobDeps } = makeJobDeps(pausedJob);
     const app = await createApp(adminActor(), jobDeps);
 
     const res = await request(app).patch(url).send({ status: "paused" });
 
     expect(res.status).toBe(200);
+    expect(scheduler.scheduleJob).not.toHaveBeenCalled();
     expect(res.body).toEqual({
       jobId: "job-1",
       jobKey: "sync.example",
