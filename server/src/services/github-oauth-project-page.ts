@@ -30,24 +30,51 @@ const ROTATING_CONNECTION_PATHS: readonly (readonly string[])[] = [
   ["providerMetadata", "oauth", "expiresAt"], ["providerMetadata", "githubOAuth", "verifiedAt"],
 ];
 
+/** Scope lists carry the same consent in any order or separator ("a b", "a,b", ["b","a"]). */
+const SCOPE_PATHS: readonly (readonly string[])[] = [["oauth", "scope"], ["oauth", "scopes"], ["providerMetadata", "oauth", "scope"]];
+function normalizeScopeValue(value: unknown): unknown {
+  if (typeof value === "string") return value.split(/[\s,]+/).filter(Boolean).sort().join(" ");
+  if (Array.isArray(value) && value.every(item => typeof item === "string")) return [...new Set(value as string[])].sort();
+  return value;
+}
+
+/** Object key order carries no consent either: hash every object with its keys sorted. */
+function canonicalJson(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonicalJson);
+  if (value && typeof value === "object") {
+    return Object.fromEntries(Object.entries(value as Record<string, unknown>).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)
+      .map(([key, item]) => [key, canonicalJson(item)]));
+  }
+  return value;
+}
+
 function withoutRotatingPaths(value: unknown): unknown {
   if (!value || typeof value !== "object" || Array.isArray(value)) return value;
   const copy = structuredClone(value) as Record<string, unknown>;
+  for (const path of SCOPE_PATHS) {
+    let node: unknown = copy;
+    for (const key of path.slice(0, -1)) node = node && typeof node === "object" ? (node as Record<string, unknown>)[key] : undefined;
+    const last = path[path.length - 1];
+    if (node && typeof node === "object" && last in (node as Record<string, unknown>)) {
+      (node as Record<string, unknown>)[last] = normalizeScopeValue((node as Record<string, unknown>)[last]);
+    }
+  }
   for (const path of ROTATING_CONNECTION_PATHS) {
     let node: unknown = copy;
     for (const key of path.slice(0, -1)) node = node && typeof node === "object" ? (node as Record<string, unknown>)[key] : undefined;
     if (node && typeof node === "object") delete (node as Record<string, unknown>)[path[path.length - 1]];
   }
-  return copy;
+  return canonicalJson(copy);
 }
 
 function withoutSecretIds(refs: unknown): unknown {
   if (!Array.isArray(refs)) return refs;
+  // A refresh that returns no new refresh token rewrites the refs in another order, so the order carries no consent.
   return refs.map(ref => {
     if (!ref || typeof ref !== "object") return ref;
     const { secretId: _secretId, ...stable } = ref as Record<string, unknown>;
     return stable;
-  });
+  }).sort((left, right) => JSON.stringify(left) < JSON.stringify(right) ? -1 : JSON.stringify(left) > JSON.stringify(right) ? 1 : 0);
 }
 
 /**

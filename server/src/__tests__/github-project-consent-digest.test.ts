@@ -50,6 +50,31 @@ describe("standing consent for a scheduled GitHub board import", () => {
     expect(v1(rotated, { secretId: SECRET_B, latestVersion: 1 })).not.toBe(v1(before, { secretId: SECRET_A, latestVersion: 1 }));
     expect(v1(rotated, { secretId: SECRET_B, latestVersion: 7 })).not.toBe(v1(before, { secretId: SECRET_A, latestVersion: 1 }));
   });
+  it("does not depend on the order of the credential refs (a refresh without a new refresh token reorders them)", () => {
+    const reordered = connection(SECRET_A, "2026-10-27T15:01:08.000Z", {
+      credentialSecretRefs: [...before.credentialSecretRefs as unknown[]].reverse(),
+      credentialRefs: [...before.credentialRefs as unknown[]].reverse() });
+    const two = (value: Connection) => ({ ...value, credentialSecretRefs: [
+      ...(value.credentialSecretRefs as unknown[]), { label: "OAuth refresh token", required: true, secretId: SECRET_B,
+        configPath: "oauth.refresh_token", versionSelector: "latest" }] });
+    expect(githubProjectConsentDigest(two(reordered), { secretId: SECRET_A, latestVersion: 1 }))
+      .toBe(githubProjectConsentDigest({ ...two(before), credentialSecretRefs: [...(two(before).credentialSecretRefs as unknown[])].reverse() },
+        { secretId: SECRET_A, latestVersion: 1 }));
+  });
+  it("does not depend on the order or form of the granted scopes or on object key order", () => {
+    const scoped = (scope: unknown, scopes: unknown) => connection(SECRET_A, "2026-10-27T15:01:08.000Z", {}, {
+      oauth: { ...oauth("2026-10-27T15:01:08.000Z", "2026-10-27T23:01:08.000Z"), scope, scopes } });
+    const base = githubProjectConsentDigest(scoped("project repo", ["repo", "project", "offline_access"]), { secretId: SECRET_A, latestVersion: 1 });
+    for (const [scope, scopes] of [["repo project", ["offline_access", "project", "repo"]], ["repo,project", ["project", "offline_access", "repo"]],
+      ["  repo   project ", ["repo", "project", "repo", "offline_access"]]] as const) {
+      expect(githubProjectConsentDigest(scoped(scope, scopes), { secretId: SECRET_A, latestVersion: 1 })).toBe(base);
+    }
+    // A genuinely different grant still changes it.
+    expect(githubProjectConsentDigest(scoped("project", ["project"]), { secretId: SECRET_A, latestVersion: 1 })).not.toBe(base);
+    const flipped = { ...before, config: Object.fromEntries(Object.entries(before.config as object).reverse()),
+      transportConfig: Object.fromEntries(Object.entries(before.transportConfig as object).reverse()) };
+    expect(githubProjectConsentDigest(flipped, { secretId: SECRET_A, latestVersion: 1 })).toBe(githubProjectConsentDigest(before, { secretId: SECRET_A, latestVersion: 1 }));
+  });
   it("is not the old v1 digest, so a pre-fix grant fails closed and must be renewed once", () => {
     expect(githubProjectConsentDigest(before, { secretId: SECRET_A, latestVersion: 1 })).toMatch(/^[a-f0-9]{64}$/);
   });
