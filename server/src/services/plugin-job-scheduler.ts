@@ -441,10 +441,9 @@ export function createPluginJobScheduler(
   }
 
   /**
-   * Plan for a worker-run (non-native) job. A strict `dispatchScope: "company"`
-   * declaration is resolved by the injected host resolver. Otherwise a job that
-   * declares `scope: "company"` runs once per company that has configured the
-   * plugin, and with no configured company it runs once unscoped.
+   * Plan for a worker-run (non-native) job. `scope: "company"` and `dispatchScope: "company"` are
+   * the same strict contract: the job runs once per host-configured company, nothing is dispatched
+   * when no company is configured, and a retry needs the original company.
    */
   async function resolveWorkerJobDispatch(job: typeof pluginJobs.$inferSelect): Promise<PluginJobDispatchPlan> {
     const strict = await resolveJobDispatch(job.pluginId, job.jobKey);
@@ -452,9 +451,8 @@ export function createPluginJobScheduler(
     const declared = await jobStore.getJobDeclarationScope(job.pluginId, job.jobKey);
     if (declared !== "company") return strict;
     const companyIds = [...workerManager.getProactiveCompanyScopes(job.pluginId)].sort();
-    return companyIds.length > 0
-      ? { scope: "company", companyIds, lenient: true }
-      : { scope: "instance", companyIds: [] };
+    if (companyIds.length === 0) throw new Error("Company job has no host-configured companies; nothing dispatched");
+    return { scope: "company", companyIds };
   }
 
   async function resolveDispatchPlan(job: typeof pluginJobs.$inferSelect): Promise<PluginJobDispatchPlan> {
