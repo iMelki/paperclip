@@ -90,15 +90,14 @@ export interface PluginJobDeclaration {
    * - `"instance"`: the job runs once per trigger. It gets a company scope
    *   only when exactly one company has configured the plugin.
    * - `"company"`: the host runs the job once per company that has configured
-   *   the plugin, sequentially, each run with its own run record (carrying
+   *   the plugin (and dispatches nothing when none has), sequentially, each run with its own run record (carrying
    *   that company id), its own `runId`, and that company's invocation scope.
    */
   scope?: PluginJobScope;
   /**
-   * Strict opt-in company fan-out from host-owned config rows. Unlike `scope: "company"`
-   * (which falls back to one unscoped run when no company has configured the plugin),
-   * a job declaring `dispatchScope: "company"` refuses to dispatch when no host-configured
-   * company exists. Omitted preserves instance dispatch.
+   * Alias of `scope` with the same strict contract: one run per host-configured company, nothing
+   * dispatched when no company is configured, and a retry needs the original company.
+   * Omitted preserves instance dispatch.
    */
   dispatchScope?: "instance" | "company";
 }
