@@ -9,6 +9,7 @@ import { createScheduledGitHubProjectBoardService } from "./plugin-github-projec
 import type { ScheduledGitHubPageReader } from "./github-project-scheduled-contract.js";
 import type { createPluginJobEnvelope, PluginJobDispatchPlan } from "./plugin-job-scope.js";
 import { isNativeGitHubBoardJobKey, readNativeBoardJobTargets } from "./github-project-board-job-targets.js";
+import { summarizeNativeBoardFailure } from "./github-project-board-failure-reason.js";
 export { isNativeGitHubBoardJobKey } from "./github-project-board-job-targets.js";
 
 type Job = Pick<typeof pluginJobs.$inferSelect, "id" | "pluginId" | "jobKey">;
@@ -92,8 +93,14 @@ export function createGitHubProjectBoardSchedulerBridge(db: Db, reader: Schedule
         eq(pluginJobRuns.trigger, "schedule"), eq(pluginJobRuns.status, "running"))).returning({ id: pluginJobRuns.id });
       if (saved.length !== 1 || !current()) throw conflict("Native board run changed before summary publication");
       return summary;
-    } catch {
+    } catch (error) {
       // Neither provider errors nor external board data are copied into the scheduler run error string.
+      // The host's own static refusal sentence (or a fixed label) goes to the run log so the cause is visible.
+      await db.update(pluginJobRuns).set({
+        logs: sql`coalesce(${pluginJobRuns.logs}, '[]'::jsonb) || jsonb_build_array(${JSON.stringify(summarizeNativeBoardFailure(error))}::text)`,
+      }).where(and(eq(pluginJobRuns.id, runId), eq(pluginJobRuns.pluginId, job.pluginId),
+        eq(pluginJobRuns.jobId, job.id), eq(pluginJobRuns.companyId, companyId),
+        eq(pluginJobRuns.trigger, "schedule"), eq(pluginJobRuns.status, "running"))).catch(() => undefined);
       throw conflict("Native board scheduled execution refused or held; inspect host-native receipts before retry");
     } finally {
       clearTimeout(timer); controller.abort();
