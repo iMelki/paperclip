@@ -12,11 +12,11 @@ import { BOARD_IMPORT_FIXTURE_SETUP_TIMEOUT_MS, createRunner,
 // PG18 custom stdout/list/transactional restore contracts:
 // https://www.postgresql.org/docs/18/app-pgdump.html
 // https://www.postgresql.org/docs/18/app-pgrestore.html
-const CLIENT_ROOT = "C:/Users/Milky/AppData/Local/PaperclipFactory/assistants-factory-win/runtime/"
-  + "pg18-client-acquire-20260924/extracted/pgsql/bin";
-const CLIENT_REQUEST = "C:/Users/Milky/Documents/Codex/2026-10-01/executive-ceo/outputs/"
-  + "parallel-company-canvas-20261007-2012/paperclip/github-asimtop-connection-20261012/"
-  + "PG18-RETAINED-CLIENT-VERSION-REQUEST-20261015.private.json";
+// Machine-specific inputs are supplied by the operator, never committed. Without both, this suite
+// is a visible skip: PAPERCLIP_PG18_CLIENT_ROOT is the directory holding the pinned PG18 client
+// binaries and DLLs; PAPERCLIP_PG18_CLIENT_REQUEST is the retained JSON request that pins the DLLs.
+const CLIENT_ROOT = process.env.PAPERCLIP_PG18_CLIENT_ROOT ?? "";
+const CLIENT_REQUEST = process.env.PAPERCLIP_PG18_CLIENT_REQUEST ?? "";
 const REQUEST_SHA256 = "6673e047311e9c644487f7885949323605d8c978dbf5d3918b1c21958229f6a4";
 const TOOL_PINS = [
   { name: "pg_dump", sha256: "ae5c804c05b32760bf9066b1df88838b7a29fa1387690b0054011cf53c19b6e7" },
@@ -99,7 +99,7 @@ function connectArgs(name: string) {
   return ["--no-password", `--dbname=${url.toString()}`];
 }
 
-describe("retained native PG18 custom archive synthetic transport", () => {
+describe.skipIf(!CLIENT_ROOT || !CLIENT_REQUEST)("retained native PG18 custom archive synthetic transport", () => {
   beforeAll(async () => {
     verifyExistingClientPins();
     if (process.env.PAPERCLIP_BOARD_FIXTURE_PG_VERSION !== "18.1") throw new Error("Exact PG18.1 fixture required");
