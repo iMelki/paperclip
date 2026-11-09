@@ -71,6 +71,9 @@ const explicitOpenApiCoverageExclusions = new Set([
   "cases.ts",
   // Smoke lab routes are experimental and not yet represented in the public OpenAPI document.
   "smoke-lab.ts",
+  // Native GitHub project-board schedule-grant routes are operator-only host composition and are not
+  // yet represented in the public OpenAPI document.
+  "plugin-github-project-schedule-grants.ts",
 ]);
 
 function createApp() {
