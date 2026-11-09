@@ -2,6 +2,12 @@
 export interface PluginJobDispatchPlan {
   scope: "instance" | "company";
   companyIds: readonly string[];
+  /**
+   * Set for jobs declared with `scope: "company"`: a retry without a company reruns every
+   * configured company. Strict `dispatchScope: "company"` plans leave it unset and require
+   * the original company for a retry.
+   */
+  lenient?: boolean;
 }
 
 export type PluginJobTrigger = "schedule" | "manual" | "retry";
@@ -32,19 +38,19 @@ export function selectPluginJobCompanies(
   requestedCompanyId?: string,
 ): Array<string | null> {
   if (plan.scope === "instance") {
-    if (requestedCompanyId !== undefined) throw new Error("Instance jobs do not accept a company retry target");
+    if (requestedCompanyId !== undefined) throw new Error("Instance-scoped jobs cannot be triggered for one company");
     return [null];
   }
   if (plan.scope !== "company" || plan.companyIds.length === 0) {
     throw new Error("Company job dispatch plan is missing its authorized companies");
   }
   const companies = [...new Set(plan.companyIds.map(exactCompanyId))].sort();
-  if (trigger === "retry" && requestedCompanyId === undefined) {
+  if (trigger === "retry" && requestedCompanyId === undefined && !plan.lenient) {
     throw new Error("Retry a company job with its original company ID; instance-wide replay is refused");
   }
   if (requestedCompanyId === undefined) return companies;
   const companyId = exactCompanyId(requestedCompanyId);
-  if (!companies.includes(companyId)) throw new Error("Requested company is not configured for this plugin job");
+  if (!companies.includes(companyId)) throw new Error(`Company "${companyId}" has not configured plugin for this job`);
   return [companyId];
 }
 
