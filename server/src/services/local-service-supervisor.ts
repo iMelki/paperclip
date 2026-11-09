@@ -8,6 +8,35 @@ import { promisify } from "node:util";
 import { resolvePaperclipInstanceRoot } from "../home-paths.js";
 
 const execFileAsync = promisify(execFile);
+const LSOF_CALL_TIMEOUT_MS = 1_000;
+
+/**
+ * Ceiling for every `lsof` invocation inside one runtime-service start.
+ * Each call is still capped at {@link LSOF_CALL_TIMEOUT_MS}, and the calls
+ * share this budget so a 32-port scan cannot spend 32 seconds in `lsof`.
+ */
+export const PORT_OWNER_INSPECTION_BUDGET_MS = 2_000;
+
+type PortOwnerInspectionScope = { deadline: number };
+let portOwnerInspectionScope: PortOwnerInspectionScope | null = null;
+
+export async function withPortOwnerInspectionBudget<T>(budgetMs: number, work: () => Promise<T>): Promise<T> {
+  const previous = portOwnerInspectionScope;
+  const deadline = Date.now() + budgetMs;
+  portOwnerInspectionScope = {
+    deadline: previous ? Math.min(previous.deadline, deadline) : deadline,
+  };
+  try {
+    return await work();
+  } finally {
+    portOwnerInspectionScope = previous;
+  }
+}
+
+function remainingLsofTimeoutMs() {
+  if (!portOwnerInspectionScope) return LSOF_CALL_TIMEOUT_MS;
+  return Math.max(0, Math.min(LSOF_CALL_TIMEOUT_MS, portOwnerInspectionScope.deadline - Date.now()));
+}
 const taskkillCommand = path.join(process.env.SystemRoot ?? "C:\\Windows", "System32", "taskkill.exe");
 const windowsPowerShellCommand = path.join(
   process.env.SystemRoot ?? "C:\\Windows",
@@ -855,6 +884,103 @@ async function terminateWindowsProcessTree(pid: number) {
   }
 }
 
+/**
+ * Linux start-time identity (parity with the Windows CreationDate check).
+ *
+ * Reads field 22 (starttime, in clock ticks since boot) of /proc/<pid>/stat.
+ * The comm field (2) may contain spaces or parentheses, so fields are parsed
+ * only after the LAST ')' in the line. Ticks are converted to wall-clock ms
+ * with btime from /proc/stat and CLK_TCK from getconf.
+ *
+ * Tolerance: btime is whole seconds (up to 1000 ms truncation), plus one
+ * clock tick, plus the 1 ms precision of the recorded processStartedAt.
+ * btime is derived from the current wall clock minus uptime, so it can also
+ * shift slightly when the system clock is adjusted (NTP slew or step). That
+ * drift is one more reason the tolerance exists; a larger clock step makes the
+ * check fail closed rather than trust a pid.
+ *
+ * Fails closed: any read or parse error, a missing /proc, a gone pid, or a
+ * non-Linux platform returns false (untrusted).
+ */
+export const LINUX_START_TIME_BTIME_PRECISION_MS = 1000;
+export const LINUX_START_TIME_RECORDED_PRECISION_MS = 1;
+
+export function parseLinuxProcStatStartTicks(statLine: string): number | null {
+  if (typeof statLine !== "string") return null;
+  const closeParen = statLine.lastIndexOf(")");
+  if (closeParen < 0) return null;
+  const rest = statLine.slice(closeParen + 1).trim().split(/\s+/);
+  // rest[0] is field 3 (state), so field 22 is rest[19].
+  const raw = rest[19];
+  if (raw === undefined || !/^\d+$/.test(raw)) return null;
+  const ticks = Number(raw);
+  return Number.isSafeInteger(ticks) ? ticks : null;
+}
+
+export function parseLinuxProcStatBootTimeSec(procStat: string): number | null {
+  if (typeof procStat !== "string") return null;
+  const match = /^btime\s+(\d+)\s*$/m.exec(procStat);
+  if (!match) return null;
+  const value = Number(match[1]);
+  return Number.isSafeInteger(value) && value > 0 ? value : null;
+}
+
+let cachedLinuxClockTicks: number | null = null;
+async function readLinuxClockTicksPerSecond(): Promise<number | null> {
+  if (cachedLinuxClockTicks !== null) return cachedLinuxClockTicks;
+  try {
+    const { stdout } = await execFileAsync("getconf", ["CLK_TCK"]);
+    const value = Number(String(stdout).trim());
+    if (!Number.isInteger(value) || value <= 0) return null;
+    cachedLinuxClockTicks = value;
+    return value;
+  } catch {
+    return null;
+  }
+}
+
+export interface LinuxStartIdentityDeps {
+  platform?: NodeJS.Platform;
+  readFile?: (filePath: string) => Promise<string>;
+  clockTicksPerSecond?: () => Promise<number | null>;
+}
+
+export async function matchesLinuxProcessStartIdentity(
+  pid: number,
+  expectedStartedAt: Date | string,
+  deps: LinuxStartIdentityDeps = {},
+): Promise<boolean> {
+  const platform = deps.platform ?? process.platform;
+  if (platform !== "linux") return false;
+  const normalizedPid = normalizeLocalServicePid(pid);
+  if (normalizedPid === null) return false;
+  const expected = expectedStartedAt instanceof Date
+    ? expectedStartedAt
+    : new Date(expectedStartedAt);
+  const expectedMs = expected.getTime();
+  if (Number.isNaN(expectedMs)) return false;
+  const readFile = deps.readFile ?? ((filePath: string) => fs.readFile(filePath, "utf8"));
+  try {
+    const [statLine, procStat, clockTicks] = await Promise.all([
+      readFile(`/proc/${normalizedPid}/stat`),
+      readFile("/proc/stat"),
+      (deps.clockTicksPerSecond ?? readLinuxClockTicksPerSecond)(),
+    ]);
+    const startTicks = parseLinuxProcStatStartTicks(statLine);
+    const bootTimeSec = parseLinuxProcStatBootTimeSec(procStat);
+    if (startTicks === null || bootTimeSec === null || !clockTicks || clockTicks <= 0) {
+      return false;
+    }
+    const actualMs = bootTimeSec * 1000 + (startTicks * 1000) / clockTicks;
+    const toleranceMs = LINUX_START_TIME_BTIME_PRECISION_MS
+      + 1000 / clockTicks
+      + LINUX_START_TIME_RECORDED_PRECISION_MS;
+    return Math.abs(actualMs - expectedMs) <= toleranceMs;
+  } catch {
+    return false;
+  }
+}
+
 async function matchesWindowsProcessCreationIdentity(
   pid: number,
   expectedStartedAt: Date | string,
@@ -1006,6 +1132,10 @@ export async function terminateLocalService(
       && !pidAlive
       && opts.expectedStartedAt !== undefined
       && opts.expectedStartedAt !== null
+      // Orphaned descendants of a dead leader keep its PGID, but the leader
+      // itself (pid === PGID) must be gone. A live process holding that pid
+      // means the PGID was reused by an unrelated group: refuse.
+      && !isPidAlive(recordedProcessGroupId)
     ) {
       const ownProcessGroupId = await readLocalServiceProcessGroupId(process.pid);
       if (ownProcessGroupId === null || recordedProcessGroupId !== ownProcessGroupId) {
@@ -1015,7 +1145,13 @@ export async function terminateLocalService(
   }
 
   const signal = opts?.signal ?? "SIGTERM";
-  const canTargetPid = opts?.trustedPid === true;
+  const canTargetPid = opts?.trustedPid === true
+    || (
+      pidAlive
+      && opts?.expectedStartedAt !== undefined
+      && opts.expectedStartedAt !== null
+      && await matchesLinuxProcessStartIdentity(pid, opts.expectedStartedAt)
+    );
   if (processGroupId === null && !canTargetPid) {
     return {
       pid,
@@ -1137,16 +1273,94 @@ export async function readLocalServicePortOwner(port: number) {
       return null;
     }
   }
+  const lsofTimeoutMs = remainingLsofTimeoutMs();
+  if (lsofTimeoutMs > 0) {
+    try {
+      // lsof can stall on a busy runner. A hung lookup turns a bind retry into a
+      // test-length wait, so give up and let /proc (or "unknown") decide.
+      // The per-call cap is also clipped to the start's remaining inspection
+      // budget, so later ports do not each pay another full second.
+      const { stdout } = await execFileAsync(
+        "lsof",
+        ["-nP", `-iTCP:${port}`, "-sTCP:LISTEN", "-t"],
+        { timeout: lsofTimeoutMs },
+      );
+      const firstPid = stdout
+        .split("\n")
+        .map((line) => Number.parseInt(line.trim(), 10))
+        .find((value) => Number.isInteger(value) && value > 0);
+      if (firstPid) return firstPid;
+    } catch {
+      // Fall through to the Linux procfs read when lsof is missing, slow, or empty.
+    }
+  }
+  if (process.platform === "linux") {
+    const procOwner = readLinuxListeningPid(port);
+    if (procOwner) return procOwner;
+  }
+  return null;
+}
+
+/** Listening socket inodes for `port` from `/proc/net/tcp{,6}`, or null if /proc cannot be read. */
+function readLinuxListenInodes(port: number): Set<string> | null {
+  const inodes = new Set<string>();
+  let readable = false;
+  const portHex = port.toString(16).toUpperCase().padStart(4, "0");
+  for (const table of ["/proc/net/tcp", "/proc/net/tcp6"]) {
+    let content: string;
+    try {
+      content = fsSync.readFileSync(table, "utf8");
+    } catch {
+      continue;
+    }
+    readable = true;
+    for (const line of content.split("\n").slice(1)) {
+      const cols = line.trim().split(/\s+/);
+      if (cols.length < 10) continue;
+      const local = cols[1] ?? "";
+      const portPart = local.split(":")[1]?.toUpperCase();
+      // 0A is TCP_LISTEN.
+      if (portPart !== portHex || cols[3]?.toUpperCase() !== "0A") continue;
+      const inode = cols[9];
+      if (inode && inode !== "0") inodes.add(inode);
+    }
+  }
+  return readable ? inodes : null;
+}
+
+function readLinuxListeningPid(port: number): number | null {
+  // Tests that simulate "ownership tool unavailable" set this so a live /proc
+  // cannot answer the lookup lsof was forced to miss.
+  if (process.env.PAPERCLIP_DISABLE_PROC_PORT_OWNER === "1") return null;
+  const inodes = readLinuxListenInodes(port);
+  if (!inodes || inodes.size === 0) return null;
+  let entries: fsSync.Dirent[];
   try {
-    const { stdout } = await execFileAsync("lsof", ["-nP", `-iTCP:${port}`, "-sTCP:LISTEN", "-t"]);
-    const firstPid = stdout
-      .split("\n")
-      .map((line) => Number.parseInt(line.trim(), 10))
-      .find((value) => Number.isInteger(value) && value > 0);
-    return firstPid ?? null;
+    entries = fsSync.readdirSync("/proc", { withFileTypes: true });
   } catch {
     return null;
   }
+  for (const entry of entries) {
+    if (!entry.isDirectory() || !/^\d+$/.test(entry.name)) continue;
+    const pid = Number.parseInt(entry.name, 10);
+    let fds: string[];
+    try {
+      fds = fsSync.readdirSync(`/proc/${entry.name}/fd`);
+    } catch {
+      continue;
+    }
+    for (const fd of fds) {
+      let link: string;
+      try {
+        link = fsSync.readlinkSync(`/proc/${entry.name}/fd/${fd}`);
+      } catch {
+        continue;
+      }
+      const match = /^socket:\[(\d+)\]$/.exec(link);
+      if (match && inodes.has(match[1]!)) return pid;
+    }
+  }
+  return null;
 }
 
 /**

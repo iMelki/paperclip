@@ -55,8 +55,10 @@ import {
   openLocalServiceLogFile,
   readLocalServiceProcessCwd,
   readLocalServiceProcessGroupId,
+  PORT_OWNER_INSPECTION_BUDGET_MS,
   readLocalServicePortOwner,
   removeLocalServiceRegistryRecord,
+  withPortOwnerInspectionBudget,
   terminateLocalService,
   touchLocalServiceRegistryRecord,
   writeLocalServiceRegistryRecord,
@@ -282,6 +284,7 @@ const exposurePortPairClaims = new ExposurePortPairClaims();
 const OPEN_EXECUTION_WORKSPACE_LEASE_STATUSES = ["active", "idle", "in_review"] as const;
 const DEFAULT_EXECUTE_PROCESS_OUTPUT_BYTES = 256 * 1024;
 export const WORKSPACE_RUNTIME_PORT_ALLOCATION_ATTEMPTS = 32;
+export { PORT_OWNER_INSPECTION_BUDGET_MS };
 const ACTIVE_RUNTIME_PORT_RESERVATION_STATUSES = ["provisioning", "starting", "running"] as const;
 const DEFAULT_TAILSCALE_BROKER_SOCKET = "/run/paperclip-tailscale-broker/broker.sock";
 
@@ -300,7 +303,19 @@ class RuntimeServicePortBindCollision extends Error {
    */
   readonly exposureReallocatable: boolean;
 
-  constructor(port: number, diagnosis: string | null = null, exposureReallocatable = false) {
+  /**
+   * True when a listener was present but neither lsof nor /proc could name its
+   * owner. Retrying the rest of the range cannot attribute that listener, so
+   * callers fail the bounded allocation immediately.
+   */
+  readonly ownershipUnavailable: boolean;
+
+  constructor(
+    port: number,
+    diagnosis: string | null = null,
+    exposureReallocatable = false,
+    ownershipUnavailable = false,
+  ) {
     super(
       `Runtime service could not bind allocated port ${port}` +
         (diagnosis ? ` (${diagnosis})` : ""),
@@ -309,6 +324,7 @@ class RuntimeServicePortBindCollision extends Error {
     this.port = port;
     this.diagnosis = diagnosis;
     this.exposureReallocatable = exposureReallocatable;
+    this.ownershipUnavailable = ownershipUnavailable;
   }
 }
 
@@ -539,6 +555,11 @@ export async function resetRuntimeServicesForTests(
   runtimeReplacementClaimsByReuseKey.clear();
   quarantinedRuntimeExposurePorts.clear();
   exposurePortPairClaims.clear();
+  quarantinedUnconfirmedStopPorts.clear();
+  resetRuntimeServicePortReservationsForTests();
+  forceUnconfirmedChildStopForTests = false;
+  failNextPostSpawnRuntimeSaveForTests = false;
+  lastUnconfirmedSpawnStopForTests = null;
   workspaceRuntimeExposureDeps = defaultWorkspaceRuntimeExposureDeps();
 }
 
@@ -4247,14 +4268,41 @@ export async function cleanupExecutionWorkspaceArtifacts(input: {
  * start makes concurrent allocations distinct.
  */
 const inFlightAllocatedPorts = new Map<number, number>();
+/**
+ * Ports whose listener survived a failed post-spawn save. TTL expiry must not
+ * hand these to a concurrent start while the old process is still bound.
+ */
+const quarantinedUnconfirmedStopPorts = new Set<number>();
 const PORT_RESERVATION_TTL_MS = 120_000;
 const PORT_ALLOCATION_ATTEMPTS = 12;
+let forceUnconfirmedChildStopForTests = false;
+let failNextPostSpawnRuntimeSaveForTests = false;
+let lastUnconfirmedSpawnStopForTests: {
+  child: ChildProcess;
+  ports: number[];
+} | null = null;
+
+/** Test-only: the next post-spawn runtime save throws before the row is durable. */
+export function setFailNextPostSpawnRuntimeSaveForTests(value: boolean) {
+  failNextPostSpawnRuntimeSaveForTests = value;
+}
+
+/** Test-only: report the child stop as unconfirmed and leave the listener running. */
+export function setForceUnconfirmedChildStopForTests(value: boolean) {
+  forceUnconfirmedChildStopForTests = value;
+}
+
+/** Test-only: the child and ports kept after an unconfirmed stop. */
+export function readUnconfirmedSpawnStopForTests() {
+  return lastUnconfirmedSpawnStopForTests;
+}
 
 export function resetRuntimeServicePortReservationsForTests() {
   inFlightAllocatedPorts.clear();
 }
 
 function reservePortIfFree(port: number, now = Date.now()): boolean {
+  if (quarantinedUnconfirmedStopPorts.has(port)) return false;
   const heldUntil = inFlightAllocatedPorts.get(port);
   if (heldUntil !== undefined && heldUntil > now) return false;
   inFlightAllocatedPorts.set(port, now + PORT_RESERVATION_TTL_MS);
@@ -4275,6 +4323,19 @@ export function claimRuntimeServiceBindPort(bindPort: number, alreadyReservedPor
 
 function releasePortReservation(port: number | null | undefined) {
   if (typeof port !== "number") return;
+  if (quarantinedUnconfirmedStopPorts.has(port)) return;
+  inFlightAllocatedPorts.delete(port);
+}
+
+function quarantineUnconfirmedStopPort(port: number | null | undefined) {
+  if (typeof port !== "number") return;
+  quarantinedUnconfirmedStopPorts.add(port);
+  inFlightAllocatedPorts.set(port, Number.POSITIVE_INFINITY);
+}
+
+function releaseConfirmedStopPort(port: number | null | undefined) {
+  if (typeof port !== "number") return;
+  quarantinedUnconfirmedStopPorts.delete(port);
   inFlightAllocatedPorts.delete(port);
 }
 
@@ -4573,17 +4634,39 @@ async function allocateAndReserveExposure(input: {
 async function canBindRuntimePort(port: number): Promise<boolean> {
   return await new Promise<boolean>((resolve, reject) => {
     const server = net.createServer();
+    let settled = false;
+    const finish = (value: boolean) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(value);
+    };
+    // A listen that never callbacks used to park the whole start until the
+    // caller's test timeout. Treat that as "not bindable" so allocation moves on.
+    const timer = setTimeout(() => {
+      server.close();
+      finish(false);
+    }, 1_000);
     server.once("error", (error: NodeJS.ErrnoException) => {
       if (error.code === "EADDRINUSE" || error.code === "EACCES") {
-        resolve(false);
+        finish(false);
         return;
       }
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
       reject(error);
     });
     server.listen(port, "127.0.0.1", () => {
       server.close((error) => {
-        if (error) reject(error);
-        else resolve(true);
+        if (error) {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          reject(error);
+          return;
+        }
+        finish(true);
       });
     });
   });
@@ -4766,6 +4849,38 @@ async function buildRuntimePortAllocationConflict(input: {
       remediation,
     },
   );
+}
+
+function boundedAllocationPortRange(preferredPort: number) {
+  const ports: number[] = [];
+  const lastPort = Math.min(65_535, preferredPort + WORKSPACE_RUNTIME_PORT_ALLOCATION_ATTEMPTS - 1);
+  for (let port = preferredPort; port <= lastPort; port += 1) ports.push(port);
+  return ports;
+}
+
+async function allocationExhaustedAfterUnattributedListener(input: {
+  db?: Db;
+  companyId: string;
+  executionWorkspaceId: string | null;
+  preferredPort: number;
+  fixedPortFallback: boolean;
+}) {
+  const attemptedPorts = boundedAllocationPortRange(input.preferredPort);
+  if (input.fixedPortFallback && input.executionWorkspaceId) {
+    return buildRuntimePortAllocationConflict({
+      db: input.db,
+      companyId: input.companyId,
+      executionWorkspaceId: input.executionWorkspaceId,
+      preferredPort: input.preferredPort,
+      attemptedPorts,
+    });
+  }
+  return conflict("No safe automatically allocated runtime service port is available.", {
+    code: "workspace_runtime_port_allocation_exhausted",
+    port: input.preferredPort,
+    attemptedPortCount: attemptedPorts.length,
+    remediation: "Retry the start or configure a different runtime service port.",
+  });
 }
 
 async function allocateIsolatedWorkspacePort(input: {
@@ -5168,17 +5283,22 @@ async function waitForAllocatedPortBind(input: {
       return;
     }
 
-    // A present listener proves only that some listener appeared. If listener ownership cannot
-    // be attributed to this child after a stability delay, retry instead of accepting a sibling.
-    // The presence read never binds the port, so it cannot steal the port from the child.
+    // A present listener with no owner is not yet proof that attribution is
+    // impossible: the socket can appear before its pid is visible. Recheck once.
+    // A second miss is the first unattributed result, so the caller fails the
+    // bounded range instead of paying another lsof timeout on every later port.
+    // The presence read never binds the port.
     if (await hasLoopbackPortListener(input.port)) {
       await delay(250);
       if (input.child.exitCode !== null || input.child.signalCode !== null) {
         throw new Error("service process exited after losing its allocated port");
       }
-      const stableOwnerPid = await readLocalServicePortOwner(input.port);
       const childPid = input.child.pid ?? null;
-      if (stableOwnerPid && childPid && await isLocalServiceProcessOwnedBy(stableOwnerPid, childPid)) return;
+      const ownerNow = await readLocalServicePortOwner(input.port);
+      if (ownerNow && childPid && await isLocalServiceProcessOwnedBy(ownerNow, childPid)) return;
+      if (!ownerNow) {
+        throw new RuntimeServicePortBindCollision(input.port, null, false, true);
+      }
       throw new RuntimeServicePortBindCollision(input.port);
     }
     await delay(50);
@@ -5755,6 +5875,47 @@ function createProvisioningRuntimeServiceRecord(
   };
 }
 
+async function terminateChildProcess(child: ChildProcess): Promise<boolean> {
+  if (!child.pid) return true;
+  if (forceUnconfirmedChildStopForTests) return false;
+  // The child is the shell wrapper (`spawn(shell, ["-lc", command], ...)`), not
+  // the real service process. A bare SIGTERM to that one pid leaves the node
+  // process holding the port, and `kill(-pid)` before setsid can signal the
+  // caller's process group. terminateLocalService waits until the group is
+  // actually gone so a retry does not bind against a dying listener.
+  const result = await terminateLocalService(
+    { pid: child.pid, processGroupId: child.pid },
+    { trustedPid: true },
+  );
+  return result.confirmedStopped;
+}
+
+/**
+ * Stop the child from a failed post-spawn save, then free its port claims only
+ * when that stop is confirmed. An unconfirmed stop quarantines the claims so a
+ * concurrent spawn cannot bind the port while the old listener is still alive.
+ */
+export async function settleFailedSpawnPortClaims(
+  child: ChildProcess,
+  ports: Array<number | null>,
+): Promise<boolean> {
+  const confirmed = await terminateChildProcess(child);
+  const concretePorts = ports.filter((port): port is number => typeof port === "number");
+  if (!confirmed) {
+    for (const port of concretePorts) quarantineUnconfirmedStopPort(port);
+    lastUnconfirmedSpawnStopForTests = { child, ports: concretePorts };
+    return false;
+  }
+  for (const port of concretePorts) releaseConfirmedStopPort(port);
+  if (
+    lastUnconfirmedSpawnStopForTests
+    && concretePorts.some((port) => lastUnconfirmedSpawnStopForTests!.ports.includes(port))
+  ) {
+    lastUnconfirmedSpawnStopForTests = null;
+  }
+  return true;
+}
+
 async function spawnLocalRuntimeService(input: StartLocalRuntimeServiceInput): Promise<LocalRuntimeServiceStart> {
   const leaseRunId = input.leaseRunId === undefined ? input.runId : input.leaseRunId;
   const startedByRunId = input.startedByRunId === undefined ? input.runId : input.startedByRunId;
@@ -6263,6 +6424,22 @@ async function spawnLocalRuntimeService(input: StartLocalRuntimeServiceInput): P
   };
 
   if (child.pid) {
+    // Make the pid durable before readiness can race ahead of the caller's
+    // own post-spawn save (and so a crash during startup keeps the pid).
+    try {
+      if (failNextPostSpawnRuntimeSaveForTests) {
+        failNextPostSpawnRuntimeSaveForTests = false;
+        throw new Error("post-spawn runtime save failed");
+      }
+      await persistRuntimeServiceRecord(input.db, record);
+    } catch (error) {
+      // The readiness race is abandoned with the save. Swallow its later
+      // rejection so stopping the child does not surface as unhandled.
+      earlyExitPromise.catch(() => undefined);
+      spawnErrorPromise.catch(() => undefined);
+      await settleFailedSpawnPortClaims(child, [reservedPort, claimedIdentityPort]);
+      throw error;
+    }
     await writeLocalServiceRegistryRecord({
       version: 1,
       serviceKey,
@@ -6486,8 +6663,17 @@ async function spawnLocalRuntimeService(input: StartLocalRuntimeServiceInput): P
     await removeLocalServiceRegistryRecord(record.serviceKey).catch(() => undefined);
     if (exposureConfig) {
       await persistRuntimeServiceRecord(record.db, record).catch(() => undefined);
+    } else if (child.pid) {
+      await persistRuntimeServiceRecord(input.db, record).catch(() => undefined);
     }
-    if (bindCollision && port) throw new RuntimeServicePortBindCollision(port);
+    if (bindCollision && port) {
+      throw new RuntimeServicePortBindCollision(
+        port,
+        null,
+        false,
+        err instanceof RuntimeServicePortBindCollision && err.ownershipUnavailable,
+      );
+    }
     if (exposureHostCollision && port) {
       // A verified host listener holds the assigned exposure port. Quarantine the
       // pair so the bounded re-allocation never re-offers it, then throw a retryable
@@ -6581,6 +6767,21 @@ async function prepareRuntimeProvisioning(
   }
 }
 
+let runtimeServiceAfterSpawnHookForTests:
+  | ((record: RuntimeServiceRecord) => Promise<void>)
+  | null = null;
+
+/**
+ * Test-only: run a hook after a local runtime service process is spawned and
+ * before the caller's own post-spawn save. Lets tests observe the persisted row
+ * in the window where readiness can still win. Pass null to clear.
+ */
+export function setRuntimeServiceAfterSpawnHookForTests(
+  hook: ((record: { id: string; providerRef: string | null }) => Promise<void>) | null,
+) {
+  runtimeServiceAfterSpawnHookForTests = hook;
+}
+
 async function startLocalRuntimeService(
   input: StartLocalRuntimeServiceInput,
   options?: { deferReadiness?: boolean },
@@ -6608,6 +6809,9 @@ async function startLocalRuntimeService(
           excludedPorts,
           runtimeServiceId: provisioningRecord?.id ?? input.runtimeServiceId,
         });
+        if (runtimeServiceAfterSpawnHookForTests) {
+          await runtimeServiceAfterSpawnHookForTests(started.record);
+        }
         if (runtimeProvisionCommand) {
           await persistRuntimeServiceRecord(input.db, started.record);
         }
@@ -6626,6 +6830,15 @@ async function startLocalRuntimeService(
           || !(retryBindCollisions || error.exposureReallocatable)
         ) {
           throw error;
+        }
+        if (error.ownershipUnavailable) {
+          throw await allocationExhaustedAfterUnattributedListener({
+            db: input.db,
+            companyId: input.agent.companyId,
+            executionWorkspaceId: input.executionWorkspaceId ?? null,
+            preferredPort: explicitPort > 0 ? explicitPort : error.port,
+            fixedPortFallback: fixedPortFallbackEnabled,
+          });
         }
         excludedPorts.add(error.port);
         started = null;
@@ -7538,6 +7751,16 @@ async function discardFailedDeferredRuntimeStart(db: Db, record: RuntimeServiceR
 async function startRuntimeServicesForWorkspaceControlInvocation(
   input: StartRuntimeServicesForWorkspaceControlInput,
 ): Promise<RuntimeServiceRef[]> {
+  // One budget covers every port in this start, including deferred readiness
+  // retries. A slow lsof cannot spend a second on each of the 32 candidates.
+  return withPortOwnerInspectionBudget(PORT_OWNER_INSPECTION_BUDGET_MS, () =>
+    startRuntimeServicesForWorkspaceControlWithinInspectionBudget(input),
+  );
+}
+
+async function startRuntimeServicesForWorkspaceControlWithinInspectionBudget(
+  input: StartRuntimeServicesForWorkspaceControlInput,
+): Promise<RuntimeServiceRef[]> {
   const rawServices = selectRuntimeServiceEntries({
     config: input.config,
     serviceIndex: input.serviceIndex,
@@ -7678,6 +7901,18 @@ async function startRuntimeServicesForWorkspaceControlInvocation(
             throw error;
           }
 
+          if (error.ownershipUnavailable) {
+            const portConfig = parseObject(pending.service.port);
+            const portType = asString(portConfig.type, "");
+            const preferredPort = asNumber(portConfig.value, asNumber(pending.service.port, 0));
+            throw await allocationExhaustedAfterUnattributedListener({
+              db: input.db,
+              companyId: input.actor.companyId,
+              executionWorkspaceId: input.executionWorkspaceId ?? null,
+              preferredPort: preferredPort > 0 ? preferredPort : error.port,
+              fixedPortFallback: allowFixedPortFallback && portType !== "auto",
+            });
+          }
           excludedPorts.add(error.port);
           if (excludedPorts.size >= WORKSPACE_RUNTIME_PORT_ALLOCATION_ATTEMPTS) {
             const portConfig = parseObject(pending.service.port);

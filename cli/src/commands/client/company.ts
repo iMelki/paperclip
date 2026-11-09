@@ -431,6 +431,56 @@ export function resolveCompanyImportAdapterStrategy(
   return normalized;
 }
 
+// Fork contract (dev d5402928): JSON import output reports the adapter policy.
+type CompanyImportAdapterPolicy = {
+  strategy: CompanyImportAdapterStrategy;
+  preservedExecutableAgentSlugs: string[];
+  changes: Array<{
+    agentSlug: string;
+    fromAdapterType: string;
+    toAdapterType: string;
+    reason: "portable_process_fallback";
+  }>;
+};
+
+function buildCompanyImportAdapterPolicy(
+  preview: Pick<
+    CompanyPortabilityPreviewResult,
+    "manifest" | "plan" | "selectedAgentSlugs"
+  >,
+  strategy: CompanyImportAdapterStrategy,
+  overrides: Record<string, { adapterType: string }> | undefined,
+): CompanyImportAdapterPolicy {
+  const manifestAgentsBySlug = new Map(
+    preview.manifest.agents.map((agent) => [agent.slug, agent]),
+  );
+  const selectedAgentSlugs = new Set(preview.selectedAgentSlugs);
+  const skippedAgentSlugs = new Set(
+    preview.plan.agentPlans
+      .filter((plan) => plan.action === "skip")
+      .map((plan) => plan.slug),
+  );
+  return {
+    strategy,
+    preservedExecutableAgentSlugs:
+      strategy === "preserve"
+        ? preview.manifest.agents
+          .filter((agent) => selectedAgentSlugs.has(agent.slug))
+          .filter((agent) => !skippedAgentSlugs.has(agent.slug))
+          .filter((agent) => agent.adapterType === "process")
+          .map((agent) => agent.slug)
+          .sort((left, right) => left.localeCompare(right))
+        : [],
+    changes: Object.entries(overrides ?? {}).map(([agentSlug, override]) => ({
+      agentSlug,
+      fromAdapterType:
+        manifestAgentsBySlug.get(agentSlug)?.adapterType ?? "unknown",
+      toAdapterType: override.adapterType,
+      reason: "portable_process_fallback",
+    })),
+  };
+}
+
 function buildDefaultImportAdapterMessages(
   overrides: Record<string, { adapterType: string }> | undefined,
 ): string[] {
@@ -1088,7 +1138,10 @@ export interface ImportTransferUploadProgress {
   totalBytes: number;
 }
 
-export function buildImportTransferManifest(zipBytes: Uint8Array): CompanyImportTransferDeclaration {
+export function buildImportTransferManifest(
+  zipBytes: Uint8Array,
+  intentKey?: string,
+): CompanyImportTransferDeclaration {
   const sha256 = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
   const parts: CompanyImportTransferDeclaration["parts"] = [];
   for (let offset = 0; offset < zipBytes.length; offset += IMPORT_TRANSFER_PART_SIZE_BYTES) {
@@ -1104,7 +1157,17 @@ export function buildImportTransferManifest(zipBytes: Uint8Array): CompanyImport
     zipSha256: sha256(zipBytes),
     partSizeBytes: IMPORT_TRANSFER_PART_SIZE_BYTES,
     parts,
+    ...(intentKey ? { intentKey } : {}),
   };
+}
+
+/**
+ * sha256 of the import intent sent with a chunked transfer declaration, so
+ * the same package imported with a different target or options is not
+ * mistaken for a retry of a completed transfer.
+ */
+export function buildImportTransferIntentKey(intent: unknown): string {
+  return createHash("sha256").update(JSON.stringify(intent)).digest("hex");
 }
 
 /**
@@ -1175,9 +1238,9 @@ export async function resolveChunkedImportZip(
 export async function uploadCompanyImportTransfer(
   api: Pick<PaperclipApiClient, "post" | "putRaw">,
   zipBytes: Uint8Array,
-  opts: { onProgress?: (progress: ImportTransferUploadProgress) => void } = {},
+  opts: { onProgress?: (progress: ImportTransferUploadProgress) => void; intentKey?: string } = {},
 ): Promise<string> {
-  const manifest = buildImportTransferManifest(zipBytes);
+  const manifest = buildImportTransferManifest(zipBytes, opts.intentKey);
   const created = await api.post<CompanyImportTransferCreated>(
     `/api/companies${COMPANY_IMPORT_TRANSFERS_ROUTE_PATH}`,
     manifest,
@@ -1789,6 +1852,7 @@ export function registerCompanyCommands(program: Command): void {
           let transferId: string | null = null;
           if (chunkedZip) {
             transferId = await uploadCompanyImportTransfer(ctx.api, chunkedZip.zipBytes, {
+              intentKey: buildImportTransferIntentKey({ ...transferMeta, adapterStrategy }),
               onProgress: ctx.json
                 ? undefined
                 : ({ uploadedParts, totalParts, uploadedBytes, totalBytes }) => {
@@ -1837,10 +1901,15 @@ export function registerCompanyCommands(program: Command): void {
             adapterStrategy,
           );
           const adapterMessages = buildDefaultImportAdapterMessages(adapterOverrides);
+          const adapterPolicy = buildCompanyImportAdapterPolicy(
+            preview,
+            adapterStrategy,
+            adapterOverrides,
+          );
 
           if (opts.dryRun) {
             if (ctx.json) {
-              printOutput(preview, { json: true });
+              printOutput({ ...preview, adapterImport: adapterPolicy }, { json: true });
             } else {
               printCompanyImportView(
                 "Import Preview",
@@ -1919,7 +1988,7 @@ export function registerCompanyCommands(program: Command): void {
             }
           }
           if (ctx.json) {
-            printOutput(imported, { json: true });
+            printOutput({ ...imported, adapterImport: adapterPolicy }, { json: true });
           } else {
             printCompanyImportView(
               "Import Result",

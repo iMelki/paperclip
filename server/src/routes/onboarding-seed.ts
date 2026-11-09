@@ -44,19 +44,20 @@ export function onboardingSeedRoutes(db: Db) {
       const companyId = req.params.companyId as string;
       // The seed creates a live agent, so it needs what the hire and create
       // routes need: a board actor (never an agent key) with agents:create.
-      // The trusted Cloud envelope is the one board source exempt from the
-      // permission check, because Cloud provisions the tenant it seeds.
+      // No actor source is exempt. Cloud header auth issues cloud_tenant actors
+      // for every stack role (member and support included), so the trusted
+      // envelope proves identity, not the right to create agents. The Cloud
+      // provisioning owner passes through its attested instance-admin flag or
+      // an explicit agents:create grant like any other board actor.
       assertBoard(req);
       assertCompanyAccess(req, companyId);
-      if (req.actor.source !== "cloud_tenant") {
-        const decision = await access.decide({
-          actor: req.actor,
-          action: "agents:create",
-          resource: { type: "company", companyId },
-        });
-        if (!decision.allowed) {
-          throw forbidden(decision.explanation, authorizationDeniedDetails(decision));
-        }
+      const decision = await access.decide({
+        actor: req.actor,
+        action: "agents:create",
+        resource: { type: "company", companyId },
+      });
+      if (!decision.allowed) {
+        throw forbidden(decision.explanation, authorizationDeniedDetails(decision));
       }
 
       // The audit entry is written inside `apply`'s own transaction, so it
