@@ -11,11 +11,12 @@ export interface PluginJobBatchPorts {
   call(params: ReturnType<typeof createPluginJobEnvelope>, timeoutMs: number): Promise<unknown>;
   isTimeout(error: unknown): boolean;
   /**
-   * Called after a company RPC timed out while more runs remain. Resolves true when the timed-out
-   * handler has finished (the next company may start), false when it may still be running.
-   * Absent means the remaining runs are always deferred.
+   * Called after a failed company RPC while more runs remain. When the error carries the timed-out
+   * worker handler's completion, waits for it (bounded) and resolves null if it finished (the next
+   * company may start) or the deferral reason if it may still be running. Resolves undefined when
+   * the error carries no such handler.
    */
-  awaitTimedOutHandler?(error: unknown): Promise<boolean>;
+  awaitTimedOutHandler?(error: unknown, run: ScopedPluginJobRun): Promise<string | null | undefined>;
   now?(): number;
 }
 
@@ -60,10 +61,13 @@ export async function dispatchPluginJobBatch(
       if (!ports.isCurrent()) return;
       outcome = { status: stoppedReason ? "cancelled" : "failed", error: error instanceof Error ? error.message : String(error),
         durationMs: now() - startedAt };
-      if (ports.isTimeout(error) && index < runs.length - 1) {
-        const settled = ports.awaitTimedOutHandler ? await ports.awaitTimedOutHandler(error) : false;
+      if (index < runs.length - 1) {
+        const wait = await ports.awaitTimedOutHandler?.(error, run);
         if (!ports.isCurrent()) return;
-        if (!settled) stoppedReason = "Earlier company RPC timed out; remaining company executions deferred";
+        if (typeof wait === "string") stoppedReason = wait;
+        else if (wait === undefined && ports.isTimeout(error)) {
+          stoppedReason = "Earlier company RPC timed out; remaining company executions deferred";
+        }
       }
     }
     if (ports.isCurrent()) await ports.completeRun(run.id, outcome);

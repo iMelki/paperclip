@@ -463,6 +463,9 @@ export function createPluginJobScheduler(
     return nativeGitHubProjectBoard.resolveDispatch(job.pluginId, job.jobKey);
   }
 
+  /** Errors thrown while inserting run records: the store is suspect, so no diagnostic row is attempted. */
+  const runRecordFailures = new WeakSet<object>();
+
   async function prepareRuns(
     job: typeof pluginJobs.$inferSelect,
     trigger: "schedule" | "manual" | "retry",
@@ -477,7 +480,13 @@ export function createPluginJobScheduler(
         if (unregisteredPlugins.has(job.pluginId) || jobOwners.get(job.id) !== owner) {
           throw new Error("Job was unregistered during preparation");
         }
-        const run = await jobStore.createRun({ jobId: job.id, pluginId: job.pluginId, trigger, companyId: company });
+        let run: Awaited<ReturnType<typeof jobStore.createRun>>;
+        try {
+          run = await jobStore.createRun({ jobId: job.id, pluginId: job.pluginId, trigger, companyId: company });
+        } catch (insertError) {
+          if (typeof insertError === "object" && insertError !== null) runRecordFailures.add(insertError);
+          throw insertError;
+        }
         runs.push({ id: run.id, companyId: company });
       }
       if (unregisteredPlugins.has(job.pluginId) || jobOwners.get(job.id) !== owner) {
@@ -512,9 +521,16 @@ export function createPluginJobScheduler(
     }
   }
 
-  async function waitForTimedOutHandler(error: unknown, graceMs: number): Promise<boolean> {
+  async function waitForTimedOutHandler(
+    error: unknown,
+    run: ScopedPluginJobRun,
+    graceMs: number,
+  ): Promise<string | null | undefined> {
     const workerSettled = getTimedOutWorkerSettled(error);
-    return workerSettled ? settlesWithin(workerSettled, graceMs) : true;
+    if (!workerSettled) return undefined;
+    if (await settlesWithin(workerSettled, graceMs)) return null;
+    return `Not started: the timed-out run ${run.id}` + (run.companyId ? ` for company "${run.companyId}"` : "") +
+      ` was still running in the worker ${graceMs}ms after its timeout`;
   }
 
   async function runPreparedBatch(
@@ -544,7 +560,7 @@ export function createPluginJobScheduler(
       isTimeout: (error) => typeof error === "object" && error !== null && "code" in error
         && error.code === PLUGIN_RPC_ERROR_CODES.TIMEOUT,
       // A timed-out worker handler may still be running: the next company starts only once it has settled.
-      awaitTimedOutHandler: (error) => waitForTimedOutHandler(error, timedOutRunGraceMs),
+      awaitTimedOutHandler: (error, run) => waitForTimedOutHandler(error, run, timedOutRunGraceMs),
     });
   }
 
@@ -580,7 +596,7 @@ export function createPluginJobScheduler(
       if (jobOwners.get(jobId) === owner) {
         try {
           // A setup failure has no tenant execution: retain an instance-level diagnostic only.
-          if (runs.length === 0) {
+          if (runs.length === 0 && !(typeof err === "object" && err !== null && runRecordFailures.has(err))) {
             const diagnostic = await jobStore.createRun({ jobId, pluginId, trigger: "schedule" });
             runs = [{ id: diagnostic.id, companyId: null }];
           }
