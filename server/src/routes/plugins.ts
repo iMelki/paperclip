@@ -2742,7 +2742,9 @@ export function pluginRoutes(
    * status is left untouched (no status write, no audit entry). Resuming
    * arms the job's `nextRunAt` from its schedule in the same write as the
    * status flip (null or past values are recomputed; a missed run is not
-   * replayed); an already-active job with a null `nextRunAt` is armed again.
+   * replayed). A no-change `active` request only repairs an active job stuck
+   * with a null `nextRunAt` (conditional write, reported as `changed: true`
+   * with its own audit entry); it never resumes a paused job.
    * Pausing leaves `nextRunAt` as it is: the scheduler only fires active jobs.
    *
    * Body: `{ status: "active" | "paused" }` (unknown fields are rejected).
@@ -2788,28 +2790,34 @@ export function pluginRoutes(
       return;
     }
 
-    async function activateOrReject(id: string): Promise<void> {
-      try {
-        await jobDeps!.scheduler.activateJob(id);
-      } catch (err) {
-        if (err instanceof PluginJobScheduleError) throw unprocessable(err.message);
-        throw err;
-      }
-    }
-
     const previousStatus = job.status;
     if (previousStatus === requestedStatus) {
+      // Narrow repair only: an active job stuck with a null nextRunAt (for
+      // example after a failed earlier resume). The store re-checks "still
+      // active and null" inside the write, so this can never resume a job a
+      // concurrent request just paused.
+      let repaired = false;
       if (requestedStatus === "active") {
-        // Idempotent repair: an active job left with a null nextRunAt (for
-        // example by a failed earlier resume) is armed again.
-        await activateOrReject(job.id);
+        try {
+          repaired = await jobDeps.scheduler.repairActiveJob(job.id);
+        } catch (err) {
+          if (err instanceof PluginJobScheduleError) throw unprocessable(err.message);
+          throw err;
+        }
+      }
+      if (repaired) {
+        await logPluginMutationActivity(req, "plugin.job_schedule_repaired", job.id, {
+          pluginId: plugin.id,
+          jobId: job.id,
+          jobKey: job.jobKey,
+        }, undefined, "plugin_job");
       }
       res.json({
         jobId: job.id,
         jobKey: job.jobKey,
         status: previousStatus,
         previousStatus,
-        changed: false,
+        changed: repaired,
       });
       return;
     }
@@ -2818,7 +2826,12 @@ export function pluginRoutes(
       // Computes nextRunAt first and writes status + nextRunAt together, so a
       // scheduler tick never sees an active job with a stale pointer. A
       // failure leaves the job paused.
-      await activateOrReject(job.id);
+      try {
+        await jobDeps.scheduler.activateJob(job.id);
+      } catch (err) {
+        if (err instanceof PluginJobScheduleError) throw unprocessable(err.message);
+        throw err;
+      }
     } else {
       await jobDeps.jobStore.updateJobStatus(job.id, requestedStatus);
     }

@@ -304,13 +304,23 @@ export function pluginJobStore(db: Db) {
     },
 
     /**
-     * Set only `nextRunAt` (leaves `lastRunAt` and `status` untouched).
+     * Arm a stuck job: set `nextRunAt` only if the row is still `active` with
+     * a null `nextRunAt` (one conditional UPDATE). Never touches the status or
+     * `lastRunAt`.
+     *
+     * @returns `true` if the row was updated
      */
-    async updateNextRunAt(jobId: string, nextRunAt: Date | null): Promise<void> {
-      await db
+    async armStuckActiveJob(jobId: string, nextRunAt: Date): Promise<boolean> {
+      const rows = await db
         .update(pluginJobs)
         .set({ nextRunAt, updatedAt: new Date() })
-        .where(eq(pluginJobs.id, jobId));
+        .where(and(
+          eq(pluginJobs.id, jobId),
+          eq(pluginJobs.status, "active"),
+          isNull(pluginJobs.nextRunAt),
+        ))
+        .returning({ id: pluginJobs.id });
+      return rows.length > 0;
     },
 
     /**

@@ -53,6 +53,8 @@ function makeWorld(initial: Partial<Row>) {
     ...initial,
   };
   let failNextArmingWrite = false;
+  // One-shot hooks that inject a concurrent change at an exact point.
+  const hooks: { afterRouteRead?: () => void; afterSchedulerRead?: () => void } = {};
   let scheduler: ReturnType<typeof createPluginJobScheduler>;
   const createRun = vi.fn(async () => ({ id: "run-1", companyId: null }));
   const maybeFail = () => {
@@ -68,8 +70,27 @@ function makeWorld(initial: Partial<Row>) {
   };
 
   const jobStore = {
-    getJobById: vi.fn(async () => ({ ...row })),
-    getJobByIdForPlugin: vi.fn(async () => ({ ...row })),
+    getJobById: vi.fn(async () => {
+      const snapshot = { ...row };
+      const hook = hooks.afterSchedulerRead;
+      hooks.afterSchedulerRead = undefined;
+      hook?.();
+      return snapshot;
+    }),
+    getJobByIdForPlugin: vi.fn(async () => {
+      const snapshot = { ...row };
+      const hook = hooks.afterRouteRead;
+      hooks.afterRouteRead = undefined;
+      hook?.();
+      return snapshot;
+    }),
+    // Conditional update: only while still active with a null pointer.
+    armStuckActiveJob: vi.fn(async (_id: string, next: Date) => {
+      maybeFail();
+      if (row.status !== "active" || row.nextRunAt !== null) return false;
+      row.nextRunAt = next;
+      return true;
+    }),
     getJobDeclarationScope: vi.fn(async () => "instance"),
     createRun,
     markRunning: vi.fn(async () => undefined),
@@ -114,6 +135,7 @@ function makeWorld(initial: Partial<Row>) {
 
   return {
     row,
+    hooks,
     scheduler,
     jobStore,
     createRun,
@@ -205,16 +227,77 @@ describe.sequential("resume arms the schedule safely", { timeout: 30_000 }, () =
     expect(world.row.nextRunAt!.getTime()).toBeGreaterThan(Date.now());
   });
 
-  it("repairs an already-active job with a null nextRunAt on a no-change request", async () => {
+  it("repairs an already-active job with a null nextRunAt, reporting changed:true with an audit entry", async () => {
     const world = makeWorld({ status: "active", nextRunAt: null });
     const app = await createApp(world);
 
     const res = await request(app).patch(url).send({ status: "active" });
 
     expect(res.status).toBe(200);
-    expect(res.body).toMatchObject({ status: "active", previousStatus: "active", changed: false });
+    expect(res.body).toMatchObject({ status: "active", previousStatus: "active", changed: true });
+    expect(world.row.status).toBe("active");
     expect(world.row.nextRunAt!.getTime()).toBeGreaterThan(Date.now());
+    expect(world.row.lastRunAt).toBeNull();
+    expect(mockLogActivity).toHaveBeenCalledTimes(1);
+    expect(mockLogActivity.mock.calls[0]?.[1]).toMatchObject({
+      action: "plugin.job_schedule_repaired",
+      entityType: "plugin_job",
+      entityId: JOB_ID,
+    });
+  });
+
+  it("does nothing for an already-active job that has a pointer (no write, no audit)", async () => {
+    const future = new Date(Date.now() + 60_000);
+    const world = makeWorld({ status: "active", nextRunAt: future });
+    const app = await createApp(world);
+
+    const res = await request(app).patch(url).send({ status: "active" });
+
+    expect(res.body).toMatchObject({ changed: false });
+    expect(world.row.nextRunAt).toEqual(future);
     expect(mockLogActivity).not.toHaveBeenCalled();
+  });
+
+  it("never resumes a job that a concurrent request paused after the route read it", async () => {
+    const world = makeWorld({ status: "active", nextRunAt: null });
+    const app = await createApp(world);
+    world.hooks.afterRouteRead = () => {
+      world.row.status = "paused";
+    };
+
+    const res = await request(app).patch(url).send({ status: "active" });
+
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ previousStatus: "active", changed: false });
+    expect(world.row.status).toBe("paused");
+    expect(world.row.nextRunAt).toBeNull();
+    expect(mockLogActivity).not.toHaveBeenCalled();
+  });
+
+  it("does not arm a job that a concurrent request paused between the scheduler read and the repair write", async () => {
+    const world = makeWorld({ status: "active", nextRunAt: null });
+    const app = await createApp(world);
+    world.hooks.afterSchedulerRead = () => {
+      world.row.status = "paused";
+    };
+
+    const res = await request(app).patch(url).send({ status: "active" });
+
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ changed: false });
+    expect(world.row.status).toBe("paused");
+    expect(world.row.nextRunAt).toBeNull();
+    expect(mockLogActivity).not.toHaveBeenCalled();
+  });
+
+  it("validates the schedule on resume even when a future pointer is retained", async () => {
+    const world = makeWorld({ schedule: "0 0 31 2 *", nextRunAt: new Date(Date.now() + 60_000) });
+    const app = await createApp(world);
+
+    const res = await request(app).patch(url).send({ status: "active" });
+
+    expect(res.status).toBe(422);
+    expect(world.row.status).toBe("paused");
   });
 
   it("refuses to resume a job whose schedule never produces a run and leaves it paused", async () => {

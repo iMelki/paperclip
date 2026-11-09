@@ -51,7 +51,7 @@ function makeJobDeps(job: Record<string, unknown> | null) {
     getJobByIdForPlugin: vi.fn().mockResolvedValue(job),
     updateJobStatus: vi.fn().mockResolvedValue(undefined),
   };
-  const scheduler = { activateJob: vi.fn().mockResolvedValue(undefined) };
+  const scheduler = { activateJob: vi.fn().mockResolvedValue(undefined), repairActiveJob: vi.fn().mockResolvedValue(false) };
   return { jobStore, scheduler, jobDeps: { scheduler, jobStore } };
 }
 
@@ -162,7 +162,7 @@ describe.sequential("PATCH /plugins/:pluginId/jobs/:jobId", { timeout: 30_000 },
     expect(mockLogActivity).not.toHaveBeenCalled();
   });
 
-  it("re-arms an already-active job (idempotent repair) without a status write or audit entry", async () => {
+  it("a no-change active request only repairs: no resume, changed:false and no audit when nothing was repaired", async () => {
     const { jobStore, scheduler, jobDeps } = makeJobDeps({ ...pausedJob, status: "active" });
     const app = await createApp(adminActor(), jobDeps);
 
@@ -170,9 +170,33 @@ describe.sequential("PATCH /plugins/:pluginId/jobs/:jobId", { timeout: 30_000 },
 
     expect(res.status).toBe(200);
     expect(res.body).toMatchObject({ status: "active", previousStatus: "active", changed: false });
-    expect(scheduler.activateJob).toHaveBeenCalledWith("job-1");
+    expect(scheduler.repairActiveJob).toHaveBeenCalledWith("job-1");
+    expect(scheduler.activateJob).not.toHaveBeenCalled();
     expect(jobStore.updateJobStatus).not.toHaveBeenCalled();
     expect(mockLogActivity).not.toHaveBeenCalled();
+  });
+
+  it("reports changed:true with an audit entry when the repair wrote", async () => {
+    const { scheduler, jobDeps } = makeJobDeps({ ...pausedJob, status: "active" });
+    scheduler.repairActiveJob.mockResolvedValueOnce(true);
+    const app = await createApp(adminActor(), jobDeps);
+
+    const res = await request(app).patch(url).send({ status: "active" });
+
+    expect(res.body).toMatchObject({ status: "active", previousStatus: "active", changed: true });
+    expect(scheduler.activateJob).not.toHaveBeenCalled();
+    expect(mockLogActivity).toHaveBeenCalledTimes(1);
+    expect(mockLogActivity.mock.calls[0]?.[1]).toMatchObject({ action: "plugin.job_schedule_repaired" });
+  });
+
+  it("a no-change paused request never touches the scheduler", async () => {
+    const { scheduler, jobDeps } = makeJobDeps(pausedJob);
+    const app = await createApp(adminActor(), jobDeps);
+
+    await request(app).patch(url).send({ status: "paused" });
+
+    expect(scheduler.repairActiveJob).not.toHaveBeenCalled();
+    expect(scheduler.activateJob).not.toHaveBeenCalled();
   });
 
   it("returns 422 and writes no audit entry when the schedule cannot be armed", async () => {
