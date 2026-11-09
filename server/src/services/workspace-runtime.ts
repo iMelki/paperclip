@@ -6661,10 +6661,16 @@ async function spawnLocalRuntimeService(input: StartLocalRuntimeServiceInput): P
     record.lastUsedAt = new Date().toISOString();
     record.stoppedAt = new Date().toISOString();
     await removeLocalServiceRegistryRecord(record.serviceKey).catch(() => undefined);
-    if (exposureConfig) {
+    // Use record.db, not input.db. A deferred start passes its start
+    // transaction as input.db, and this handler runs after that transaction
+    // has committed. postgres.js does not reject a query on a finished
+    // transaction handle. It sends the query on the released pool connection,
+    // which may be inside another caller's transaction, and the await can
+    // stay pending forever, which hung the whole start until the caller timed
+    // out. registerRuntimeService sets record.db to the pool handle before the
+    // transaction commits.
+    if (exposureConfig || child.pid) {
       await persistRuntimeServiceRecord(record.db, record).catch(() => undefined);
-    } else if (child.pid) {
-      await persistRuntimeServiceRecord(input.db, record).catch(() => undefined);
     }
     if (bindCollision && port) {
       throw new RuntimeServicePortBindCollision(

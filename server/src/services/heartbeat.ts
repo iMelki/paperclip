@@ -19449,7 +19449,39 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       .from(heartbeatRuns)
       .where(and(eq(heartbeatRuns.agentId, agentId), inArray(heartbeatRuns.status, [...CANCELLABLE_HEARTBEAT_RUN_STATUSES])));
 
+    let cancelledCount = 0;
     for (const run of runs) {
+      const running = runningProcesses.get(run.id);
+      const runningChildIsLive = running
+        ? (running.child.exitCode == null && running.child.signalCode == null)
+        : false;
+      const termination = running
+        ? await terminateHeartbeatRunProcess({
+            pid: running.child.pid ?? run.processPid,
+            processGroupId: running.processGroupId ?? run.processGroupId,
+            expectedStartedAt: run.processStartedAt,
+            graceMs: Math.max(1, running.graceSec) * 1000,
+            ...(runningChildIsLive ? { trustedPid: true, trustedProcessGroup: true } : {}),
+          })
+        : run.processPid || run.processGroupId
+          ? await terminateHeartbeatRunProcess({
+              pid: run.processPid,
+              processGroupId: run.processGroupId,
+              expectedStartedAt: run.processStartedAt,
+            })
+          : null;
+      if (termination?.confirmedStopped === false) {
+        await retainRunForUnverifiedTermination({
+          run,
+          result: termination,
+          operation: "agent_pause",
+        });
+        continue;
+      }
+      if (running) {
+        runningProcesses.delete(run.id);
+      }
+
       await setRunStatus(run.id, "cancelled", {
         finishedAt: new Date(),
         error: reason,
@@ -19467,31 +19499,11 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         finishedAt: new Date(),
         error: reason,
       });
-
-      const running = runningProcesses.get(run.id);
-      const runningChildIsLive = running
-        ? (running.child.exitCode == null && running.child.signalCode == null)
-        : false;
-      if (running) {
-        await terminateHeartbeatRunProcess({
-          pid: running.child.pid ?? run.processPid,
-          processGroupId: running.processGroupId ?? run.processGroupId,
-          expectedStartedAt: run.processStartedAt,
-          graceMs: Math.max(1, running.graceSec) * 1000,
-          ...(runningChildIsLive ? { trustedPid: true, trustedProcessGroup: true } : {}),
-        });
-        runningProcesses.delete(run.id);
-      } else if (run.processPid || run.processGroupId) {
-        await terminateHeartbeatRunProcess({
-          pid: run.processPid,
-          processGroupId: run.processGroupId,
-          expectedStartedAt: run.processStartedAt,
-        });
-      }
       await releaseIssueExecutionAndPromote(run);
+      cancelledCount += 1;
     }
 
-    return runs.length;
+    return cancelledCount;
   }
 
   async function cancelPendingWakeupsForAgentsInternal(agentIds: string[], reason: string) {

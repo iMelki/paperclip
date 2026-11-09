@@ -853,8 +853,9 @@ This file is the durable local index for active `paperclip` issues.
     [the dated integration checkpoint](doc/plans/2026-09-18-factory-host-integration-qualification.md).
     Source integration is not live rollout approval. Task-index repair is
     separately reviewed in PR #132; preserve that repair when integrating.
-  - The active Windows Factory remains usable on the legacy `0.8.12` plugin. Do
-    not install the secured current-main plugin until an isolated data-copy
+  - The legacy `0.8.12` plugin is the Windows Factory's retained rollback
+    baseline (current host health is in the dated entry below). Do not
+    install the secured current-main plugin until an isolated data-copy
     qualification proves the matching host, private Node runtime, backup/restore,
     and import-only single-repository smoke path.
   - As of 2026-09-28, the Windows Factory on port 5113 is unavailable, and the
