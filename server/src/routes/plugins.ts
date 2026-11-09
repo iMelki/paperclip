@@ -55,7 +55,7 @@ import {
 import { logActivity } from "../services/activity-log.js";
 import { publishGlobalLiveEvent } from "../services/live-events.js";
 import { issueService } from "../services/issues.js";
-import type { PluginJobScheduler } from "../services/plugin-job-scheduler.js";
+import { PluginJobScheduleError, type PluginJobScheduler } from "../services/plugin-job-scheduler.js";
 import type { PluginJobStore } from "../services/plugin-job-store.js";
 import type { PluginWorkerManager } from "../services/plugin-worker-manager.js";
 import type { PluginStreamBus } from "../services/plugin-stream-bus.js";
@@ -501,6 +501,7 @@ interface PluginToolExecuteRequest {
  * | GET | /plugins/:pluginId/jobs | List jobs for a plugin |
  * | GET | /plugins/:pluginId/jobs/:jobId/runs | List runs for a job |
  * | POST | /plugins/:pluginId/jobs/:jobId/trigger | Manually trigger a job |
+ * | PATCH | /plugins/:pluginId/jobs/:jobId | Pause or resume a job (instance admin) |
  * | POST | /plugins/:pluginId/webhooks/:endpointKey | Receive inbound webhook |
  * | GET | /plugins/:pluginId/companies/:companyId/trusted-loopback-http | Read exact local HTTP rules |
  * | PUT | /plugins/:pluginId/companies/:companyId/trusted-loopback-http | Replace exact local HTTP rules |
@@ -709,6 +710,7 @@ export function pluginRoutes(
     entityId: string,
     details: Record<string, unknown>,
     scopeCompanyId?: string,
+    entityType = "plugin",
   ): Promise<void> {
     const companyIds = scopeCompanyId
       ? [scopeCompanyId]
@@ -725,7 +727,7 @@ export function pluginRoutes(
         runId: actor.runId,
         agentApiKeyId: actor.agentApiKeyId,
         action,
-        entityType: "plugin",
+        entityType,
         entityId,
         details,
       })));
@@ -2728,6 +2730,125 @@ export function pluginRoutes(
       const message = err instanceof Error ? err.message : String(err);
       res.status(400).json({ error: message });
     }
+  });
+
+  /**
+   * PATCH /api/plugins/:pluginId/jobs/:jobId
+   *
+   * Instance-admin only. Set a job's status to `active` or `paused`.
+   *
+   * Plugin reload deliberately does not resume a paused job, so this is the
+   * only way to resume one. A job whose status already equals the requested
+   * status is left untouched (no status write, no audit entry). Resuming
+   * arms the job's `nextRunAt` from its schedule in the same write as the
+   * status flip (null or past values are recomputed; a missed run is not
+   * replayed). A no-change `active` request only repairs an active job stuck
+   * with a null `nextRunAt` (conditional write, reported as `changed: true`
+   * with its own audit entry); it never resumes a paused job.
+   * Pausing leaves `nextRunAt` as it is: the scheduler only fires active jobs.
+   *
+   * Body: `{ status: "active" | "paused" }` (unknown fields are rejected).
+   *
+   * Response: `{ jobId, jobKey, status, previousStatus, changed }`
+   * Errors:
+   * - 400 if the body is invalid
+   * - 403 if the caller is not an instance admin
+   * - 404 if the plugin or job is not found
+   * - 422 if resuming a job whose schedule cannot produce a next run
+   * - 501 if job scheduling is not enabled
+   */
+  router.patch("/plugins/:pluginId/jobs/:jobId", async (req, res) => {
+    assertInstanceAdmin(req);
+    if (!jobDeps) {
+      res.status(501).json({ error: "Job scheduling is not enabled" });
+      return;
+    }
+
+    const body: unknown = req.body;
+    if (typeof body !== "object" || body === null || Array.isArray(body)) {
+      throw badRequest("Request body must be a JSON object");
+    }
+    const unknownKeys = Object.keys(body).filter((key) => key !== "status");
+    if (unknownKeys.length > 0) {
+      throw badRequest(`Unknown field(s): ${unknownKeys.join(", ")}`);
+    }
+    const requestedStatus = (body as { status?: unknown }).status;
+    if (requestedStatus !== "active" && requestedStatus !== "paused") {
+      throw badRequest('"status" must be "active" or "paused"');
+    }
+
+    const { pluginId, jobId } = req.params;
+    const plugin = await resolvePlugin(registry, pluginId);
+    if (!plugin) {
+      res.status(404).json({ error: "Plugin not found" });
+      return;
+    }
+
+    const job = await jobDeps.jobStore.getJobByIdForPlugin(plugin.id, jobId);
+    if (!job) {
+      res.status(404).json({ error: "Job not found" });
+      return;
+    }
+
+    const previousStatus = job.status;
+    if (previousStatus === requestedStatus) {
+      // Narrow repair only: an active job stuck with a null nextRunAt (for
+      // example after a failed earlier resume). The store re-checks "still
+      // active and null" inside the write, so this can never resume a job a
+      // concurrent request just paused.
+      let repaired = false;
+      if (requestedStatus === "active") {
+        try {
+          repaired = await jobDeps.scheduler.repairActiveJob(job.id);
+        } catch (err) {
+          if (err instanceof PluginJobScheduleError) throw unprocessable(err.message);
+          throw err;
+        }
+      }
+      if (repaired) {
+        await logPluginMutationActivity(req, "plugin.job_schedule_repaired", job.id, {
+          pluginId: plugin.id,
+          jobId: job.id,
+          jobKey: job.jobKey,
+        }, undefined, "plugin_job");
+      }
+      res.json({
+        jobId: job.id,
+        jobKey: job.jobKey,
+        status: previousStatus,
+        previousStatus,
+        changed: repaired,
+      });
+      return;
+    }
+
+    if (requestedStatus === "active") {
+      // Computes nextRunAt first and writes status + nextRunAt together, so a
+      // scheduler tick never sees an active job with a stale pointer. A
+      // failure leaves the job paused.
+      try {
+        await jobDeps.scheduler.activateJob(job.id);
+      } catch (err) {
+        if (err instanceof PluginJobScheduleError) throw unprocessable(err.message);
+        throw err;
+      }
+    } else {
+      await jobDeps.jobStore.updateJobStatus(job.id, requestedStatus);
+    }
+    await logPluginMutationActivity(req, "plugin.job_status_changed", job.id, {
+      pluginId: plugin.id,
+      jobId: job.id,
+      jobKey: job.jobKey,
+      from: previousStatus,
+      to: requestedStatus,
+    }, undefined, "plugin_job");
+    res.json({
+      jobId: job.id,
+      jobKey: job.jobKey,
+      status: requestedStatus,
+      previousStatus,
+      changed: true,
+    });
   });
 
   // ===========================================================================
