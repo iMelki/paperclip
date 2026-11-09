@@ -261,6 +261,20 @@ describe("redactSensitive", () => {
     for (const key of keys) expect(out[key], key).toBe("[REDACTED]");
   });
 
+  it("redacts compound one-time-code keys built on otp", () => {
+    const keys = [
+      "otp", "OTP", "otpCode", "otp_code", "otp-code", "OtpToken", "smsOtp", "emailOTP", "user_otp",
+      "otp.value", "one_time_code", "oneTimeCode", "smsOneTimeCode",
+    ];
+    const out = redactSensitive(Object.fromEntries(keys.map((k) => [k, "v"]))) as Record<string, unknown>;
+    for (const key of keys) expect(out[key], key).toBe("[REDACTED]");
+  });
+
+  it("keeps keys that only contain otp inside another word", () => {
+    const input = { hotpath: "h", footprint: "f", hotPlate: "p", notpaid: "n", spotPrice: 4 };
+    expect(redactSensitive(input)).toEqual(input);
+  });
+
   it("keeps keys that only contain the short words inside another word", () => {
     const input = {
       side: "l", insider: "i", sidebar: "s", considerations: "c", totpal: "t", bearerish: "b", outside: "o",

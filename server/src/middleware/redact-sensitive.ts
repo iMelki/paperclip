@@ -120,6 +120,7 @@ const SENSITIVE_COMPACT_SUBSTRINGS = [
   "passcode",
   "passphrase",
   "onetimepass",
+  "onetimecode",
   "verificationcode",
   "securitycode",
   "authorizationcode",
@@ -146,8 +147,10 @@ const SENSITIVE_BOUNDED_TOKEN_RE = /(?:^|[_\-\s.])id[_\-\s.]?token/;
 // insider, considerations or totpal; segment matching does not. By the same
 // contract any key whose own segment is one of these words is redacted, so
 // bearerToken and bearerTrend are both redacted while bearerish is not.
+// `otp` is listed here too so compound one-time-code keys (otpCode, otp_code,
+// smsOtp, emailOTP, user-otp) are redacted, not only the exact `otp` key.
 const SENSITIVE_WORD_TOKEN_RE =
-  /(?:^|[_\-\s.])(?:bearer|mfa[_\-\s.]?code|totp|two[_\-\s.]?factor[_\-\s.]?code|oauth[_\-\s.]?code|credentials?|session[_\-\s.]?id|sid)(?:$|[_\-\s.])/;
+  /(?:^|[_\-\s.])(?:bearer|otp|mfa[_\-\s.]?code|totp|two[_\-\s.]?factor[_\-\s.]?code|oauth[_\-\s.]?code|credentials?|session[_\-\s.]?id|sid)(?:$|[_\-\s.])/;
 
 function isSensitiveKey(key: string): boolean {
   const normalized = normalizePayloadKey(key);
