@@ -29,6 +29,14 @@ export function selectNativeBoardJobTargets(rows: readonly GrantRow[], pluginId:
   return [...selected.values()].sort((a, b) => a.companyId.localeCompare(b.companyId) || a.projectId.localeCompare(b.projectId));
 }
 
+export interface NativeBoardExcludedCompany { companyId: string; reason: string }
+const STATIC_EXCLUSION_REASON = "Native board grant metadata for this company is invalid or exceeds its bounded limits";
+
+/**
+ * Reads the current native board targets. With `companyId` the result is that company's only (and a bad row
+ * for it throws, so its own run is refused). Without it every company with grant rows is read separately:
+ * a company whose rows are invalid or over a cap is excluded with a static reason and never stops the others.
+ */
 export async function readNativeBoardJobTargets(db: Db, pluginId: string, jobId?: string, companyId?: string) {
   if (!z.string().uuid().safeParse(pluginId).success || jobId !== undefined && !z.string().uuid().safeParse(jobId).success
     || companyId !== undefined && !z.string().uuid().safeParse(companyId).success) throw forbidden("Exact native board scope required");
@@ -42,11 +50,23 @@ export async function readNativeBoardJobTargets(db: Db, pluginId: string, jobId?
       || !job || job.status !== "active" || jobId !== undefined && job.id !== jobId) {
       throw forbidden("Ready native GitHub plugin and exact active board job required");
     }
-    const conditions = [eq(pluginState.pluginId, pluginId), eq(pluginState.scopeKind, "company"),
-      eq(pluginState.namespace, GITHUB_PROJECT_BINDING_NAMESPACE), like(pluginState.stateKey, "schedule-grant:%")];
-    if (companyId !== undefined) conditions.push(eq(pluginState.scopeId, companyId));
-    const rows = await tx.select({ scopeId: pluginState.scopeId, stateKey: pluginState.stateKey, valueJson: pluginState.valueJson })
-      .from(pluginState).where(and(...conditions)).limit(NATIVE_BOARD_MAX_GRANT_ROWS + 1);
-    return { job, targets: selectNativeBoardJobTargets(rows, pluginId, job.id, companyId) };
+    const grantRows = (scopeId: string) => tx.select({ scopeId: pluginState.scopeId, stateKey: pluginState.stateKey, valueJson: pluginState.valueJson })
+      .from(pluginState).where(and(eq(pluginState.pluginId, pluginId), eq(pluginState.scopeKind, "company"),
+        eq(pluginState.namespace, GITHUB_PROJECT_BINDING_NAMESPACE), like(pluginState.stateKey, "schedule-grant:%"),
+        eq(pluginState.scopeId, scopeId))).limit(NATIVE_BOARD_MAX_GRANT_ROWS + 1);
+    if (companyId !== undefined) {
+      return { job, targets: selectNativeBoardJobTargets(await grantRows(companyId), pluginId, job.id, companyId),
+        excluded: [] as NativeBoardExcludedCompany[] };
+    }
+    const companies = await tx.selectDistinct({ scopeId: pluginState.scopeId }).from(pluginState).where(and(
+      eq(pluginState.pluginId, pluginId), eq(pluginState.scopeKind, "company"),
+      eq(pluginState.namespace, GITHUB_PROJECT_BINDING_NAMESPACE), like(pluginState.stateKey, "schedule-grant:%")));
+    const targets: NativeBoardJobTarget[] = [], excluded: NativeBoardExcludedCompany[] = [];
+    for (const { scopeId } of companies) {
+      if (!scopeId) continue;
+      try { targets.push(...selectNativeBoardJobTargets(await grantRows(scopeId), pluginId, job.id, scopeId)); }
+      catch { excluded.push({ companyId: scopeId, reason: STATIC_EXCLUSION_REASON }); }
+    }
+    return { job, targets, excluded };
   });
 }

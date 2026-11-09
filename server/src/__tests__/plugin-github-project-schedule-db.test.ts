@@ -72,13 +72,19 @@ async function seed() {
       authorizationDigest: githubProjectAuthorizationDigest(connection, { secretId: secret.id, latestVersion: secret.latestVersion }) };
   });
   await boards.bind(context, { companyId, projectId, connectionId, boardUrl });
-  return { companyId, projectId, userId, context, scope: { companyId, projectId }, boards,
+  return { companyId, projectId, connectionId, userId, context, scope: { companyId, projectId }, boards,
     grants: pluginGitHubProjectScheduleGrants(db, identity, boards) };
 }
 type Setup = Awaited<ReturnType<typeof seed>>;
 const inHours = (hours: number) => new Date(Date.now() + hours * HOUR).toISOString();
 const createGrant = (setup: Setup, overrides: Record<string, unknown> = {}) => setup.grants.create(setup.context,
   { ...setup.scope, expectedRevision: 0, jobId, enabled: true, maxItems: 5, expiresAt: inHours(1), ...overrides });
+async function addBoundProject(setup: Setup) {
+  const projectId = randomUUID();
+  await db.insert(projects).values({ id: projectId, companyId: setup.companyId, name: "Synthetic second destination", status: "planned" });
+  await setup.boards.bind(setup.context, { companyId: setup.companyId, projectId, connectionId: setup.connectionId, boardUrl });
+  return { companyId: setup.companyId, projectId };
+}
 async function runRow(companyId: string) {
   const [row] = await db.insert(pluginJobRuns).values({ jobId, pluginId, companyId, trigger: "schedule", status: "running",
     startedAt: new Date() }).returning({ id: pluginJobRuns.id });
@@ -250,6 +256,73 @@ describe.skipIf(WINDOWS_NATIVE_FIXTURE_MISSING)("native board schedule grants, t
       await expect(service.run(targetFor(setup, await runRow(setup.companyId)), custody())).rejects.toThrow(/Current enabled board schedule grant required/);
       expect(reader).not.toHaveBeenCalled();
       expect(await store().get(pluginId, "company", `schedule-lease:${setup.projectId}`, stateOptions(setup.companyId))).toBeNull();
+    });
+  });
+
+  describe("one company's second grant never stops another company", () => {
+    const EXACT_ONE = "Exactly one current native board grant required for this company run";
+    function nativeBridge() {
+      const reader = vi.fn(async (input: { authorizationDigest: string }) => ({ page: boardPage(1),
+        account: { accountId: 42, login: "example" }, authorizationDigest: input.authorizationDigest }));
+      return createGitHubProjectBoardSchedulerBridge(db, reader as never, { enabled: true });
+    }
+    async function bridgeRun(bridge: ReturnType<typeof nativeBridge>, companyId: string) {
+      const runId = await runRow(companyId);
+      const envelope = createPluginJobEnvelope(GITHUB_PROJECT_BOARD_JOB_KEY, runId, "schedule", new Date().toISOString(), companyId);
+      const outcome = await bridge.run({ id: jobId, pluginId, jobKey: GITHUB_PROJECT_BOARD_JOB_KEY }, envelope, 20_000, () => true)
+        .then(value => value, (error: Error) => error.message);
+      return { runId, outcome };
+    }
+
+    it("create refuses a second enabled grant in the same company and job, and allows it once the first is revoked", async () => {
+      const setup = await seed();
+      const second = await addBoundProject(setup);
+      await createGrant(setup);
+      await expect(setup.grants.create(setup.context, { ...second, expectedRevision: 0, jobId, enabled: true, maxItems: 5, expiresAt: inHours(1) }))
+        .rejects.toThrow(/Another current board schedule grant exists/);
+      await expect(setup.grants.read(setup.context, second)).resolves.toMatchObject({ status: "absent" });
+      // A disabled grant cannot be scheduled, so it does not break the rule.
+      await expect(setup.grants.create(setup.context, { ...second, expectedRevision: 0, jobId, enabled: false, maxItems: 5, expiresAt: inHours(1) }))
+        .resolves.toMatchObject({ enabled: false });
+      await setup.grants.revoke(setup.context, { ...setup.scope, expectedRevision: 1 });
+      await expect(setup.grants.create(setup.context, { ...second, expectedRevision: 1, jobId, enabled: true, maxItems: 5, expiresAt: inHours(1) }))
+        .resolves.toMatchObject({ revision: 2, enabled: true });
+    });
+
+    it("two concurrent creates in one company: exactly one enabled grant results", async () => {
+      const setup = await seed();
+      const second = await addBoundProject(setup);
+      const body = { expectedRevision: 0, jobId, enabled: true, maxItems: 5, expiresAt: inHours(1) };
+      const outcomes = await Promise.allSettled([setup.grants.create(setup.context, { ...setup.scope, ...body }),
+        setup.grants.create(setup.context, { ...second, ...body })]);
+      expect(outcomes.filter(item => item.status === "fulfilled")).toHaveLength(1);
+      expect(outcomes.filter(item => item.status === "rejected")).toHaveLength(1);
+    });
+
+    it("a company with two current grants (forced into the database) is excluded alone; the other companies still dispatch and import", async () => {
+      const a = await seed(), b = await seed();
+      const second = await addBoundProject(a);
+      await createGrant(a);
+      await createGrant(b);
+      const first = await retainedGrant(a);
+      await store().set(pluginId, { scopeKind: "company", ...stateOptions(a.companyId), stateKey: `schedule-grant:${second.projectId}`,
+        value: { ...first, projectId: second.projectId, grantId: randomUUID() } });
+      // Another company with an unreadable grant row must not stop anyone either.
+      const brokenCompany = randomUUID();
+      await store().set(pluginId, { scopeKind: "company", ...stateOptions(brokenCompany), stateKey: `schedule-grant:${randomUUID()}`,
+        value: { nonsense: true } });
+
+      const bridge = nativeBridge();
+      const plan = await bridge.resolveDispatch(pluginId, GITHUB_PROJECT_BOARD_JOB_KEY);
+      expect(plan.companyIds).toContain(b.companyId);
+      expect(plan.companyIds).not.toContain(a.companyId);
+      expect(plan.companyIds).not.toContain(brokenCompany);
+
+      const ran = await bridgeRun(bridge, b.companyId);
+      expect(ran.outcome).toMatchObject({ status: "verified", batchVerified: true, created: 1 });
+      const refused = await bridgeRun(bridge, a.companyId);
+      expect(refused.outcome).toMatch(/refused or held/);
+      expect(await logs(refused.runId)).toEqual([{ schema: "native-github-board-scheduled-failure.v1", status: "refused", httpStatus: 403, reason: EXACT_ONE }]);
     });
   });
 

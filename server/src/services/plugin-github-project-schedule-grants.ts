@@ -1,8 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
-import { and, eq, sql } from "drizzle-orm";
+import { and, eq, like, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { activityLog, companyMemberships, pluginJobs } from "@paperclipai/db";
+import { activityLog, companyMemberships, pluginJobs, pluginState } from "@paperclipai/db";
 import { conflict, forbidden } from "../errors.js";
 import { pluginStateStore } from "./plugin-state-store.js";
 import { GITHUB_PROJECT_BINDING_NAMESPACE, pluginGitHubProjectBoardService,
@@ -71,6 +71,22 @@ export function pluginGitHubProjectScheduleGrants(
       .for("share").limit(1);
     return Boolean(member && member.role !== "viewer");
   }
+  /** A second current grant in the same company would stop that company's scheduled imports, so it cannot be created. */
+  async function assertNoOtherCurrentGrant(executor: Db, scope: Scope, jobId: string, now: number) {
+    const rows = await executor.select({ stateKey: pluginState.stateKey, valueJson: pluginState.valueJson }).from(pluginState)
+      .where(and(eq(pluginState.pluginId, identity.pluginId), eq(pluginState.scopeKind, "company"),
+        eq(pluginState.namespace, GITHUB_PROJECT_BINDING_NAMESPACE), eq(pluginState.scopeId, scope.companyId),
+        like(pluginState.stateKey, "schedule-grant:%"))).limit(1001);
+    for (const row of rows) {
+      if (row.stateKey === key(scope.projectId)) continue;
+      const parsed = scheduleGrantSchema.safeParse(row.valueJson);
+      if (!parsed.success) throw conflict("A retained board schedule grant in this company is invalid; resolve it first");
+      const other = parsed.data;
+      if (other.jobId === jobId && other.enabled && other.revokedAt === null && Date.parse(other.expiresAt) > now) {
+        throw conflict("Another current board schedule grant exists for this company and job; revoke it before creating a new one");
+      }
+    }
+  }
   function transaction<T>(work: (executor: Db, startedAt: number) => Promise<T>) {
     return db.transaction(async tx => {
       const executor = tx as unknown as Db, startedAt = Date.now();
@@ -98,12 +114,15 @@ export function pluginGitHubProjectScheduleGrants(
       const input = parseScheduleGrantInput(createScheduleGrantSchema, value);
       return transaction(async executor => {
         const scope = { companyId: input.companyId, projectId: input.projectId };
+        // One enabled grant per company and job: serialize creators of the same company before any check.
+        await executor.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`github-project-schedule-grant-company:${identity.pluginId}:${input.companyId}`}, 0))`);
         const snapshot = await boards.verifiedBindingSnapshot(executor, context, scope);
         assertOwner(snapshot);
         await job(executor, input.jobId);
         const previous = await retained(executor, scope);
         assertScheduleGrantRevision(previous, input.expectedRevision);
         const now = Date.now(), expires = Date.parse(input.expiresAt);
+        if (input.enabled) await assertNoOtherCurrentGrant(executor, scope, input.jobId, now);
         if (expires <= now || expires - now > GITHUB_PROJECT_GRANT_MAX_AGE_MS) {
           throw forbidden("Board schedule grant expiry must be future and at most 24 hours away");
         }

@@ -3,6 +3,7 @@ import { and, eq, sql } from "drizzle-orm";
 import { plugins, pluginJobs, pluginJobRuns, type Db } from "@paperclipai/db";
 import type { PluginJobDeclaration } from "@paperclipai/shared";
 import { conflict, forbidden } from "../errors.js";
+import { logger } from "../middleware/logger.js";
 import { GITHUB_PROJECT_IMPORTER_KEY } from "./plugin-github-project-board.js";
 import { GITHUB_PROJECT_BOARD_JOB_KEY } from "./github-project-schedule-grant-contract.js";
 import { createScheduledGitHubProjectBoardService } from "./plugin-github-project-scheduled.js";
@@ -30,11 +31,16 @@ export function createGitHubProjectBoardSchedulerBridge(db: Db, reader: Schedule
   };
   async function resolveDispatch(pluginId: string, jobKey: string): Promise<PluginJobDispatchPlan> {
     assertNative(jobKey); assertEnabled();
-    const { targets } = await readNativeBoardJobTargets(db, pluginId);
-    if (new Set(targets.map(target => target.companyId)).size !== targets.length) {
-      throw forbidden("Native board scheduling permits exactly one board grant per company and job");
-    }
-    return { scope: "company", companyIds: [...new Set(targets.map(target => target.companyId))].sort() };
+    const { targets, excluded } = await readNativeBoardJobTargets(db, pluginId);
+    const perCompany = new Map<string, number>();
+    for (const target of targets) perCompany.set(target.companyId, (perCompany.get(target.companyId) ?? 0) + 1);
+    // A company that breaks the one-grant rule, or whose grant rows are invalid, loses only its own dispatch.
+    const refused = [...excluded.map(item => ({ companyId: item.companyId, reason: item.reason })),
+      ...[...perCompany].filter(([, count]) => count !== 1).map(([companyId]) => ({ companyId,
+        reason: "Native board scheduling permits exactly one board grant per company and job" }))];
+    for (const item of refused) logger.warn({ pluginId, companyId: item.companyId, reason: item.reason }, "native board company excluded from dispatch");
+    const refusedIds = new Set(refused.map(item => item.companyId));
+    return { scope: "company", companyIds: [...perCompany.keys()].filter(id => !refusedIds.has(id)).sort() };
   }
   async function reconcileDeclarations(pluginId: string, pluginKey: string, declarations: PluginJobDeclaration[]) {
     if (pluginKey !== GITHUB_PROJECT_IMPORTER_KEY) return declarations;

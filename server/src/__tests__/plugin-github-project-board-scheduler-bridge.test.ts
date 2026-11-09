@@ -56,7 +56,7 @@ function fixture(options: { enabled?: boolean; savedRows?: unknown[] } = {}) {
 }
 
 beforeEach(() => {
-  mocks.readTargets.mockReset().mockResolvedValue({ job: { id: JOB_ID }, targets: [target] });
+  mocks.readTargets.mockReset().mockResolvedValue({ job: { id: JOB_ID }, targets: [target], excluded: [] });
   mocks.coreRun.mockReset().mockResolvedValue({ status: "verified", batchVerified: true, complete: true, created: 1, reused: 0,
     preservedExisting: 0, progress: { snapshotDigest: "d", verifiedForSnapshot: 1 } });
 });
@@ -67,10 +67,10 @@ describe("scheduler bridge refusals that reach the run log", () => {
       () => mocks.readTargets.mockRejectedValue(forbidden("Ready native GitHub plugin and exact active board job required")),
       403, "Ready native GitHub plugin and exact active board job required"],
     ["no authorized company (no current grant for this company)",
-      () => mocks.readTargets.mockResolvedValue({ job: { id: JOB_ID }, targets: [] }),
+      () => mocks.readTargets.mockResolvedValue({ job: { id: JOB_ID }, targets: [], excluded: [] }),
       403, "Exactly one current native board grant required for this company run"],
     ["more than one grant for the company",
-      () => mocks.readTargets.mockResolvedValue({ job: { id: JOB_ID }, targets: [target, { ...target, projectId: COMPANY_B }] }),
+      () => mocks.readTargets.mockResolvedValue({ job: { id: JOB_ID }, targets: [target, { ...target, projectId: COMPANY_B }], excluded: [] }),
       403, "Exactly one current native board grant required for this company run"],
     ["a result that is held",
       () => mocks.coreRun.mockResolvedValue({ status: "held", batchVerified: false, reason: "lease-held" }),
@@ -168,13 +168,21 @@ describe("scheduler bridge refusals before any run record is touched", () => {
 
 describe("scheduler bridge dispatch plan", () => {
   it("authorizes exactly the companies that have a current grant, sorted", async () => {
-    mocks.readTargets.mockResolvedValue({ job: { id: JOB_ID }, targets: [{ ...target, companyId: COMPANY_B }, target] });
+    mocks.readTargets.mockResolvedValue({ job: { id: JOB_ID }, targets: [{ ...target, companyId: COMPANY_B }, target], excluded: [] });
     const { bridge } = fixture();
     await expect(bridge.resolveDispatch(PLUGIN, GITHUB_PROJECT_BOARD_JOB_KEY)).resolves.toEqual({ scope: "company", companyIds: [COMPANY, COMPANY_B] });
   });
-  it("refuses more than one grant for a company", async () => {
-    mocks.readTargets.mockResolvedValue({ job: { id: JOB_ID }, targets: [target, { ...target, projectId: COMPANY_B }] });
-    await expect(fixture().bridge.resolveDispatch(PLUGIN, GITHUB_PROJECT_BOARD_JOB_KEY)).rejects.toThrow("exactly one board grant per company");
+  it("excludes only a company with more than one grant; the other companies still dispatch", async () => {
+    mocks.readTargets.mockResolvedValue({ job: { id: JOB_ID }, excluded: [],
+      targets: [target, { ...target, projectId: JOB_ID }, { ...target, companyId: COMPANY_B }] });
+    await expect(fixture().bridge.resolveDispatch(PLUGIN, GITHUB_PROJECT_BOARD_JOB_KEY))
+      .resolves.toEqual({ scope: "company", companyIds: [COMPANY_B] });
+  });
+  it("excludes a company whose grant rows were reported invalid, without stopping the others", async () => {
+    mocks.readTargets.mockResolvedValue({ job: { id: JOB_ID }, targets: [target],
+      excluded: [{ companyId: COMPANY_B, reason: "Native board grant metadata for this company is invalid or exceeds its bounded limits" }] });
+    await expect(fixture().bridge.resolveDispatch(PLUGIN, GITHUB_PROJECT_BOARD_JOB_KEY))
+      .resolves.toEqual({ scope: "company", companyIds: [COMPANY] });
   });
   it("passes the readiness refusal through when no ready plugin or active job exists", async () => {
     mocks.readTargets.mockRejectedValue(forbidden("Ready native GitHub plugin and exact active board job required"));
