@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { githubProjectAuthorizationDigest, githubProjectConsentDigest } from "../services/github-oauth-project-page.js";
+import { boardImportDigest } from "../services/plugin-imported-issues-contract.js";
 import { summarizeNativeBoardFailure } from "../services/github-project-board-failure-reason.js";
 import { HttpError, conflict, forbidden } from "../errors.js";
 
@@ -35,6 +36,19 @@ describe("standing consent for a scheduled GitHub board import", () => {
   it("NEGATIVE PROOF of the incident: the exact authorization digest does change on the same rotation", () => {
     expect(githubProjectAuthorizationDigest(rotated, { secretId: SECRET_B, latestVersion: 1 }))
       .not.toBe(githubProjectAuthorizationDigest(before, { secretId: SECRET_A, latestVersion: 1 }));
+  });
+  it("survives a rotation that also changes the credential secret version", () => {
+    expect(githubProjectConsentDigest(rotated, { secretId: SECRET_B, latestVersion: 7 }))
+      .toBe(githubProjectConsentDigest(before, { secretId: SECRET_A, latestVersion: 1 }));
+  });
+  it("NEGATIVE PROOF of the regression: the pre-fix v1 digest (kept here as a fixture) changes on the same refresh", () => {
+    // Pre-fix function, verbatim from before c61715d1: only the row time was neutralised.
+    const v1 = (value: Connection, credential: { secretId: string; latestVersion: number }) =>
+      boardImportDigest({ kind: "github-project-standing-consent-v1",
+        authorization: githubProjectAuthorizationDigest({ ...value, updatedAt: new Date(0),
+          updatedAtExact: "1970-01-01T00:00:00.000000Z" }, credential) });
+    expect(v1(rotated, { secretId: SECRET_B, latestVersion: 1 })).not.toBe(v1(before, { secretId: SECRET_A, latestVersion: 1 }));
+    expect(v1(rotated, { secretId: SECRET_B, latestVersion: 7 })).not.toBe(v1(before, { secretId: SECRET_A, latestVersion: 1 }));
   });
   it("is not the old v1 digest, so a pre-fix grant fails closed and must be renewed once", () => {
     expect(githubProjectConsentDigest(before, { secretId: SECRET_A, latestVersion: 1 })).toMatch(/^[a-f0-9]{64}$/);
