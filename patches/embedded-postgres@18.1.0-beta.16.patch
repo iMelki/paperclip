@@ -102,12 +102,6 @@ diff --git a/dist/index.js b/dist/index.js
 +                    }
 +                }
 +                const comspec = requireSafePath(path.join(systemRoot, 'System32', 'cmd.exe'), 'COMSPEC path');
-+                const logPrefix = requireSafePath(path.join(path.dirname(this.options.databaseDir), 'paperclip-postgres-start-'), 'log directory prefix');
-+                // Keep startup logs outside PGDATA: recovery fsync can reopen files
-+                // there while Windows still holds pg_ctl's log handle. Retain every
-+                // prior startup log, including any existing PGDATA/server.log.
-+                const logDirectory = requireSafePath(yield fs.mkdtemp(logPrefix), 'log directory');
-+                const logFile = requireSafePath(path.join(logDirectory, 'server.log'), 'log path');
 +                const env = Object.assign({}, globalThis.process.env);
 +                for (const key of Object.keys(env)) {
 +                    if (key.toUpperCase() === 'COMSPEC') delete env[key];
