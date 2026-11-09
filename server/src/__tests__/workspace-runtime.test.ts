@@ -6311,7 +6311,36 @@ describeEmbeddedPostgres("workspace runtime service control persistence", () => 
     await tempDb?.cleanup();
   });
 
+  // Detached helper processes a test spawns outside the runtime supervisor (for
+  // example the bind-race blocker). resetRuntimeServicesForTests cannot reap
+  // them, and a test that times out never reaches its own finally.
+  const detachedHelperPidFiles = new Set<string>();
+
+  async function reapDetachedHelpers() {
+    for (const pidFile of detachedHelperPidFiles) {
+      const pid = Number.parseInt(await fs.readFile(pidFile, "utf8").catch(() => ""), 10);
+      if (!Number.isInteger(pid) || pid <= 0) continue;
+      try {
+        process.kill(pid, "SIGKILL");
+      } catch {
+        continue;
+      }
+      // Wait for the exit, so its listener is gone before the next test picks ports.
+      const deadline = Date.now() + 5_000;
+      while (Date.now() < deadline) {
+        try {
+          process.kill(pid, 0);
+        } catch {
+          break;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+    }
+    detachedHelperPidFiles.clear();
+  }
+
   afterEach(async () => {
+    await reapDetachedHelpers();
     // Terminate the real child processes this block starts and persist their
     // stopped rows before the row deletes below. A left-over child exits later
     // and its detached exit handler then writes a workspace_runtime_services row
@@ -7101,6 +7130,7 @@ describeEmbeddedPostgres("workspace runtime service control persistence", () => 
     const basePort = await findFreePort();
     const markerPath = path.join(workspace.cwd, "bind-race.marker");
     const blockerPidPath = path.join(workspace.cwd, "bind-race.pid");
+    detachedHelperPidFiles.add(blockerPidPath);
     const blockerScript = [
       "const net=require('node:net');",
       "const port=Number(process.argv[1]);",
@@ -7195,6 +7225,89 @@ describeEmbeddedPostgres("workspace runtime service control persistence", () => 
           attemptedPortCount: WORKSPACE_RUNTIME_PORT_ALLOCATION_ATTEMPTS,
         },
       });
+    } finally {
+      restoreEnvKeyIfUnchanged("PATH", previousPath, ownedPath);
+      restoreEnvKeyIfUnchanged("PAPERCLIP_DISABLE_PROC_PORT_OWNER", previousDisableProcOwner, "1");
+      await stopRuntimeServicesForExecutionWorkspace({
+        db,
+        executionWorkspaceId: workspace.id,
+        workspaceCwd: workspace.cwd,
+      }).catch(() => undefined);
+      await fs.rm(fakeBin, { recursive: true, force: true });
+      await cleanupRuntimeHome();
+      await fixture.cleanup();
+    }
+  }, 20_000);
+
+  it("does not write through the committed start transaction when a deferred start fails its bind check", async () => {
+    const fixture = await createRuntimeFixture();
+    const cleanupRuntimeHome = await createRuntimeHome();
+    const workspace = fixture.workspaces[0]!;
+    const basePort = await findFreePort();
+    const fakeBin = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-runtime-stale-tx-"));
+    const fakeLsof = path.join(fakeBin, "lsof");
+    const previousPath = process.env.PATH;
+    const previousDisableProcOwner = process.env.PAPERCLIP_DISABLE_PROC_PORT_OWNER;
+    await fs.writeFile(fakeLsof, "#!/bin/sh\nexit 1\n", { mode: 0o755 });
+    const ownedPath = `${fakeBin}${path.delimiter}${previousPath ?? ""}`;
+    process.env.PATH = ownedPath;
+    process.env.PAPERCLIP_DISABLE_PROC_PORT_OWNER = "1";
+
+    // The bind check fails only after the start transaction has committed. Any
+    // use of that transaction handle afterwards is recorded and refused, so the
+    // old behavior shows up as a failed assertion instead of a hung write.
+    const usesAfterCommit: string[] = [];
+    const strictDb = new Proxy(db, {
+      get(target, property) {
+        if (property === "transaction") {
+          return (work: (tx: unknown) => Promise<unknown>, ...rest: unknown[]) =>
+            (target.transaction as (...args: unknown[]) => Promise<unknown>).call(
+              target,
+              async (tx: object) => {
+                let committed = false;
+                const guardedTx = new Proxy(tx, {
+                  get(txTarget, txProperty) {
+                    if (committed) {
+                      usesAfterCommit.push(String(txProperty));
+                      throw new Error(`start transaction used after commit: ${String(txProperty)}`);
+                    }
+                    const value = Reflect.get(txTarget, txProperty, txTarget);
+                    return typeof value === "function" ? value.bind(txTarget) : value;
+                  },
+                });
+                try {
+                  return await work(guardedTx);
+                } finally {
+                  committed = true;
+                }
+              },
+              ...rest,
+            );
+        }
+        const value = Reflect.get(target, property, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    }) as typeof db;
+
+    try {
+      await expect(startRuntimeServicesForWorkspaceControl({
+        db: strictDb,
+        actor: fixture.actor,
+        issue: null,
+        workspace: fixture.realizedWorkspace(workspace),
+        executionWorkspaceId: workspace.id,
+        config: fixedPortRuntimeConfig(basePort),
+        adapterEnv: {},
+      })).rejects.toMatchObject({
+        status: 409,
+        details: { code: "workspace_runtime_port_allocation_exhausted", port: basePort },
+      });
+      expect(usesAfterCommit).toEqual([]);
+      const persisted = await db
+        .select()
+        .from(workspaceRuntimeServices)
+        .where(eq(workspaceRuntimeServices.executionWorkspaceId, workspace.id));
+      expect(persisted.map((row) => row.status)).not.toContain("starting");
     } finally {
       restoreEnvKeyIfUnchanged("PATH", previousPath, ownedPath);
       restoreEnvKeyIfUnchanged("PAPERCLIP_DISABLE_PROC_PORT_OWNER", previousDisableProcOwner, "1");
