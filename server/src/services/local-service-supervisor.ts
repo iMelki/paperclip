@@ -1,4 +1,3 @@
-import { AsyncLocalStorage } from "node:async_hooks";
 import { execFile } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import fsSync from "node:fs";
@@ -22,20 +21,19 @@ const LSOF_CALL_TIMEOUT_MS = 1_000;
 export const PORT_OWNER_INSPECTION_BUDGET_MS = 2_000;
 
 type PortOwnerInspectionScope = { remainingMs: number };
-// Per-invocation context, not a module global: concurrent starts for different
-// workspaces each see only their own budget, and one start finishing cannot
-// restore or drain another's scope.
-const portOwnerInspectionContext = new AsyncLocalStorage<PortOwnerInspectionScope>();
+let portOwnerInspectionScope: PortOwnerInspectionScope | null = null;
 
 export async function withPortOwnerInspectionBudget<T>(budgetMs: number, work: () => Promise<T>): Promise<T> {
-  const parent = portOwnerInspectionContext.getStore();
-  const initialMs = parent ? Math.min(parent.remainingMs, budgetMs) : budgetMs;
+  const previous = portOwnerInspectionScope;
+  const initialMs = previous ? Math.min(previous.remainingMs, budgetMs) : budgetMs;
   const scope: PortOwnerInspectionScope = { remainingMs: initialMs };
+  portOwnerInspectionScope = scope;
   try {
-    return await portOwnerInspectionContext.run(scope, work);
+    return await work();
   } finally {
-    // Time a nested scope spent in lsof also counts against its own parent.
-    if (parent) parent.remainingMs = Math.max(0, parent.remainingMs - (initialMs - scope.remainingMs));
+    portOwnerInspectionScope = previous;
+    // Time a nested scope spent in lsof also counts against the outer scope.
+    if (previous) previous.remainingMs = Math.max(0, previous.remainingMs - (initialMs - scope.remainingMs));
   }
 }
 
@@ -1279,7 +1277,7 @@ export async function readLocalServicePortOwner(port: number) {
       return null;
     }
   }
-  const inspectionScope = portOwnerInspectionContext.getStore() ?? null;
+  const inspectionScope = portOwnerInspectionScope;
   const lsofTimeoutMs = remainingLsofTimeoutMs(inspectionScope);
   if (lsofTimeoutMs > 0) {
     const lsofStartedAt = Date.now();
