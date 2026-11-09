@@ -130,6 +130,38 @@ describe("local service supervision", () => {
     }
   });
 
+  it.skipIf(process.platform === "win32")(
+    "refuses a trusted descendant-only group kill when a live process holds the recorded pgid",
+    async () => {
+      const deadLeader = spawn(process.execPath, ["-e", "process.exit(0)"], { stdio: "ignore" });
+      await new Promise<void>((resolve) => deadLeader.once("exit", () => resolve()));
+      const unrelated = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
+        detached: true,
+        stdio: "ignore",
+      });
+      try {
+        const result = await terminateLocalService(
+          { pid: deadLeader.pid!, processGroupId: unrelated.pid! },
+          {
+            trustedProcessGroup: true,
+            expectedStartedAt: new Date(Date.now() - 60_000),
+            forceAfterMs: 100,
+          },
+        );
+        expect(result.attempted).toBe(false);
+        expect(result.confirmedStopped).toBe(false);
+        expect(result.outcome).toBe("untrusted_identity");
+        expect(() => process.kill(unrelated.pid!, 0)).not.toThrow();
+      } finally {
+        try {
+          process.kill(-unrelated.pid!, "SIGKILL");
+        } catch {
+          // already gone
+        }
+      }
+    },
+  );
+
   it("recognizes a pnpm command after the launcher becomes pnpm.cjs", () => {
     expect(doesLocalServiceCommandLineMatch({
       commandLine: "/usr/bin/node /opt/pnpm/pnpm.cjs dev -- --bind custom --bind-host 127.0.0.1",

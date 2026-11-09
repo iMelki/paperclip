@@ -25,6 +25,10 @@ export interface InlineBannerProps {
   /** Denser padding for embedding inside modals/dialogs. */
   compact?: boolean;
   className?: string;
+  /** ARIA role. Defaults to `note`; use `alert` for warnings that must be announced. */
+  role?: "note" | "alert" | "status";
+  /** Test hook passed through to the root element. */
+  "data-testid"?: string;
 }
 
 /**
@@ -43,11 +47,14 @@ export function InlineBanner({
   actions,
   compact = false,
   className,
+  role = "note",
+  "data-testid": dataTestId,
 }: InlineBannerProps) {
   const Icon = icon === false ? null : (icon ?? TONE_ICON[tone]);
   return (
     <div
-      role="note"
+      role={role}
+      data-testid={dataTestId}
       className={cn(
         "flex flex-col gap-2 rounded-lg border sm:flex-row sm:items-start sm:justify-between",
         compact ? "p-3" : "p-4",

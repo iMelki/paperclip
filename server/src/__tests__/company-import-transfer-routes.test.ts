@@ -756,6 +756,48 @@ describeEmbeddedPostgres("company import transfer routes", () => {
     expect(reApplied.status).toBe(409);
   });
 
+  it("starts a new transfer when the same bytes are declared with a different import intent", async () => {
+    const zip = buildFixtureZip();
+    const { body, slices } = declareTransfer(zip, zip.length);
+    const intentA = sha256Hex(Buffer.from("intent-a"));
+    const intentB = sha256Hex(Buffer.from("intent-b"));
+    const created = await request(app)
+      .post("/api/companies/import/transfers")
+      .send({ ...body, intentKey: intentA });
+    expect(created.status).toBe(200);
+    const transferId = created.body.transferId as string;
+    expect((await putPart(transferId, 0, slices[0]!)).status).toBe(200);
+    expect(
+      (await request(app).post(`/api/companies/import/transfers/${transferId}/apply`).send(importMeta)).status,
+    ).toBe(200);
+
+    // Same bytes, same intent: still a retry of the completed run.
+    const sameIntent = await request(app)
+      .post("/api/companies/import/transfers")
+      .send({ ...body, intentKey: intentA });
+    expect(sameIntent.status).toBe(200);
+    expect(sameIntent.body.transferId).toBe(transferId);
+    expect(sameIntent.body.alreadyCompleted).toBe(true);
+
+    // Same bytes, different intent: a new request with its own run.
+    const otherIntent = await request(app)
+      .post("/api/companies/import/transfers")
+      .send({ ...body, intentKey: intentB });
+    expect(otherIntent.status).toBe(200);
+    expect(otherIntent.body.transferId).not.toBe(transferId);
+    expect(otherIntent.body.alreadyCompleted).toBe(false);
+    expect(otherIntent.body.missingParts).toEqual([0]);
+  });
+
+  it("rejects a malformed intentKey", async () => {
+    const zip = buildFixtureZip();
+    const { body } = declareTransfer(zip, zip.length);
+    const res = await request(app)
+      .post("/api/companies/import/transfers")
+      .send({ ...body, intentKey: "not-a-sha" });
+    expect(res.status).toBe(400);
+  });
+
   it("keeps a completed run completed when post-success spool cleanup fails", async () => {
     const zip = buildFixtureZip();
     const { body, slices } = declareTransfer(zip, Math.ceil(zip.length / 2));

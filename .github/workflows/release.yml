@@ -49,6 +49,9 @@ concurrency:
   group: release-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: false
 
+permissions:
+  contents: read
+
 env:
   # npm accepts a publish immediately, but the registry's CDN can lag packument
   # propagation by several minutes (observed 2.5-4+ minutes on 2026-08-21,
@@ -154,8 +157,9 @@ jobs:
       canary_version: ${{ steps.select.outputs.canary_version }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
+          persist-credentials: false
           ref: master
           fetch-depth: 0
 
@@ -267,18 +271,18 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ needs.select_nightly.outputs.sha }}
           fetch-depth: 0
 
       - name: Setup pnpm
-        uses: pnpm/action-setup@v6
+        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
         with:
           version: 9.15.4
 
       - name: Setup Node.js
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
           node-version: 24
           cache: pnpm
@@ -383,8 +387,9 @@ jobs:
       mode: ${{ steps.select.outputs.mode }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
+          persist-credentials: false
           ref: master
           fetch-depth: 0
 
@@ -533,18 +538,18 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ needs.select_beta.outputs.sha }}
           fetch-depth: 0
 
       - name: Setup pnpm
-        uses: pnpm/action-setup@v6
+        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
         with:
           version: 9.15.4
 
       - name: Setup Node.js
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
           node-version: 24
           cache: pnpm
@@ -652,7 +657,7 @@ jobs:
       pull-requests: read
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: master
           fetch-depth: 0
@@ -744,8 +749,9 @@ jobs:
       notes_ref: ${{ steps.notes.outputs.notes_ref }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
+          persist-credentials: false
           ref: master
           fetch-depth: 0
 
@@ -905,6 +911,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
+          persist-credentials: false
           fetch-depth: 0
           ref: ${{ needs.preflight_stable.outputs.sha }}
 
@@ -1094,7 +1101,7 @@ jobs:
       contents: write
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: master
           fetch-depth: 0

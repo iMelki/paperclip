@@ -7,8 +7,9 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
+import { shellQuotePath } from "@paperclipai/adapter-utils/shell-path";
 import { parse as parseEnvContents } from "dotenv";
-import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import {
   activityLog,
   agents,
@@ -38,14 +39,21 @@ import {
   releaseRuntimeServicesForRun,
   UnresolvedWorkspaceBaseRefError,
   resetRuntimeServicesForTests,
+  claimRuntimeServiceBindPort,
+  readUnconfirmedSpawnStopForTests,
   resolveRuntimeProvisionCommand,
+  setFailNextPostSpawnRuntimeSaveForTests,
+  setForceUnconfirmedChildStopForTests,
+  settleFailedSpawnPortClaims,
   resolveWorkspaceRuntimeReadinessTimeoutSec,
   resolveShell,
   sanitizeRuntimeServiceBaseEnv,
+  setRuntimeServiceAfterSpawnHookForTests,
   setWorkspaceRuntimeExposureDepsForTests,
   startRuntimeServicesForWorkspaceControl,
   stopRuntimeServicesForExecutionWorkspace,
   stopRuntimeServicesForProjectWorkspace,
+  PORT_OWNER_INSPECTION_BUDGET_MS,
   WORKSPACE_RUNTIME_PORT_ALLOCATION_ATTEMPTS,
   type RealizedExecutionWorkspace,
 } from "../services/workspace-runtime.ts";
@@ -84,6 +92,40 @@ const RUNTIME_OWNED_GIT_BRANCH_METADATA = {
 } as const;
 
 const execFileAsync = promisify(execFile);
+
+/**
+ * Whole-range fail-closed ceiling when every `lsof` call burns its 1s timeout.
+ * Inspection itself stops at {@link PORT_OWNER_INSPECTION_BUDGET_MS}; the extra
+ * room is one process start and its confirmed stop.
+ */
+const SLOW_LSOF_PORT_RANGE_BOUND_MS = PORT_OWNER_INSPECTION_BUDGET_MS + 8_000;
+
+let processEnvSnapshot: Record<string, string | undefined> | null = null;
+
+function restoreProcessEnv(snapshot: Record<string, string | undefined> | null) {
+  if (!snapshot) return;
+  for (const key of Object.keys(process.env)) {
+    if (!(key in snapshot)) delete process.env[key];
+  }
+  for (const [key, value] of Object.entries(snapshot)) {
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
+}
+
+function restoreEnvKeyIfUnchanged(
+  key: string,
+  previous: string | undefined,
+  owned: string | undefined,
+) {
+  if (process.env[key] !== owned) return;
+  if (previous === undefined) delete process.env[key];
+  else process.env[key] = previous;
+}
+
+beforeEach(() => {
+  processEnvSnapshot = { ...process.env };
+});
 
 function stableStringifyForTest(value: unknown): string {
   if (Array.isArray(value)) {
@@ -442,12 +484,16 @@ afterEach(async () => {
       leasedRunIds.delete(runId);
     }),
   );
+  await resetRuntimeServicesForTests();
+  // Vitest does not wait for a timed-out test's `finally`. Put PATH and every
+  // other mutated variable back before the next case, then keep the historical
+  // clear of ambient Paperclip homes so a suite cannot leak into the next one.
+  restoreProcessEnv(processEnvSnapshot);
   delete process.env.PAPERCLIP_CONFIG;
   delete process.env.PAPERCLIP_HOME;
   delete process.env.PAPERCLIP_INSTANCE_ID;
   delete process.env.PAPERCLIP_WORKTREES_DIR;
   delete process.env.DATABASE_URL;
-  await resetRuntimeServicesForTests();
 });
 
 describe("sanitizeRuntimeServiceBaseEnv", () => {
@@ -1784,23 +1830,15 @@ describe("realizeExecutionWorkspace", () => {
       expect(reusedEnvContents).toContain('PAPERCLIP_WORKTREE_COLOR="#112233"');
     } finally {
       process.chdir(previousCwd);
-      if (previousPath === undefined) {
-        delete process.env.PATH;
-      } else {
-        process.env.PATH = previousPath;
-      }
-      for (const [key, value] of [
-        ["PAPERCLIP_CONFIG", previousConfig],
-        ["PAPERCLIP_HOME", previousHome],
-        ["PAPERCLIP_INSTANCE_ID", previousInstanceId],
-        ["PAPERCLIP_WORKTREES_DIR", previousWorktreesDir],
-      ] as const) {
-        if (value === undefined) {
-          delete process.env[key];
-        } else {
-          process.env[key] = value;
-        }
-      }
+      restoreEnvKeyIfUnchanged(
+        "PATH",
+        previousPath,
+        `${isolatedBin}${path.delimiter}/usr/bin${path.delimiter}/bin`,
+      );
+      restoreEnvKeyIfUnchanged("PAPERCLIP_CONFIG", previousConfig, undefined);
+      restoreEnvKeyIfUnchanged("PAPERCLIP_HOME", previousHome, paperclipHome);
+      restoreEnvKeyIfUnchanged("PAPERCLIP_INSTANCE_ID", previousInstanceId, instanceId);
+      restoreEnvKeyIfUnchanged("PAPERCLIP_WORKTREES_DIR", previousWorktreesDir, isolatedWorktreeHome);
     }
   }, 15_000);
 
@@ -3993,13 +4031,12 @@ describe("ensureRuntimeServicesForRun", () => {
   function configureRuntimeProvisionTestHome(workspaceRoot: string, suffix: string) {
     const previousPaperclipHome = process.env.PAPERCLIP_HOME;
     const previousPaperclipInstanceId = process.env.PAPERCLIP_INSTANCE_ID;
+    const instanceId = `${suffix}-${randomUUID()}`;
     process.env.PAPERCLIP_HOME = workspaceRoot;
-    process.env.PAPERCLIP_INSTANCE_ID = `${suffix}-${randomUUID()}`;
+    process.env.PAPERCLIP_INSTANCE_ID = instanceId;
     return () => {
-      if (previousPaperclipHome === undefined) delete process.env.PAPERCLIP_HOME;
-      else process.env.PAPERCLIP_HOME = previousPaperclipHome;
-      if (previousPaperclipInstanceId === undefined) delete process.env.PAPERCLIP_INSTANCE_ID;
-      else process.env.PAPERCLIP_INSTANCE_ID = previousPaperclipInstanceId;
+      restoreEnvKeyIfUnchanged("PAPERCLIP_HOME", previousPaperclipHome, workspaceRoot);
+      restoreEnvKeyIfUnchanged("PAPERCLIP_INSTANCE_ID", previousPaperclipInstanceId, instanceId);
     };
   }
 
@@ -5274,17 +5311,16 @@ describe("readLocalServicePortOwner", () => {
     await fs.copyFile(path.join(fakeBin, "netstat"), path.join(fakeBin, "System32", "netstat.exe"));
     await fs.chmod(path.join(fakeBin, "System32", "netstat.exe"), 0o755);
     process.env.SystemRoot = fakeBin;
-    process.env.PATH = `${fakeBin}${path.delimiter}${previousPath ?? ""}`;
+    const ownedPath = `${fakeBin}${path.delimiter}${previousPath ?? ""}`;
+    process.env.PATH = ownedPath;
     Object.defineProperty(process, "platform", { value: "win32" });
 
     try {
       await expect(readLocalServicePortOwner(port)).resolves.toBe(listenerPid);
       await expect(isLocalServiceProcessOwnedBy(listenerPid, launchedPid)).resolves.toBe(true);
     } finally {
-      if (previousPath === undefined) delete process.env.PATH;
-      else process.env.PATH = previousPath;
-      if (previousSystemRoot === undefined) delete process.env.SystemRoot;
-      else process.env.SystemRoot = previousSystemRoot;
+      restoreEnvKeyIfUnchanged("PATH", previousPath, ownedPath);
+      restoreEnvKeyIfUnchanged("SystemRoot", previousSystemRoot, fakeBin);
       await fs.rm(fakeBin, { recursive: true, force: true });
     }
   });
@@ -5313,8 +5349,7 @@ describe("readLocalServicePortOwner", () => {
     try {
       await expect(readLocalServiceProcessCwd(process.pid)).resolves.toBe(reportedCwd);
     } finally {
-      if (previousPath === undefined) delete process.env.PATH;
-      else process.env.PATH = previousPath;
+      restoreEnvKeyIfUnchanged("PATH", previousPath, fakeBin);
       await fs.rm(fakeBin, { recursive: true, force: true });
     }
   });
@@ -5330,8 +5365,7 @@ describe("readLocalServicePortOwner", () => {
     try {
       await expect(readLocalServiceProcessCwd(process.pid)).resolves.toBeNull();
     } finally {
-      if (previousPath === undefined) delete process.env.PATH;
-      else process.env.PATH = previousPath;
+      restoreEnvKeyIfUnchanged("PATH", previousPath, fakeBin);
       await fs.rm(fakeBin, { recursive: true, force: true });
     }
   });
@@ -6244,6 +6278,26 @@ describeEmbeddedPostgres("workspace dirty quarantine branch repair", () => {
   }, 20_000);
 });
 
+async function deleteCompaniesAfterRuntimeServices(database: ReturnType<typeof createDb>) {
+  // A timed-out start can insert workspace_runtime_services after the first
+  // delete. That row references the company with no ON DELETE CASCADE, so
+  // drop it again and retry the company delete.
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    await database.delete(workspaceRuntimeServices);
+    try {
+      await database.delete(companies);
+      return;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const cause = error instanceof Error && "cause" in error ? String(error.cause) : "";
+      const leftoverService = `${message} ${cause}`.includes("workspace_runtime_services_company_id_companies_id_fk");
+      if (!leftoverService || attempt === 3) {
+        throw error;
+      }
+    }
+  }
+}
+
 describeEmbeddedPostgres("workspace runtime service control persistence", () => {
   let db!: ReturnType<typeof createDb>;
   let tempDb: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>> | null = null;
@@ -6274,7 +6328,7 @@ describeEmbeddedPostgres("workspace runtime service control persistence", () => 
     await db.delete(issues);
     await db.delete(projects);
     await db.delete(agents);
-    await db.delete(companies);
+    await deleteCompaniesAfterRuntimeServices(db);
   });
 
   it("persists provisioning before starting and excludes provision time from readiness timeout", async () => {
@@ -6282,8 +6336,9 @@ describeEmbeddedPostgres("workspace runtime service control persistence", () => 
     const paperclipHome = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-runtime-control-home-"));
     const previousPaperclipHome = process.env.PAPERCLIP_HOME;
     const previousPaperclipInstanceId = process.env.PAPERCLIP_INSTANCE_ID;
+    const instanceId = `runtime-control-${randomUUID()}`;
     process.env.PAPERCLIP_HOME = paperclipHome;
-    process.env.PAPERCLIP_INSTANCE_ID = `runtime-control-${randomUUID()}`;
+    process.env.PAPERCLIP_INSTANCE_ID = instanceId;
 
     const companyId = randomUUID();
     const projectId = randomUUID();
@@ -6482,10 +6537,8 @@ describeEmbeddedPostgres("workspace runtime service control persistence", () => 
         workspaceCwd: workspaceRoot,
       });
       await fs.rm(paperclipHome, { recursive: true, force: true });
-      if (previousPaperclipHome === undefined) delete process.env.PAPERCLIP_HOME;
-      else process.env.PAPERCLIP_HOME = previousPaperclipHome;
-      if (previousPaperclipInstanceId === undefined) delete process.env.PAPERCLIP_INSTANCE_ID;
-      else process.env.PAPERCLIP_INSTANCE_ID = previousPaperclipInstanceId;
+      restoreEnvKeyIfUnchanged("PAPERCLIP_HOME", previousPaperclipHome, paperclipHome);
+      restoreEnvKeyIfUnchanged("PAPERCLIP_INSTANCE_ID", previousPaperclipInstanceId, instanceId);
     }
   }, 15_000);
 
@@ -6614,13 +6667,12 @@ describeEmbeddedPostgres("workspace runtime service control persistence", () => 
     const paperclipHome = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-runtime-port-home-"));
     const previousPaperclipHome = process.env.PAPERCLIP_HOME;
     const previousPaperclipInstanceId = process.env.PAPERCLIP_INSTANCE_ID;
+    const instanceId = `runtime-ports-${randomUUID()}`;
     process.env.PAPERCLIP_HOME = paperclipHome;
-    process.env.PAPERCLIP_INSTANCE_ID = `runtime-ports-${randomUUID()}`;
+    process.env.PAPERCLIP_INSTANCE_ID = instanceId;
     return async () => {
-      if (previousPaperclipHome === undefined) delete process.env.PAPERCLIP_HOME;
-      else process.env.PAPERCLIP_HOME = previousPaperclipHome;
-      if (previousPaperclipInstanceId === undefined) delete process.env.PAPERCLIP_INSTANCE_ID;
-      else process.env.PAPERCLIP_INSTANCE_ID = previousPaperclipInstanceId;
+      restoreEnvKeyIfUnchanged("PAPERCLIP_HOME", previousPaperclipHome, paperclipHome);
+      restoreEnvKeyIfUnchanged("PAPERCLIP_INSTANCE_ID", previousPaperclipInstanceId, instanceId);
       await fs.rm(paperclipHome, { recursive: true, force: true });
     };
   }
@@ -7104,8 +7156,11 @@ describeEmbeddedPostgres("workspace runtime service control persistence", () => 
     const fakeBin = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-runtime-no-lsof-"));
     const fakeLsof = path.join(fakeBin, "lsof");
     const previousPath = process.env.PATH;
+    const previousDisableProcOwner = process.env.PAPERCLIP_DISABLE_PROC_PORT_OWNER;
     await fs.writeFile(fakeLsof, "#!/bin/sh\nexit 1\n", { mode: 0o755 });
-    process.env.PATH = `${fakeBin}${path.delimiter}${previousPath ?? ""}`;
+    const ownedPath = `${fakeBin}${path.delimiter}${previousPath ?? ""}`;
+    process.env.PATH = ownedPath;
+    process.env.PAPERCLIP_DISABLE_PROC_PORT_OWNER = "1";
 
     try {
       await expect(startRuntimeServicesForWorkspaceControl({
@@ -7125,8 +7180,8 @@ describeEmbeddedPostgres("workspace runtime service control persistence", () => 
         },
       });
     } finally {
-      if (previousPath === undefined) delete process.env.PATH;
-      else process.env.PATH = previousPath;
+      restoreEnvKeyIfUnchanged("PATH", previousPath, ownedPath);
+      restoreEnvKeyIfUnchanged("PAPERCLIP_DISABLE_PROC_PORT_OWNER", previousDisableProcOwner, "1");
       await stopRuntimeServicesForExecutionWorkspace({
         db,
         executionWorkspaceId: workspace.id,
@@ -7137,6 +7192,58 @@ describeEmbeddedPostgres("workspace runtime service control persistence", () => 
       await fixture.cleanup();
     }
   }, 20_000);
+
+  it("fails the bounded port range inside one inspection budget when every lsof call times out", async () => {
+    const fixture = await createRuntimeFixture();
+    const cleanupRuntimeHome = await createRuntimeHome();
+    const workspace = fixture.workspaces[0]!;
+    const basePort = await findFreePort();
+    const fakeBin = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-runtime-slow-lsof-"));
+    const fakeLsof = path.join(fakeBin, "lsof");
+    const previousPath = process.env.PATH;
+    const previousDisableProcOwner = process.env.PAPERCLIP_DISABLE_PROC_PORT_OWNER;
+    // Longer than the 1s per-call cap, so a real lookup always hits the timeout.
+    await fs.writeFile(
+      fakeLsof,
+      `#!${process.execPath}\nsetTimeout(() => process.exit(1), 1200);\n`,
+      { mode: 0o755 },
+    );
+    const ownedPath = `${fakeBin}${path.delimiter}${previousPath ?? ""}`;
+    process.env.PATH = ownedPath;
+    process.env.PAPERCLIP_DISABLE_PROC_PORT_OWNER = "1";
+
+    const startedAt = Date.now();
+    try {
+      await expect(startRuntimeServicesForWorkspaceControl({
+        db,
+        actor: fixture.actor,
+        issue: null,
+        workspace: fixture.realizedWorkspace(workspace),
+        executionWorkspaceId: workspace.id,
+        config: fixedPortRuntimeConfig(basePort),
+        adapterEnv: {},
+      })).rejects.toMatchObject({
+        status: 409,
+        details: {
+          code: "workspace_runtime_port_allocation_exhausted",
+          port: basePort,
+          attemptedPortCount: WORKSPACE_RUNTIME_PORT_ALLOCATION_ATTEMPTS,
+        },
+      });
+      expect(Date.now() - startedAt).toBeLessThan(SLOW_LSOF_PORT_RANGE_BOUND_MS);
+    } finally {
+      restoreEnvKeyIfUnchanged("PATH", previousPath, ownedPath);
+      restoreEnvKeyIfUnchanged("PAPERCLIP_DISABLE_PROC_PORT_OWNER", previousDisableProcOwner, "1");
+      await stopRuntimeServicesForExecutionWorkspace({
+        db,
+        executionWorkspaceId: workspace.id,
+        workspaceCwd: workspace.cwd,
+      }).catch(() => undefined);
+      await fs.rm(fakeBin, { recursive: true, force: true });
+      await cleanupRuntimeHome();
+      await fixture.cleanup();
+    }
+  }, SLOW_LSOF_PORT_RANGE_BOUND_MS + 5_000);
 
   it("returns a bounded structured conflict and exposes only same-company workspace references", async () => {
     const fixture = await createRuntimeFixture({
@@ -7323,7 +7430,7 @@ describeEmbeddedPostgres("workspace runtime startup reconciliation", () => {
     // company to respect the activity_log.company_id foreign key.
     await db.delete(activityLog);
     await db.delete(agents);
-    await db.delete(companies);
+    await deleteCompaniesAfterRuntimeServices(db);
   });
 
   it("restores desired services when one row is stopped and a live registered service has no row", async () => {
@@ -7512,8 +7619,9 @@ describeEmbeddedPostgres("workspace runtime startup reconciliation", () => {
     const previousPaperclipHome = process.env.PAPERCLIP_HOME;
     const previousPaperclipInstanceId = process.env.PAPERCLIP_INSTANCE_ID;
     const previousHttpsMode = process.env.PAPERCLIP_MANAGED_RUNTIME_HTTPS;
+    const instanceId = `runtime-https-backfill-${randomUUID()}`;
     process.env.PAPERCLIP_HOME = paperclipHome;
-    process.env.PAPERCLIP_INSTANCE_ID = `runtime-https-backfill-${randomUUID()}`;
+    process.env.PAPERCLIP_INSTANCE_ID = instanceId;
 
     const reservePort = async () => {
       for (let attempt = 0; attempt < 100; attempt += 1) {
@@ -7712,12 +7820,9 @@ describeEmbeddedPostgres("workspace runtime startup reconciliation", () => {
       await resetRuntimeServicesForTests();
       await fs.rm(paperclipHome, { recursive: true, force: true });
       await fs.rm(workspaceRoot, { recursive: true, force: true });
-      if (previousPaperclipHome === undefined) delete process.env.PAPERCLIP_HOME;
-      else process.env.PAPERCLIP_HOME = previousPaperclipHome;
-      if (previousPaperclipInstanceId === undefined) delete process.env.PAPERCLIP_INSTANCE_ID;
-      else process.env.PAPERCLIP_INSTANCE_ID = previousPaperclipInstanceId;
-      if (previousHttpsMode === undefined) delete process.env.PAPERCLIP_MANAGED_RUNTIME_HTTPS;
-      else process.env.PAPERCLIP_MANAGED_RUNTIME_HTTPS = previousHttpsMode;
+      restoreEnvKeyIfUnchanged("PAPERCLIP_HOME", previousPaperclipHome, paperclipHome);
+      restoreEnvKeyIfUnchanged("PAPERCLIP_INSTANCE_ID", previousPaperclipInstanceId, instanceId);
+      restoreEnvKeyIfUnchanged("PAPERCLIP_MANAGED_RUNTIME_HTTPS", previousHttpsMode, undefined);
     }
   }, 40_000);
 
@@ -7848,8 +7953,9 @@ describeEmbeddedPostgres("workspace runtime startup reconciliation", () => {
     const paperclipHome = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-runtime-home-"));
     const previousPaperclipHome = process.env.PAPERCLIP_HOME;
     const previousInstanceId = process.env.PAPERCLIP_INSTANCE_ID;
+    const instanceId = `runtime-pnpm-reconcile-${randomUUID()}`;
     process.env.PAPERCLIP_HOME = paperclipHome;
-    process.env.PAPERCLIP_INSTANCE_ID = `runtime-pnpm-reconcile-${randomUUID()}`;
+    process.env.PAPERCLIP_INSTANCE_ID = instanceId;
 
     // Reserve a port outside the runtime exposure app-port range (42000-42999).
     // The reconciler stores this port on the row. A port inside that range makes
@@ -8049,14 +8155,246 @@ describeEmbeddedPostgres("workspace runtime startup reconciliation", () => {
         }
       }
       await resetRuntimeServicesForTests();
-      if (previousPaperclipHome === undefined) delete process.env.PAPERCLIP_HOME;
-      else process.env.PAPERCLIP_HOME = previousPaperclipHome;
-      if (previousInstanceId === undefined) delete process.env.PAPERCLIP_INSTANCE_ID;
-      else process.env.PAPERCLIP_INSTANCE_ID = previousInstanceId;
+      restoreEnvKeyIfUnchanged("PAPERCLIP_HOME", previousPaperclipHome, paperclipHome);
+      restoreEnvKeyIfUnchanged("PAPERCLIP_INSTANCE_ID", previousInstanceId, instanceId);
       await fs.rm(paperclipHome, { recursive: true, force: true });
       await fs.rm(workspaceRoot, { recursive: true, force: true });
     }
   }, 20_000);
+
+  it("persists the spawned pid before the post-spawn save when runtime provisioning ran", async () => {
+    const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-runtime-pid-durable-"));
+    const paperclipHome = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-runtime-pid-home-"));
+    const previousPaperclipHome = process.env.PAPERCLIP_HOME;
+    const previousPaperclipInstanceId = process.env.PAPERCLIP_INSTANCE_ID;
+    const instanceId = `runtime-pid-durable-${randomUUID()}`;
+    process.env.PAPERCLIP_HOME = paperclipHome;
+    process.env.PAPERCLIP_INSTANCE_ID = instanceId;
+    const serviceScriptPath = path.join(workspaceRoot, "runtime-service.cjs");
+    await fs.writeFile(
+      serviceScriptPath,
+      "require('node:http').createServer((_req,res)=>res.end('ok')).listen(Number(process.env.PORT), '127.0.0.1');",
+      "utf8",
+    );
+    const command = `${shellQuotePath(process.execPath)} ${shellQuotePath(serviceScriptPath)}`;
+    const provisionCommand = `${shellQuotePath(process.execPath)} -e ""`;
+
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    const runId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values({
+      id: agentId,
+      companyId,
+      name: "Codex Coder",
+      role: "engineer",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+    await db.insert(heartbeatRuns).values({
+      id: runId,
+      companyId,
+      agentId,
+      invocationSource: "manual",
+      status: "running",
+      startedAt: new Date(),
+      updatedAt: new Date(),
+    });
+
+    const workspace = {
+      ...buildWorkspace(workspaceRoot),
+      projectId: null,
+      workspaceId: null,
+    };
+    leasedRunIds.add(runId);
+
+    // Deterministic version of the startup race: pause after the process is
+    // spawned (and readiness has started) but before the caller's own save, and
+    // read what is durable in the database at that moment.
+    const observed: Array<{ status: string | null; providerRef: string | null; pid: string | null }> = [];
+    setRuntimeServiceAfterSpawnHookForTests(async (record) => {
+      await new Promise((resolve) => setTimeout(resolve, 400));
+      const row = await db
+        .select()
+        .from(workspaceRuntimeServices)
+        .where(eq(workspaceRuntimeServices.id, record.id))
+        .then((rows) => rows[0] ?? null);
+      observed.push({
+        status: row?.status ?? null,
+        providerRef: row?.providerRef ?? null,
+        pid: record.providerRef,
+      });
+    });
+
+    try {
+      const services = await ensureRuntimeServicesForRun({
+        db,
+        runId,
+        agent: { id: agentId, name: "Codex Coder", companyId },
+        issue: null,
+        workspace,
+        config: {
+          runtimeProvisionCommand: provisionCommand,
+          workspaceRuntime: {
+            services: [
+              {
+                name: "web",
+                command,
+                port: { type: "auto" },
+                readiness: {
+                  type: "http",
+                  urlTemplate: "http://127.0.0.1:{{port}}",
+                  timeoutSec: 10,
+                  intervalMs: 50,
+                },
+                lifecycle: "shared",
+                reuseScope: "agent",
+                stopPolicy: { type: "manual" },
+              },
+            ],
+          },
+        },
+        adapterEnv: {},
+      });
+
+      expect(services).toHaveLength(1);
+      expect(observed).toHaveLength(1);
+      expect(observed[0]!.pid).toMatch(/^\d+$/);
+      expect(observed[0]!.status).toMatch(/^(starting|running)$/);
+      expect(observed[0]!.providerRef).toBe(observed[0]!.pid);
+
+      const persisted = await db
+        .select()
+        .from(workspaceRuntimeServices)
+        .where(eq(workspaceRuntimeServices.id, services[0]!.id))
+        .then((rows) => rows[0] ?? null);
+      expect(persisted?.status).toBe("running");
+      expect(persisted?.providerRef).toBe(observed[0]!.pid);
+    } finally {
+      setRuntimeServiceAfterSpawnHookForTests(null);
+      await releaseRuntimeServicesForRun(runId);
+      leasedRunIds.delete(runId);
+      await resetRuntimeServicesForTests();
+      await fs.rm(paperclipHome, { recursive: true, force: true });
+      restoreEnvKeyIfUnchanged("PAPERCLIP_HOME", previousPaperclipHome, paperclipHome);
+      restoreEnvKeyIfUnchanged("PAPERCLIP_INSTANCE_ID", previousPaperclipInstanceId, instanceId);
+    }
+  }, 30_000);
+
+  it("keeps the port claim quarantined when a failed post-spawn save cannot confirm the child stopped", async () => {
+    const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-runtime-unconfirmed-stop-"));
+    const paperclipHome = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-runtime-unconfirmed-home-"));
+    const previousPaperclipHome = process.env.PAPERCLIP_HOME;
+    const previousPaperclipInstanceId = process.env.PAPERCLIP_INSTANCE_ID;
+    const instanceId = `runtime-unconfirmed-stop-${randomUUID()}`;
+    process.env.PAPERCLIP_HOME = paperclipHome;
+    process.env.PAPERCLIP_INSTANCE_ID = instanceId;
+    const serviceScriptPath = path.join(workspaceRoot, "runtime-service.cjs");
+    await fs.writeFile(
+      serviceScriptPath,
+      "require('node:http').createServer((_req,res)=>res.end('ok')).listen(Number(process.env.PORT), '127.0.0.1');",
+      "utf8",
+    );
+    const command = `${shellQuotePath(process.execPath)} ${shellQuotePath(serviceScriptPath)}`;
+
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    const runId = randomUUID();
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values({
+      id: agentId,
+      companyId,
+      name: "Codex Coder",
+      role: "engineer",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+    await db.insert(heartbeatRuns).values({
+      id: runId,
+      companyId,
+      agentId,
+      invocationSource: "manual",
+      status: "running",
+      startedAt: new Date(),
+      updatedAt: new Date(),
+    });
+    leasedRunIds.add(runId);
+    setFailNextPostSpawnRuntimeSaveForTests(true);
+    setForceUnconfirmedChildStopForTests(true);
+
+    try {
+      await expect(ensureRuntimeServicesForRun({
+        db,
+        runId,
+        agent: { id: agentId, name: "Codex Coder", companyId },
+        issue: null,
+        workspace: { ...buildWorkspace(workspaceRoot), projectId: null, workspaceId: null },
+        config: {
+          workspaceRuntime: {
+            services: [{
+              name: "web",
+              command,
+              port: { type: "auto" },
+              readiness: {
+                type: "http",
+                urlTemplate: "http://127.0.0.1:{{port}}",
+                timeoutSec: 5,
+                intervalMs: 50,
+              },
+              lifecycle: "shared",
+              reuseScope: "agent",
+              stopPolicy: { type: "manual" },
+            }],
+          },
+        },
+        adapterEnv: {},
+      })).rejects.toThrow(/post-spawn runtime save failed/);
+
+      const pending = readUnconfirmedSpawnStopForTests();
+      expect(pending?.ports.length).toBeGreaterThan(0);
+      const port = pending!.ports[0]!;
+      expect(claimRuntimeServiceBindPort(port, null)).toBe(false);
+
+      setForceUnconfirmedChildStopForTests(false);
+      await expect(settleFailedSpawnPortClaims(pending!.child, pending!.ports)).resolves.toBe(true);
+      expect(claimRuntimeServiceBindPort(port, null)).toBe(true);
+    } finally {
+      setFailNextPostSpawnRuntimeSaveForTests(false);
+      setForceUnconfirmedChildStopForTests(false);
+      const pending = readUnconfirmedSpawnStopForTests();
+      if (pending?.child.pid) {
+        try {
+          process.kill(pending.child.pid, "SIGKILL");
+        } catch {
+          // The confirmed stop already reaped the child.
+        }
+      }
+      await releaseRuntimeServicesForRun(runId).catch(() => undefined);
+      leasedRunIds.delete(runId);
+      await resetRuntimeServicesForTests();
+      await fs.rm(paperclipHome, { recursive: true, force: true });
+      await fs.rm(workspaceRoot, { recursive: true, force: true });
+      restoreEnvKeyIfUnchanged("PAPERCLIP_HOME", previousPaperclipHome, paperclipHome);
+      restoreEnvKeyIfUnchanged("PAPERCLIP_INSTANCE_ID", previousPaperclipInstanceId, instanceId);
+    }
+  }, 30_000);
 
   it("does not reuse a stopped auto-port service port while another process owns it", async () => {
     const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-runtime-unhealthy-adopt-"));

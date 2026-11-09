@@ -26,8 +26,8 @@ vi.mock("@/components/SecretBindingPicker", () => ({ SecretBindingPicker: ({ val
   <option value="">Select secret</option><option value="secret-1">Saved fixture secret</option>
 </select>; } }));
 
-const SETUP = { callbackUrl: "https://paperclip.fixture.test:5113/api/tools/oauth/callback", registrationUrl: "https://github.com/settings/applications/new", requestedScopes: ["read:project", "public_repo", "offline_access"],
-  privateRepoRequestedScopes: ["repo", "project", "offline_access"] };
+const SETUP = { callbackUrl: "https://paperclip.fixture.test:5113/api/tools/oauth/callback", registrationUrl: "https://github.com/settings/applications/new", requestedScopes: ["read:project", "public_repo"],
+  privateRepoRequestedScopes: ["repo", "project"] };
 const DRAFT = { clientId: "public-client-123", expectedLogin: "fixture-user", secret: { secretId: "secret-1", version: "latest" as const }, privateRepoAccess: false };
 function connection(overrides: Partial<ToolConnection> = {}): ToolConnection {
   return {
@@ -172,7 +172,7 @@ describe("dedicated GitHub OAuth setup", () => {
       configValues: { expectedGitHubLogin: DRAFT.expectedLogin },
     });
     expect(nav.top).toHaveBeenCalledExactlyOnceWith(authorization());
-    expect(container.textContent).toContain("Requested scopes: read:project, public_repo, offline_access");
+    expect(container.textContent).toContain("Requested scopes: read:project, public_repo");
     expect(api.finish).not.toHaveBeenCalled(); expect(api.install).not.toHaveBeenCalled();
     expect(localStorage.length).toBe(0); expect(sessionStorage.length).toBe(0);
   });

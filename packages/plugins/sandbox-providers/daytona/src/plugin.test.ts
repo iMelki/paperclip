@@ -4456,6 +4456,124 @@ describe("daytona native file-sync hooks", () => {
     ).toBe(false);
   });
 
+  // #133 security review: fork hardening restored in file-sync.ts.
+  async function syncInWithPostUpload(sandbox: ReturnType<typeof createMockSandbox>, cwd: string) {
+    const hostDir = await makeHostDir();
+    const source = path.join(hostDir, "config.txt");
+    await fs.writeFile(source, "plain");
+    mockGet.mockResolvedValue(sandbox);
+    return plugin.definition.onEnvironmentSyncIn?.({
+      driverKey: "daytona",
+      companyId: "company-1",
+      environmentId: "env-1",
+      config: { timeoutMs: 300000, reuseLease: false },
+      lease: syncLease(),
+      operations: [
+        {
+          operationId: "op-cwd",
+          files: [{ sourcePath: source, targetPath: `${REMOTE_DIR}/config.txt`, kind: "file" }],
+          postUploadCommands: [{ command: "privileged-step", cwd }],
+        },
+      ],
+    });
+  }
+
+  it.each([
+    ["a .. escape", `${REMOTE_DIR}/../etc`],
+    ["an absolute path outside the root", "/etc"],
+    ["a relative path", "sub"],
+  ])("refuses a post-upload command cwd that is %s and never runs the command", async (_label, cwd) => {
+    const sandbox = createMockSandbox();
+    await expect(syncInWithPostUpload(sandbox, cwd)).rejects.toThrow(/post-upload command cwd/);
+    expect(
+      sandbox.process.executeCommand.mock.calls.some(([c]) => c === "privileged-step"),
+    ).toBe(false);
+  });
+
+  it("refuses a post-upload command cwd that a sandbox symlink retargets outside the root", async () => {
+    const sandbox = createMockSandbox();
+    sandbox.process.executeCommand.mockImplementation(async (command: string) => {
+      // The in-sandbox realpath guard for the cwd reports an escape.
+      if (command.includes("ESCAPE:") && command.includes(`${REMOTE_DIR}/sub`)) {
+        return { exitCode: 42, result: `ESCAPE:${REMOTE_DIR}/sub`, artifacts: { stdout: "" } };
+      }
+      return { exitCode: 0, result: "", artifacts: { stdout: "" } };
+    });
+    await expect(syncInWithPostUpload(sandbox, `${REMOTE_DIR}/sub`)).rejects.toThrow();
+    expect(
+      sandbox.process.executeCommand.mock.calls.some(([c]) => c === "privileged-step"),
+    ).toBe(false);
+  });
+
+  it("runs a confined post-upload command after its cwd passes the in-sandbox guard", async () => {
+    const sandbox = createMockSandbox();
+    await syncInWithPostUpload(sandbox, `${REMOTE_DIR}/sub`);
+    const calls = sandbox.process.executeCommand.mock.calls.map(([c, cwd]) => [String(c), cwd]);
+    const guardIndex = calls.findIndex(
+      ([c]) => c.includes("ESCAPE:") && c.includes(`${REMOTE_DIR}/sub`),
+    );
+    const runIndex = calls.findIndex(([c]) => c === "privileged-step");
+    expect(guardIndex).toBeGreaterThanOrEqual(0);
+    expect(runIndex).toBeGreaterThan(guardIndex);
+    expect(calls[runIndex][1]).toBe(`${REMOTE_DIR}/sub`);
+  });
+
+  it("promotes file mappings through a pinned, re-verified parent directory handle", async () => {
+    const hostDir = await makeHostDir();
+    const source = path.join(hostDir, "config.txt");
+    await fs.writeFile(source, "plain");
+    const sandbox = createMockSandbox();
+    mockGet.mockResolvedValue(sandbox);
+    await plugin.definition.onEnvironmentSyncIn?.({
+      driverKey: "daytona",
+      companyId: "company-1",
+      environmentId: "env-1",
+      config: { timeoutMs: 300000, reuseLease: false },
+      lease: syncLease(),
+      operations: [
+        {
+          operationId: "op-pin",
+          files: [{ sourcePath: source, targetPath: `${REMOTE_DIR}/nested/config.txt`, kind: "file" }],
+        },
+      ],
+    });
+    const mv = String(
+      sandbox.process.executeCommand.mock.calls.find(([c]) => String(c).includes("mv -f"))?.[0],
+    );
+    expect(mv).toContain('exec 8<"$_pc_tgt_dir"');
+    expect(mv).toContain("/proc/self/fd/8/");
+    expect(mv).toMatch(/_pc_resolve \/proc\/self\/fd\/8/);
+    expect(mv).not.toMatch(/mv -f \S+ '\/[^']*config\.txt'/);
+  });
+
+  it("extracts directory mappings into a pinned, re-verified directory handle", async () => {
+    const hostDir = await makeHostDir();
+    const sourceDir = path.join(hostDir, "assets");
+    await fs.mkdir(sourceDir, { recursive: true });
+    await fs.writeFile(path.join(sourceDir, "a.txt"), "a");
+    const sandbox = createMockSandbox();
+    mockGet.mockResolvedValue(sandbox);
+    await plugin.definition.onEnvironmentSyncIn?.({
+      driverKey: "daytona",
+      companyId: "company-1",
+      environmentId: "env-1",
+      config: { timeoutMs: 300000, reuseLease: false },
+      lease: syncLease(),
+      operations: [
+        {
+          operationId: "op-dir",
+          files: [{ sourcePath: sourceDir, targetPath: `${REMOTE_DIR}/assets`, kind: "directory" }],
+        },
+      ],
+    });
+    const extract = String(
+      sandbox.process.executeCommand.mock.calls.find(([c]) => String(c).includes("tar -xf"))?.[0],
+    );
+    expect(extract).toContain("-C /proc/self/fd/9");
+    expect(extract).toMatch(/_pc_resolve \/proc\/self\/fd\/9/);
+    expect(extract).not.toContain(`-C '${REMOTE_DIR}/assets'`);
+  });
+
   // -------------------------------------------------------------------------
   // Merged git-workspace operation. A git-backed workspace stage-sync rides ONE
   // operation whose `files` carry the git-history tar and the workspace-overlay
