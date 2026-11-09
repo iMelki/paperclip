@@ -55,7 +55,7 @@ import {
 import { logActivity } from "../services/activity-log.js";
 import { publishGlobalLiveEvent } from "../services/live-events.js";
 import { issueService } from "../services/issues.js";
-import type { PluginJobScheduler } from "../services/plugin-job-scheduler.js";
+import { PluginJobScheduleError, type PluginJobScheduler } from "../services/plugin-job-scheduler.js";
 import type { PluginJobStore } from "../services/plugin-job-store.js";
 import type { PluginWorkerManager } from "../services/plugin-worker-manager.js";
 import type { PluginStreamBus } from "../services/plugin-stream-bus.js";
@@ -2739,10 +2739,11 @@ export function pluginRoutes(
    *
    * Plugin reload deliberately does not resume a paused job, so this is the
    * only way to resume one. A job whose status already equals the requested
-   * status is left untouched (no write, no audit entry). Resuming also
-   * initializes the job's `nextRunAt` from its schedule (null or past values
-   * are recomputed; a missed run is not replayed). Pausing leaves `nextRunAt`
-   * as it is: the scheduler only fires active jobs.
+   * status is left untouched (no status write, no audit entry). Resuming
+   * arms the job's `nextRunAt` from its schedule in the same write as the
+   * status flip (null or past values are recomputed; a missed run is not
+   * replayed); an already-active job with a null `nextRunAt` is armed again.
+   * Pausing leaves `nextRunAt` as it is: the scheduler only fires active jobs.
    *
    * Body: `{ status: "active" | "paused" }` (unknown fields are rejected).
    *
@@ -2751,6 +2752,7 @@ export function pluginRoutes(
    * - 400 if the body is invalid
    * - 403 if the caller is not an instance admin
    * - 404 if the plugin or job is not found
+   * - 422 if resuming a job whose schedule cannot produce a next run
    * - 501 if job scheduling is not enabled
    */
   router.patch("/plugins/:pluginId/jobs/:jobId", async (req, res) => {
@@ -2786,8 +2788,22 @@ export function pluginRoutes(
       return;
     }
 
+    async function activateOrReject(id: string): Promise<void> {
+      try {
+        await jobDeps!.scheduler.activateJob(id);
+      } catch (err) {
+        if (err instanceof PluginJobScheduleError) throw unprocessable(err.message);
+        throw err;
+      }
+    }
+
     const previousStatus = job.status;
     if (previousStatus === requestedStatus) {
+      if (requestedStatus === "active") {
+        // Idempotent repair: an active job left with a null nextRunAt (for
+        // example by a failed earlier resume) is armed again.
+        await activateOrReject(job.id);
+      }
       res.json({
         jobId: job.id,
         jobKey: job.jobKey,
@@ -2798,11 +2814,13 @@ export function pluginRoutes(
       return;
     }
 
-    await jobDeps.jobStore.updateJobStatus(job.id, requestedStatus);
     if (requestedStatus === "active") {
-      // Resuming must also arm the schedule: the scheduler tick ignores a
-      // null `nextRunAt`, and a stale one is recomputed rather than replayed.
-      await jobDeps.scheduler.scheduleJob(job.id);
+      // Computes nextRunAt first and writes status + nextRunAt together, so a
+      // scheduler tick never sees an active job with a stale pointer. A
+      // failure leaves the job paused.
+      await activateOrReject(job.id);
+    } else {
+      await jobDeps.jobStore.updateJobStatus(job.id, requestedStatus);
     }
     await logPluginMutationActivity(req, "plugin.job_status_changed", job.id, {
       pluginId: plugin.id,

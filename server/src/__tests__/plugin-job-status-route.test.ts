@@ -51,7 +51,7 @@ function makeJobDeps(job: Record<string, unknown> | null) {
     getJobByIdForPlugin: vi.fn().mockResolvedValue(job),
     updateJobStatus: vi.fn().mockResolvedValue(undefined),
   };
-  const scheduler = { scheduleJob: vi.fn().mockResolvedValue(undefined) };
+  const scheduler = { activateJob: vi.fn().mockResolvedValue(undefined) };
   return { jobStore, scheduler, jobDeps: { scheduler, jobStore } };
 }
 
@@ -108,15 +108,11 @@ describe.sequential("PATCH /plugins/:pluginId/jobs/:jobId", { timeout: 30_000 },
       previousStatus: "paused",
       changed: true,
     });
-    expect(jobStore.updateJobStatus).toHaveBeenCalledTimes(1);
-    // The schedule pointer is initialized after the status write, so a job
-    // whose nextRunAt is null or stale actually fires again.
-    expect(scheduler.scheduleJob).toHaveBeenCalledTimes(1);
-    expect(scheduler.scheduleJob).toHaveBeenCalledWith("job-1");
-    expect(jobStore.updateJobStatus.mock.invocationCallOrder[0]).toBeLessThan(
-      scheduler.scheduleJob.mock.invocationCallOrder[0] as number,
-    );
-    expect(jobStore.updateJobStatus).toHaveBeenCalledWith("job-1", "active");
+    // Resume goes through the scheduler, which writes status and nextRunAt
+    // together; the route does not flip the status separately first.
+    expect(scheduler.activateJob).toHaveBeenCalledTimes(1);
+    expect(scheduler.activateJob).toHaveBeenCalledWith("job-1");
+    expect(jobStore.updateJobStatus).not.toHaveBeenCalled();
     expect(mockLogActivity).toHaveBeenCalledTimes(1);
     expect(mockLogActivity.mock.calls[0]?.[1]).toMatchObject({
       companyId: companyA,
@@ -141,7 +137,7 @@ describe.sequential("PATCH /plugins/:pluginId/jobs/:jobId", { timeout: 30_000 },
 
     expect(res.status).toBe(200);
     // Pausing keeps nextRunAt as it is (the tick only fires active jobs).
-    expect(scheduler.scheduleJob).not.toHaveBeenCalled();
+    expect(scheduler.activateJob).not.toHaveBeenCalled();
     expect(res.body).toMatchObject({ status: "paused", previousStatus: "active", changed: true });
     expect(jobStore.updateJobStatus).toHaveBeenCalledWith("job-1", "paused");
     expect(mockLogActivity).toHaveBeenCalledTimes(1);
@@ -154,7 +150,7 @@ describe.sequential("PATCH /plugins/:pluginId/jobs/:jobId", { timeout: 30_000 },
     const res = await request(app).patch(url).send({ status: "paused" });
 
     expect(res.status).toBe(200);
-    expect(scheduler.scheduleJob).not.toHaveBeenCalled();
+    expect(scheduler.activateJob).not.toHaveBeenCalled();
     expect(res.body).toEqual({
       jobId: "job-1",
       jobKey: "sync.example",
@@ -163,6 +159,42 @@ describe.sequential("PATCH /plugins/:pluginId/jobs/:jobId", { timeout: 30_000 },
       changed: false,
     });
     expect(jobStore.updateJobStatus).not.toHaveBeenCalled();
+    expect(mockLogActivity).not.toHaveBeenCalled();
+  });
+
+  it("re-arms an already-active job (idempotent repair) without a status write or audit entry", async () => {
+    const { jobStore, scheduler, jobDeps } = makeJobDeps({ ...pausedJob, status: "active" });
+    const app = await createApp(adminActor(), jobDeps);
+
+    const res = await request(app).patch(url).send({ status: "active" });
+
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ status: "active", previousStatus: "active", changed: false });
+    expect(scheduler.activateJob).toHaveBeenCalledWith("job-1");
+    expect(jobStore.updateJobStatus).not.toHaveBeenCalled();
+    expect(mockLogActivity).not.toHaveBeenCalled();
+  });
+
+  it("returns 422 and writes no audit entry when the schedule cannot be armed", async () => {
+    const { PluginJobScheduleError } = await import("../services/plugin-job-scheduler.js");
+    const { scheduler, jobDeps } = makeJobDeps(pausedJob);
+    scheduler.activateJob.mockRejectedValueOnce(new PluginJobScheduleError("never runs"));
+    const app = await createApp(adminActor(), jobDeps);
+
+    const res = await request(app).patch(url).send({ status: "active" });
+
+    expect(res.status).toBe(422);
+    expect(mockLogActivity).not.toHaveBeenCalled();
+  });
+
+  it("returns an error, not success, when arming throws", async () => {
+    const { scheduler, jobDeps } = makeJobDeps(pausedJob);
+    scheduler.activateJob.mockRejectedValueOnce(new Error("db down"));
+    const app = await createApp(adminActor(), jobDeps);
+
+    const res = await request(app).patch(url).send({ status: "active" });
+
+    expect(res.status).toBe(500);
     expect(mockLogActivity).not.toHaveBeenCalled();
   });
 

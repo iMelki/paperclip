@@ -290,10 +290,26 @@ export function pluginJobStore(db: Db) {
     async updateJobStatus(
       jobId: string,
       status: JobDefinitionStatus,
+      options?: { nextRunAt?: Date | null },
     ): Promise<void> {
+      // One UPDATE: a resume sets status and the armed pointer atomically.
       await db
         .update(pluginJobs)
-        .set({ status, updatedAt: new Date() })
+        .set({
+          status,
+          updatedAt: new Date(),
+          ...(options?.nextRunAt !== undefined ? { nextRunAt: options.nextRunAt } : {}),
+        })
+        .where(eq(pluginJobs.id, jobId));
+    },
+
+    /**
+     * Set only `nextRunAt` (leaves `lastRunAt` and `status` untouched).
+     */
+    async updateNextRunAt(jobId: string, nextRunAt: Date | null): Promise<void> {
+      await db
+        .update(pluginJobs)
+        .set({ nextRunAt, updatedAt: new Date() })
         .where(eq(pluginJobs.id, jobId));
     },
 

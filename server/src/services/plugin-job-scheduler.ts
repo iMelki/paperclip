@@ -183,16 +183,23 @@ export interface PluginJobScheduler {
   unregisterPlugin(pluginId: string): Promise<void>;
 
   /**
-   * Initialize the schedule pointer (`nextRunAt`) of one active job.
+   * Set a job to `active` (resume) and arm its schedule in one write.
    *
-   * Used when a paused job is resumed: a null or already-past `nextRunAt` is
-   * recomputed from the job's cron schedule (same rule as
-   * {@link registerPlugin}); a future value is kept. No-op for a missing or
-   * non-active job.
+   * For a paused/failed job whose `nextRunAt` is null or already past, the
+   * next run is computed from the cron schedule FIRST and stored together
+   * with the status flip, so a scheduler tick can never see an active job with
+   * a stale pointer (a missed run is skipped, not replayed). A future
+   * `nextRunAt` is kept; a manual-only job (no schedule) is just activated.
+   *
+   * For a job that is already `active` with a null `nextRunAt` it repairs the
+   * pointer (idempotent retry after a failed resume). `lastRunAt` is never
+   * touched.
    *
    * @param jobId - UUID of the job
+   * @throws {PluginJobScheduleError} if the schedule is invalid or can never
+   *   produce a next run; the job status is left unchanged
    */
-  scheduleJob(jobId: string): Promise<void>;
+  activateJob(jobId: string): Promise<void>;
 
   /**
    * Manually trigger a specific job (outside of the cron schedule).
@@ -252,6 +259,14 @@ export interface PluginJobScheduler {
  * scheduler.stop();
  * ```
  */
+/** A job's schedule cannot be armed (invalid cron, or no future occurrence). */
+export class PluginJobScheduleError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "PluginJobScheduleError";
+  }
+}
+
 export function createPluginJobScheduler(
   options: PluginJobSchedulerOptions,
 ): PluginJobScheduler {
@@ -840,16 +855,42 @@ export function createPluginJobScheduler(
     }
   }
 
-  /**
-   * Initialize the schedule pointer of a single job (used when a paused job
-   * is resumed). Does nothing for a missing or non-active job.
-   */
-  async function scheduleJob(jobId: string): Promise<void> {
+  async function activateJob(jobId: string): Promise<void> {
     const job = await jobStore.getJobById(jobId);
-    if (!job || job.status !== "active") {
-      return;
+    if (!job) {
+      throw new Error(`Job not found: ${jobId}`);
     }
-    await ensureNextRunTimestamp(job);
+
+    const alreadyActive = job.status === "active";
+    const hasFutureRun = !!job.nextRunAt && job.nextRunAt.getTime() > Date.now();
+    // An active job with a past pointer is simply due and runs on the next
+    // tick; only a null pointer leaves it stuck, so only that is repaired.
+    const needsArming = !!job.schedule
+      && (alreadyActive ? job.nextRunAt === null : !hasFutureRun);
+
+    let nextRunAt: Date | undefined;
+    if (needsArming) {
+      const schedule = job.schedule as string;
+      const validationError = validateCron(schedule);
+      if (validationError) {
+        throw new PluginJobScheduleError(
+          `Job "${job.jobKey}" has an invalid cron schedule: ${validationError}`,
+        );
+      }
+      const next = nextCronTick(parseCron(schedule), new Date());
+      if (!next) {
+        throw new PluginJobScheduleError(
+          `Job "${job.jobKey}" schedule "${schedule}" never produces a next run`,
+        );
+      }
+      nextRunAt = next;
+    }
+
+    if (!alreadyActive) {
+      await jobStore.updateJobStatus(jobId, "active", nextRunAt ? { nextRunAt } : undefined);
+    } else if (nextRunAt) {
+      await jobStore.updateNextRunAt(jobId, nextRunAt);
+    }
   }
 
   // -----------------------------------------------------------------------
@@ -967,7 +1008,7 @@ export function createPluginJobScheduler(
     stop,
     registerPlugin,
     unregisterPlugin,
-    scheduleJob,
+    activateJob,
     triggerJob,
     tick,
     diagnostics,
