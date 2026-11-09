@@ -11,31 +11,35 @@ const execFileAsync = promisify(execFile);
 const LSOF_CALL_TIMEOUT_MS = 1_000;
 
 /**
- * Ceiling for every `lsof` invocation inside one runtime-service start.
+ * Ceiling for the time spent in `lsof` inside one runtime-service start.
  * Each call is still capped at {@link LSOF_CALL_TIMEOUT_MS}, and the calls
  * share this budget so a 32-port scan cannot spend 32 seconds in `lsof`.
+ * Only time spent inside `lsof` is charged: a slow provision or readiness
+ * wait must not use up the budget, or a later ownership read on macOS
+ * (where there is no /proc fallback) would return null for a healthy child.
  */
 export const PORT_OWNER_INSPECTION_BUDGET_MS = 2_000;
 
-type PortOwnerInspectionScope = { deadline: number };
+type PortOwnerInspectionScope = { remainingMs: number };
 let portOwnerInspectionScope: PortOwnerInspectionScope | null = null;
 
 export async function withPortOwnerInspectionBudget<T>(budgetMs: number, work: () => Promise<T>): Promise<T> {
   const previous = portOwnerInspectionScope;
-  const deadline = Date.now() + budgetMs;
-  portOwnerInspectionScope = {
-    deadline: previous ? Math.min(previous.deadline, deadline) : deadline,
-  };
+  const initialMs = previous ? Math.min(previous.remainingMs, budgetMs) : budgetMs;
+  const scope: PortOwnerInspectionScope = { remainingMs: initialMs };
+  portOwnerInspectionScope = scope;
   try {
     return await work();
   } finally {
     portOwnerInspectionScope = previous;
+    // Time a nested scope spent in lsof also counts against the outer scope.
+    if (previous) previous.remainingMs = Math.max(0, previous.remainingMs - (initialMs - scope.remainingMs));
   }
 }
 
-function remainingLsofTimeoutMs() {
-  if (!portOwnerInspectionScope) return LSOF_CALL_TIMEOUT_MS;
-  return Math.max(0, Math.min(LSOF_CALL_TIMEOUT_MS, portOwnerInspectionScope.deadline - Date.now()));
+function remainingLsofTimeoutMs(scope: PortOwnerInspectionScope | null) {
+  if (!scope) return LSOF_CALL_TIMEOUT_MS;
+  return Math.max(0, Math.min(LSOF_CALL_TIMEOUT_MS, scope.remainingMs));
 }
 const taskkillCommand = path.join(process.env.SystemRoot ?? "C:\\Windows", "System32", "taskkill.exe");
 const windowsPowerShellCommand = path.join(
@@ -1273,8 +1277,10 @@ export async function readLocalServicePortOwner(port: number) {
       return null;
     }
   }
-  const lsofTimeoutMs = remainingLsofTimeoutMs();
+  const inspectionScope = portOwnerInspectionScope;
+  const lsofTimeoutMs = remainingLsofTimeoutMs(inspectionScope);
   if (lsofTimeoutMs > 0) {
+    const lsofStartedAt = Date.now();
     try {
       // lsof can stall on a busy runner. A hung lookup turns a bind retry into a
       // test-length wait, so give up and let /proc (or "unknown") decide.
@@ -1292,6 +1298,10 @@ export async function readLocalServicePortOwner(port: number) {
       if (firstPid) return firstPid;
     } catch {
       // Fall through to the Linux procfs read when lsof is missing, slow, or empty.
+    } finally {
+      if (inspectionScope) {
+        inspectionScope.remainingMs = Math.max(0, inspectionScope.remainingMs - (Date.now() - lsofStartedAt));
+      }
     }
   }
   if (process.platform === "linux") {
