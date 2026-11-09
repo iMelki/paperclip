@@ -42,8 +42,10 @@ function fixture(initialPlan?: PluginJobDispatchPlan) {
       if (["pending", "queued", "running"].includes(row.status)) Object.assign(row, value);
     }),
     updateRunTimestamps: vi.fn(async () => undefined),
+    // No manifest in this fixture declares the legacy `scope: "company"` fan-out.
+    getJobDeclarationScope: vi.fn(async () => "instance" as const),
   };
-  const worker = { isRunning: vi.fn(() => true), call: vi.fn(async (..._args: unknown[]) => undefined) };
+  const worker = { isRunning: vi.fn(() => true), getProactiveCompanyScopes: vi.fn(() => []), call: vi.fn(async (..._args: unknown[]) => undefined) };
   const resolve = vi.fn(async () => plan!);
   const scheduler = createPluginJobScheduler({ db: db as never, jobStore: store as never,
     workerManager: worker as never, jobTimeoutMs: 10000,

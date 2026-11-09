@@ -38,7 +38,7 @@ export function selectPluginJobCompanies(
   requestedCompanyId?: string,
 ): Array<string | null> {
   if (plan.scope === "instance") {
-    if (requestedCompanyId !== undefined) throw new Error("Instance-scoped jobs cannot be triggered for one company");
+    if (requestedCompanyId !== undefined) throw new Error("Job is instance-scoped and cannot be triggered for one company");
     return [null];
   }
   if (plan.scope !== "company" || plan.companyIds.length === 0) {
