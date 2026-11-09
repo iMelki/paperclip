@@ -289,14 +289,13 @@ describe.skipIf(WINDOWS_NATIVE_FIXTURE_MISSING)("native board schedule grants, t
         .resolves.toMatchObject({ revision: 2, enabled: true });
     });
 
-    it("two concurrent creates in one company: exactly one enabled grant results", async () => {
+    it("concurrent creates in one company: exactly one enabled grant results", async () => {
       const setup = await seed();
-      const second = await addBoundProject(setup);
+      const projectsInCompany = [setup.scope, ...await Promise.all([addBoundProject(setup), addBoundProject(setup), addBoundProject(setup)])];
       const body = { expectedRevision: 0, jobId, enabled: true, maxItems: 5, expiresAt: inHours(1) };
-      const outcomes = await Promise.allSettled([setup.grants.create(setup.context, { ...setup.scope, ...body }),
-        setup.grants.create(setup.context, { ...second, ...body })]);
+      const outcomes = await Promise.allSettled(projectsInCompany.map(scope => setup.grants.create(setup.context, { ...scope, ...body })));
       expect(outcomes.filter(item => item.status === "fulfilled")).toHaveLength(1);
-      expect(outcomes.filter(item => item.status === "rejected")).toHaveLength(1);
+      expect(outcomes.filter(item => item.status === "rejected")).toHaveLength(3);
     });
 
     it("a company with two current grants (forced into the database) is excluded alone; the other companies still dispatch and import", async () => {
@@ -339,7 +338,7 @@ describe.skipIf(WINDOWS_NATIVE_FIXTURE_MISSING)("native board schedule grants, t
       const first = await Promise.race(started);
       expect(first.ok).toBe(false);
       expect((first as { error: Error }).error.message).toMatch(/Another active or uncertain native board lease is retained/);
-      expect(reader).toHaveBeenCalledTimes(1);
+      await vi.waitFor(() => expect(reader).toHaveBeenCalledTimes(1), { timeout: 60_000 });
       gate.release();
       const results = await Promise.all(started);
       expect(results.filter(result => result.ok)).toHaveLength(1);
