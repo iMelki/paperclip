@@ -35,6 +35,11 @@ const SECRET_TEXT_HINTS = [
   "private",
   "cookie",
   "connectionstring",
+  // Keep in step with SECRET_FIELD_NAME_PATTERN: browser_code / login_url
+  // carry neither an earlier hint nor a period, so without these the fast
+  // path would return a login code unredacted.
+  "browser",
+  "login",
   "sk-",
   "ghp_",
   "gho_",
