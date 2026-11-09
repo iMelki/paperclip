@@ -61,8 +61,6 @@ export interface CreateJobRunInput {
   jobId: string;
   /** FK to the plugins row. */
   pluginId: string;
-  /** Exact host-selected tenant, absent/null only for an instance run. */
-  companyId?: string | null;
   /** What triggered this run. */
   trigger: PluginJobRunTrigger;
   /** Company scope of this run; omit or `null` for an instance-level run. */
