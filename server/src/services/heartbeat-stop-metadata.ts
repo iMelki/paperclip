@@ -1,6 +1,7 @@
 import {
   adapterDefaultTimeoutSec,
   resolveAdapterTimeoutSec,
+  resolvePaperclipRunnerTimeoutMs,
   resolveHttpAdapterTimeout,
 } from "@paperclipai/adapter-utils/adapter-timeout";
 
@@ -67,6 +68,17 @@ export function resolveHeartbeatRunTimeoutPolicy(
     configured: config.timeoutSec,
     adapterDefaultSec: adapterDefaultTimeoutSec(adapterType),
   });
+
+  if (adapterType === "paperclip_runner") {
+    // The runner coordinator accepts only 1s to 24h, so report the timeout it
+    // actually enforces rather than the raw configured or env value.
+    const timeoutMs = resolvePaperclipRunnerTimeoutMs({ configured: config.timeoutSec });
+    return {
+      effectiveTimeoutSec: timeoutMs / 1000,
+      timeoutConfigured: resolved.source === "configured",
+      timeoutSource: heartbeatTimeoutSource(resolved.source),
+    };
+  }
 
   return {
     effectiveTimeoutSec: resolved.timeoutSec,

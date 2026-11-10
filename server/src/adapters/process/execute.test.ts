@@ -183,7 +183,7 @@ describe("buildProcessExecutionContextEnv", () => {
     expect(payload.custom).toBe("forwarded");
   });
 
-  async function runHangingProcess(timeoutSec: number): Promise<{ timedOut: boolean; pid: number }> {
+  async function runHangingProcess(timeoutSec: number): Promise<{ timedOut: boolean; pid: number; aliveAfterRun: boolean }> {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-process-timeout-"));
     const pidFile = path.join(root, "pid");
     const previous = process.env.PAPERCLIP_ADAPTER_TIMEOUT_SEC;
@@ -220,14 +220,17 @@ describe("buildProcessExecutionContextEnv", () => {
         onLog: async () => {},
       });
       const pid = Number.parseInt(await fs.readFile(pidFile, "utf8"), 10);
-      if (isPidAlive(pid)) {
+      // Read liveness before the cleanup below, so the assertion sees what the
+      // adapter did and not the helper's own SIGKILL.
+      const aliveAfterRun = isPidAlive(pid);
+      if (aliveAfterRun) {
         try {
           process.kill(pid, "SIGKILL");
         } catch {
           // already gone
         }
       }
-      return { timedOut: result.timedOut, pid };
+      return { timedOut: result.timedOut, pid, aliveAfterRun };
     } finally {
       if (previous === undefined) delete process.env.PAPERCLIP_ADAPTER_TIMEOUT_SEC;
       else process.env.PAPERCLIP_ADAPTER_TIMEOUT_SEC = previous;
@@ -238,12 +241,12 @@ describe("buildProcessExecutionContextEnv", () => {
   it("terminates the child when a positive timeoutSec elapses", async () => {
     const result = await runHangingProcess(0.2);
     expect(result.timedOut).toBe(true);
-    expect(isPidAlive(result.pid)).toBe(false);
+    expect(result.aliveAfterRun).toBe(false);
   });
 
   it("terminates the child when timeoutSec is 0 by using the env default", async () => {
     const result = await runHangingProcess(0);
     expect(result.timedOut).toBe(true);
-    expect(isPidAlive(result.pid)).toBe(false);
+    expect(result.aliveAfterRun).toBe(false);
   });
 });

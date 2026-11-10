@@ -5,6 +5,7 @@ import type {
 } from "@paperclipai/adapter-utils";
 import {
   ADAPTER_DEFAULT_TIMEOUT_SEC,
+  MAX_ADAPTER_TIMEOUT_MS,
   resolveAdapterTimeoutSec,
 } from "@paperclipai/adapter-utils/adapter-timeout";
 import {
@@ -1327,7 +1328,9 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         const waitPayload = await client.request<Record<string, unknown>>(
           "agent.wait",
           { runId: acceptedRunId, timeoutMs: waitTimeoutMs },
-          { timeoutMs: waitTimeoutMs + connectTimeoutMs },
+          // setTimeout fires at once above 2^31-1 ms, so a long override must not
+          // push the composed request timer past that limit.
+          { timeoutMs: Math.min(waitTimeoutMs + connectTimeoutMs, MAX_ADAPTER_TIMEOUT_MS) },
         );
 
         latestResultPayload = waitPayload;

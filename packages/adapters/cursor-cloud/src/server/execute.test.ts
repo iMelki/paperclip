@@ -402,6 +402,28 @@ describe("cursor_cloud execute", () => {
     expect(result.sessionParams).not.toHaveProperty("latestRunId");
   });
 
+  it("does not wait forever on an event stream that never closes after the run result arrived", async () => {
+    const run = {
+      ...createMockRun({ id: "run-open-stream", agentId: "agent-open-stream" }),
+      async *stream() {
+        await new Promise(() => {});
+        yield undefined as never;
+      },
+    };
+    createMock.mockResolvedValue(createMockSdkAgent({ agentId: "agent-open-stream", sendRun: run }));
+    const ctx = createContext();
+    ctx.config.timeoutSec = 0.2;
+
+    const result = await Promise.race([
+      execute(ctx),
+      new Promise<never>((_, reject) => setTimeout(() => reject(new Error("execute hung on the open stream")), 3_000)),
+    ]);
+
+    expect(result.timedOut).toBe(false);
+    expect(result.exitCode).toBe(0);
+    expect(ctx.logs.some((entry) => entry.chunk.includes("event stream for run-open-stream was still open"))).toBe(true);
+  });
+
   it("returns the timeout when Cursor cancel never settles", async () => {
     const hungRun = {
       ...createMockRun({ id: "run-cancel-hang", agentId: "agent-cancel-hang" }),

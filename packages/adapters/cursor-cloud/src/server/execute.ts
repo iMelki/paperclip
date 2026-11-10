@@ -12,6 +12,7 @@ import {
 import type { AdapterExecutionContext, AdapterExecutionResult, AdapterInvocationMeta } from "@paperclipai/adapter-utils";
 import {
   ADAPTER_DEFAULT_TIMEOUT_SEC,
+  MAX_ADAPTER_TIMEOUT_MS,
   resolveAdapterTimeoutSec,
 } from "@paperclipai/adapter-utils/adapter-timeout";
 import {
@@ -407,6 +408,32 @@ async function streamRun(run: Run, onLog: AdapterExecutionContext["onLog"]) {
   }
 }
 
+/**
+ * Waits for the event stream to finish after the run result arrived, but only
+ * until the same wall-clock deadline (at least a short grace period, never longer than the timeout itself). A stream
+ * that never closes must not keep the heartbeat alive once the run is done.
+ * Returns false when the stream was still open at the deadline.
+ */
+const STREAM_DRAIN_GRACE_MS = 5_000;
+
+async function drainStreamWithinDeadline(
+  streamPromise: Promise<void>,
+  startedAtMs: number,
+  timeoutSec: number,
+): Promise<boolean> {
+  const timeoutMs = timeoutSec * 1000;
+  const remainingMs = Math.max(Math.min(STREAM_DRAIN_GRACE_MS, timeoutMs), timeoutMs - (Date.now() - startedAtMs));
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const expired = new Promise<false>((resolve) => {
+    timer = setTimeout(() => resolve(false), Math.min(remainingMs, MAX_ADAPTER_TIMEOUT_MS));
+  });
+  try {
+    return await Promise.race([streamPromise.then(() => true as const), expired]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 async function getAttachedRun(input: {
   apiKey: string;
   session: CursorCloudSession | null;
@@ -591,6 +618,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       const priorStreamPromise = streamRun(attachedRun, onLog).catch((err) => {
         streamError = formatRunError(err);
       });
+      const priorStartedAt = Date.now();
       if (attachedRun.supports("wait")) {
         const waited = await waitForCursorRun(attachedRun, timeoutSec);
         if (waited.timedOut) {
@@ -606,7 +634,9 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
           });
         }
       }
-      await priorStreamPromise;
+      if (!(await drainStreamWithinDeadline(priorStreamPromise, priorStartedAt, timeoutSec))) {
+        await onLog("stderr", `[cursor-cloud] event stream for ${attachedRun.id} was still open at the deadline; continuing.\n`);
+      }
       streamError = null;
       await emitStatus(
         onLog,
@@ -633,6 +663,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     const streamPromise = streamRun(run, onLog).catch((err) => {
       streamError = formatRunError(err);
     });
+    const startedAt = Date.now();
     const waited = run.supports("wait")
       ? await waitForCursorRun(run, timeoutSec)
       : {
@@ -659,7 +690,9 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       });
     }
     const result = waited.result;
-    await streamPromise;
+    if (!(await drainStreamWithinDeadline(streamPromise, startedAt, timeoutSec))) {
+      await onLog("stderr", `[cursor-cloud] event stream for ${run.id} was still open at the deadline; using the run result.\n`);
+    }
 
     const modelId = result.model?.id ?? model?.id ?? null;
     await onLog("stdout", eventLine({

@@ -40,6 +40,20 @@ describe("heartbeat stop metadata", () => {
     }
   });
 
+  it("reports the timeout the paperclip_runner coordinator enforces, not the raw value", () => {
+    expect(resolveHeartbeatRunTimeoutPolicy("paperclip_runner", { timeoutSec: 0.2 })).toEqual({
+      effectiveTimeoutSec: 1,
+      timeoutConfigured: true,
+      timeoutSource: "config",
+    });
+    expect(resolveHeartbeatRunTimeoutPolicy("paperclip_runner", { timeoutSec: 100_000 })).toEqual({
+      effectiveTimeoutSec: 86_400,
+      timeoutConfigured: true,
+      timeoutSource: "config",
+    });
+    expect(resolveHeartbeatRunTimeoutPolicy("process", { timeoutSec: 100_000 }).effectiveTimeoutSec).toBe(100_000);
+  });
+
   it("records configured timeout policy and timeout stop reason", () => {
     const metadata = buildHeartbeatRunStopMetadata({
       adapterType: "codex_local",
