@@ -606,6 +606,24 @@ export function questionResponseDeliveryService(
       steeringErrorCode = "steering_unsupported";
     }
 
+    // Steering only hands the answer to a turn that is already running. A wake
+    // can start new agent work, so it must honor the interaction's continuation
+    // policy, as the respond route's continuation wakeup did before this outbox:
+    // only `wake_assignee` continues an answered question
+    // (`wake_assignee_on_accept` applies to an accepted interaction). The answer
+    // stays authoritative in the interaction, so the receipt is complete.
+    if (interaction.continuationPolicy !== "wake_assignee") {
+      return recordTerminal({
+        delivery: claimed,
+        interaction,
+        status: "delivered",
+        mode: null,
+        targetRunId: null,
+        adapter,
+        errorCode: "question_response_continuation_disabled",
+      });
+    }
+
     const actor = actorForInteraction(interaction);
     // This is a new, migration-fenced namespace. The partial unique index on
     // agent_wakeup_requests makes the wake transaction itself idempotent, so a
@@ -738,7 +756,14 @@ export function questionResponseDeliveryService(
     const ids = await db.select({ interactionId: issueQuestionResponseDeliveries.interactionId })
       .from(issueQuestionResponseDeliveries)
       .where(eq(issueQuestionResponseDeliveries.status, "pending"))
-      .orderBy(asc(issueQuestionResponseDeliveries.createdAt))
+      // Every attempt advances `updatedAt`, including a suppressed wake that
+      // returns the row to `pending` without consuming its error budget. Ordering
+      // by it rotates attempted rows behind untried ones, so a page of
+      // suppressed responses cannot starve newer ones that need recovery.
+      .orderBy(
+        asc(issueQuestionResponseDeliveries.updatedAt),
+        asc(issueQuestionResponseDeliveries.createdAt),
+      )
       .limit(limit)
       .then((rows) => rows.map((row) => row.interactionId));
     const counts = { scanned: ids.length, steered: 0, coalesced: 0, wakeFallback: 0, failed: 0 };
