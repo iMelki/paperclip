@@ -25,6 +25,14 @@ import {
   questionResponseDeliveryService,
 } from "../services/question-response-delivery.js";
 
+const telemetryMocks = vi.hoisted(() => ({
+  trackDynamic: vi.fn(),
+}));
+
+vi.mock("../telemetry.js", () => ({
+  getTelemetryClient: () => ({ trackDynamic: telemetryMocks.trackDynamic }),
+}));
+
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
 
@@ -57,6 +65,7 @@ describeEmbeddedPostgres("question response delivery", () => {
   }, EMBEDDED_POSTGRES_TEST_SETUP_TIMEOUT_MS);
 
   afterEach(async () => {
+    telemetryMocks.trackDynamic.mockClear();
     await db.delete(issueQuestionResponseDeliveries);
     await db.delete(issueThreadInteractions);
     await db.delete(activityLog);
@@ -321,6 +330,11 @@ describeEmbeddedPostgres("question response delivery", () => {
       const wakeRequests = await db.select().from(agentWakeupRequests)
         .where(eq(agentWakeupRequests.agentId, seeded.agentId));
       expect(wakeRequests).toHaveLength(0);
+      expect(telemetryMocks.trackDynamic).toHaveBeenCalledTimes(1);
+      expect(telemetryMocks.trackDynamic).toHaveBeenCalledWith("question_response.delivery", {
+        adapter: "codex_local",
+        outcome: "skipped_policy",
+      });
     },
   );
 

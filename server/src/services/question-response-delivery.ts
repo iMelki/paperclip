@@ -371,7 +371,9 @@ export function questionResponseDeliveryService(
     if (updated) {
       getTelemetryClient()?.trackDynamic("question_response.delivery", {
         adapter: input.adapter,
-        outcome: input.mode ?? "failed",
+        // A receipt can complete without a runtime delivery (continuation
+        // disabled by policy); only a failed status is a delivery failure.
+        outcome: input.mode ?? (input.status === "failed" ? "failed" : "skipped_policy"),
       });
     }
     return {
