@@ -16,6 +16,15 @@ export const PAPERCLIP_ADAPTER_TIMEOUT_SEC_ENV = "PAPERCLIP_ADAPTER_TIMEOUT_SEC"
  */
 export const DEFAULT_ADAPTER_TIMEOUT_SEC = 14_400;
 
+/**
+ * Longest wall-clock timeout any adapter timer accepts. setTimeout treats a
+ * delay above 2^31-1 ms (about 24.8 days) as 1 ms and fires at once, so an
+ * operator who sets a huge timeoutSec or PAPERCLIP_ADAPTER_TIMEOUT_SEC to mean
+ * "very long" would otherwise kill every run immediately.
+ */
+export const MAX_ADAPTER_TIMEOUT_MS = 2_147_483_647;
+export const MAX_ADAPTER_TIMEOUT_SEC = Math.floor(MAX_ADAPTER_TIMEOUT_MS / 1_000);
+
 export const PAPERCLIP_RUNNER_MIN_TIMEOUT_MS = 1_000;
 export const PAPERCLIP_RUNNER_MAX_TIMEOUT_MS = 24 * 60 * 60 * 1_000;
 
@@ -85,17 +94,18 @@ export function resolveAdapterTimeoutSec(input: {
   adapterDefaultSec: number;
   env?: EnvLike;
 }): AdapterTimeoutResolution {
+  const clamp = (seconds: number) => Math.min(seconds, MAX_ADAPTER_TIMEOUT_SEC);
   const configured = readPositiveTimeoutSec(input.configured);
   if (configured != null) {
-    return { timeoutSec: configured, source: "configured" };
+    return { timeoutSec: clamp(configured), source: "configured" };
   }
   const envTimeout = readEnvTimeoutSec(input.env ?? process.env);
   if (envTimeout != null) {
-    return { timeoutSec: envTimeout, source: "env" };
+    return { timeoutSec: clamp(envTimeout), source: "env" };
   }
   const adapterDefault = readPositiveTimeoutSec(input.adapterDefaultSec);
   return {
-    timeoutSec: adapterDefault ?? DEFAULT_ADAPTER_TIMEOUT_SEC,
+    timeoutSec: clamp(adapterDefault ?? DEFAULT_ADAPTER_TIMEOUT_SEC),
     source: "adapter_default",
   };
 }
@@ -125,11 +135,11 @@ export function resolveHttpAdapterTimeout(input: {
 }): HttpAdapterTimeoutResolution {
   const timeoutSec = readPositiveTimeoutSec(input.timeoutSec);
   if (timeoutSec != null) {
-    return { timeoutMs: timeoutSec * 1000, source: "configured" };
+    return { timeoutMs: Math.min(timeoutSec * 1000, MAX_ADAPTER_TIMEOUT_MS), source: "configured" };
   }
   const timeoutMs = readPositiveTimeoutSec(input.timeoutMs);
   if (timeoutMs != null) {
-    return { timeoutMs, source: "configured" };
+    return { timeoutMs: Math.min(timeoutMs, MAX_ADAPTER_TIMEOUT_MS), source: "configured" };
   }
   const resolved = resolveAdapterTimeoutSec({
     configured: undefined,

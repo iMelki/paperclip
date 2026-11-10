@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
   ADAPTER_DEFAULT_TIMEOUT_SEC,
+  MAX_ADAPTER_TIMEOUT_MS,
+  MAX_ADAPTER_TIMEOUT_SEC,
   DEFAULT_ADAPTER_TIMEOUT_SEC,
   PAPERCLIP_RUNNER_MAX_TIMEOUT_MS,
   resolveAdapterTimeoutSec,
@@ -126,5 +128,44 @@ describe("resolvePaperclipRunnerTimeoutMs", () => {
     expect(resolvePaperclipRunnerTimeoutMs({ configured: 100_000, env: EMPTY_ENV })).toBe(
       PAPERCLIP_RUNNER_MAX_TIMEOUT_MS,
     );
+  });
+});
+
+describe("timeout upper bound", () => {
+  it("never resolves above what setTimeout can hold", () => {
+    expect(MAX_ADAPTER_TIMEOUT_SEC * 1_000).toBeLessThanOrEqual(MAX_ADAPTER_TIMEOUT_MS);
+    for (const [configured, env, source] of [
+      [31_536_000, EMPTY_ENV, "configured"],
+      [99_999_999_999, EMPTY_ENV, "configured"],
+      [0, { PAPERCLIP_ADAPTER_TIMEOUT_SEC: "99999999" }, "env"],
+    ] as const) {
+      const resolved = resolveAdapterTimeoutSec({
+        configured,
+        adapterDefaultSec: ADAPTER_DEFAULT_TIMEOUT_SEC.claude_local,
+        env,
+      });
+      expect(resolved.source).toBe(source);
+      expect(resolved.timeoutSec).toBeLessThanOrEqual(MAX_ADAPTER_TIMEOUT_SEC);
+      expect(resolved.timeoutSec * 1_000).toBeLessThanOrEqual(MAX_ADAPTER_TIMEOUT_MS);
+    }
+  });
+
+  it("keeps an ordinary long timeout as configured", () => {
+    expect(
+      resolveAdapterTimeoutSec({
+        configured: 86_400,
+        adapterDefaultSec: ADAPTER_DEFAULT_TIMEOUT_SEC.claude_local,
+        env: EMPTY_ENV,
+      }),
+    ).toEqual({ timeoutSec: 86_400, source: "configured" });
+  });
+
+  it("bounds the http adapter timeout in milliseconds too", () => {
+    expect(
+      resolveHttpAdapterTimeout({ timeoutSec: 99_999_999, timeoutMs: undefined, env: EMPTY_ENV }).timeoutMs,
+    ).toBe(MAX_ADAPTER_TIMEOUT_MS);
+    expect(
+      resolveHttpAdapterTimeout({ timeoutSec: 0, timeoutMs: 9_999_999_999, env: EMPTY_ENV }).timeoutMs,
+    ).toBe(MAX_ADAPTER_TIMEOUT_MS);
   });
 });
