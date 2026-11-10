@@ -66,6 +66,7 @@ import {
   normalizeIssueIdentifier as normalizeIssueReferenceIdentifier,
 } from "@paperclipai/shared";
 import { conflict, HttpError, notFound, unprocessable } from "../errors.js";
+import { resolveStoredResponsibleUserId } from "./company-actor-user.js";
 import { isForeignKeyViolation } from "../db-errors.js";
 import { logger } from "../middleware/logger.js";
 import { parseObject } from "../adapters/utils.js";
@@ -409,13 +410,29 @@ async function resolveCommentResponsibleUserId(
   actorResponsibleUserId: string | null | undefined,
 ): Promise<string | null> {
   const actorValue = actorResponsibleUserId?.trim() || null;
-  if (actorValue) return actorValue;
-  if (!createdByRunId) return null;
-  return dbOrTx
-    .select({ responsibleUserId: heartbeatRuns.responsibleUserId })
-    .from(heartbeatRuns)
-    .where(and(eq(heartbeatRuns.id, createdByRunId), eq(heartbeatRuns.companyId, companyId)))
-    .then((rows: Array<{ responsibleUserId: string | null }>) => rows[0]?.responsibleUserId?.trim() || null);
+  const storedValue = actorValue
+    ? actorValue
+    : createdByRunId
+      ? await dbOrTx
+        .select({ responsibleUserId: heartbeatRuns.responsibleUserId })
+        .from(heartbeatRuns)
+        .where(and(eq(heartbeatRuns.id, createdByRunId), eq(heartbeatRuns.companyId, companyId)))
+        .then((rows: Array<{ responsibleUserId: string | null }>) => rows[0]?.responsibleUserId?.trim() || null)
+      : null;
+  if (!storedValue) return null;
+
+  const resolved = await resolveStoredResponsibleUserId(dbOrTx, companyId, storedValue);
+  if (!resolved) {
+    logger.error(
+      { companyId },
+      "responsible user is not an existing user; issue comment was not saved",
+    );
+    throw unprocessable(
+      "Responsible user is not an existing user. The comment was not saved.",
+      { code: "responsible_user_unresolved", companyId },
+    );
+  }
+  return resolved;
 }
 
 function withAgentCommentAuthorizationMetadata(

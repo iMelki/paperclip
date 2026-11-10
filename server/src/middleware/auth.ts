@@ -25,6 +25,7 @@ import { isUuidLike, normalizeAgentApiKeyScope, type DeploymentMode } from "@pap
 import type { BetterAuthSessionResult } from "../auth/better-auth.js";
 import { logger } from "./logger.js";
 import { boardAuthService } from "../services/board-auth.js";
+import { isBuiltInBundleActorUserId, resolveEligibleCompanyActorUserId } from "../services/company-actor-user.js";
 
 const CLOUD_TENANT_WRITE_DEBOUNCE_MS = 5_000;
 const CLOUD_TENANT_WRITE_DEBOUNCE_MAX = 1_000;
@@ -127,6 +128,21 @@ async function loadResponsibleUserMemberships(
       ),
   ]);
   return user ? memberships : [];
+}
+
+/**
+ * The built-in sentinel is not a user row. Replace it with an existing company
+ * member when one can be resolved. If none can, keep the sentinel so the
+ * existing responsible-user check still rejects the request.
+ */
+async function coerceBuiltInResponsibleUserId(
+  db: Db,
+  companyId: string,
+  userId: string | null,
+): Promise<string | null> {
+  if (!userId || !isBuiltInBundleActorUserId(userId)) return userId;
+  const resolved = await resolveEligibleCompanyActorUserId(db, companyId);
+  return resolved ?? userId;
 }
 
 /**
@@ -364,13 +380,18 @@ export function actorMiddleware(db: Db, opts: ActorMiddlewareOptions): RequestHa
         return;
       }
 
-      const onBehalfOfUserId = claims.responsible_user_id !== undefined
+      const claimedResponsibleUserId = claims.responsible_user_id !== undefined
         ? normalizeOptionalString(claims.responsible_user_id)
         : await resolveLegacyRunResponsibleUserId(db, {
             companyId: claims.company_id,
             agentId: claims.sub,
             runId: claims.run_id,
           });
+      const onBehalfOfUserId = await coerceBuiltInResponsibleUserId(
+        db,
+        claims.company_id,
+        claimedResponsibleUserId,
+      );
       const onBehalfOfMemberships = await loadResponsibleUserMemberships(db, {
         companyId: claims.company_id,
         userId: onBehalfOfUserId,
@@ -415,8 +436,8 @@ export function actorMiddleware(db: Db, opts: ActorMiddlewareOptions): RequestHa
       return;
     }
 
-    const responsibleUserId = normalizeOptionalString(key.responsibleUserId);
-    if (!responsibleUserId) {
+    const storedResponsibleUserId = normalizeOptionalString(key.responsibleUserId);
+    if (!storedResponsibleUserId) {
       await auditAgentKeyMissingResponsibleUser(db, {
         companyId: key.companyId,
         agentId: key.agentId,
@@ -429,6 +450,11 @@ export function actorMiddleware(db: Db, opts: ActorMiddlewareOptions): RequestHa
       }));
       return;
     }
+    const responsibleUserId = await coerceBuiltInResponsibleUserId(
+      db,
+      key.companyId,
+      storedResponsibleUserId,
+    );
 
     req.actor = {
       type: "agent",
