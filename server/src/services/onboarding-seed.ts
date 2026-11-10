@@ -1,10 +1,11 @@
 import { and, eq, ne, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { agents, companyOnboardingSeeds, goals, issues, projects } from "@paperclipai/db";
+import { agents, approvals, companies, companyOnboardingSeeds, goals, issues, projects } from "@paperclipai/db";
 import type { ApplyOnboardingSeed } from "@paperclipai/shared";
 import { writePaperclipSkillSyncPreference } from "@paperclipai/adapter-utils/server-utils";
 import { findActiveServerAdapter } from "../adapters/registry.js";
 import { agentService } from "./agents.js";
+import { approvalService } from "./approvals.js";
 import { PAPERCLIP_CORE_SKILL_KEYS } from "./company-skills.js";
 import { goalService } from "./goals.js";
 import { projectService } from "./projects.js";
@@ -184,6 +185,7 @@ export function onboardingSeedService(db: Db) {
     dbx: Db,
     companyId: string,
     seed: ApplyOnboardingSeed,
+    audit?: OnboardingSeedAuditActor,
   ): Promise<OnboardingSeedApplication> {
     const agentSvc = agentService(dbx);
     const goalSvc = goalService(dbx);
@@ -232,25 +234,93 @@ export function onboardingSeedService(db: Db) {
     }
 
     // 2. Agent → the customer's first hire, the lead the first task is
-    //    assigned to.
+    //    assigned to. When the company requires board approval, this is a
+    //    pending hire with a hire_agent approval, not an idle CEO.
+    const company = await dbx
+      .select({ requireBoardApprovalForNewAgents: companies.requireBoardApprovalForNewAgents })
+      .from(companies)
+      .where(eq(companies.id, companyId))
+      .then((rows) => rows[0] ?? null);
+    const requiresApproval = company?.requireBoardApprovalForNewAgents === true;
     let agentId = await resolveTargetAgentId(dbx, companyId, existing?.agentId ?? null);
     if (agentName) {
       if (agentId) {
-        await agentSvc.update(agentId, { name: agentName, title: agentRole });
+        const existingAgent = await dbx
+          .select({ status: agents.status })
+          .from(agents)
+          .where(and(eq(agents.id, agentId), eq(agents.companyId, companyId)))
+          .then((rows) => rows[0] ?? null);
+        await agentSvc.update(
+          agentId,
+          { name: agentName, title: agentRole },
+          existingAgent?.status === "pending_approval"
+            ? { allowPendingApprovalConfigUpdate: true }
+            : undefined,
+        );
+        if (existingAgent?.status === "pending_approval") {
+          const openHire = await approvalService(dbx).findOpenHireApprovalForAgent(companyId, agentId);
+          if (openHire) {
+            await dbx
+              .update(approvals)
+              .set({
+                payload: { ...openHire.payload, name: agentName, title: agentRole },
+                updatedAt: new Date(),
+              })
+              .where(and(eq(approvals.id, openHire.id), eq(approvals.companyId, companyId)));
+          }
+        }
       } else {
+        const adapterType = seededAgentAdapterType();
         const created = await agentSvc.create(companyId, {
           name: agentName,
           role: SEEDED_AGENT_ROLE,
           title: agentRole,
-          adapterType: seededAgentAdapterType(),
-          adapterConfig: seededAgentAdapterConfig(seededAgentAdapterType()),
+          adapterType,
+          adapterConfig: seededAgentAdapterConfig(adapterType),
           runtimeConfig: {},
           permissions: {},
-          status: "idle",
+          status: requiresApproval ? "pending_approval" : "idle",
           spentMonthlyCents: 0,
           lastHeartbeatAt: null,
         });
         agentId = created.id;
+        if (requiresApproval) {
+          await approvalService(dbx).create(companyId, {
+            type: "hire_agent",
+            requestedByAgentId: null,
+            requestedByUserId: audit?.actorType === "user" ? audit.actorId : null,
+            status: "pending",
+            payload: {
+              name: created.name,
+              role: created.role,
+              title: created.title,
+              adapterType: created.adapterType,
+              adapterConfig: created.adapterConfig,
+              runtimeConfig: created.runtimeConfig,
+              budgetMonthlyCents: created.budgetMonthlyCents,
+              metadata: created.metadata,
+              agentId: created.id,
+            },
+            decisionNote: null,
+            decidedByUserId: null,
+            decidedAt: null,
+            updatedAt: new Date(),
+          });
+        }
+      }
+    }
+
+    // A pending hire cannot be an assignee. The seed still records the agent
+    // id, and the task stays unassigned until the board approves the hire.
+    let assignableAgentId: string | null = null;
+    if (agentId) {
+      const assignee = await dbx
+        .select({ status: agents.status })
+        .from(agents)
+        .where(and(eq(agents.id, agentId), eq(agents.companyId, companyId)))
+        .then((rows) => rows[0] ?? null);
+      if (assignee && assignee.status !== "pending_approval" && assignee.status !== "terminated") {
+        assignableAgentId = agentId;
       }
     }
 
@@ -285,7 +355,7 @@ export function onboardingSeedService(db: Db) {
             // otherwise the record would report an assignee/goal the issue row
             // does not actually carry. Only set them when resolved, so an
             // absent value never clears an assignment the tenant made.
-            ...(agentId ? { assigneeAgentId: agentId } : {}),
+            ...(assignableAgentId ? { assigneeAgentId: assignableAgentId } : {}),
             ...(goalId ? { goalId } : {}),
           },
           dbx,
@@ -300,7 +370,7 @@ export function onboardingSeedService(db: Db) {
         const created = await issueSvc.create(companyId, {
           title: firstTaskTitle,
           ...(firstTaskDetails ? { description: firstTaskDetails } : {}),
-          ...(agentId ? { assigneeAgentId: agentId } : {}),
+          ...(assignableAgentId ? { assigneeAgentId: assignableAgentId } : {}),
           projectId,
           ...(goalId ? { goalId } : {}),
           status: "todo",
@@ -398,7 +468,7 @@ export function onboardingSeedService(db: Db) {
         sql`select pg_advisory_xact_lock(hashtextextended(${`paperclip:onboarding-seed:${companyId}`}, 0))`,
       );
       const dbx = tx as unknown as Db;
-      const applied = await applyWithin(dbx, companyId, seed);
+      const applied = await applyWithin(dbx, companyId, seed, audit);
 
       if (applied.changed && audit) {
         await logActivity(

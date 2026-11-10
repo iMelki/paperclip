@@ -84,6 +84,10 @@ export function workProductService(db: Db) {
         .map((product) => (product.type === "runtime_service" ? product.runtimeServiceId : null))
         .filter((value): value is string => Boolean(value));
       if (runtimeServiceIds.length === 0) return products;
+      // The foreign key is the service id alone. Match the owning company too,
+      // or a work product that names another company's service id would copy
+      // that service's URL and health into this company's issue.
+      const companyIds = [...new Set(products.map((product) => product.companyId))];
       const liveRuntimeServices = await db
         .select({
           id: workspaceRuntimeServices.id,
@@ -92,7 +96,10 @@ export function workProductService(db: Db) {
           healthStatus: workspaceRuntimeServices.healthStatus,
         })
         .from(workspaceRuntimeServices)
-        .where(inArray(workspaceRuntimeServices.id, [...new Set(runtimeServiceIds)]));
+        .where(and(
+          inArray(workspaceRuntimeServices.id, [...new Set(runtimeServiceIds)]),
+          inArray(workspaceRuntimeServices.companyId, companyIds),
+        ));
       return reconcileRuntimeServiceWorkProducts(products, liveRuntimeServices);
     },
 

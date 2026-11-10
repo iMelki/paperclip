@@ -5,6 +5,8 @@ import { afterEach, expect, it, vi } from "vitest";
 import {
   activityLog,
   agents,
+  approvals,
+  companies,
   companyMemberships,
   companyOnboardingSeeds,
   goals,
@@ -44,6 +46,7 @@ describeEmbeddedPostgres("POST /api/companies/:companyId/onboarding-seed", () =>
   afterEach(async () => {
     await ctx.db.delete(activityLog);
     await ctx.db.delete(companyOnboardingSeeds);
+    await ctx.db.delete(approvals);
     await ctx.db.delete(issues);
     await ctx.db.delete(projects);
     await ctx.db.delete(agents);
@@ -547,5 +550,62 @@ describeEmbeddedPostgres("POST /api/companies/:companyId/onboarding-seed", () =>
     const companyGoals = await ctx.db.select().from(goals).where(eq(goals.companyId, companyId));
     expect(companyIssues[0]?.assigneeAgentId).toBe(companyAgents[0]?.id);
     expect(companyIssues[0]?.goalId).toBe(companyGoals[0]?.id);
+  });
+
+  it("creates an idle CEO and no hire approval when board approval is off", async () => {
+    const { companyId, app } = await seedCompany();
+    await ctx.db
+      .update(companies)
+      .set({ requireBoardApprovalForNewAgents: false })
+      .where(eq(companies.id, companyId));
+
+    const response = await post(app, companyId, SEED);
+
+    expect(response.status).toBe(200);
+    expect(response.body.applied).toBe(true);
+    const companyAgents = await ctx.db.select().from(agents).where(eq(agents.companyId, companyId));
+    expect(companyAgents).toHaveLength(1);
+    expect(companyAgents[0]?.status).toBe("idle");
+    expect(companyAgents[0]?.role).toBe("ceo");
+    const companyIssues = await ctx.db.select().from(issues).where(eq(issues.companyId, companyId));
+    expect(companyIssues[0]?.assigneeAgentId).toBe(companyAgents[0]?.id);
+    const hireApprovals = await ctx.db
+      .select()
+      .from(approvals)
+      .where(and(eq(approvals.companyId, companyId), eq(approvals.type, "hire_agent")));
+    expect(hireApprovals).toHaveLength(0);
+  });
+
+  it("creates a pending CEO and a hire approval when board approval is required", async () => {
+    const { companyId, userId, app } = await seedCompany();
+    await ctx.db
+      .update(companies)
+      .set({ requireBoardApprovalForNewAgents: true })
+      .where(eq(companies.id, companyId));
+
+    const response = await post(app, companyId, SEED);
+
+    expect(response.status).toBe(200);
+    expect(response.body.applied).toBe(true);
+    const companyAgents = await ctx.db.select().from(agents).where(eq(agents.companyId, companyId));
+    expect(companyAgents).toHaveLength(1);
+    expect(companyAgents[0]?.status).toBe("pending_approval");
+    expect(companyAgents[0]?.role).toBe("ceo");
+    expect(companyAgents[0]?.name).toBe("Ada");
+    const hireApprovals = await ctx.db
+      .select()
+      .from(approvals)
+      .where(and(eq(approvals.companyId, companyId), eq(approvals.type, "hire_agent")));
+    expect(hireApprovals).toHaveLength(1);
+    expect(hireApprovals[0]?.status).toBe("pending");
+    expect(hireApprovals[0]?.requestedByUserId).toBe(userId);
+    expect(hireApprovals[0]?.payload).toMatchObject({
+      agentId: companyAgents[0]?.id,
+      name: "Ada",
+      role: "ceo",
+    });
+    const companyIssues = await ctx.db.select().from(issues).where(eq(issues.companyId, companyId));
+    expect(companyIssues).toHaveLength(1);
+    expect(companyIssues[0]?.assigneeAgentId).toBeNull();
   });
 });
