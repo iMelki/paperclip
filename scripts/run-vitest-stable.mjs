@@ -154,6 +154,8 @@ function parseCliOptions(argv) {
   let dryRun = false;
   let related = false;
   let exact = false;
+  let allowEmptyShard = process.env.PAPERCLIP_ALLOW_EMPTY_SERVER_SHARD === "1"
+    || process.env.PAPERCLIP_ALLOW_EMPTY_SERVER_SHARD === "true";
   const relatedFiles = [];
   const exactFiles = [];
 
@@ -219,6 +221,11 @@ function parseCliOptions(argv) {
 
     if (arg === "--dry-run") {
       dryRun = true;
+      continue;
+    }
+
+    if (arg === "--allow-empty-shard") {
+      allowEmptyShard = true;
       continue;
     }
 
@@ -313,6 +320,7 @@ function parseCliOptions(argv) {
       shardCount: shardCount ?? 1,
       group: null,
       dryRun,
+      allowEmptyShard,
     };
   }
 
@@ -322,7 +330,30 @@ function parseCliOptions(argv) {
     shardCount,
     group,
     dryRun,
+    allowEmptyShard,
   };
+}
+
+function rejectEmptyServerShard({
+  kind,
+  selectedCount,
+  totalCount,
+  shardIndex,
+  shardCount,
+  allowEmptyShard,
+}) {
+  if (selectedCount > 0) return;
+  const label = `${kind} shard ${shardIndex + 1}/${shardCount}`;
+  if (allowEmptyShard) {
+    console.log(
+      `[test:run] ${label} selected 0 of ${totalCount} suites; empty shard explicitly allowed.`,
+    );
+    return;
+  }
+  fail(
+    `${label} selected 0 test files out of ${totalCount}. ` +
+      "Pass --allow-empty-shard or set PAPERCLIP_ALLOW_EMPTY_SERVER_SHARD=1 when this shard is intentionally empty.",
+  );
 }
 
 function selectSerializedSuites(routeTests, shardIndex, shardCount) {
@@ -378,7 +409,7 @@ function runProjectGroup(projects, groupName) {
   }
 }
 
-function runGeneralGroup(routeTests, groupName, shardIndex = null, shardCount = null) {
+function runGeneralGroup(routeTests, groupName, shardIndex = null, shardCount = null, allowEmptyShard = false) {
   if (groupName === generalServerGroupName) {
     if (shardCount !== null && shardCount > 1) {
       const shardFiles = selectGeneralServerShard(
@@ -390,6 +421,14 @@ function runGeneralGroup(routeTests, groupName, shardIndex = null, shardCount = 
       console.log(
         `\n[test:run] general-server shard ${shardIndex + 1}/${shardCount} running ${shardFiles.length} of ${generalServerTestFiles.length} suites`,
       );
+      rejectEmptyServerShard({
+        kind: "general-server",
+        selectedCount: shardFiles.length,
+        totalCount: generalServerTestFiles.length,
+        shardIndex,
+        shardCount,
+        allowEmptyShard,
+      });
       if (shardFiles.length === 0) {
         return;
       }
@@ -632,11 +671,19 @@ function runExactSuites(files) {
   });
 }
 
-function runSerializedSuites(routeTests, shardIndex, shardCount) {
+function runSerializedSuites(routeTests, shardIndex, shardCount, allowEmptyShard = false) {
   const shardTests = selectSerializedSuites(routeTests, shardIndex, shardCount);
   console.log(
     `\n[test:run] serialized shard ${shardIndex + 1}/${shardCount} running ${shardTests.length} of ${routeTests.length} suites`,
   );
+  rejectEmptyServerShard({
+    kind: "serialized",
+    selectedCount: shardTests.length,
+    totalCount: routeTests.length,
+    shardIndex,
+    shardCount,
+    allowEmptyShard,
+  });
 
   for (const routeTest of shardTests) {
     runVitest(
@@ -731,12 +778,12 @@ if (options.exact) {
 
 if (options.mode === generalModeName || options.mode === allModeName) {
   if (options.group) {
-    runGeneralGroup(routeTests, options.group, options.shardIndex, options.shardCount);
+    runGeneralGroup(routeTests, options.group, options.shardIndex, options.shardCount, options.allowEmptyShard);
   } else {
     runGeneralSuites(routeTests);
   }
 }
 
 if (options.mode === serializedModeName || options.mode === allModeName) {
-  runSerializedSuites(routeTests, options.shardIndex ?? 0, options.shardCount ?? 1);
+  runSerializedSuites(routeTests, options.shardIndex ?? 0, options.shardCount ?? 1, options.allowEmptyShard);
 }
