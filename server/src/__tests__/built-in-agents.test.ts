@@ -22,7 +22,10 @@ import {
   routines,
   routineTriggers,
 } from "@paperclipai/db";
-import { readPaperclipSkillSyncPreference } from "@paperclipai/adapter-utils/server-utils";
+import {
+  readPaperclipSkillSyncPreference,
+  writePaperclipSkillSyncPreference,
+} from "@paperclipai/adapter-utils/server-utils";
 import {
   EMBEDDED_POSTGRES_TEST_SETUP_TIMEOUT_MS,
   getEmbeddedPostgresTestSupport,
@@ -31,6 +34,7 @@ import {
 import { agentInstructionsService } from "../services/agent-instructions.ts";
 import { agentService } from "../services/agents.ts";
 import { approvalService } from "../services/approvals.ts";
+import { companySkillService } from "../services/company-skills.ts";
 import {
   builtInAgentService,
   deriveBuiltInAgentStatus,
@@ -1770,5 +1774,55 @@ describeEmbeddedPostgres("built-in agents", () => {
     const final = await agentService(db).getById(agentId);
     expect(readPaperclipSkillSyncPreference(final!.adapterConfig as Record<string, unknown>).desiredSkills.sort())
       .toEqual([bundledSkill, "aaa/custom-skill"].sort());
+  });
+  it("keeps the version pin of the bundled skill when ensure sends it as a plain key", async () => {
+    const companyId = await seedCompany({ requireApproval: false });
+    await agentService(db).create(companyId, {
+      name: "CEO",
+      role: "ceo",
+      status: "idle",
+      adapterType: "codex_local",
+      adapterConfig: { model: "gpt-5.4" },
+      runtimeConfig: {},
+      permissions: {},
+    });
+    const builtIns = builtInAgentService(db);
+    const converged = await builtIns.ensure(companyId, "reflection-coach");
+    const agentId = converged.agentId!;
+    const entriesOf = (agent: { adapterConfig: unknown }) =>
+      readPaperclipSkillSyncPreference(agent.adapterConfig as Record<string, unknown>).desiredSkillEntries;
+    const bundledKey = entriesOf(converged.agent!).find((entry) => entry.key.includes("reflection-coach"))!.key;
+    const skill = await companySkillService(db).getByKey(companyId, bundledKey);
+    const version = await companySkillService(db).createVersion(companyId, skill!.id, { label: "pin" });
+    const pinned = { key: bundledKey, versionId: version.id };
+    // The agent stores the bundled skill pinned to a concrete version.
+    const current = await agentService(db).getById(agentId);
+    await agentService(db).update(agentId, {
+      adapterConfig: writePaperclipSkillSyncPreference(
+        current!.adapterConfig as Record<string, unknown>,
+        [pinned],
+      ),
+    });
+
+    const desiredInput = () => ({
+      adapterType: "codex_local",
+      adapterConfig: {
+        model: "gpt-5.4",
+        paperclipSkillSync: { desiredSkills: [pinned.key] },
+      },
+    });
+    const countRevisions = () => db
+      .select({ id: agentConfigRevisions.id })
+      .from(agentConfigRevisions)
+      .where(eq(agentConfigRevisions.agentId, agentId))
+      .then((rows) => rows.length);
+    await builtIns.ensure(companyId, "reflection-coach", desiredInput());
+    const before = await countRevisions();
+    for (let cycle = 0; cycle < 3; cycle += 1) {
+      await builtIns.ensure(companyId, "reflection-coach", desiredInput());
+    }
+    expect(await countRevisions()).toBe(before);
+    const final = await agentService(db).getById(agentId);
+    expect(entriesOf(final!).find((entry) => entry.key === pinned.key)?.versionId).toBe(pinned.versionId);
   });
 });

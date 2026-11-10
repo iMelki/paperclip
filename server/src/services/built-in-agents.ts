@@ -731,6 +731,31 @@ function canonicalPaperclipSkillSync(config: Record<string, unknown>): Record<st
   return isPlainRecord(written.paperclipSkillSync) ? written.paperclipSkillSync : undefined;
 }
 
+// An incoming skill selection that names a key without a version pin keeps the
+// pin the stored selection already has for that key; otherwise ensure would drop
+// the pin that bundled skill-sync wrote and the two would trade revisions.
+function carryForwardSkillPins(
+  existingConfig: Record<string, unknown>,
+  merged: Record<string, unknown>,
+): Record<string, unknown> {
+  if (!Object.prototype.hasOwnProperty.call(existingConfig, "paperclipSkillSync")) return merged;
+  if (!isPlainRecord(merged.paperclipSkillSync) || merged.paperclipSkillSync === existingConfig.paperclipSkillSync) {
+    return merged;
+  }
+  if (!Array.isArray((merged.paperclipSkillSync as Record<string, unknown>).desiredSkills)) return merged;
+  const pins = new Map(
+    readPaperclipSkillSyncPreference(existingConfig).desiredSkillEntries
+      .filter((entry) => entry.versionId)
+      .map((entry) => [entry.key, entry.versionId] as const),
+  );
+  if (pins.size === 0) return merged;
+  const incoming = readPaperclipSkillSyncPreference(merged).desiredSkillEntries.map((entry) => ({
+    key: entry.key,
+    versionId: entry.versionId ?? pins.get(entry.key) ?? null,
+  }));
+  return writePaperclipSkillSyncPreference(merged, incoming);
+}
+
 function withCanonicalSkillSync(config: Record<string, unknown>): Record<string, unknown> {
   if (!Object.prototype.hasOwnProperty.call(config, "paperclipSkillSync")) return config;
   const canonical = canonicalPaperclipSkillSync(config);
@@ -1690,7 +1715,7 @@ export function builtInAgentService(db: Db) {
         // When `incomingConfig.env` is set, that assignment replaces the whole
         // env map. Do not deep-merge env keys. PATCH `adapterConfig.env` has
         // the same full-replacement behavior; leave that route alone.
-        const nextConfig = withCanonicalSkillSync({ ...mergeBase, ...incomingConfig });
+        const nextConfig = withCanonicalSkillSync(carryForwardSkillPins(existingConfig, { ...mergeBase, ...incomingConfig }));
         if (adapterType !== existing.adapterType) patch.adapterType = adapterType;
         if (!adapterConfigsEffectivelyEqual(existingConfig, nextConfig)) {
           patch.adapterConfig = nextConfig;
