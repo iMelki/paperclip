@@ -7,7 +7,7 @@ import type { PluginWorkerManager } from "../services/plugin-worker-manager.js";
 const PLUGIN_ID = "plugin-1";
 const JOB_ID = "job-1";
 
-function setup(opts: { grantedCompanyIds: string[]; authorizedCompanyIds: string[] }) {
+function setup(opts: { grantedCompanyIds: string[]; authorizedCompanyIds: string[]; workerRegistered?: boolean }) {
   const job = {
     id: JOB_ID,
     pluginId: PLUGIN_ID,
@@ -34,6 +34,8 @@ function setup(opts: { grantedCompanyIds: string[]; authorizedCompanyIds: string
   } as unknown as PluginJobStore;
   const workerManager = {
     isRunning: vi.fn(() => false),
+    // A registered (here stopped) worker handle carries the authorized set.
+    getWorker: vi.fn(() => (opts.workerRegistered === false ? undefined : {})),
     getProactiveCompanyScopes: vi.fn(() => [...opts.authorizedCompanyIds]),
     setProactiveCompanyScopes: vi.fn(),
     call: vi.fn(),
@@ -53,7 +55,7 @@ function setup(opts: { grantedCompanyIds: string[]; authorizedCompanyIds: string
       stop: vi.fn(),
     },
   });
-  return { scheduler, createRun, nativeRun, workerManager };
+  return { scheduler, createRun, nativeRun, workerManager, jobStore };
 }
 
 describe("native GitHub board job authorization", () => {
@@ -87,5 +89,19 @@ describe("native GitHub board job authorization", () => {
     expect(ctx.createRun).toHaveBeenCalledTimes(1);
     expect(ctx.createRun).toHaveBeenCalledWith(expect.objectContaining({ companyId: "company-authorized" }));
     expect(ctx.nativeRun).toHaveBeenCalledTimes(1);
+  });
+
+  it("leaves the job due, without a run or a schedule advance, while the worker is unregistered", async () => {
+    const ctx = setup({
+      grantedCompanyIds: ["company-authorized"],
+      authorizedCompanyIds: [],
+      workerRegistered: false,
+    });
+
+    await ctx.scheduler.tick();
+
+    expect(ctx.createRun).not.toHaveBeenCalled();
+    expect(ctx.nativeRun).not.toHaveBeenCalled();
+    expect(ctx.jobStore.updateRunTimestamps).not.toHaveBeenCalled();
   });
 });
