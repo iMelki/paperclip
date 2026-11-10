@@ -7191,6 +7191,26 @@ async function cleanupPersistedExposureRows(
   }
 }
 
+/**
+ * Refreshes a reused service's registry `lastSeenAt` without blocking the
+ * reuse path. The touch is best effort, but it is detached, so it must handle
+ * its own rejection: an unhandled one crashes the host (the server keeps
+ * Node's crash-on-unhandled-rejection behavior). A registry write can fail
+ * when the runtime-services directory disappears mid-write, for example when
+ * the instance root is removed while the rename is in flight.
+ */
+function touchLocalServiceRegistryRecordInBackground(record: RuntimeServiceRecord) {
+  void touchLocalServiceRegistryRecord(record.serviceKey, {
+    runtimeServiceId: record.id,
+    lastSeenAt: record.lastUsedAt,
+  }).catch((err) => {
+    const detail = err instanceof Error ? err.message : String(err);
+    console.warn(
+      `[workspace-runtime] registry touch failed for runtime service ${record.id}: ${detail}`,
+    );
+  });
+}
+
 function registerRuntimeService(db: Db | undefined, record: RuntimeServiceRecord) {
   record.db = db;
   runtimeServicesById.set(record.id, record);
@@ -7402,10 +7422,7 @@ async function ensureRuntimeServicesForRunInvocation(
           existing.lastUsedAt = new Date().toISOString();
           existing.stoppedAt = null;
           clearIdleTimer(existing);
-          void touchLocalServiceRegistryRecord(existing.serviceKey, {
-            runtimeServiceId: existing.id,
-            lastSeenAt: existing.lastUsedAt,
-          });
+          touchLocalServiceRegistryRecordInBackground(existing);
           await persistRuntimeServiceRecord(input.db, existing);
           acquiredServiceIds.push(existing.id);
           refs.push(toRuntimeServiceRef(existing, { reused: true }));
@@ -7639,10 +7656,7 @@ async function startRuntimeServicesForWorkspaceControlUnlocked(
         existing.lastUsedAt = new Date().toISOString();
         existing.stoppedAt = null;
         clearIdleTimer(existing);
-        void touchLocalServiceRegistryRecord(existing.serviceKey, {
-          runtimeServiceId: existing.id,
-          lastSeenAt: existing.lastUsedAt,
-        });
+        touchLocalServiceRegistryRecordInBackground(existing);
         await persistRuntimeServiceRecord(persistenceDb, existing);
         refs.push(toRuntimeServiceRef(existing, { reused: true }));
         continue;
