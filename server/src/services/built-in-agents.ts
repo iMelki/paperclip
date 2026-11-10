@@ -749,9 +749,18 @@ function carryForwardSkillPins(
       .map((entry) => [entry.key, entry.versionId] as const),
   );
   if (pins.size === 0) return merged;
+  // `{ key, versionId: null }` is an explicit request to track latest content,
+  // unlike a plain string key, which only omits the pin. Honor it.
+  const explicitlyUnpinned = new Set<string>();
+  for (const value of (merged.paperclipSkillSync as Record<string, unknown>).desiredSkills as unknown[]) {
+    if (!isPlainRecord(value) || typeof value.key !== "string") continue;
+    if (Object.prototype.hasOwnProperty.call(value, "versionId") && value.versionId === null) {
+      explicitlyUnpinned.add(value.key.trim());
+    }
+  }
   const incoming = readPaperclipSkillSyncPreference(merged).desiredSkillEntries.map((entry) => ({
     key: entry.key,
-    versionId: entry.versionId ?? pins.get(entry.key) ?? null,
+    versionId: entry.versionId ?? (explicitlyUnpinned.has(entry.key) ? null : pins.get(entry.key) ?? null),
   }));
   return writePaperclipSkillSyncPreference(merged, incoming);
 }

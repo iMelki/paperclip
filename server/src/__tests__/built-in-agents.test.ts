@@ -1825,4 +1825,55 @@ describeEmbeddedPostgres("built-in agents", () => {
     const final = await agentService(db).getById(agentId);
     expect(entriesOf(final!).find((entry) => entry.key === pinned.key)?.versionId).toBe(pinned.versionId);
   });
+
+  it("honors an explicit null version so ensure can unpin a custom skill", async () => {
+    const companyId = await seedCompany({ requireApproval: false });
+    await agentService(db).create(companyId, {
+      name: "CEO",
+      role: "ceo",
+      status: "idle",
+      adapterType: "codex_local",
+      adapterConfig: { model: "gpt-5.4" },
+      runtimeConfig: {},
+      permissions: {},
+    });
+    const builtIns = builtInAgentService(db);
+    const converged = await builtIns.ensure(companyId, "reflection-coach");
+    const agentId = converged.agentId!;
+    const entriesOf = (agent: { adapterConfig: unknown }) =>
+      readPaperclipSkillSyncPreference(agent.adapterConfig as Record<string, unknown>).desiredSkillEntries;
+    const bundledKey = entriesOf(converged.agent!).find((entry) => entry.key.includes("reflection-coach"))!.key;
+    const customKey = "aaa/custom-skill";
+    const current = await agentService(db).getById(agentId);
+    await agentService(db).update(agentId, {
+      adapterConfig: writePaperclipSkillSyncPreference(
+        current!.adapterConfig as Record<string, unknown>,
+        [
+          { key: bundledKey, versionId: null },
+          { key: customKey, versionId: "pinned-version" },
+        ],
+      ),
+    });
+    const pinnedBefore = await agentService(db).getById(agentId);
+    expect(entriesOf(pinnedBefore!).find((entry) => entry.key === customKey)?.versionId).toBe("pinned-version");
+
+    // A plain string key only omits the pin, so the stored pin is kept.
+    await builtIns.ensure(companyId, "reflection-coach", {
+      adapterType: "codex_local",
+      adapterConfig: { model: "gpt-5.4", paperclipSkillSync: { desiredSkills: [bundledKey, customKey] } },
+    });
+    const keptPin = await agentService(db).getById(agentId);
+    expect(entriesOf(keptPin!).find((entry) => entry.key === customKey)?.versionId).toBe("pinned-version");
+
+    // An explicit null asks to track the latest content again.
+    await builtIns.ensure(companyId, "reflection-coach", {
+      adapterType: "codex_local",
+      adapterConfig: {
+        model: "gpt-5.4",
+        paperclipSkillSync: { desiredSkills: [bundledKey, { key: customKey, versionId: null }] },
+      },
+    });
+    const unpinned = await agentService(db).getById(agentId);
+    expect(entriesOf(unpinned!).find((entry) => entry.key === customKey)?.versionId).toBeNull();
+  });
 });
