@@ -19942,19 +19942,38 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         const timerClaim = await claimDueTimerHeartbeat(agent, now, policy.intervalSec);
         if (!timerClaim) continue;
 
-        const run = await enqueueWakeup(agent.id, {
-          source: "timer",
-          triggerDetail: "system",
-          reason: "heartbeat_timer",
-          requestedByActorType: "system",
-          requestedByActorId: "heartbeat_scheduler",
-          contextSnapshot: {
-            source: "scheduler",
-            reason: "interval_elapsed",
-            now: now.toISOString(),
-            timerClaimWasFirstHeartbeat: timerClaim.wasFirstHeartbeat,
-          },
-        });
+        let run: Awaited<ReturnType<typeof enqueueWakeup>>;
+        try {
+          run = await enqueueWakeup(agent.id, {
+            source: "timer",
+            triggerDetail: "system",
+            reason: "heartbeat_timer",
+            requestedByActorType: "system",
+            requestedByActorId: "heartbeat_scheduler",
+            contextSnapshot: {
+              source: "scheduler",
+              reason: "interval_elapsed",
+              now: now.toISOString(),
+              timerClaimWasFirstHeartbeat: timerClaim.wasFirstHeartbeat,
+            },
+          });
+        } catch (error) {
+          // The claim already moved lastHeartbeatAt. Give it back, so a retry of
+          // this tick (or the next one) finds the agent still due instead of
+          // skipping a wake that was never queued.
+          await db
+            .update(agents)
+            .set({ lastHeartbeatAt: agent.lastHeartbeatAt ?? null, updatedAt: new Date() })
+            .where(and(
+              eq(agents.id, agent.id),
+              eq(agents.companyId, agent.companyId),
+              eq(agents.lastHeartbeatAt, now),
+            ))
+            .catch((restoreError) => {
+              logger.warn({ err: restoreError, agentId: agent.id }, "failed to release the timer claim after a failed wakeup");
+            });
+          throw error;
+        }
         if (run) enqueued += 1;
         else skipped += 1;
       }

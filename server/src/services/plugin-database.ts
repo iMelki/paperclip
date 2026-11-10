@@ -517,6 +517,30 @@ export function pluginDatabaseService(db: PluginDatabaseRootClient) {
         error: unknown;
       } | null = null;
 
+      // The rollback released the advisory lock, so another attempt may have
+      // applied this migration before the failure is written. Take the same lock
+      // in a short transaction and let an applied ledger row win.
+      const persistMigrationFailure = async (failure: NonNullable<typeof pendingFailure>) => {
+        const writeFailure = async (client: PluginDatabaseClient) => {
+          await client.execute(sql`SELECT pg_advisory_xact_lock(${lockKey})`);
+          const current = await client
+            .select()
+            .from(pluginMigrations)
+            .where(and(
+              eq(pluginMigrations.pluginId, failure.pluginId),
+              eq(pluginMigrations.migrationKey, failure.migrationKey),
+            ))
+            .limit(1);
+          if ((current[0] as PluginMigrationRecord | undefined)?.status === "applied") return;
+          await recordMigrationFailure(client, failure);
+        };
+        if (typeof db.transaction === "function") {
+          await db.transaction(async (tx) => writeFailure(tx as PluginDatabaseClient));
+        } else {
+          await writeFailure(db);
+        }
+      };
+
       const applyWithClient = async (client: PluginDatabaseClient) => {
         await client.execute(sql`SELECT pg_advisory_xact_lock(${lockKey})`);
         for (const file of loaded) {
@@ -598,7 +622,7 @@ export function pluginDatabaseService(db: PluginDatabaseRootClient) {
         // connection while the first is still reserved.
         if (pendingFailure) {
           try {
-            await recordMigrationFailure(db, pendingFailure);
+            await persistMigrationFailure(pendingFailure);
           } catch {
             // Keep the migration error. A ledger write must not replace it.
           }
