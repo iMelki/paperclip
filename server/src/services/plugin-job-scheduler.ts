@@ -458,7 +458,18 @@ export function createPluginJobScheduler(
   async function resolveDispatchPlan(job: typeof pluginJobs.$inferSelect): Promise<PluginJobDispatchPlan> {
     if (!isNativeGitHubBoardJobKey(job.jobKey)) return resolveWorkerJobDispatch(job);
     if (!nativeGitHubProjectBoard) throw new Error("Native GitHub board scheduler handler is unavailable; worker fallback refused");
-    return nativeGitHubProjectBoard.resolveDispatch(job.pluginId, job.jobKey);
+    const plan = await nativeGitHubProjectBoard.resolveDispatch(job.pluginId, job.jobKey);
+    // Grants are not a second authorization source. A company runs only when
+    // it is also in the host-authorized set installed by setProactiveCompanyScopes.
+    // An empty intersection does not fall back to an unscoped run.
+    const authorized = new Set(workerManager.getProactiveCompanyScopes(job.pluginId));
+    const companyIds = plan.companyIds.filter((companyId) => authorized.has(companyId));
+    if (companyIds.length === 0) {
+      throw new Error(
+        `Plugin "${job.pluginId}" job "${job.jobKey}" has no company that is both granted and authorized`,
+      );
+    }
+    return { ...plan, companyIds };
   }
 
   /** Errors thrown while inserting run records: the store is suspect, so no diagnostic row is attempted. */

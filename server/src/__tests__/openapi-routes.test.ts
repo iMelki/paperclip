@@ -49,6 +49,7 @@ const apiPrefixes: Record<string, string> = {
   "openapi.ts": "/api",
   "plugin-ui-static.ts": "/api",
   "plugins.ts": "/api",
+  "plugin-github-project-schedule-grants.ts": "/api",
   "projects.ts": "/api",
   "resource-memberships.ts": "/api",
   "routines.ts": "/api",
@@ -73,9 +74,6 @@ const explicitOpenApiCoverageExclusions = new Set([
   "cases.ts",
   // Smoke lab routes are experimental and not yet represented in the public OpenAPI document.
   "smoke-lab.ts",
-  // Native GitHub project-board schedule-grant routes are operator-only host composition and are not
-  // yet represented in the public OpenAPI document.
-  "plugin-github-project-schedule-grants.ts",
 ]);
 
 // The set of contract-first routes whose OpenAPI document leads the mounted
