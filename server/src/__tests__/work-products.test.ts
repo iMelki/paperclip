@@ -175,4 +175,56 @@ describeEmbeddedPostgres("workProductService runtime service company scope", () 
     await ctx.db.delete(issues).where(eq(issues.id, issueId));
     await resetCompanyIssueFixtures(ctx.db);
   });
+
+  it("rejects a foreign runtime service on create and update and keeps a same-company id", async () => {
+    const caller = await seedCompanyWithBoardAccess(ctx.db, "Caller writes");
+    const other = await seedCompanyWithBoardAccess(ctx.db, "Other writes");
+    const issueId = randomUUID();
+    await ctx.db.insert(issues).values({
+      id: issueId,
+      companyId: caller.companyId,
+      title: "Writes",
+      status: "todo",
+    });
+    const ownServiceId = await insertRuntimeService(caller.companyId, "https://caller.example/own");
+    const replacementServiceId = await insertRuntimeService(caller.companyId, "https://caller.example/replacement");
+    const foreignServiceId = await insertRuntimeService(other.companyId, "https://other.example/foreign");
+    const svc = workProductService(ctx.db);
+    const foreignWrite = {
+      type: "runtime_service" as const,
+      provider: "paperclip",
+      title: "Foreign",
+      status: "open",
+      runtimeServiceId: foreignServiceId,
+    };
+
+    await expect(svc.createForIssue(issueId, caller.companyId, foreignWrite)).rejects.toMatchObject({
+      status: 422,
+      message: "Runtime service was not found in this company",
+    });
+    expect(await ctx.db.select().from(issueWorkProducts).where(eq(issueWorkProducts.issueId, issueId))).toHaveLength(0);
+
+    const created = await svc.createForIssue(issueId, caller.companyId, {
+      ...foreignWrite,
+      title: "Own",
+      runtimeServiceId: ownServiceId,
+    });
+    expect(created?.runtimeServiceId).toBe(ownServiceId);
+
+    await expect(svc.update(created!.id, { runtimeServiceId: foreignServiceId })).rejects.toMatchObject({
+      status: 422,
+      message: "Runtime service was not found in this company",
+    });
+    const stored = await ctx.db.select().from(issueWorkProducts).where(eq(issueWorkProducts.id, created!.id));
+    expect(stored[0]?.runtimeServiceId).toBe(ownServiceId);
+
+    const updated = await svc.update(created!.id, { runtimeServiceId: replacementServiceId });
+    expect(updated?.runtimeServiceId).toBe(replacementServiceId);
+
+    await ctx.db.delete(issueWorkProducts).where(eq(issueWorkProducts.issueId, issueId));
+    await ctx.db.delete(workspaceRuntimeServices).where(eq(workspaceRuntimeServices.companyId, other.companyId));
+    await ctx.db.delete(workspaceRuntimeServices).where(eq(workspaceRuntimeServices.companyId, caller.companyId));
+    await ctx.db.delete(issues).where(eq(issues.id, issueId));
+    await resetCompanyIssueFixtures(ctx.db);
+  });
 });

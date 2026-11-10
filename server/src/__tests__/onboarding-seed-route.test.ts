@@ -10,6 +10,7 @@ import {
   companyMemberships,
   companyOnboardingSeeds,
   goals,
+  issueCreateIdempotencyKeys,
   issues,
   principalPermissionGrants,
   projects,
@@ -48,6 +49,7 @@ describeEmbeddedPostgres("POST /api/companies/:companyId/onboarding-seed", () =>
     await ctx.db.delete(activityLog);
     await ctx.db.delete(companyOnboardingSeeds);
     await ctx.db.delete(approvals);
+    await ctx.db.delete(issueCreateIdempotencyKeys);
     await ctx.db.delete(issues);
     await ctx.db.delete(projects);
     await ctx.db.delete(agents);
@@ -641,5 +643,35 @@ describeEmbeddedPostgres("POST /api/companies/:companyId/onboarding-seed", () =>
     const replayed = await ctx.db.select().from(issues).where(eq(issues.companyId, companyId));
     expect(replayed).toHaveLength(1);
     expect(replayed[0]?.assigneeAgentId).toBe(ceo?.id);
+  });
+
+  it("assigns the seeded task after the idempotency key is purged", async () => {
+    const { companyId, userId, app } = await seedCompany();
+    await ctx.db
+      .update(companies)
+      .set({ requireBoardApprovalForNewAgents: true })
+      .where(eq(companies.id, companyId));
+
+    const response = await post(app, companyId, SEED);
+    expect(response.status).toBe(200);
+
+    const before = await ctx.db.select().from(issues).where(eq(issues.companyId, companyId));
+    expect(before).toHaveLength(1);
+    expect(before[0]?.assigneeAgentId).toBeNull();
+
+    await ctx.db
+      .delete(issueCreateIdempotencyKeys)
+      .where(eq(issueCreateIdempotencyKeys.companyId, companyId));
+
+    const [ceo] = await ctx.db.select().from(agents).where(eq(agents.companyId, companyId));
+    const [approval] = await ctx.db
+      .select()
+      .from(approvals)
+      .where(and(eq(approvals.companyId, companyId), eq(approvals.type, "hire_agent")));
+    await approvalService(ctx.db).approve(approval!.id, userId);
+
+    const after = await ctx.db.select().from(issues).where(eq(issues.companyId, companyId));
+    expect(after).toHaveLength(1);
+    expect(after[0]?.assigneeAgentId).toBe(ceo?.id);
   });
 });
