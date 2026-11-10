@@ -443,15 +443,25 @@ export function createPluginJobScheduler(
         throw new Error("Native GitHub board scheduler handler is unavailable; worker fallback refused");
       }
       const plan = await nativeGitHubProjectBoard.resolveDispatch(job.pluginId, job.jobKey);
+      // Grants are not a second authorization source. A company runs only when
+      // it is also in the host-authorized set installed by setProactiveCompanyScopes.
+      // An empty intersection does not fall back to an unscoped run.
+      const authorized = new Set(workerManager.getProactiveCompanyScopes(job.pluginId));
+      const companyIds = plan.companyIds.filter((companyId) => authorized.has(companyId));
+      if (companyIds.length === 0) {
+        throw new Error(
+          `Plugin "${job.pluginId}" job "${job.jobKey}" has no company that is both granted and authorized`,
+        );
+      }
       if (onlyCompanyId) {
-        if (!plan.companyIds.includes(onlyCompanyId)) {
+        if (!companyIds.includes(onlyCompanyId)) {
           throw new Error(
             `Company "${onlyCompanyId}" has not configured plugin "${job.pluginId}" (job "${job.jobKey}")`,
           );
         }
         return [onlyCompanyId];
       }
-      return plan.companyIds.length > 0 ? [...plan.companyIds] : [null];
+      return companyIds;
     }
     const scope = await jobStore.getJobDeclarationScope(job.pluginId, job.jobKey);
     if (scope !== "company") {

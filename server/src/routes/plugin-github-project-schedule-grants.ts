@@ -1,8 +1,8 @@
 import type { Request, Router } from "express";
 import type { Db } from "@paperclipai/db";
 import { z } from "zod";
-import { forbidden, unprocessable } from "../errors.js";
-import { assertBoard, assertCompanyAccess, getActorInfo } from "./authz.js";
+import { forbidden, notFound, unprocessable } from "../errors.js";
+import { assertBoard, assertCompanyAccess, getActorInfo, hasCompanyAccess } from "./authz.js";
 import { pluginGitHubProjectBoardService, GITHUB_PROJECT_IMPORTER_KEY } from "../services/plugin-github-project-board.js";
 import { pluginGitHubProjectScheduleGrants } from "../services/plugin-github-project-schedule-grants.js";
 import { createScheduleGrantSchema, parseScheduleGrantInput, revokeScheduleGrantSchema } from "../services/github-project-schedule-grant-contract.js";
@@ -11,7 +11,6 @@ const pathSchema = z.object({ pluginId: z.string().uuid(), companyId: z.string()
 const createBody = createScheduleGrantSchema.omit({ companyId: true, projectId: true });
 const revokeBody = revokeScheduleGrantSchema.omit({ companyId: true, projectId: true });
 const empty = z.object({}).strict();
-const route = "/plugins/:pluginId/companies/:companyId/projects/:projectId/github-board/schedule-grant";
 
 function trustedScope(req: Request) {
   assertBoard(req);
@@ -24,6 +23,8 @@ function trustedScope(req: Request) {
     throw forbidden("A real authenticated user is required to manage board schedule grants");
   }
   const scope = parseScheduleGrantInput(pathSchema, req.params);
+  // Same 404 for a missing company and a company this caller cannot access.
+  if (!hasCompanyAccess(req, scope.companyId)) throw notFound("Company not found");
   assertCompanyAccess(req, scope.companyId);
   const membership = req.actor.memberships?.find(row => row.companyId === scope.companyId);
   if (!membership || membership.status !== "active" || membership.membershipRole === "viewer") {
@@ -43,7 +44,7 @@ export function registerGitHubProjectScheduleGrantRoutes(router: Router, db: Db)
     });
     return pluginGitHubProjectScheduleGrants(db, identity, boards);
   };
-  router.get(route, async (req, res) => {
+  router.get("/plugins/:pluginId/companies/:companyId/projects/:projectId/github-board/schedule-grant", async (req, res) => {
     const { scope, context } = trustedScope(req);
     if (req.body !== undefined && (req.body === null || typeof req.body !== "object" || Array.isArray(req.body)
       || Object.keys(req.body).length !== 0)) throw unprocessable("Grant reads do not accept a request body");
@@ -51,14 +52,14 @@ export function registerGitHubProjectScheduleGrantRoutes(router: Router, db: Db)
     res.setHeader("Cache-Control", "no-store");
     res.json(result);
   });
-  router.post(route, async (req, res) => {
+  router.post("/plugins/:pluginId/companies/:companyId/projects/:projectId/github-board/schedule-grant", async (req, res) => {
     const { scope, context } = trustedScope(req);
     const input = parseScheduleGrantInput(createBody, req.body);
     const result = await services(scope.pluginId).create(context, { ...input, companyId: scope.companyId, projectId: scope.projectId });
     res.setHeader("Cache-Control", "no-store");
     res.status(201).json(result);
   });
-  router.post(`${route}/revoke`, async (req, res) => {
+  router.post("/plugins/:pluginId/companies/:companyId/projects/:projectId/github-board/schedule-grant/revoke", async (req, res) => {
     const { scope, context } = trustedScope(req);
     const input = parseScheduleGrantInput(revokeBody, req.body);
     const result = await services(scope.pluginId).revoke(context, { ...input, companyId: scope.companyId, projectId: scope.projectId });
