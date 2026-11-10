@@ -151,45 +151,6 @@ All notable changes to this repository should be recorded here.
   ahead of older declared models; unknown discovered IDs remain available and
   deterministic. Detected-model promotion, provider groups, manual IDs, saved
   selections and model discovery caching retain their existing behavior.
-- **Private Paperclip #129 candidate:** make the JavaScript restore fallback
-  replay Paperclip's generated default-text `COPY FROM stdin` blocks through
-  postgres.js streaming, while refusing unsupported COPY formats and incomplete
-  blocks. Regression coverage preserves marker-looking row data, escaped newlines,
-  SQL after COPY, and transaction rollback on malformed input. The full backup
-  library suite passed 9/9 and the DB package TypeScript check passed. Source-only;
-  not installed or activated on the live instance. See
-  `doc/evidence/backup-fallback-restore-20261018.md`. A subsequent review found
-  upstream postgres.js issue #1173, where server-side COPY errors after CopyDone
-  can hang the stream. The pinned-driver patch passed all four synthetic COPY
-  protocol cases, the disposable-PostgreSQL rollback regression, and the full
-  backup-library suite (10/10) against a private patched dependency copy. The
-  patched dependency is not installed in the candidate or live instance. An
-  offline, frozen pnpm 9.15.4 install completed in a separate private source
-  copy with lifecycle scripts disabled; readback confirmed the patched driver
-  link stayed inside that copy. This is dependency-staging evidence only, not a
-  full build or application installation. SDK development-bin warnings are
-  expected because scripts were disabled.
-
-- **Private source work; Paperclip #129/#126:** repair the disabled dormant-upgrade
-  and unreachable capability-staging paths while retaining explicit approval.
-  Bind registry writes to the reviewed status/manifest snapshot and prevent a
-  repeated pending upgrade from implicitly activating. Four original negative
-  cases are observed, non-author source review accepted and 44 focused regressions
-  passed; original host production typecheck also passed without diagnostics.
-  Private successor commit and installation remain pending. See
-  `doc/evidence/plugin-upgrade-approval-20261016.md`.
-
-- **Private candidate; Paperclip #129/#126:** add an explicit dormant install/
-  upgrade option and separate enable of installed plugins, reusing registry
-  identity and local-path validation. Add failure/legacy-route and nonempty-agent
-  repeated-import fixtures. The reviewed private fixture successor now passed
-  mock24, native DB20, selected routes17 and server noEmit. Direct foreground
-  PostgreSQL ownership fixes retained startup pipe writers and bounds cleanup.
-  Six additional legacy validation routes now pass;23 of30 route cases qualified.
-  One retained native synthetic backup test restored twice and rejected a
-  truncated archive; this does not establish real-instance recovery.
-  Not installed or released;seven legacy fixture/npm cases remain gated. See
-  `doc/evidence/plugin-deferred-activation-20261015.md` for remaining gates.
 
 - **[#164]** Refresh Lockfile accepts manual `ref` and `base` inputs that default
   to `dev`. Each base has its own refresh branch and matching PR lookup. Master
