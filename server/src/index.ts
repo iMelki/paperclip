@@ -1607,8 +1607,8 @@ export async function startServer(): Promise<StartedServer> {
         }
 
         trackBoundedSweep("heartbeat-timer", async () => {
-          if ((await heartbeat.resolveSchedulingSuppression()).suppressed) return;
           try {
+            if ((await heartbeat.resolveSchedulingSuppression()).suppressed) return;
             const result = await runHeartbeatTickWithConnectRetry(
               () => heartbeat.tickTimers(new Date()),
               {
