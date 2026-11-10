@@ -17,6 +17,8 @@ import {
   instanceSettings,
   issueInboxArchives,
   issues,
+  pluginManagedResources,
+  plugins,
   projectWorkspaces,
   projects,
   routineDocuments,
@@ -31,6 +33,7 @@ import {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
+import { pluginOperationIssueOriginKind } from "@paperclipai/shared";
 import { isUniqueViolation } from "../db-errors.js";
 import { issueService } from "../services/issues.ts";
 import { instanceSettingsService } from "../services/instance-settings.ts";
@@ -82,6 +85,8 @@ describeEmbeddedPostgres("routine service live-execution coalescing", () => {
     await db.delete(projectWorkspaces);
     await db.delete(projects);
     await db.delete(agents);
+    await db.delete(pluginManagedResources);
+    await db.delete(plugins);
     await db.delete(companies);
     await db.delete(instanceSettings);
   });
@@ -2153,6 +2158,140 @@ describeEmbeddedPostgres("routine service live-execution coalescing", () => {
       assigneeAgentId: openExecutions[0]!.assigneeAgentId,
     })).rejects.toSatisfy((error: unknown) => isUniqueViolation(error, "issues_open_routine_execution_uq"));
     expect(await listOpenExecutions()).toHaveLength(1);
+  });
+
+  async function openBesideExcludedIssue(
+    exclude: (issue: typeof issues.$inferSelect) => Promise<void>,
+  ) {
+    const { routine, svc } = await seedFixture();
+    const first = await svc.runRoutine(routine.id, { source: "manual" });
+    expect(first.status).toBe("issue_created");
+    expect(first.linkedIssueId).toBeTruthy();
+    const existing = await db
+      .select()
+      .from(issues)
+      .where(eq(issues.id, first.linkedIssueId!))
+      .then((rows) => rows[0]!);
+    await db
+      .update(heartbeatRuns)
+      .set({ status: "failed", finishedAt: new Date() })
+      .where(eq(heartbeatRuns.id, existing.executionRunId!));
+    await exclude(existing);
+    const second = await svc.runRoutine(routine.id, { source: "manual" });
+    expect(second.status).toBe("issue_created");
+    expect(second.linkedIssueId).toBeTruthy();
+    expect(second.linkedIssueId).not.toBe(existing.id);
+  }
+
+  it("creates a new execution when the occupied issue origin is a plugin operation", async () => {
+    const { companyId, agentId, routine, svc } = await seedFixture();
+    const pluginKey = "paperclip.index-predicate-test";
+    const pluginId = randomUUID();
+    const originId = `operation:${routine.id}`;
+    const originKind = pluginOperationIssueOriginKind(pluginKey);
+    await db.insert(plugins).values({
+      id: pluginId,
+      pluginKey,
+      packageName: "@paperclipai/plugin-index-predicate-test",
+      version: "0.0.1",
+      apiVersion: 1,
+      categories: ["automation"],
+      manifestJson: {
+        id: pluginKey,
+        apiVersion: 1,
+        version: "0.0.1",
+        displayName: "Index predicate test",
+        description: "Test plugin",
+        author: "Paperclip",
+        categories: ["automation"],
+        capabilities: [],
+        entrypoints: { worker: "./dist/worker.js" },
+      },
+      status: "ready",
+    });
+    await db.insert(pluginManagedResources).values({
+      companyId,
+      pluginId,
+      pluginKey,
+      resourceKind: "routine",
+      resourceKey: "index-predicate",
+      resourceId: routine.id,
+      defaultsJson: {
+        issueTemplate: {
+          surfaceVisibility: "plugin_operation",
+          originId,
+        },
+      },
+    });
+    const excludedRunId = randomUUID();
+    const excludedIssueId = randomUUID();
+    await db.insert(heartbeatRuns).values({
+      id: excludedRunId,
+      companyId,
+      agentId,
+      invocationSource: "assignment",
+      status: "failed",
+      finishedAt: new Date(),
+    });
+    await db.insert(issues).values({
+      id: excludedIssueId,
+      companyId,
+      title: "dead plugin operation",
+      status: "todo",
+      originKind,
+      originId,
+      originFingerprint: "default",
+      executionRunId: excludedRunId,
+      assigneeAgentId: agentId,
+    });
+
+    const run = await svc.runRoutine(routine.id, { source: "manual" });
+
+    expect(run.status).toBe("issue_created");
+    expect(run.linkedIssueId).toBeTruthy();
+    expect(run.linkedIssueId).not.toBe(excludedIssueId);
+    const created = await db
+      .select({ originKind: issues.originKind, originId: issues.originId })
+      .from(issues)
+      .where(eq(issues.id, run.linkedIssueId!))
+      .then((rows) => rows[0]);
+    expect(created).toMatchObject({ originKind, originId });
+  });
+
+  it("creates a new execution when the occupied issue fingerprint is default", async () => {
+    await openBesideExcludedIssue(async (issue) => {
+      await db.update(issues).set({ originFingerprint: "default" }).where(eq(issues.id, issue.id));
+    });
+  });
+
+  it("creates a new execution when the occupied issue is hidden", async () => {
+    await openBesideExcludedIssue(async (issue) => {
+      await db.update(issues).set({ hiddenAt: new Date() }).where(eq(issues.id, issue.id));
+    });
+  });
+
+  it("creates a new execution when the occupied issue has no execution run", async () => {
+    await openBesideExcludedIssue(async (issue) => {
+      await db.update(issues).set({ executionRunId: null }).where(eq(issues.id, issue.id));
+    });
+  });
+
+  it("creates a new execution when the occupied issue origin id is null", async () => {
+    await openBesideExcludedIssue(async (issue) => {
+      await db.update(issues).set({ originId: null }).where(eq(issues.id, issue.id));
+    });
+  });
+
+  it("creates a new execution when the occupied issue is done", async () => {
+    await openBesideExcludedIssue(async (issue) => {
+      await db.update(issues).set({ status: "done", completedAt: new Date() }).where(eq(issues.id, issue.id));
+    });
+  });
+
+  it("creates a new execution when the occupied issue is cancelled", async () => {
+    await openBesideExcludedIssue(async (issue) => {
+      await db.update(issues).set({ status: "cancelled", cancelledAt: new Date() }).where(eq(issues.id, issue.id));
+    });
   });
 
   it("fails the run and cleans up the execution issue when wakeup queueing fails", async () => {

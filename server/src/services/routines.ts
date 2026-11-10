@@ -1553,32 +1553,33 @@ export function routineService(
       .then((rows) => rows[0]?.issues ?? null);
   }
 
-  // The partial unique index `issues_open_routine_execution_uq` occupies the key
-  // for every visible open execution that already has an execution run, even
-  // when that run is no longer queued, running, or scheduled. The live-heartbeat
-  // lookup above does not see those rows, so a later open would insert a second
-  // execution and then fail the index.
+  // Same key columns and WHERE as issues_open_routine_execution_uq in
+  // packages/db/src/migrations/0062_routine_run_dispatch_fingerprint.sql.
+  // A plugin operation, a legacy "default" fingerprint, a hidden row, a row
+  // with no execution run, a null origin id, or a terminal status is outside
+  // the index, so this lookup must not reuse it.
   async function findIndexedOpenExecutionIssue(
     routine: typeof routines.$inferSelect,
     executor: Db = db,
     dispatchFingerprint?: string | null,
     origin?: { kind: string; id: string | null },
   ) {
-    const fingerprintCondition = routineExecutionFingerprintCondition(dispatchFingerprint);
     const originKind = origin?.kind ?? "routine_execution";
     const originId = origin?.id ?? routine.id;
+    if (originKind !== "routine_execution" || !originId || !dispatchFingerprint) return null;
     return executor
       .select()
       .from(issues)
       .where(
         and(
           eq(issues.companyId, routine.companyId),
-          eq(issues.originKind, originKind),
+          eq(issues.originKind, "routine_execution"),
+          isNotNull(issues.originId),
           eq(issues.originId, originId),
-          isNotNull(issues.executionRunId),
+          eq(issues.originFingerprint, dispatchFingerprint),
           isNull(issues.hiddenAt),
-          inArray(issues.status, OPEN_ISSUE_STATUSES),
-          ...(fingerprintCondition ? [fingerprintCondition] : []),
+          isNotNull(issues.executionRunId),
+          inArray(issues.status, ["backlog", "todo", "in_progress", "in_review", "blocked"]),
         ),
       )
       .orderBy(desc(issues.updatedAt), desc(issues.createdAt))
