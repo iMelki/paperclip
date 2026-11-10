@@ -392,6 +392,34 @@ describe("cursor_cloud execute", () => {
     expect(result.timedOut).toBe(true);
     expect(result.errorCode).toBe("cursor_cloud_timeout");
     expect(cancelled).toBe(true);
+    expect(result.sessionParams).toMatchObject({
+      cursorAgentId: "agent-hung",
+      latestRunId: "run-hung",
+      runtime: "cloud",
+    });
+  });
+
+  it("returns the timeout when Cursor cancel never settles", async () => {
+    const hungRun = {
+      ...createMockRun({ id: "run-cancel-hang", agentId: "agent-cancel-hang" }),
+      async wait(): Promise<Record<string, unknown>> {
+        return new Promise(() => {});
+      },
+      cancel() {
+        return new Promise(() => {});
+      },
+    };
+    createMock.mockResolvedValue(createMockSdkAgent({ agentId: "agent-cancel-hang", sendRun: hungRun }));
+    const ctx = createContext();
+    ctx.config.timeoutSec = 0.05;
+
+    const result = await execute(ctx);
+
+    expect(result.timedOut).toBe(true);
+    expect(result.sessionParams).toMatchObject({
+      cursorAgentId: "agent-cancel-hang",
+      latestRunId: "run-cancel-hang",
+    });
   });
 
   it("terminates a hung Cursor wait when timeoutSec is 0 by using the env default", async () => {

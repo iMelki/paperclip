@@ -118,7 +118,11 @@ async function waitForCursorRun(
     if (outcome.timedOut) {
       const cancel = (run as Run & { cancel?: () => Promise<unknown> | unknown }).cancel;
       if (typeof cancel === "function") {
-        await Promise.resolve(cancel.call(run)).catch(() => undefined);
+        // Do not await cancel. A hung SDK cancel must not keep the heartbeat alive
+        // after the wall-clock deadline has already fired.
+        void Promise.resolve()
+          .then(() => cancel.call(run))
+          .catch(() => undefined);
       }
       return { timedOut: true };
     }
@@ -128,20 +132,34 @@ async function waitForCursorRun(
   }
 }
 
-function cursorCloudTimeoutResult(
-  timeoutSec: number,
-  session: CursorCloudSession | null,
-  run: Run | null,
-): AdapterExecutionResult {
+function cursorCloudTimeoutResult(input: {
+  timeoutSec: number;
+  session: CursorCloudSession | null;
+  run: Run | null;
+  envType: CursorCloudSession["envType"];
+  envName: string | null;
+  repos: CursorCloudSession["repos"];
+}): AdapterExecutionResult {
+  const { timeoutSec, session, run, envType, envName, repos } = input;
+  const nextSession: CursorCloudSession | null = run
+    ? {
+        cursorAgentId: run.agentId,
+        latestRunId: run.id,
+        runtime: "cloud",
+        envType: envType ?? "cloud",
+        ...(envName ? { envName } : {}),
+        repos,
+      }
+    : session;
   return {
     exitCode: 1,
     signal: null,
     timedOut: true,
     errorCode: "cursor_cloud_timeout",
     errorMessage: `Cursor cloud run timed out after ${timeoutSec}s.`,
-    sessionId: run?.agentId ?? session?.cursorAgentId ?? null,
-    sessionDisplayId: run?.agentId ?? session?.cursorAgentId ?? null,
-    sessionParams: session,
+    sessionId: nextSession?.cursorAgentId ?? null,
+    sessionDisplayId: nextSession?.cursorAgentId ?? null,
+    sessionParams: nextSession,
     provider: "cursor",
     biller: "cursor",
     billingType: "api",
@@ -564,7 +582,14 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         if (waited.timedOut) {
           await onLog("stderr", `[cursor-cloud] timed out after ${timeoutSec}s while waiting for ${attachedRun.id}\n`);
           void priorStreamPromise;
-          return cursorCloudTimeoutResult(timeoutSec, session, attachedRun);
+          return cursorCloudTimeoutResult({
+            timeoutSec,
+            session,
+            run: attachedRun,
+            envType,
+            envName,
+            repos,
+          });
         }
       }
       await priorStreamPromise;
@@ -610,7 +635,14 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     if (waited.timedOut) {
       await onLog("stderr", `[cursor-cloud] timed out after ${timeoutSec}s while waiting for ${run.id}\n`);
       void streamPromise;
-      return cursorCloudTimeoutResult(timeoutSec, session, run);
+      return cursorCloudTimeoutResult({
+        timeoutSec,
+        session,
+        run,
+        envType,
+        envName,
+        repos,
+      });
     }
     const result = waited.result;
     await streamPromise;
