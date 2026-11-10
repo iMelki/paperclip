@@ -58,6 +58,21 @@ function setup(opts: { grantedCompanyIds: string[]; authorizedCompanyIds: string
   return { scheduler, createRun, nativeRun, workerManager, jobStore };
 }
 
+// A refused dispatch has no tenant execution. The scheduler keeps one
+// instance-level diagnostic run (no companyId) and marks it failed; it never
+// creates a company-scoped run.
+function expectOnlyFailedDiagnosticRun(ctx: ReturnType<typeof setup>) {
+  expect(ctx.createRun).toHaveBeenCalledTimes(1);
+  expect(ctx.createRun.mock.calls[0]?.[0]).not.toHaveProperty("companyId");
+  expect(ctx.jobStore.completeRun).toHaveBeenCalledWith(
+    "run-1",
+    expect.objectContaining({
+      status: "failed",
+      error: expect.stringContaining("has no company that is both granted and authorized"),
+    }),
+  );
+}
+
 describe("native GitHub board job authorization", () => {
   it("does not run a grant for a company outside the authorized set, and does not run unscoped", async () => {
     const ctx = setup({ grantedCompanyIds: ["company-grant"], authorizedCompanyIds: ["company-authorized"] });
@@ -65,7 +80,7 @@ describe("native GitHub board job authorization", () => {
     await ctx.scheduler.tick();
 
     expect(ctx.workerManager.getProactiveCompanyScopes).toHaveBeenCalledWith(PLUGIN_ID);
-    expect(ctx.createRun).not.toHaveBeenCalled();
+    expectOnlyFailedDiagnosticRun(ctx);
     expect(ctx.nativeRun).not.toHaveBeenCalled();
   });
 
@@ -74,7 +89,7 @@ describe("native GitHub board job authorization", () => {
 
     await ctx.scheduler.tick();
 
-    expect(ctx.createRun).not.toHaveBeenCalled();
+    expectOnlyFailedDiagnosticRun(ctx);
     expect(ctx.nativeRun).not.toHaveBeenCalled();
   });
 
