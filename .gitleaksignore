@@ -104,3 +104,5 @@ server/src/__tests__/server-startup-feedback-export.test.ts:generic-api-key:356
 server/src/__tests__/server-startup-feedback-export.test.ts:generic-api-key:588
 server/src/__tests__/server-startup-feedback-export.test.ts:generic-api-key:635
 server/src/__tests__/decisions-service.test.ts:generic-api-key:50
+# RFC 6455 sample Sec-WebSocket-Key nonce in a runner handshake test (upstream commit).
+9964b034bbff24e700c8eccf5a8b1fc3daa44bf2:packages/paperclip-runner/src/control-plane/durable-prp-control-plane.test.ts:generic-api-key:170

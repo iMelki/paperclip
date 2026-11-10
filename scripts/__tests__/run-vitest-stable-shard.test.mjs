@@ -15,10 +15,11 @@ const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), ".."
 const script = path.join(repoRoot, "scripts", "run-vitest-stable.mjs");
 const durationsManifest = path.join(repoRoot, "scripts", "general-server-shard-durations.json");
 
-function runScript(args) {
+function runScript(args, env = {}) {
   return spawnSync(process.execPath, [script, ...args], {
     cwd: repoRoot,
     encoding: "utf8",
+    env: { ...process.env, ...env },
   });
 }
 
@@ -101,9 +102,25 @@ test("the unsharded general-server lane transports exclusions outside Windows ar
   );
 });
 
-test("shard flags are rejected for the parallel workspace groups", () => {
-  const result = dryRun(["--mode", "general", "--group", "general-workspaces-a", "--shard-index", "0", "--shard-count", "3"]);
-  assert.notEqual(result.status, 0, "workspace groups must not accept shard flags");
+test("shard flags are rejected for the workspaces-b group", () => {
+  const result = dryRun(["--mode", "general", "--group", "general-workspaces-b", "--shard-index", "0", "--shard-count", "3"]);
+  assert.notEqual(result.status, 0, "workspaces-b must not accept shard flags");
+});
+
+test("workspaces-a shards map to Vitest native slices over a stable project list", () => {
+  const shards = [0, 1].map((index) =>
+    dryRunJson([
+      "--mode", "general", "--group", "general-workspaces-a",
+      "--shard-index", String(index), "--shard-count", "2",
+    ]),
+  );
+  for (const [index, plan] of shards.entries()) {
+    assert.equal(plan.workspacesVitestShard, `${index + 1}/2`);
+    assert.deepEqual(plan.workspaceProjects, ["@paperclipai/ui", "paperclipai"]);
+  }
+  const unsharded = dryRunJson(["--mode", "general", "--group", "general-workspaces-a"]);
+  assert.deepEqual(unsharded.workspaceProjects, shards[0].workspaceProjects);
+  assert.equal(unsharded.workspacesVitestShard, null);
 });
 
 test("shard count alone is rejected for related and exact-file modes", () => {
@@ -210,6 +227,52 @@ test("the checked-in manifest loads and covers most of the current suite set", (
     known / currentFiles.length >= 0.5,
     `manifest is stale: only ${known} of ${currentFiles.length} suites have recorded durations — regenerate it from a recent PR run (see the manifest's $comment)`,
   );
+});
+
+test("an empty server shard exits non-zero unless it is explicitly allowed", () => {
+  const cases = [
+    {
+      label: "serialized",
+      base: ["--mode", "serialized"],
+      countKey: "serializedSuiteCount",
+      selectedKey: "selectedSerializedSuites",
+    },
+    {
+      label: "general-server",
+      base: ["--mode", "general", "--group", "general-server"],
+      countKey: "generalServerSuiteCount",
+      selectedKey: "selectedGeneralServerSuites",
+    },
+  ];
+
+  for (const entry of cases) {
+    const census = dryRunJson([...entry.base, "--shard-index", "0", "--shard-count", "1"]);
+    const total = census[entry.countKey];
+    assert.ok(total > 0, `${entry.label} suite set must be non-empty`);
+    const args = [
+      ...entry.base,
+      "--shard-index",
+      String(total),
+      "--shard-count",
+      String(total + 1),
+    ];
+    const plan = dryRunJson(args);
+    assert.equal(plan[entry.selectedKey].length, 0, `${entry.label} fixture shard must select zero files`);
+
+    // Clear the opt-out so an ambient PAPERCLIP_ALLOW_EMPTY_SERVER_SHARD=1 in the
+    // caller's shell or CI cannot turn the must-fail case into a pass.
+    const blocked = runScript(args, { PAPERCLIP_ALLOW_EMPTY_SERVER_SHARD: "" });
+    assert.notEqual(blocked.status, 0, `${entry.label} empty shard must fail: ${blocked.stderr}`);
+    assert.match(blocked.stderr, /selected 0 test files/);
+
+    const allowedByFlag = runScript([...args, "--allow-empty-shard"]);
+    assert.equal(allowedByFlag.status, 0, allowedByFlag.stderr);
+    assert.match(allowedByFlag.stdout, /empty shard explicitly allowed/);
+
+    const allowedByEnv = runScript(args, { PAPERCLIP_ALLOW_EMPTY_SERVER_SHARD: "1" });
+    assert.equal(allowedByEnv.status, 0, allowedByEnv.stderr);
+    assert.match(allowedByEnv.stdout, /empty shard explicitly allowed/);
+  }
 });
 
 test("the real shard partition is duration-balanced", () => {

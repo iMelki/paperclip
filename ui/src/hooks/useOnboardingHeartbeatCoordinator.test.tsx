@@ -22,6 +22,27 @@ const setRouteDismissedMock = vi.hoisted(() => vi.fn());
 const setSelectedCompanyIdMock = vi.hoisted(() => vi.fn());
 
 vi.mock("../api/agents", () => ({ agentsApi: agentsApiMock }));
+// Setup only: upstream restores a saved draft only after a settled company
+// list shows the draft's company is still owned by this account.
+vi.mock("../api/companies-query", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../api/companies-query")>()),
+  useCompanyListQuery: () => ({
+    isSuccess: true,
+    isFetching: false,
+    data: { companies: [{ id: "company-1" }], unauthorized: false },
+  }),
+}));
+// Setup only: upstream's Test now resolves the run environment before it
+// probes (fail-closed), so these stubs let it settle on the server default.
+vi.mock("../api/environments", () => ({
+  environmentsApi: { list: vi.fn(async () => []) },
+}));
+vi.mock("../api/instanceSettings", () => ({
+  instanceSettingsApi: {
+    get: vi.fn(async () => ({ defaultEnvironmentId: null })),
+    getExperimental: vi.fn(async () => ({ enableManagedSandboxOnly: false })),
+  },
+}));
 
 vi.mock("../context/DialogContext", () => ({
   useDialog: () => ({
@@ -49,6 +70,8 @@ vi.mock("@/lib/router", () => ({
 
 vi.mock("../adapters/use-disabled-adapters", () => ({
   useDisabledAdaptersSync: () => new Set<string>(),
+  // Setup only: upstream's wizard also gates on the adapter registry load.
+  useAdapterRegistryLoaded: () => true,
 }));
 
 vi.mock("../adapters/use-adapter-capabilities", () => ({

@@ -42,20 +42,31 @@ const SENSITIVE_KEYS = new Set<string>([
   "session_token",
   "sessiontoken",
   "private_key",
-  "privatekey",
-  "code",
+    "privatekey",
+    "code",
+  // The Claude setup-token login fields. `browserCode` carries the one-time
+  // sign-in code and `authorization_code` carries the OAuth code; neither may
+  // reach a log line.
+  "browsercode",
+  "browser_code",
   "authorization_code",
-  "authorizationcode",
-  "verification_code",
-  "verificationcode",
-  "security_code",
-  "securitycode",
-  "otp",
-  "one_time_password",
-  "onetimepassword",
-  "passcode",
-  "pin",
-  "state",
+    "authorizationcode",
+    "verification_code",
+    "verificationcode",
+    "security_code",
+    "securitycode",
+    "otp",
+    "one_time_password",
+    "onetimepassword",
+    "passcode",
+    // camelCase `passCode` normalizes to `pass_code`, so both spellings are listed.
+    "pass_code",
+    "pin",
+    "state",
+  // The workspace login handoff ticket (PAP-17572). It is a signed bearer
+  // credential carried as a query parameter, so it must never reach a log line
+  // even though the exchange itself answers 302.
+  "ticket",
 ]);
 const SENSITIVE_KEY_SEGMENT_RE =
   /(?:^|[_-])(?:api[-_]?key|access[-_]?token|auth[-_]?token|token|secret|passwd|password|credential|jwt|private[-_]?key|cookie|connection[-_]?string)(?:$|[_-])/i;
@@ -73,6 +84,11 @@ const URLISH_KEYS = new Set<string>([
   "sourceurl",
   "uri",
   "url",
+  // The Claude setup-token login URL. A structured `loginUrl` that reaches a log
+  // sink keeps its origin and path only; the OAuth query, fragment, and any
+  // credentials are stripped (SR-5 backstop).
+  "loginurl",
+  "login_url",
 ]);
 
 function normalizePayloadKey(key: string): string {

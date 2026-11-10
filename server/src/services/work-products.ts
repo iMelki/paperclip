@@ -1,7 +1,8 @@
-import { and, desc, eq } from "drizzle-orm";
+import { and, desc, eq, inArray } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { issueWorkProducts } from "@paperclipai/db";
+import { issueWorkProducts, workspaceRuntimeServices } from "@paperclipai/db";
 import type { IssueWorkProduct } from "@paperclipai/shared";
+import { unprocessable } from "../errors.js";
 import { insertRowsInChunks } from "./batch-insert.js";
 import type { ImportIssueWorkProductRow } from "./import-write-types.js";
 
@@ -33,6 +34,69 @@ function toIssueWorkProduct(row: IssueWorkProductRow): IssueWorkProduct {
   };
 }
 
+/**
+ * Refresh runtime-service work products from the live runtime rows they point at
+ * (PAP-17572).
+ *
+ * A runtime URL is only valid for as long as the process holds that port. A
+ * managed restart can relocate it, which used to leave a user-facing preview link
+ * that answers with somebody else's service or nothing at all. The runtime row is
+ * the authoritative publication record, so it wins over the stored copy.
+ *
+ * Read-path only and deliberately non-destructive: a work product whose runtime
+ * row is gone keeps its recorded URL and is reported unhealthy rather than
+ * silently blanked, so the history of what was published survives.
+ */
+export function reconcileRuntimeServiceWorkProducts(
+  products: IssueWorkProduct[],
+  liveRuntimeServices: Array<{
+    id: string;
+    url: string | null;
+    status: string;
+    healthStatus: string;
+  }>,
+): IssueWorkProduct[] {
+  if (products.length === 0) return products;
+  const liveById = new Map(liveRuntimeServices.map((service) => [service.id, service]));
+  return products.map((product) => {
+    if (product.type !== "runtime_service" || !product.runtimeServiceId) return product;
+    const live = liveById.get(product.runtimeServiceId);
+    if (!live) {
+      return product.healthStatus === "unhealthy" ? product : { ...product, healthStatus: "unhealthy" };
+    }
+    const isServing = live.status === "running" && live.healthStatus === "healthy";
+    const url = live.url ?? product.url;
+    const healthStatus: IssueWorkProduct["healthStatus"] = isServing ? "healthy" : "unhealthy";
+    if (product.url === url && product.healthStatus === healthStatus) return product;
+    return { ...product, url, healthStatus };
+  });
+}
+
+/**
+ * The read path only selects a runtime service when both the id and the
+ * company match. Writes use that same predicate and fail closed: a missing
+ * id and another company's id are the same rejection, so the response does
+ * not reveal that a foreign service exists.
+ */
+async function assertRuntimeServiceInCompany(
+  db: Db,
+  companyId: string,
+  runtimeServiceId: string | null | undefined,
+) {
+  if (!runtimeServiceId) return;
+  const match = await db
+    .select({ id: workspaceRuntimeServices.id })
+    .from(workspaceRuntimeServices)
+    .where(and(
+      eq(workspaceRuntimeServices.id, runtimeServiceId),
+      eq(workspaceRuntimeServices.companyId, companyId),
+    ))
+    .then((rows) => rows[0] ?? null);
+  if (!match) {
+    throw unprocessable("Runtime service was not found in this company");
+  }
+}
+
 export function workProductService(db: Db) {
   return {
     listForIssue: async (issueId: string) => {
@@ -41,7 +105,28 @@ export function workProductService(db: Db) {
         .from(issueWorkProducts)
         .where(eq(issueWorkProducts.issueId, issueId))
         .orderBy(desc(issueWorkProducts.isPrimary), desc(issueWorkProducts.updatedAt));
-      return rows.map(toIssueWorkProduct);
+      const products = rows.map(toIssueWorkProduct);
+      const runtimeServiceIds = products
+        .map((product) => (product.type === "runtime_service" ? product.runtimeServiceId : null))
+        .filter((value): value is string => Boolean(value));
+      if (runtimeServiceIds.length === 0) return products;
+      // The foreign key is the service id alone. Match the owning company too,
+      // or a work product that names another company's service id would copy
+      // that service's URL and health into this company's issue.
+      const companyIds = [...new Set(products.map((product) => product.companyId))];
+      const liveRuntimeServices = await db
+        .select({
+          id: workspaceRuntimeServices.id,
+          url: workspaceRuntimeServices.url,
+          status: workspaceRuntimeServices.status,
+          healthStatus: workspaceRuntimeServices.healthStatus,
+        })
+        .from(workspaceRuntimeServices)
+        .where(and(
+          inArray(workspaceRuntimeServices.id, [...new Set(runtimeServiceIds)]),
+          inArray(workspaceRuntimeServices.companyId, companyIds),
+        ));
+      return reconcileRuntimeServiceWorkProducts(products, liveRuntimeServices);
     },
 
     getById: async (id: string) => {
@@ -55,6 +140,7 @@ export function workProductService(db: Db) {
 
     createForIssue: async (issueId: string, companyId: string, data: Omit<typeof issueWorkProducts.$inferInsert, "issueId" | "companyId">) => {
       const row = await db.transaction(async (tx) => {
+        await assertRuntimeServiceInCompany(tx as unknown as Db, companyId, data.runtimeServiceId);
         if (data.isPrimary) {
           await tx
             .update(issueWorkProducts)
@@ -88,6 +174,11 @@ export function workProductService(db: Db) {
           .where(eq(issueWorkProducts.id, id))
           .then((rows) => rows[0] ?? null);
         if (!existing) return null;
+
+        const companyId = typeof patch.companyId === "string" ? patch.companyId : existing.companyId;
+        if (Object.prototype.hasOwnProperty.call(patch, "runtimeServiceId")) {
+          await assertRuntimeServiceInCompany(tx as unknown as Db, companyId, patch.runtimeServiceId);
+        }
 
         if (patch.isPrimary === true) {
           await tx

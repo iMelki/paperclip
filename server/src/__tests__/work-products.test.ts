@@ -1,5 +1,14 @@
+import { randomUUID } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
+import { eq } from "drizzle-orm";
+import { issueWorkProducts, issues, workspaceRuntimeServices } from "@paperclipai/db";
 import { workProductService } from "../services/work-products.ts";
+import {
+  describeEmbeddedPostgres,
+  resetCompanyIssueFixtures,
+  seedCompanyWithBoardAccess,
+  useEmbeddedPostgres,
+} from "./helpers/route-test-harness.js";
 
 function createWorkProductRow(overrides: Partial<Record<string, unknown>> = {}) {
   const now = new Date("2026-03-17T00:00:00.000Z");
@@ -91,5 +100,131 @@ describe("workProductService", () => {
     expect(txSelect).toHaveBeenCalledTimes(1);
     expect(txUpdate).toHaveBeenCalledTimes(2);
     expect(result?.reviewState).toBe("ready_for_review");
+  });
+});
+
+describeEmbeddedPostgres("workProductService runtime service company scope", () => {
+  const ctx = useEmbeddedPostgres("work-product-company-scope");
+
+  async function insertRuntimeService(companyId: string, url: string) {
+    const id = randomUUID();
+    await ctx.db.insert(workspaceRuntimeServices).values({
+      id,
+      companyId,
+      scopeType: "execution_workspace",
+      serviceName: "preview",
+      status: "running",
+      lifecycle: "shared",
+      url,
+      provider: "local_process",
+      healthStatus: "healthy",
+    });
+    return id;
+  }
+
+  it("does not select a runtime service that belongs to another company", async () => {
+    const caller = await seedCompanyWithBoardAccess(ctx.db, "Caller");
+    const other = await seedCompanyWithBoardAccess(ctx.db, "Other");
+    const issueId = randomUUID();
+    await ctx.db.insert(issues).values({
+      id: issueId,
+      companyId: caller.companyId,
+      title: "Preview",
+      status: "todo",
+    });
+    const foreignServiceId = await insertRuntimeService(other.companyId, "https://other.example/leaked");
+    const ownServiceId = await insertRuntimeService(caller.companyId, "https://caller.example/live");
+    await ctx.db.insert(issueWorkProducts).values([
+      {
+        companyId: caller.companyId,
+        issueId,
+        runtimeServiceId: foreignServiceId,
+        type: "runtime_service",
+        provider: "paperclip",
+        title: "Foreign preview",
+        url: "https://caller.example/kept",
+        status: "open",
+        healthStatus: "healthy",
+      },
+      {
+        companyId: caller.companyId,
+        issueId,
+        runtimeServiceId: ownServiceId,
+        type: "runtime_service",
+        provider: "paperclip",
+        title: "Own preview",
+        url: "https://caller.example/stale",
+        status: "open",
+        healthStatus: "unknown",
+      },
+    ]);
+
+    const listed = await workProductService(ctx.db).listForIssue(issueId);
+    const foreign = listed.find((product) => product.runtimeServiceId === foreignServiceId);
+    const own = listed.find((product) => product.runtimeServiceId === ownServiceId);
+
+    expect(foreign?.url).toBe("https://caller.example/kept");
+    expect(foreign?.healthStatus).toBe("unhealthy");
+    expect(JSON.stringify(foreign)).not.toContain("other.example");
+    expect(own?.url).toBe("https://caller.example/live");
+    expect(own?.healthStatus).toBe("healthy");
+
+    await ctx.db.delete(issueWorkProducts).where(eq(issueWorkProducts.issueId, issueId));
+    await ctx.db.delete(workspaceRuntimeServices).where(eq(workspaceRuntimeServices.companyId, other.companyId));
+    await ctx.db.delete(workspaceRuntimeServices).where(eq(workspaceRuntimeServices.companyId, caller.companyId));
+    await ctx.db.delete(issues).where(eq(issues.id, issueId));
+    await resetCompanyIssueFixtures(ctx.db);
+  });
+
+  it("rejects a foreign runtime service on create and update and keeps a same-company id", async () => {
+    const caller = await seedCompanyWithBoardAccess(ctx.db, "Caller writes");
+    const other = await seedCompanyWithBoardAccess(ctx.db, "Other writes");
+    const issueId = randomUUID();
+    await ctx.db.insert(issues).values({
+      id: issueId,
+      companyId: caller.companyId,
+      title: "Writes",
+      status: "todo",
+    });
+    const ownServiceId = await insertRuntimeService(caller.companyId, "https://caller.example/own");
+    const replacementServiceId = await insertRuntimeService(caller.companyId, "https://caller.example/replacement");
+    const foreignServiceId = await insertRuntimeService(other.companyId, "https://other.example/foreign");
+    const svc = workProductService(ctx.db);
+    const foreignWrite = {
+      type: "runtime_service" as const,
+      provider: "paperclip",
+      title: "Foreign",
+      status: "open",
+      runtimeServiceId: foreignServiceId,
+    };
+
+    await expect(svc.createForIssue(issueId, caller.companyId, foreignWrite)).rejects.toMatchObject({
+      status: 422,
+      message: "Runtime service was not found in this company",
+    });
+    expect(await ctx.db.select().from(issueWorkProducts).where(eq(issueWorkProducts.issueId, issueId))).toHaveLength(0);
+
+    const created = await svc.createForIssue(issueId, caller.companyId, {
+      ...foreignWrite,
+      title: "Own",
+      runtimeServiceId: ownServiceId,
+    });
+    expect(created?.runtimeServiceId).toBe(ownServiceId);
+
+    await expect(svc.update(created!.id, { runtimeServiceId: foreignServiceId })).rejects.toMatchObject({
+      status: 422,
+      message: "Runtime service was not found in this company",
+    });
+    const stored = await ctx.db.select().from(issueWorkProducts).where(eq(issueWorkProducts.id, created!.id));
+    expect(stored[0]?.runtimeServiceId).toBe(ownServiceId);
+
+    const updated = await svc.update(created!.id, { runtimeServiceId: replacementServiceId });
+    expect(updated?.runtimeServiceId).toBe(replacementServiceId);
+
+    await ctx.db.delete(issueWorkProducts).where(eq(issueWorkProducts.issueId, issueId));
+    await ctx.db.delete(workspaceRuntimeServices).where(eq(workspaceRuntimeServices.companyId, other.companyId));
+    await ctx.db.delete(workspaceRuntimeServices).where(eq(workspaceRuntimeServices.companyId, caller.companyId));
+    await ctx.db.delete(issues).where(eq(issues.id, issueId));
+    await resetCompanyIssueFixtures(ctx.db);
   });
 });
