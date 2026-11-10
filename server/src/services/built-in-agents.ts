@@ -18,6 +18,7 @@ import {
   withBuiltInAgentMarker,
 } from "./built-in-agent-metadata.js";
 import { companySkillService } from "./company-skills.js";
+import { resolveEligibleCompanyActorUserId } from "./company-actor-user.js";
 import { routineService } from "./routines.js";
 import { accessService } from "./access.js";
 import { listAdapterModels } from "../adapters/registry.js";
@@ -1284,7 +1285,14 @@ export function builtInAgentService(db: Db) {
 
   async function createOrResetRoutine(agent: Agent, definition: BuiltInAgentDefinition, existing: Routine | null, mode: "reconcile" | "reset") {
     const routine = definition.bundle!.routine;
-    const actor = { agentId: null, userId: "built-in-bundles" };
+    const actorUserId = await resolveEligibleCompanyActorUserId(db, agent.companyId);
+    if (!actorUserId) {
+      throw unprocessable(
+        "Built-in routine has no eligible company user and will not run. Set PAPERCLIP_BUILT_IN_ACTOR_USER_ID to an existing member, or add an active company owner.",
+        { code: "built_in_actor_unresolved", companyId: agent.companyId },
+      );
+    }
+    const actor = { agentId: null, userId: actorUserId };
     const nextRoutine = existing
       ? await routineSvc.update(existing.id, {
         title: routine.title,

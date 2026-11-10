@@ -76,6 +76,7 @@ import { createHostDuplexObservabilityRecorder } from "./duplex-observability-re
 import type { DuplexAggregateByteLedger } from "@paperclipai/adapter-utils/duplex-aggregate-byte-ledger";
 import { incrementToolRuntimeMetricCounter } from "./tool-runtime-metrics.js";
 import { logger } from "../middleware/logger.js";
+import { isBuiltInBundleActorUserId, resolveEligibleCompanyActorUserId } from "./company-actor-user.js";
 import {
   createGitRemoteAuthProvider,
   describeGitAuthFailure,
@@ -7523,21 +7524,25 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     executor?: Db;
   }) {
     const executor = input.executor ?? db;
+    const acceptCompanyActor = async (userId: string | null) => {
+      if (!isBuiltInBundleActorUserId(userId)) return userId;
+      return resolveEligibleCompanyActorUserId(executor, input.companyId);
+    };
     const contextResponsibleUserId = readNonEmptyString(input.contextSnapshot.responsibleUserId);
     const requestedUserId = input.requestedByActorType === "user"
       ? readNonEmptyString(input.requestedByActorId)
       : null;
-    if (contextResponsibleUserId) return contextResponsibleUserId;
-    if (input.existingRunResponsibleUserId) return input.existingRunResponsibleUserId;
-    if (input.routineEnvContext.responsibleUserId) return input.routineEnvContext.responsibleUserId;
+    if (contextResponsibleUserId) return acceptCompanyActor(contextResponsibleUserId);
+    if (input.existingRunResponsibleUserId) return acceptCompanyActor(input.existingRunResponsibleUserId);
+    if (input.routineEnvContext.responsibleUserId) return acceptCompanyActor(input.routineEnvContext.responsibleUserId);
     if (isManualUserRun(input) && requestedUserId) return requestedUserId;
-    if (input.issueContext?.responsibleUserId) return input.issueContext.responsibleUserId;
+    if (input.issueContext?.responsibleUserId) return acceptCompanyActor(input.issueContext.responsibleUserId);
     const parentResponsibleUserId = await resolveParentIssueResponsibleUserId(
       input.companyId,
       input.issueContext?.parentId,
       executor,
     );
-    if (parentResponsibleUserId) return parentResponsibleUserId;
+    if (parentResponsibleUserId) return acceptCompanyActor(parentResponsibleUserId);
     if (input.issueContext) return resolveCompanyDefaultResponsibleUserId(input.companyId, executor);
     if (requestedUserId) return requestedUserId;
     return resolveCompanyDefaultResponsibleUserId(input.companyId, executor);

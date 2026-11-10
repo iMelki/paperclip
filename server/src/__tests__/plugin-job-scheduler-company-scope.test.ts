@@ -71,6 +71,7 @@ function setup(opts: {
   return {
     scheduler,
     job,
+    jobStore,
     createRun,
     completeRun,
     markRunning,
@@ -110,7 +111,6 @@ describe("plugin job scheduler company scope", () => {
   it.each([
     { scope: "instance" as const, companyIds: ["company-a", "company-b"] },
     { scope: "instance" as const, companyIds: [] },
-    { scope: "company" as const, companyIds: [] },
   ])("runs a $scope-scoped job once, unscoped, with companies $companyIds", async ({ scope, companyIds }) => {
     const ctx = setup({ scope, companyIds });
     await ctx.scheduler.tick();
@@ -121,6 +121,39 @@ describe("plugin job scheduler company scope", () => {
     expect(params).toHaveLength(1);
     expect(params[0]).not.toHaveProperty("companyId");
     expect(params[0]!.job).not.toHaveProperty("companyId");
+  });
+
+  it("does not run a company-scoped job that is missing its authorized companies and delays the next attempt", async () => {
+    const ctx = setup({ scope: "company", companyIds: [] });
+    const before = Date.now();
+    await ctx.scheduler.tick();
+
+    expect(ctx.createRun).not.toHaveBeenCalled();
+    expect(ctx.call).not.toHaveBeenCalled();
+    const stamp = ctx.jobStore.updateRunTimestamps as ReturnType<typeof vi.fn>;
+    expect(stamp).toHaveBeenCalledTimes(1);
+    const nextRunAt = stamp.mock.calls[0]?.[2] as Date;
+    expect(nextRunAt.getTime()).toBeGreaterThan(before + 60 * 60 * 1000);
+  });
+
+  it("refreshes authorized companies and then runs the company-scoped job", async () => {
+    const ctx = setup({ scope: "company", companyIds: [] });
+    const scheduler = (await import("../services/plugin-job-scheduler.js")).createPluginJobScheduler({
+      db: { select: () => ({ from: () => ({ where: async () => [ctx.job] }) }) } as never,
+      jobStore: ctx.jobStore,
+      workerManager: {
+        isRunning: () => true,
+        getProactiveCompanyScopes: vi.fn()
+          .mockReturnValueOnce([])
+          .mockReturnValue(["company-a"]),
+        setProactiveCompanyScopes: vi.fn(),
+        call: ctx.call,
+      } as never,
+      jobTimeoutMs: 1_000,
+      refreshAuthorizedCompanies: async () => ["company-a"],
+    });
+    await scheduler.tick();
+    expect(ctx.createRun).toHaveBeenCalledWith(expect.objectContaining({ companyId: "company-a" }));
   });
 
   it("records each company's run separately when one company's run fails, and still runs the others", async () => {

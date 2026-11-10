@@ -88,7 +88,30 @@ export interface PluginJobSchedulerOptions {
    * remaining companies of that trigger (default: `jobTimeoutMs`).
    */
   timedOutRunGraceMs?: number;
+  /**
+   * Re-read the plugin's stored company configs and install them as the
+   * worker's authorized company set. Used when that set is empty at run time.
+   */
+  refreshAuthorizedCompanies?: (pluginId: string) => Promise<readonly string[]>;
 }
+
+/** Company-scoped job has no host-authorized company and must not run unscoped. */
+export class PluginJobMissingAuthorizedCompaniesError extends Error {
+  readonly remediation: string;
+
+  constructor(pluginId: string, jobKey: string) {
+    const remediation =
+      "Open Company settings, then Instance, then Plugins. Open this plugin and choose Save Configuration for the company that should run it.";
+    super(
+      `Plugin "${pluginId}" job "${jobKey}" is missing its authorized companies. ${remediation}`,
+    );
+    this.name = "PluginJobMissingAuthorizedCompaniesError";
+    this.remediation = remediation;
+  }
+}
+
+/** Delay before a company-scoped job with no authorized company is tried again. */
+export const MISSING_COMPANY_GRANT_BACKOFF_MS = 6 * 60 * 60 * 1000;
 
 /**
  * Options for a manual job trigger.
@@ -290,7 +313,8 @@ export function createPluginJobScheduler(
     jobTimeoutMs = DEFAULT_JOB_TIMEOUT_MS,
     maxConcurrentJobs = DEFAULT_MAX_CONCURRENT_JOBS,
   } = options;
-  const timedOutRunGraceMs = options.timedOutRunGraceMs ?? jobTimeoutMs;
+    const timedOutRunGraceMs = options.timedOutRunGraceMs ?? jobTimeoutMs;
+    const refreshAuthorizedCompanies = options.refreshAuthorizedCompanies;
 
   const log = logger.child({ service: "plugin-job-scheduler" });
 
@@ -423,7 +447,8 @@ export function createPluginJobScheduler(
    *   scope) run once: `[null]`.
    * - Company-scoped jobs (`scope: "company"` in the manifest) run once per
    *   host-authorized configured company, in sorted order. With no configured
-   *   company they run once unscoped, as before.
+   *   company they do not run. An empty set is refreshed from stored plugin
+   *   config once, then the job waits out a long backoff.
    * - `onlyCompanyId` restricts a company-scoped job to one configured
    *   company (per-company manual trigger or retry).
    */
@@ -440,7 +465,26 @@ export function createPluginJobScheduler(
       }
       return [null];
     }
-    const companyIds = [...workerManager.getProactiveCompanyScopes(job.pluginId)].sort();
+    let companyIds = [...workerManager.getProactiveCompanyScopes(job.pluginId)].sort();
+    if (companyIds.length === 0 && refreshAuthorizedCompanies) {
+      try {
+        const refreshed = await refreshAuthorizedCompanies(job.pluginId);
+        workerManager.setProactiveCompanyScopes(job.pluginId, refreshed);
+        companyIds = [...workerManager.getProactiveCompanyScopes(job.pluginId)].sort();
+      } catch (err) {
+        log.error(
+          {
+            pluginId: job.pluginId,
+            jobKey: job.jobKey,
+            err: err instanceof Error ? err.message : String(err),
+          },
+          "failed to refresh plugin authorized companies",
+        );
+      }
+    }
+    if (companyIds.length === 0) {
+      throw new PluginJobMissingAuthorizedCompaniesError(job.pluginId, job.jobKey);
+    }
     if (onlyCompanyId) {
       if (!companyIds.includes(onlyCompanyId)) {
         throw new Error(
@@ -449,7 +493,7 @@ export function createPluginJobScheduler(
       }
       return [onlyCompanyId];
     }
-    return companyIds.length > 0 ? companyIds : [null];
+    return companyIds;
   }
 
   /** True if `promise` settles within `ms`; false otherwise. */
@@ -658,6 +702,7 @@ export function createPluginJobScheduler(
 
     // Mark as active (overlap prevention)
     activeJobs.add(jobId);
+    let skipScheduleAdvance = false;
 
     try {
       const targets = await resolveRunTargets(job);
@@ -670,15 +715,34 @@ export function createPluginJobScheduler(
         planned,
       );
     } catch (err) {
-      jobLog.error(
-        { err: err instanceof Error ? err.message : String(err) },
-        "scheduled job dispatch failed",
-      );
+      if (err instanceof PluginJobMissingAuthorizedCompaniesError) {
+        skipScheduleAdvance = true;
+        const nextRunAt = new Date(Date.now() + MISSING_COMPANY_GRANT_BACKOFF_MS);
+        jobLog.error(
+          { nextRunAt: nextRunAt.toISOString(), remediation: err.remediation },
+          err.message,
+        );
+        try {
+          await jobStore.updateRunTimestamps(job.id, job.lastRunAt ?? new Date(), nextRunAt);
+        } catch (stampErr) {
+          jobLog.error(
+            { err: stampErr instanceof Error ? stampErr.message : String(stampErr) },
+            "failed to delay a job that is missing its authorized companies",
+          );
+        }
+      } else {
+        jobLog.error(
+          { err: err instanceof Error ? err.message : String(err) },
+          "scheduled job dispatch failed",
+        );
+      }
     } finally {
       // Remove from active set
       activeJobs.delete(jobId);
 
-      // Always advance the schedule pointer (even on failure)
+      // Always advance the schedule pointer (even on failure), except when
+      // the job has no authorized company and already has a long backoff.
+      if (skipScheduleAdvance) return;
       try {
         await advanceSchedulePointer(job);
       } catch (err) {

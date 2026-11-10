@@ -558,6 +558,12 @@ export async function createApp(
     db,
     jobStore,
     workerManager,
+    refreshAuthorizedCompanies: async (pluginId) => {
+      const configRows = await pluginRegistry.listConfigs(pluginId);
+      const companyIds = configRows.map((row) => row.companyId).filter((id) => id.trim().length > 0);
+      workerManager.setProactiveCompanyScopes(pluginId, companyIds);
+      return companyIds;
+    },
   });
   const toolDispatcher = createPluginToolDispatcher({
     workerManager,

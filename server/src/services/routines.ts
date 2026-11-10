@@ -1,5 +1,6 @@
 import crypto from "node:crypto";
 import { and, asc, desc, eq, gt, inArray, isNotNull, isNull, lte, ne, not, or, sql } from "drizzle-orm";
+import { isBuiltInBundleActorUserId, resolveEligibleCompanyActorUserId, userHasActiveCompanyAccess } from "./company-actor-user.js";
 import type { Db } from "@paperclipai/db";
 import {
   agents,
@@ -3151,9 +3152,33 @@ export function routineService(
           continue;
         }
 
+        let routineForRun = row.routine;
+        if (row.routine.originKind === "built_in_agent_bundle") {
+          const storedUserId = row.routine.responsibleUserId;
+          const storedCanRun = Boolean(
+            storedUserId
+            && !isBuiltInBundleActorUserId(storedUserId)
+            && await userHasActiveCompanyAccess(db, row.routine.companyId, storedUserId),
+          );
+          if (!storedCanRun) {
+            const eligibleUserId = await resolveEligibleCompanyActorUserId(db, row.routine.companyId);
+            if (!eligibleUserId) {
+              await recordSuppressedAutomaticRun({
+                routine: row.routine,
+                trigger: row.trigger,
+                source: "schedule",
+                reason: "no_eligible_actor",
+                nextRunAt: claimedNextRunAt,
+              });
+              continue;
+            }
+            routineForRun = { ...row.routine, responsibleUserId: eligibleUserId };
+          }
+        }
+
         for (let i = 0; i < runCount; i += 1) {
           await dispatchRoutineRun({
-            routine: row.routine,
+            routine: routineForRun,
             trigger: row.trigger,
             source: "schedule",
             nextRunAtOverride: claimedNextRunAt,
