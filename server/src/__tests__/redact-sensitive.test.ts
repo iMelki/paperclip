@@ -255,7 +255,8 @@ describe("redactSensitive", () => {
     const keys = [
       "bearer", "Bearer", "bearerToken", "mfaCode", "mfa_code", "mfa-code", "totp", "TOTP", "userTotp",
       "twoFactorCode", "two_factor_code", "oauthCode", "oauth_code", "OAuthCode", "oAuthCode", "userOAuthCode",
-      "o-auth-code", "credentials", "credential",
+      "o-auth-code", "mfaCodes", "mfa_codes", "twoFactorCodes", "two_factor_codes", "oauthCodes", "userOAuthCodes",
+      "credentials", "credential",
       "sessionId", "session_id", "sid", "SID", "user_sid",
     ];
     const out = redactSensitive(Object.fromEntries(keys.map((k) => [k, "v"]))) as Record<string, unknown>;
