@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { readdir, readFile } from "node:fs/promises";
 import path from "node:path";
+import { withReleasedTransaction } from "./short-transaction.js";
 import { and, eq, sql } from "drizzle-orm";
 import type { SQL } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
@@ -346,6 +347,12 @@ function resolveMigrationsDir(packageRoot: string, migrationsDir: string): strin
 type PluginDatabaseClient = Pick<Db, "select" | "insert" | "update" | "execute">;
 type PluginDatabaseRootClient = PluginDatabaseClient & Partial<Pick<Db, "transaction">>;
 
+export interface LoadedPluginMigration {
+  migrationKey: string;
+  content: string;
+  checksum: string;
+}
+
 export interface ApplyPluginMigrationsOptions {
   /**
    * Persist failed migration ledger rows. Fresh install uses false because the
@@ -353,6 +360,30 @@ export interface ApplyPluginMigrationsOptions {
    * namespace together.
    */
   persistFailure?: boolean;
+  /**
+   * Migration sources read before any transaction. Install passes these so the
+   * plugin-row lock is not held across filesystem reads.
+   */
+  loadedMigrations?: LoadedPluginMigration[];
+}
+
+export async function loadPluginMigrationFiles(
+  packageRoot: string,
+  manifest: PaperclipPluginManifestV1,
+): Promise<LoadedPluginMigration[]> {
+  if (!manifest.database) return [];
+  const migrationDir = resolveMigrationsDir(packageRoot, manifest.database.migrationsDir);
+  const migrationFiles = await listSqlMigrationFiles(migrationDir);
+  const loaded: LoadedPluginMigration[] = [];
+  for (const migrationKey of migrationFiles) {
+    const content = await readFile(path.join(migrationDir, migrationKey), "utf8");
+    loaded.push({
+      migrationKey,
+      content,
+      checksum: createHash("sha256").update(content).digest("hex"),
+    });
+  }
+  return loaded;
 }
 
 export function pluginDatabaseService(db: PluginDatabaseRootClient) {
@@ -470,17 +501,26 @@ export function pluginDatabaseService(db: PluginDatabaseRootClient) {
       const namespace = await ensureNamespace(pluginId, manifest);
       if (!namespace) return null;
 
-      const migrationDir = resolveMigrationsDir(packageRoot, manifest.database.migrationsDir);
-      const migrationFiles = await listSqlMigrationFiles(migrationDir);
+      // Read files before the transaction so a plugin-row or advisory lock is
+      // not held across filesystem awaits.
+      const loaded = options.loadedMigrations ?? await loadPluginMigrationFiles(packageRoot, manifest);
       const coreReadTables = manifest.database.coreReadTables ?? [];
       const lockKey = Number.parseInt(createHash("sha256").update(pluginId).digest("hex").slice(0, 12), 16);
       const persistFailure = options.persistFailure ?? true;
+      let pendingFailure: {
+        pluginId: string;
+        pluginKey: string;
+        namespaceName: string;
+        migrationKey: string;
+        checksum: string;
+        pluginVersion: string;
+        error: unknown;
+      } | null = null;
 
       const applyWithClient = async (client: PluginDatabaseClient) => {
         await client.execute(sql`SELECT pg_advisory_xact_lock(${lockKey})`);
-        for (const migrationKey of migrationFiles) {
-          const content = await readFile(path.join(migrationDir, migrationKey), "utf8");
-          const checksum = createHash("sha256").update(content).digest("hex");
+        for (const file of loaded) {
+          const { migrationKey, content, checksum } = file;
           const existingRows = await client
             .select()
             .from(pluginMigrations)
@@ -528,7 +568,7 @@ export function pluginDatabaseService(db: PluginDatabaseRootClient) {
               });
           } catch (error) {
             if (persistFailure) {
-              await recordMigrationFailure(db, {
+              pendingFailure = {
                 pluginId,
                 pluginKey: manifest.id,
                 namespaceName: namespace.namespaceName,
@@ -536,17 +576,34 @@ export function pluginDatabaseService(db: PluginDatabaseRootClient) {
                 checksum,
                 pluginVersion: manifest.version,
                 error,
-              });
+              };
             }
             throw error;
           }
         }
       };
 
-      if (typeof db.transaction === "function") {
-        await db.transaction(async (tx) => applyWithClient(tx as PluginDatabaseClient));
-      } else {
-        await applyWithClient(db);
+      try {
+        if (typeof db.transaction === "function") {
+          await withReleasedTransaction<PluginDatabaseClient, void>(
+            (work) => db.transaction!(async (tx) => work(tx as PluginDatabaseClient)),
+            (client) => applyWithClient(client),
+          );
+        } else {
+          await applyWithClient(db);
+        }
+      } catch (error) {
+        // The transaction has already released its connection. Recording the
+        // ledger row on the root client here does not check out a second
+        // connection while the first is still reserved.
+        if (pendingFailure) {
+          try {
+            await recordMigrationFailure(db, pendingFailure);
+          } catch {
+            // Keep the migration error. A ledger write must not replace it.
+          }
+        }
+        throw error;
       }
 
       return namespace;

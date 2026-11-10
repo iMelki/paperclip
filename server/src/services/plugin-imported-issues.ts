@@ -323,26 +323,39 @@ export function pluginImportedIssuesService(
     readReceipt: (context: BoardImportHostContext, input: { operationId: string }) => read(context,
       executor => readReceiptInside(executor, context, validateBoardImportOperationId(input.operationId))),
     withStockCreationFence,
-    getExcludedSources: (context: BoardImportHostContext) => transact(async executor => {
-      await authorize(executor, context, undefined, true);
-      const nativeRows = await executor.select().from(issues).where(and(
-        eq(issues.companyId, context.companyId), eq(issues.originKind, origins.task),
-      )).limit(MAX_EXCLUSIONS + 1);
-      const journals = await executor.select().from(pluginState).where(and(
-        eq(pluginState.pluginId, identity.pluginId), eq(pluginState.scopeKind, "company"),
-        eq(pluginState.scopeId, context.companyId), eq(pluginState.namespace, BOARD_IMPORT_NAMESPACE),
-        like(pluginState.stateKey, "task:%"),
-      )).limit(MAX_EXCLUSIONS + 1);
-      if (nativeRows.length > MAX_EXCLUSIONS || journals.length > MAX_EXCLUSIONS || nativeRows.length !== journals.length) {
-        throw conflict("Incomplete native manual-import exclusion evidence; repository sync must remain held");
-      }
+    getExcludedSources: async (context: BoardImportHostContext) => {
+      // The count check is one short transaction. Each task read is its own
+      // transaction, so `plugins ... FOR SHARE` from authorize is not held
+      // across the whole exclusion scan.
+      const snapshot = await transact(async executor => {
+        await authorize(executor, context, undefined, true);
+        const nativeRows = await executor.select({ id: issues.id, originId: issues.originId }).from(issues).where(and(
+          eq(issues.companyId, context.companyId), eq(issues.originKind, origins.task),
+        )).limit(MAX_EXCLUSIONS + 1);
+        const journals = await executor.select({ id: pluginState.id }).from(pluginState).where(and(
+          eq(pluginState.pluginId, identity.pluginId), eq(pluginState.scopeKind, "company"),
+          eq(pluginState.scopeId, context.companyId), eq(pluginState.namespace, BOARD_IMPORT_NAMESPACE),
+          like(pluginState.stateKey, "task:%"),
+        )).limit(MAX_EXCLUSIONS + 1);
+        if (nativeRows.length > MAX_EXCLUSIONS || journals.length > MAX_EXCLUSIONS || nativeRows.length !== journals.length) {
+          throw conflict("Incomplete native manual-import exclusion evidence; repository sync must remain held");
+        }
+        return nativeRows.map((row) => {
+          if (!row.originId) throw conflict("Missing authoritative manual-import exclusion");
+          return { id: row.id, originId: row.originId };
+        });
+      });
       const sourceUrls: string[] = [];
-      for (const row of nativeRows) {
-        const existing = await taskJournal(executor, context.companyId, validateBoardImportNode(row.originId!));
-        if (!existing || existing.issue.id !== row.id) throw conflict("Missing authoritative manual-import exclusion");
-        sourceUrls.push(existing.journal.sourceUrl);
+      for (const row of snapshot) {
+        const sourceUrl = await transact(async executor => {
+          await authorize(executor, context, undefined, true);
+          const existing = await taskJournal(executor, context.companyId, validateBoardImportNode(row.originId));
+          if (!existing || existing.issue.id !== row.id) throw conflict("Missing authoritative manual-import exclusion");
+          return existing.journal.sourceUrl;
+        });
+        sourceUrls.push(sourceUrl);
       }
       return { companyId: context.companyId, sourceUrls: [...new Set(sourceUrls)].sort() };
-    }),
+    },
   };
 }
