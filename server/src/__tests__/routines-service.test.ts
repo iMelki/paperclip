@@ -1,5 +1,5 @@
 import { createHmac, randomUUID } from "node:crypto";
-import { eq } from "drizzle-orm";
+import { and, eq, inArray, isNull } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   activityLog,
@@ -31,6 +31,7 @@ import {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
+import { isUniqueViolation } from "../db-errors.js";
 import { issueService } from "../services/issues.ts";
 import { instanceSettingsService } from "../services/instance-settings.ts";
 import * as providerRegistry from "../secrets/provider-registry.ts";
@@ -2085,6 +2086,73 @@ describeEmbeddedPostgres("routine service live-execution coalescing", () => {
       .where(eq(issues.originId, routine.id));
 
     expect(routineIssues).toHaveLength(1);
+  });
+
+  it("keeps one open execution when concurrent opens race an occupied execution key", async () => {
+    const { agentId, routine, svc } = await seedFixture();
+    const openStatuses = ["backlog", "todo", "in_progress", "in_review", "blocked"];
+    const listOpenExecutions = () => db
+      .select()
+      .from(issues)
+      .where(and(
+        eq(issues.companyId, routine.companyId),
+        eq(issues.originKind, "routine_execution"),
+        eq(issues.originId, routine.id),
+        isNull(issues.hiddenAt),
+        inArray(issues.status, openStatuses),
+      ));
+
+    const coldOpens = await Promise.all([
+      svc.runRoutine(routine.id, { source: "manual" }),
+      svc.runRoutine(routine.id, { source: "manual" }),
+      svc.runRoutine(routine.id, { source: "manual" }),
+    ]);
+    expect(coldOpens.filter((run) => run.status === "failed")).toEqual([]);
+    expect(coldOpens.map((run) => run.failureReason ?? "").join(" ")).not.toMatch(/issues_open_routine_execution_uq|duplicate key/i);
+    const firstOpen = await listOpenExecutions();
+    expect(firstOpen).toHaveLength(1);
+    expect(firstOpen[0]?.executionRunId).toBeTruthy();
+
+    // The execution run is no longer live, but it still holds the unique index.
+    // A scheduler retry or an overlapping tick used to miss this row and insert
+    // a second execution.
+    await db
+      .update(heartbeatRuns)
+      .set({ status: "failed", finishedAt: new Date() })
+      .where(eq(heartbeatRuns.id, firstOpen[0]!.executionRunId!));
+
+    const racedOpens = await Promise.all([
+      svc.runRoutine(routine.id, { source: "manual" }),
+      svc.runRoutine(routine.id, { source: "manual" }),
+      svc.runRoutine(routine.id, { source: "manual" }),
+    ]);
+    expect(racedOpens.map((run) => run.status).sort()).toEqual(["coalesced", "coalesced", "coalesced"]);
+    expect(racedOpens.map((run) => run.failureReason ?? "").join(" ")).not.toMatch(/issues_open_routine_execution_uq|duplicate key/i);
+    expect(racedOpens.every((run) => run.linkedIssueId === firstOpen[0]!.id)).toBe(true);
+
+    const openExecutions = await listOpenExecutions();
+    expect(openExecutions).toHaveLength(1);
+
+    const extraRunId = randomUUID();
+    await db.insert(heartbeatRuns).values({
+      id: extraRunId,
+      companyId: routine.companyId,
+      agentId,
+      invocationSource: "assignment",
+      status: "queued",
+      contextSnapshot: { issueId: "unused" },
+    });
+    await expect(db.insert(issues).values({
+      companyId: routine.companyId,
+      title: "second open execution",
+      status: "todo",
+      originKind: "routine_execution",
+      originId: routine.id,
+      originFingerprint: openExecutions[0]!.originFingerprint,
+      executionRunId: extraRunId,
+      assigneeAgentId: openExecutions[0]!.assigneeAgentId,
+    })).rejects.toSatisfy((error: unknown) => isUniqueViolation(error, "issues_open_routine_execution_uq"));
+    expect(await listOpenExecutions()).toHaveLength(1);
   });
 
   it("fails the run and cleans up the execution issue when wakeup queueing fails", async () => {

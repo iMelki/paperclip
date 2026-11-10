@@ -57,6 +57,7 @@ import {
   syncRoutineVariablesWithTemplate,
 } from "@paperclipai/shared";
 import { trackRoutineRun } from "@paperclipai/shared/telemetry";
+import { isUniqueViolation } from "../db-errors.js";
 import { conflict, forbidden, notFound, unauthorized, unprocessable } from "../errors.js";
 import { logger } from "../middleware/logger.js";
 import { getTelemetryClient } from "../telemetry.js";
@@ -1552,6 +1553,39 @@ export function routineService(
       .then((rows) => rows[0]?.issues ?? null);
   }
 
+  // The partial unique index `issues_open_routine_execution_uq` occupies the key
+  // for every visible open execution that already has an execution run, even
+  // when that run is no longer queued, running, or scheduled. The live-heartbeat
+  // lookup above does not see those rows, so a later open would insert a second
+  // execution and then fail the index.
+  async function findIndexedOpenExecutionIssue(
+    routine: typeof routines.$inferSelect,
+    executor: Db = db,
+    dispatchFingerprint?: string | null,
+    origin?: { kind: string; id: string | null },
+  ) {
+    const fingerprintCondition = routineExecutionFingerprintCondition(dispatchFingerprint);
+    const originKind = origin?.kind ?? "routine_execution";
+    const originId = origin?.id ?? routine.id;
+    return executor
+      .select()
+      .from(issues)
+      .where(
+        and(
+          eq(issues.companyId, routine.companyId),
+          eq(issues.originKind, originKind),
+          eq(issues.originId, originId),
+          isNotNull(issues.executionRunId),
+          isNull(issues.hiddenAt),
+          inArray(issues.status, OPEN_ISSUE_STATUSES),
+          ...(fingerprintCondition ? [fingerprintCondition] : []),
+        ),
+      )
+      .orderBy(desc(issues.updatedAt), desc(issues.createdAt))
+      .limit(1)
+      .then((rows) => rows[0] ?? null);
+  }
+
   async function finalizeRun(runId: string, patch: Partial<typeof routineRuns.$inferInsert>, executor: Db = db) {
     return executor
       .update(routineRuns)
@@ -1771,6 +1805,10 @@ export function routineService(
       await tx.execute(
         sql`select id from ${routines} where ${routines.id} = ${input.routine.id} and ${routines.companyId} = ${input.routine.companyId} for update`,
       );
+      // The issue insert runs on its own connection, so the row lock above does
+      // not cover that insert. Hold the execution key until this transaction
+      // ends, which is after the insert and the wakeup that binds the run.
+      await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`routine-execution:${input.routine.companyId}:${issueOriginKind}:${issueOriginId}:${dispatchFingerprint}`}, 0))`);
 
       if (input.idempotencyKey) {
         const existing = await txDb
@@ -1841,37 +1879,42 @@ export function routineService(
           ? nextCronTickInTimeZone(input.trigger.cronExpression, input.trigger.timezone, triggeredAt)
           : undefined;
 
+      const executionOrigin = { kind: issueOriginKind, id: issueOriginId };
+      const reuseOpenExecution = async (activeIssue: typeof issues.$inferSelect) => {
+        const status = input.routine.concurrencyPolicy === "skip_if_active" ? "skipped" : "coalesced";
+        if (manualRunnerUserId) {
+          await touchIssueForUserInbox(txDb, {
+            companyId: input.routine.companyId,
+            issueId: activeIssue.id,
+            userId: manualRunnerUserId,
+            touchedAt: triggeredAt,
+          });
+        }
+        const updated = await finalizeRun(createdRun.id, {
+          status,
+          linkedIssueId: activeIssue.id,
+          coalescedIntoRunId: activeIssue.originRunId,
+          completedAt: triggeredAt,
+        }, txDb);
+        await updateRoutineTouchedState({
+          routineId: input.routine.id,
+          triggerId: input.trigger?.id ?? null,
+          triggeredAt,
+          status,
+          issueId: activeIssue.id,
+          nextRunAt,
+        }, txDb);
+        return updated ?? createdRun;
+      };
+
       let createdIssue: Awaited<ReturnType<typeof issueSvc.create>> | null = null;
       try {
-        const activeIssue = await findLiveExecutionIssue(input.routine, txDb, dispatchFingerprint, {
-          kind: issueOriginKind,
-          id: issueOriginId,
-        });
-        if (activeIssue && input.routine.concurrencyPolicy !== "always_enqueue") {
-          const status = input.routine.concurrencyPolicy === "skip_if_active" ? "skipped" : "coalesced";
-          if (manualRunnerUserId) {
-            await touchIssueForUserInbox(txDb, {
-              companyId: input.routine.companyId,
-              issueId: activeIssue.id,
-              userId: manualRunnerUserId,
-              touchedAt: triggeredAt,
-            });
-          }
-          const updated = await finalizeRun(createdRun.id, {
-            status,
-            linkedIssueId: activeIssue.id,
-            coalescedIntoRunId: activeIssue.originRunId,
-            completedAt: triggeredAt,
-          }, txDb);
-          await updateRoutineTouchedState({
-            routineId: input.routine.id,
-            triggerId: input.trigger?.id ?? null,
-            triggeredAt,
-            status,
-            issueId: activeIssue.id,
-            nextRunAt,
-          }, txDb);
-          return updated ?? createdRun;
+        const activeIssue = input.routine.concurrencyPolicy === "always_enqueue"
+          ? null
+          : await findIndexedOpenExecutionIssue(input.routine, txDb, dispatchFingerprint, executionOrigin)
+            ?? await findLiveExecutionIssue(input.routine, txDb, dispatchFingerprint, executionOrigin);
+        if (activeIssue) {
+          return reuseOpenExecution(activeIssue);
         }
 
         try {
@@ -1898,59 +1941,42 @@ export function routineService(
             executionWorkspacePreference: input.executionWorkspacePreference ?? null,
             executionWorkspaceSettings: input.executionWorkspaceSettings ?? null,
           });
+          // Keep the dispatch lock until the issue is linked to a queued heartbeat run.
+          await queueIssueAssignmentWakeup({
+            heartbeat,
+            issue: createdIssue,
+            reason: "issue_assigned",
+            mutation: "create",
+            contextSource: "routine.dispatch",
+            requestedByActorType: input.source === "schedule" ? "system" : undefined,
+            rethrowOnError: true,
+          });
         } catch (error) {
-          const isOpenExecutionConflict =
-            !!error &&
-            typeof error === "object" &&
-            "code" in error &&
-            (error as { code?: string }).code === "23505" &&
-            "constraint" in error &&
-            (error as { constraint?: string }).constraint === "issues_open_routine_execution_uq";
-          if (!isOpenExecutionConflict || input.routine.concurrencyPolicy === "always_enqueue") {
+          if (!isUniqueViolation(error, "issues_open_routine_execution_uq")) {
             throw error;
           }
-
-          const existingIssue = await findLiveExecutionIssue(input.routine, txDb, dispatchFingerprint, {
-            kind: issueOriginKind,
-            id: issueOriginId,
-          });
-          if (!existingIssue) throw error;
-          const status = input.routine.concurrencyPolicy === "skip_if_active" ? "skipped" : "coalesced";
-          if (manualRunnerUserId) {
-            await touchIssueForUserInbox(txDb, {
-              companyId: input.routine.companyId,
-              issueId: existingIssue.id,
-              userId: manualRunnerUserId,
-              touchedAt: triggeredAt,
-            });
+          // The index rejected a second open execution. Drop the loser and
+          // return the row that already holds the key. Do this for every
+          // concurrency policy: the index is the hard rule.
+          if (createdIssue) {
+            await txDb.delete(issues).where(and(
+              eq(issues.companyId, input.routine.companyId),
+              eq(issues.id, createdIssue.id),
+            ));
+            createdIssue = null;
           }
-          const updated = await finalizeRun(createdRun.id, {
-            status,
-            linkedIssueId: existingIssue.id,
-            coalescedIntoRunId: existingIssue.originRunId,
-            completedAt: triggeredAt,
-          }, txDb);
-          await updateRoutineTouchedState({
-            routineId: input.routine.id,
-            triggerId: input.trigger?.id ?? null,
-            triggeredAt,
-            status,
-            issueId: existingIssue.id,
-            nextRunAt,
-          }, txDb);
-          return updated ?? createdRun;
+          const existingIssue = await findIndexedOpenExecutionIssue(
+            input.routine,
+            txDb,
+            dispatchFingerprint,
+            executionOrigin,
+          ) ?? await findLiveExecutionIssue(input.routine, txDb, dispatchFingerprint, executionOrigin);
+          if (!existingIssue) throw error;
+          return reuseOpenExecution(existingIssue);
         }
-
-        // Keep the dispatch lock until the issue is linked to a queued heartbeat run.
-        await queueIssueAssignmentWakeup({
-          heartbeat,
-          issue: createdIssue,
-          reason: "issue_assigned",
-          mutation: "create",
-          contextSource: "routine.dispatch",
-          requestedByActorType: input.source === "schedule" ? "system" : undefined,
-          rethrowOnError: true,
-        });
+        if (!createdIssue) {
+          throw new Error("Routine execution issue was not created");
+        }
         const updated = await finalizeRun(createdRun.id, {
           status: "issue_created",
           linkedIssueId: createdIssue.id,
@@ -1966,7 +1992,10 @@ export function routineService(
         return updated ?? createdRun;
       } catch (error) {
         if (createdIssue) {
-          await txDb.delete(issues).where(eq(issues.id, createdIssue.id));
+          await txDb.delete(issues).where(and(
+            eq(issues.companyId, input.routine.companyId),
+            eq(issues.id, createdIssue.id),
+          ));
         }
         const failureReason = error instanceof Error ? error.message : String(error);
         const failed = await finalizeRun(createdRun.id, {
