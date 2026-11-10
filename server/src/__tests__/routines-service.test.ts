@@ -4,7 +4,9 @@ import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest
 import {
   activityLog,
   agents,
+  authUsers,
   companies,
+  companyMemberships,
   companySecretBindings,
   companySecrets,
   companySecretVersions,
@@ -81,6 +83,8 @@ describeEmbeddedPostgres("routine service live-execution coalescing", () => {
     await db.delete(projectWorkspaces);
     await db.delete(projects);
     await db.delete(agents);
+    await db.delete(companyMemberships);
+    await db.delete(authUsers);
     await db.delete(companies);
     await db.delete(instanceSettings);
   });
@@ -2696,6 +2700,57 @@ describeEmbeddedPostgres("routine service live-execution coalescing", () => {
 
       const issuesAfterTick = await db.select().from(issues).where(eq(issues.companyId, routine.companyId));
       expect(issuesAfterTick).toHaveLength(0);
+    } finally {
+      if (previousActorUserId === undefined) delete process.env.PAPERCLIP_BUILT_IN_ACTOR_USER_ID;
+      else process.env.PAPERCLIP_BUILT_IN_ACTOR_USER_ID = previousActorUserId;
+    }
+  });
+
+  it("replaces a revoked revision user with the company owner for a scheduled built-in routine", async () => {
+    const previousActorUserId = process.env.PAPERCLIP_BUILT_IN_ACTOR_USER_ID;
+    delete process.env.PAPERCLIP_BUILT_IN_ACTOR_USER_ID;
+    try {
+      const { companyId, routine, svc } = await seedFixture();
+      const ownerId = `owner-${randomUUID()}`;
+      const revokedId = `revoked-${randomUUID()}`;
+      const now = new Date();
+      for (const id of [ownerId, revokedId]) {
+        await db.insert(authUsers).values({
+          id,
+          name: id,
+          email: `${id}@example.com`,
+          emailVerified: true,
+          createdAt: now,
+          updatedAt: now,
+        });
+      }
+      await db.insert(companyMemberships).values([
+        { companyId, principalType: "user", principalId: ownerId, status: "active", membershipRole: "owner", updatedAt: now },
+        { companyId, principalType: "user", principalId: revokedId, status: "suspended", membershipRole: "owner", updatedAt: now },
+      ]);
+      await db.update(routines).set({
+        originKind: "built_in_agent_bundle",
+        originId: "summarizer:daily",
+        responsibleUserId: ownerId,
+      }).where(eq(routines.id, routine.id));
+      // The routine's own user is fine; its latest revision names a user whose
+      // membership was revoked.
+      await db.update(routineRevisions).set({ responsibleUserId: revokedId }).where(eq(routineRevisions.routineId, routine.id));
+      const { trigger } = await svc.createTrigger(routine.id, {
+        kind: "schedule",
+        label: "daily",
+        cronExpression: "0 0 * * *",
+        timezone: "UTC",
+      }, {});
+      await db.update(routineRevisions).set({ responsibleUserId: revokedId }).where(eq(routineRevisions.routineId, routine.id));
+      await db.update(routineTriggers).set({ nextRunAt: new Date("2020-01-01T00:00:00.000Z") }).where(eq(routineTriggers.id, trigger.id));
+
+      expect(await svc.tickScheduledTriggers(new Date())).toEqual({ triggered: 1 });
+
+      const [run] = await db.select().from(routineRuns).where(eq(routineRuns.routineId, routine.id));
+      expect(run).toMatchObject({ status: "issue_created", responsibleUserId: ownerId });
+      const [issue] = await db.select().from(issues).where(eq(issues.id, run!.linkedIssueId!));
+      expect(issue?.responsibleUserId).toBe(ownerId);
     } finally {
       if (previousActorUserId === undefined) delete process.env.PAPERCLIP_BUILT_IN_ACTOR_USER_ID;
       else process.env.PAPERCLIP_BUILT_IN_ACTOR_USER_ID = previousActorUserId;

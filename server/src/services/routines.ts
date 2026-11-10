@@ -1827,9 +1827,23 @@ export function routineService(
         : null;
       const storedResponsibleUserId =
         manualRunnerUserId ?? latestRevisionResponsibleUserId ?? input.routine.responsibleUserId ?? null;
-      const responsibleUserId = input.routine.originKind === "built_in_agent_bundle"
-        ? await resolveStoredResponsibleUserId(txDb, input.routine.companyId, storedResponsibleUserId)
-        : storedResponsibleUserId;
+      let responsibleUserId: string | null = storedResponsibleUserId;
+      if (input.routine.originKind === "built_in_agent_bundle") {
+        // A manual runner keeps their own attribution. For a scheduled or
+        // webhook run the stored user (latest revision, then the routine) must
+        // still be a member who can write; otherwise a validated company actor
+        // replaces it, so a deleted or revoked revision user cannot fail the run.
+        const storedUsable = Boolean(
+          !manualRunnerUserId
+          && storedResponsibleUserId
+          && !isBuiltInBundleActorUserId(storedResponsibleUserId)
+          && await userRowExists(txDb, storedResponsibleUserId)
+          && await userHasActiveCompanyAccess(txDb, input.routine.companyId, storedResponsibleUserId),
+        );
+        responsibleUserId = manualRunnerUserId || storedUsable
+          ? await resolveStoredResponsibleUserId(txDb, input.routine.companyId, storedResponsibleUserId)
+          : await resolveEligibleCompanyActorUserId(txDb, input.routine.companyId);
+      }
       if (input.routine.originKind === "built_in_agent_bundle" && !responsibleUserId) {
         throw unprocessable(
           "Built-in routine has no eligible company user and will not run. Set PAPERCLIP_BUILT_IN_ACTOR_USER_ID to an existing member, or add an active company owner.",

@@ -1,4 +1,4 @@
-import { and, asc, eq } from "drizzle-orm";
+import { and, asc, eq, ne } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { authUsers, companyMemberships } from "@paperclipai/db";
 import { logger } from "../middleware/logger.js";
@@ -25,7 +25,12 @@ export async function userRowExists(db: Db, userId: string): Promise<boolean> {
   return row !== null;
 }
 
-/** Active company membership is the access check. Instance admin is not a substitute. */
+/**
+ * Active, write-capable company membership is the access check. Instance admin
+ * is not a substitute, and a read-only `viewer` is not enough: a built-in actor
+ * writes on behalf of the company, and `assertCompanyAccess` rejects on-behalf-of
+ * writes from a viewer.
+ */
 export async function userHasActiveCompanyAccess(
   db: Db,
   companyId: string,
@@ -39,6 +44,7 @@ export async function userHasActiveCompanyAccess(
       eq(companyMemberships.principalType, "user"),
       eq(companyMemberships.principalId, userId),
       eq(companyMemberships.status, "active"),
+      ne(companyMemberships.membershipRole, "viewer"),
     ))
     .limit(1)
     .then((rows) => rows[0] ?? null);
@@ -49,6 +55,9 @@ async function activeOwnerUserId(db: Db, companyId: string): Promise<string | nu
   const owner = await db
     .select({ userId: companyMemberships.principalId })
     .from(companyMemberships)
+    // Join the user table before ordering and limiting, so an owner membership
+    // whose user row is missing cannot hide an eligible owner behind it.
+    .innerJoin(authUsers, eq(authUsers.id, companyMemberships.principalId))
     .where(and(
       eq(companyMemberships.companyId, companyId),
       eq(companyMemberships.principalType, "user"),

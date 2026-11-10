@@ -49,7 +49,13 @@ function createDb(input: {
     return [];
   };
   return {
-    select: () => ({ from: (table: unknown) => ({ where: () => rowsResult(rowsForTable(table)) }) }),
+    select: () => ({
+      from: (table: unknown) => ({
+        where: () => rowsResult(rowsForTable(table)),
+        // The owner lookup joins the user table before it filters and limits.
+        innerJoin: () => ({ where: () => rowsResult(rowsForTable(table)) }),
+      }),
+    }),
     update: () => ({ set: () => ({ where: () => Promise.resolve([]) }) }),
     insert: () => ({ values: () => Promise.resolve([]) }),
   } as any;

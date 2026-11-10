@@ -75,4 +75,43 @@ describeEmbeddedPostgres("company actor user", () => {
     })).resolves.toBeNull();
     expect(await ctx.db.select().from(authUsers)).toHaveLength(0);
   });
+  it("skips an owner membership with no user row and picks the next eligible owner", async () => {
+    const seeded = await seedCompanyWithBoardAccess(ctx.db, "Orphan owner first");
+    // The seeded owner is the oldest membership and has no user row.
+    const laterOwner = `user-${randomUUID()}`;
+    await insertUser(laterOwner);
+    await ctx.db.insert(companyMemberships).values({
+      companyId: seeded.companyId,
+      principalType: "user",
+      principalId: laterOwner,
+      status: "active",
+      membershipRole: "owner",
+      updatedAt: new Date(Date.now() + 1_000),
+      createdAt: new Date(Date.now() + 1_000),
+    });
+
+    await expect(resolveEligibleCompanyActorUserId(ctx.db, seeded.companyId, {
+      configuredUserId: "",
+    })).resolves.toBe(laterOwner);
+  });
+
+  it("does not use a read-only viewer as the actor", async () => {
+    const seeded = await seedCompanyWithBoardAccess(ctx.db, "Viewer configured");
+    await insertUser(seeded.userId);
+    const viewer = `user-${randomUUID()}`;
+    await insertUser(viewer);
+    await ctx.db.insert(companyMemberships).values({
+      companyId: seeded.companyId,
+      principalType: "user",
+      principalId: viewer,
+      status: "active",
+      membershipRole: "viewer",
+      updatedAt: new Date(),
+    });
+
+    expect(await userHasActiveCompanyAccess(ctx.db, seeded.companyId, viewer)).toBe(false);
+    await expect(resolveEligibleCompanyActorUserId(ctx.db, seeded.companyId, {
+      configuredUserId: viewer,
+    })).resolves.toBe(seeded.userId);
+  });
 });

@@ -136,6 +136,20 @@ describe("plugin job scheduler company scope", () => {
     expect(nextRunAt.getTime()).toBeGreaterThan(before + 60 * 60 * 1000);
   });
 
+  it("still advances the schedule when the missing-companies backoff write fails", async () => {
+    const ctx = setup({ scope: "company", companyIds: [] });
+    const stamp = ctx.jobStore.updateRunTimestamps as ReturnType<typeof vi.fn>;
+    stamp.mockRejectedValueOnce(new Error("db unavailable"));
+    const before = Date.now();
+    await ctx.scheduler.tick();
+
+    // The backoff write failed, so the normal schedule advance runs instead of
+    // leaving the job overdue for the next tick.
+    expect(stamp).toHaveBeenCalledTimes(2);
+    const advancedTo = stamp.mock.calls[1]?.[2] as Date;
+    expect(advancedTo.getTime()).toBeLessThan(before + 60 * 60 * 1000);
+  });
+
   it("refreshes authorized companies and then runs the company-scoped job", async () => {
     const ctx = setup({ scope: "company", companyIds: [] });
     const scheduler = (await import("../services/plugin-job-scheduler.js")).createPluginJobScheduler({

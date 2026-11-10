@@ -716,7 +716,6 @@ export function createPluginJobScheduler(
       );
     } catch (err) {
       if (err instanceof PluginJobMissingAuthorizedCompaniesError) {
-        skipScheduleAdvance = true;
         const nextRunAt = new Date(Date.now() + MISSING_COMPANY_GRANT_BACKOFF_MS);
         jobLog.error(
           { nextRunAt: nextRunAt.toISOString(), remediation: err.remediation },
@@ -724,6 +723,10 @@ export function createPluginJobScheduler(
         );
         try {
           await jobStore.updateRunTimestamps(job.id, job.lastRunAt ?? new Date(), nextRunAt);
+          // Only a stored backoff replaces the normal schedule advance. If the
+          // write failed, the normal advance below still moves the pointer so the
+          // job does not retry on every scheduler tick.
+          skipScheduleAdvance = true;
         } catch (stampErr) {
           jobLog.error(
             { err: stampErr instanceof Error ? stampErr.message : String(stampErr) },

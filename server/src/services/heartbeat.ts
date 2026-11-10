@@ -7420,10 +7420,16 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         .then((rows) => rows[0] ?? null);
       const snapshot = revision?.snapshot as RoutineRevisionSnapshotV1 | undefined;
       if (snapshot?.version === 1) {
+        // A built-in routine run records the user it was validated for at
+        // dispatch (a replacement actor when the revision user is no longer
+        // eligible). Seed with that user, not the revision's.
+        const dispatchedUserId = snapshot.routine.originKind === "built_in_agent_bundle"
+          ? routineRun.responsibleUserId ?? null
+          : null;
         return {
           routineId: issueContext.originId,
           env: snapshot.routine.env ?? null,
-          responsibleUserId: revision?.responsibleUserId ?? snapshot.routine.responsibleUserId ?? null,
+          responsibleUserId: dispatchedUserId ?? revision?.responsibleUserId ?? snapshot.routine.responsibleUserId ?? null,
         };
       }
     }
