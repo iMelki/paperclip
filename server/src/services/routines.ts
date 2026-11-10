@@ -659,7 +659,11 @@ export function routineService(
   db: Db,
   deps: {
     heartbeat?: IssueAssignmentWakeupDeps & {
-      cancelRun?: (runId: string, reason?: string) => Promise<unknown>;
+      cancelRun?: (
+        runId: string,
+        reason?: string,
+        options?: { discardIssueWork?: boolean },
+      ) => Promise<unknown>;
     };
     pluginWorkerManager?: PluginWorkerManager;
     runtimeEnv?: Record<string, string | undefined>;
@@ -1605,12 +1609,27 @@ export function routineService(
           sql`${heartbeatRuns.contextSnapshot} ->> 'issueId' = ${issueId}`,
         ),
       );
+    const failures: Array<{ runId: string; err: unknown }> = [];
     for (const run of stranded) {
       try {
-        await heartbeat.cancelRun(run.id, "Cancelled because the routine execution issue was discarded");
+        await heartbeat.cancelRun(
+          run.id,
+          "Cancelled because the routine execution issue was discarded",
+          { discardIssueWork: true },
+        );
       } catch (err) {
         logger.warn({ err, runId: run.id, issueId }, "failed to cancel heartbeat run for a discarded routine execution issue");
+        failures.push({ runId: run.id, err });
       }
+    }
+    // The issue is only deleted once its runs are cancelled. A run that could
+    // not be cancelled (for example when its process cannot be verified as
+    // stopped) keeps the issue so it is never left running for a missing issue.
+    if (failures.length > 0) {
+      throw new Error(
+        `Could not cancel ${failures.length} heartbeat run(s) for the discarded routine execution issue`,
+        { cause: failures[0]!.err },
+      );
     }
   }
 
@@ -2029,14 +2048,23 @@ export function routineService(
         }, txDb);
         return updated ?? createdRun;
       } catch (error) {
+        let discardFailure: string | null = null;
         if (createdIssue) {
-          await cancelRunsForDiscardedIssue(input.routine.companyId, createdIssue.id);
-          await txDb.delete(issues).where(and(
-            eq(issues.companyId, input.routine.companyId),
-            eq(issues.id, createdIssue.id),
-          ));
+          try {
+            await cancelRunsForDiscardedIssue(input.routine.companyId, createdIssue.id);
+            await txDb.delete(issues).where(and(
+              eq(issues.companyId, input.routine.companyId),
+              eq(issues.id, createdIssue.id),
+            ));
+          } catch (cleanupError) {
+            // Keep the issue while a run may still be using it.
+            discardFailure = cleanupError instanceof Error ? cleanupError.message : String(cleanupError);
+          }
         }
-        const failureReason = error instanceof Error ? error.message : String(error);
+        const failureReason = [
+          error instanceof Error ? error.message : String(error),
+          discardFailure ? `The execution issue was kept: ${discardFailure}` : null,
+        ].filter(Boolean).join(". ");
         const failed = await finalizeRun(createdRun.id, {
           status: "failed",
           failureReason,

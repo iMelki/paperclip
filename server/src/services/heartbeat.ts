@@ -17218,7 +17218,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
 
   async function releaseIssueExecutionAndPromote(
     run: typeof heartbeatRuns.$inferSelect,
-    options: { suppressImmediateRecovery?: boolean } = {},
+    options: { suppressImmediateRecovery?: boolean; suppressDeferredPromotion?: boolean } = {},
   ) {
     const runContext = parseObject(run.contextSnapshot);
     const contextIssueId = readNonEmptyString(runContext.issueId);
@@ -17374,7 +17374,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           .limit(1)
           .then((rows) => rows[0] ?? null);
 
-        if (!deferred) break;
+        if (!deferred || options.suppressDeferredPromotion) break;
 
         const deferredAgent = await tx
           .select()
@@ -19363,6 +19363,12 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     resultJson?: Record<string, unknown>;
     eventMessage?: string;
     eventPayload?: Record<string, unknown>;
+    /**
+     * The caller is about to delete the issue this run was started for. Release
+     * the execution lock but do not start assignment recovery or promote a
+     * deferred wake for that issue, which would outlive the delete.
+     */
+    discardIssueWork?: boolean;
   };
 
   async function cancelRunInternal(runId: string, reason = "Cancelled by control plane", options: CancelRunOptions = {}) {
@@ -19432,7 +19438,12 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         message: options.eventMessage ?? "run cancelled",
         ...(options.eventPayload ? { payload: options.eventPayload } : {}),
       });
-      await releaseIssueExecutionAndPromote(cancelled);
+      await releaseIssueExecutionAndPromote(
+        cancelled,
+        options.discardIssueWork
+          ? { suppressImmediateRecovery: true, suppressDeferredPromotion: true }
+          : undefined,
+      );
     }
 
     await finalizeAgentStatus(run.agentId, "cancelled", undefined, {

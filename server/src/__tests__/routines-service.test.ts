@@ -96,6 +96,7 @@ describeEmbeddedPostgres("routine service live-execution coalescing", () => {
   });
 
   async function seedFixture(opts?: {
+    cancelRun?: (runId: string) => Promise<void>;
     runtimeEnv?: Record<string, string | undefined>;
     concurrencyPolicy?: "coalesce_if_active" | "always_enqueue" | "skip_if_active";
     wakeup?: (
@@ -157,10 +158,13 @@ describeEmbeddedPostgres("routine service live-execution coalescing", () => {
     });
 
     const cancelledRunIds: string[] = [];
+    const cancelOptions: unknown[] = [];
     const svc = routineService(db, {
       runtimeEnv: opts?.runtimeEnv,
       heartbeat: {
-        cancelRun: async (runId) => {
+        cancelRun: async (runId, _reason, cancelRunOptions) => {
+          cancelOptions.push(cancelRunOptions);
+          if (opts?.cancelRun) await opts.cancelRun(runId);
           cancelledRunIds.push(runId);
           await db
             .update(heartbeatRuns)
@@ -220,7 +224,7 @@ describeEmbeddedPostgres("routine service live-execution coalescing", () => {
       {},
     );
 
-    return { companyId, agentId, issueSvc, projectId, routine, svc, wakeups, cancelledRunIds };
+    return { companyId, agentId, issueSvc, projectId, routine, svc, wakeups, cancelledRunIds, cancelOptions };
   }
 
   async function armWorktreeExecution(cutoff: Date, instanceId = "worktree-routines-test") {
@@ -2357,6 +2361,9 @@ describeEmbeddedPostgres("routine service live-execution coalescing", () => {
     expect(run.status).toBe("coalesced");
     expect(run.linkedIssueId).toBe(winnerIssueId);
     expect(fixture.cancelledRunIds).toEqual([strandedRunId]);
+    // The run is cancelled in discard mode so cancellation cannot start
+    // assignment recovery for the issue that is about to be deleted.
+    expect(fixture.cancelOptions).toEqual([{ discardIssueWork: true }]);
     const stranded = await db
       .select({ status: heartbeatRuns.status })
       .from(heartbeatRuns)
@@ -2365,6 +2372,43 @@ describeEmbeddedPostgres("routine service live-execution coalescing", () => {
     expect(stranded?.status).toBe("cancelled");
     const loserRows = await db.select({ id: issues.id }).from(issues).where(eq(issues.id, loserIssueId!));
     expect(loserRows).toHaveLength(0);
+  });
+
+  it("keeps the issue when the stranded heartbeat run cannot be cancelled", async () => {
+    let strandedRunId: string | null = null;
+    let issueId: string | null = null;
+    const fixture = await seedFixture({
+      cancelRun: async () => {
+        throw new Error("Run process termination could not be verified");
+      },
+      wakeup: async (wakeupAgentId, wakeupOpts) => {
+        issueId = wakeupOpts.payload?.issueId as string;
+        const issue = await db.select().from(issues).where(eq(issues.id, issueId)).then((rows) => rows[0]!);
+        strandedRunId = randomUUID();
+        await db.insert(heartbeatRuns).values({
+          id: strandedRunId,
+          companyId: issue.companyId,
+          agentId: wakeupAgentId,
+          invocationSource: "assignment",
+          status: "running",
+          contextSnapshot: { issueId },
+        });
+        throw new Error("wakeup failed after claiming the run");
+      },
+    });
+
+    const run = await fixture.svc.runRoutine(fixture.routine.id, { source: "manual" });
+
+    expect(run.status).toBe("failed");
+    expect(run.failureReason).toContain("The execution issue was kept");
+    const kept = await db.select({ id: issues.id }).from(issues).where(eq(issues.id, issueId!));
+    expect(kept).toHaveLength(1);
+    const stranded = await db
+      .select({ status: heartbeatRuns.status })
+      .from(heartbeatRuns)
+      .where(eq(heartbeatRuns.id, strandedRunId!))
+      .then((rows) => rows[0]);
+    expect(stranded?.status).toBe("running");
   });
 
   it("reuses an indexed open execution whose run is gone even under always_enqueue", async () => {
