@@ -97,6 +97,7 @@ describeEmbeddedPostgres("routine service live-execution coalescing", () => {
 
   async function seedFixture(opts?: {
     runtimeEnv?: Record<string, string | undefined>;
+    concurrencyPolicy?: "coalesce_if_active" | "always_enqueue" | "skip_if_active";
     wakeup?: (
       agentId: string,
       wakeupOpts: {
@@ -155,9 +156,17 @@ describeEmbeddedPostgres("routine service live-execution coalescing", () => {
       status: "in_progress",
     });
 
+    const cancelledRunIds: string[] = [];
     const svc = routineService(db, {
       runtimeEnv: opts?.runtimeEnv,
       heartbeat: {
+        cancelRun: async (runId) => {
+          cancelledRunIds.push(runId);
+          await db
+            .update(heartbeatRuns)
+            .set({ status: "cancelled", finishedAt: new Date() })
+            .where(eq(heartbeatRuns.id, runId));
+        },
         wakeup: async (wakeupAgentId, wakeupOpts) => {
           wakeups.push({ agentId: wakeupAgentId, opts: wakeupOpts });
           if (opts?.wakeup) return opts.wakeup(wakeupAgentId, wakeupOpts);
@@ -205,13 +214,13 @@ describeEmbeddedPostgres("routine service live-execution coalescing", () => {
         assigneeAgentId: agentId,
         priority: "medium",
         status: "active",
-        concurrencyPolicy: "coalesce_if_active",
+        concurrencyPolicy: opts?.concurrencyPolicy ?? "coalesce_if_active",
         catchUpPolicy: "skip_missed",
       },
       {},
     );
 
-    return { companyId, agentId, issueSvc, projectId, routine, svc, wakeups };
+    return { companyId, agentId, issueSvc, projectId, routine, svc, wakeups, cancelledRunIds };
   }
 
   async function armWorktreeExecution(cutoff: Date, instanceId = "worktree-routines-test") {
@@ -2292,6 +2301,101 @@ describeEmbeddedPostgres("routine service live-execution coalescing", () => {
     await openBesideExcludedIssue(async (issue) => {
       await db.update(issues).set({ status: "cancelled", cancelledAt: new Date() }).where(eq(issues.id, issue.id));
     });
+  });
+
+  it("cancels the heartbeat run that lost the execution key before dropping its issue", async () => {
+    const uniqueViolation = Object.assign(
+      new Error('duplicate key value violates unique constraint "issues_open_routine_execution_uq"'),
+      { code: "23505", constraint: "issues_open_routine_execution_uq" },
+    );
+    let strandedRunId: string | null = null;
+    let loserIssueId: string | null = null;
+    let winnerIssueId: string | null = null;
+    const fixture = await seedFixture({
+      wakeup: async (wakeupAgentId, wakeupOpts) => {
+        const issueId = wakeupOpts.payload?.issueId as string;
+        loserIssueId = issueId;
+        const loser = await db.select().from(issues).where(eq(issues.id, issueId)).then((rows) => rows[0]!);
+        // A concurrent open takes the execution key first.
+        const winnerRunId = randomUUID();
+        await db.insert(heartbeatRuns).values({
+          id: winnerRunId,
+          companyId: loser.companyId,
+          agentId: wakeupAgentId,
+          invocationSource: "assignment",
+          status: "running",
+          contextSnapshot: { issueId: "winner" },
+        });
+        winnerIssueId = randomUUID();
+        await db.insert(issues).values({
+          id: winnerIssueId,
+          companyId: loser.companyId,
+          title: "winning execution",
+          status: "todo",
+          originKind: "routine_execution",
+          originId: loser.originId,
+          originFingerprint: loser.originFingerprint,
+          executionRunId: winnerRunId,
+          assigneeAgentId: wakeupAgentId,
+        });
+        // This heartbeat run was claimed (running) before its issue stamp failed.
+        strandedRunId = randomUUID();
+        await db.insert(heartbeatRuns).values({
+          id: strandedRunId,
+          companyId: loser.companyId,
+          agentId: wakeupAgentId,
+          invocationSource: "assignment",
+          status: "running",
+          contextSnapshot: { issueId },
+        });
+        throw uniqueViolation;
+      },
+    });
+
+    const run = await fixture.svc.runRoutine(fixture.routine.id, { source: "manual" });
+
+    expect(run.status).toBe("coalesced");
+    expect(run.linkedIssueId).toBe(winnerIssueId);
+    expect(fixture.cancelledRunIds).toEqual([strandedRunId]);
+    const stranded = await db
+      .select({ status: heartbeatRuns.status })
+      .from(heartbeatRuns)
+      .where(eq(heartbeatRuns.id, strandedRunId!))
+      .then((rows) => rows[0]);
+    expect(stranded?.status).toBe("cancelled");
+    const loserRows = await db.select({ id: issues.id }).from(issues).where(eq(issues.id, loserIssueId!));
+    expect(loserRows).toHaveLength(0);
+  });
+
+  it("reuses an indexed open execution whose run is gone even under always_enqueue", async () => {
+    // The wakeup does not stamp executionRunId, as in production where the run
+    // claims the key later, so a second issue would not fail at queue time.
+    const { agentId, companyId, routine, svc } = await seedFixture({
+      concurrencyPolicy: "always_enqueue",
+      wakeup: async () => ({ id: randomUUID() }),
+    });
+    const first = await svc.runRoutine(routine.id, { source: "manual" });
+    expect(first.status).toBe("issue_created");
+    const deadRunId = randomUUID();
+    await db.insert(heartbeatRuns).values({
+      id: deadRunId,
+      companyId,
+      agentId,
+      invocationSource: "assignment",
+      status: "failed",
+      finishedAt: new Date(),
+    });
+    await db.update(issues).set({ executionRunId: deadRunId }).where(eq(issues.id, first.linkedIssueId!));
+
+    const second = await svc.runRoutine(routine.id, { source: "manual" });
+
+    expect(second.status).toBe("coalesced");
+    expect(second.linkedIssueId).toBe(first.linkedIssueId);
+    const executions = await db
+      .select({ id: issues.id })
+      .from(issues)
+      .where(and(eq(issues.originKind, "routine_execution"), eq(issues.originId, routine.id)));
+    expect(executions).toHaveLength(1);
   });
 
   it("fails the run and cleans up the execution issue when wakeup queueing fails", async () => {

@@ -658,7 +658,9 @@ function mapRoutineDescriptionDocument(row: {
 export function routineService(
   db: Db,
   deps: {
-    heartbeat?: IssueAssignmentWakeupDeps;
+    heartbeat?: IssueAssignmentWakeupDeps & {
+      cancelRun?: (runId: string, reason?: string) => Promise<unknown>;
+    };
     pluginWorkerManager?: PluginWorkerManager;
     runtimeEnv?: Record<string, string | undefined>;
   } = {},
@@ -1587,6 +1589,31 @@ export function routineService(
       .then((rows) => rows[0] ?? null);
   }
 
+  // A wakeup that fails while claiming its run (for example on the unique
+  // violation above) can leave the heartbeat run marked running or queued with
+  // its wakeup claimed. Cancel those runs before the issue they point at is
+  // deleted, so no run keeps an agent concurrency slot for a missing issue.
+  async function cancelRunsForDiscardedIssue(companyId: string, issueId: string) {
+    if (!heartbeat.cancelRun) return;
+    const stranded = await db
+      .select({ id: heartbeatRuns.id })
+      .from(heartbeatRuns)
+      .where(
+        and(
+          eq(heartbeatRuns.companyId, companyId),
+          inArray(heartbeatRuns.status, LIVE_HEARTBEAT_RUN_STATUSES),
+          sql`${heartbeatRuns.contextSnapshot} ->> 'issueId' = ${issueId}`,
+        ),
+      );
+    for (const run of stranded) {
+      try {
+        await heartbeat.cancelRun(run.id, "Cancelled because the routine execution issue was discarded");
+      } catch (err) {
+        logger.warn({ err, runId: run.id, issueId }, "failed to cancel heartbeat run for a discarded routine execution issue");
+      }
+    }
+  }
+
   async function finalizeRun(runId: string, patch: Partial<typeof routineRuns.$inferInsert>, executor: Db = db) {
     return executor
       .update(routineRuns)
@@ -1910,10 +1937,19 @@ export function routineService(
 
       let createdIssue: Awaited<ReturnType<typeof issueSvc.create>> | null = null;
       try {
+        const indexedIssue = await findIndexedOpenExecutionIssue(
+          input.routine,
+          txDb,
+          dispatchFingerprint,
+          executionOrigin,
+        );
+        const liveIssue = await findLiveExecutionIssue(input.routine, txDb, dispatchFingerprint, executionOrigin);
+        // always_enqueue still queues behind a live run. It reuses only an
+        // indexed row whose run is gone: that row holds the unique key, so a new
+        // issue could never claim its own run and would fail at the claim step.
         const activeIssue = input.routine.concurrencyPolicy === "always_enqueue"
-          ? null
-          : await findIndexedOpenExecutionIssue(input.routine, txDb, dispatchFingerprint, executionOrigin)
-            ?? await findLiveExecutionIssue(input.routine, txDb, dispatchFingerprint, executionOrigin);
+          ? (liveIssue ? null : indexedIssue)
+          : indexedIssue ?? liveIssue;
         if (activeIssue) {
           return reuseOpenExecution(activeIssue);
         }
@@ -1960,6 +1996,7 @@ export function routineService(
           // return the row that already holds the key. Do this for every
           // concurrency policy: the index is the hard rule.
           if (createdIssue) {
+            await cancelRunsForDiscardedIssue(input.routine.companyId, createdIssue.id);
             await txDb.delete(issues).where(and(
               eq(issues.companyId, input.routine.companyId),
               eq(issues.id, createdIssue.id),
@@ -1993,6 +2030,7 @@ export function routineService(
         return updated ?? createdRun;
       } catch (error) {
         if (createdIssue) {
+          await cancelRunsForDiscardedIssue(input.routine.companyId, createdIssue.id);
           await txDb.delete(issues).where(and(
             eq(issues.companyId, input.routine.companyId),
             eq(issues.id, createdIssue.id),
