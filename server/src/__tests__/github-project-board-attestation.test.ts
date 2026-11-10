@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { advanceGitHubProjectAttestation as advanceNative, assertGitHubProjectAttestedIntent as assertNative,
-  pendingGitHubProjectAttestation as pendingNative,
+  gitHubProjectAttestedIntentChecker, pendingGitHubProjectAttestation as pendingNative,
   GITHUB_PROJECT_ATTESTATION_MAX_AGE_MS } from "../services/github-project-board-attestation.js";
 import { boardImportDigest, validateBoardImportIntent, type BoardImportIntent } from "../services/plugin-imported-issues-contract.js";
 import type { GitHubProjectBinding } from "../services/plugin-github-project-board.js";
@@ -120,5 +120,49 @@ describe("host-owned GitHub board attestation", () => {
     expect(() => snapshot(data([incomplete]))).toThrow();
     const wrong = item(); wrong.content.url = "https://github.com/example/other/issues/1";
     expect(() => snapshot(data([wrong]))).toThrow("identity");
+  });
+});
+
+describe("attested intent checker over a whole board", () => {
+  // A full 1,000-item board, the largest the attestation accepts.
+  function fullBoard() {
+    const ids = Array.from({ length: 1000 }, (_, index) => `PVTI_${index}`);
+    const issues = ids.map((boardItemId, index) => ({ boardItemId, githubIssueNodeId: `I_${index}`,
+      title: `Synthetic source title ${index}`, sourceUrl: `https://github.com/example/fixture/issues/${index}`,
+      fields: [{ name: "Status", value: "ReadyForAgent" }] }));
+    return { version: 1, bindingDigest: boardImportDigest(binding), authorizationDigest: authority,
+      companyId: binding.companyId, projectId: binding.projectId, boardId: binding.boardId, boardUrl: binding.boardUrl,
+      sourceUpdatedAt: "2026-10-13T00:00:00Z", totalCount: ids.length, startedAt: now, completedAt: now,
+      complete: true, pages: 20, nextCursor: null, seenItemIds: ids, issues };
+  }
+  function boardIntent(index: number, patch: Record<string, unknown> = {}) {
+    return intent({ boardItemId: `PVTI_${index}`, githubIssueNodeId: `I_${index}`,
+      fields: [{ name: "Status", value: "ReadyForAgent" }],
+      task: { companyId: binding.companyId, projectId: binding.projectId, githubIssueNodeId: `I_${index}`,
+        title: `Synthetic source title ${index}`, sourceUrl: `https://github.com/example/fixture/issues/${index}`,
+        status: "backlog", assigneeAgentId: null, assigneeUserId: null, noDispatch: true }, ...patch });
+  }
+
+  it("validates the attestation once and accepts every attested intent", () => {
+    const { attestation, assertIntent } = gitHubProjectAttestedIntentChecker(fullBoard(), binding, authority, now);
+    expect(attestation.issues).toHaveLength(1000);
+    for (let index = 0; index < 1000; index += 1) expect(() => assertIntent(boardIntent(index))).not.toThrow();
+  });
+
+  it("rejects an intent that is not on the board or differs from the observed issue", () => {
+    const { assertIntent } = gitHubProjectAttestedIntentChecker(fullBoard(), binding, authority, now);
+    expect(() => assertIntent(boardIntent(1000))).toThrow("Import intent differs");
+    expect(() => assertIntent(boardIntent(7, { githubIssueNodeId: "I_8" }))).toThrow("Import intent differs");
+    expect(() => assertIntent(boardIntent(7, { sourceUpdatedAt: "2026-10-14T00:00:00Z" })))
+      .toThrow("A fresh complete host-observed board preview");
+  });
+
+  it("rejects an issue whose board item was never observed, as the full check does", () => {
+    const board = fullBoard();
+    board.issues[3] = { ...board.issues[3], boardItemId: "PVTI_missing" };
+    expect(() => gitHubProjectAttestedIntentChecker(board, binding, authority, now))
+      .toThrow("A fresh complete host-observed board preview");
+    expect(() => assertGitHubProjectAttestedIntent(board, binding, boardIntent(0), now))
+      .toThrow("A fresh complete host-observed board preview");
   });
 });

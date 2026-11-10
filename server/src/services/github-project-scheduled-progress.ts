@@ -4,8 +4,7 @@ import { z } from "zod";
 import { conflict } from "../errors.js";
 import { pluginStateStore } from "./plugin-state-store.js";
 import { GITHUB_PROJECT_BINDING_NAMESPACE } from "./plugin-github-project-board.js";
-import { assertCompleteGitHubProjectAttestation, assertGitHubProjectAttestedIntent,
-  type GitHubProjectAttestation } from "./github-project-board-attestation.js";
+import { gitHubProjectAttestedIntentChecker, type GitHubProjectAttestation } from "./github-project-board-attestation.js";
 import { boardImportDigest, validateBoardImportIntent, type BoardImportIntent,
   type BoardImportReceipt } from "./plugin-imported-issues-contract.js";
 import type { VerifiedScheduledBoard } from "./github-project-scheduled-contract.js";
@@ -43,13 +42,15 @@ const order = (left: string, right: string) => left < right ? -1 : left > right 
 /** Pure complete-snapshot plan. No permission or cursor is inferred from caller JSON. */
 export function createScheduledBoardProgressPlan(verified: Readonly<VerifiedScheduledBoard>,
   value: GitHubProjectAttestation, values: BoardImportIntent[]): ScheduledBoardProgressPlan {
-  const observed = assertCompleteGitHubProjectAttestation(value, verified.binding, verified.authorizationDigest);
+  // Validate the attestation once; each intent is then an indexed check.
+  const { attestation: observed, assertIntent } = gitHubProjectAttestedIntentChecker(
+    value, verified.binding, verified.authorizationDigest);
   const intents = values.map(value => validateBoardImportIntent(value, verified.target.companyId))
     .sort((a, b) => order(a.boardItemId, b.boardItemId));
   if (intents.length !== observed.issues.length || new Set(intents.map(intent => intent.boardItemId)).size !== intents.length) {
     throw conflict("Complete scheduled manifest must account for every eligible board item exactly once");
   }
-  for (const intent of intents) assertGitHubProjectAttestedIntent(observed, verified.binding, intent, verified.authorizationDigest);
+  for (const intent of intents) assertIntent(intent);
   const metadata = { pluginId: verified.target.pluginId, companyId: verified.target.companyId,
     projectId: verified.target.projectId, jobId: verified.target.jobId, boardId: verified.binding.boardId,
     boardUrl: verified.binding.boardUrl, bindingDigest: boardImportDigest(verified.binding),

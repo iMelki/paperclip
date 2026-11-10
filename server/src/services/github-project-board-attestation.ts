@@ -111,6 +111,9 @@ export function assertCompleteGitHubProjectAttestation(
   value: unknown, binding: GitHubProjectBinding, authorizationDigest: string, now = Date.now(),
 ): GitHubProjectAttestation {
   const attestation = record(value) as unknown as GitHubProjectAttestation;
+  // One set lookup per issue. `seenItemIds.includes` per issue is quadratic in the
+  // board size (up to 1,000 items) and runs while authorization locks are held.
+  const seenItemIds = Array.isArray(attestation.seenItemIds) ? new Set<unknown>(attestation.seenItemIds) : null;
   if (!Number.isSafeInteger(now) || now < 0
     || attestation.version !== 1 || attestation.bindingDigest !== boardImportDigest(binding)
     || attestation.authorizationDigest !== authorizationDigest
@@ -127,10 +130,10 @@ export function assertCompleteGitHubProjectAttestation(
     || !Number.isSafeInteger(attestation.totalCount) || attestation.totalCount! < 0
     || attestation.seenItemIds.length !== attestation.totalCount || attestation.seenItemIds.length > 1000
     || attestation.issues.length > attestation.seenItemIds.length
-    || new Set(attestation.seenItemIds).size !== attestation.seenItemIds.length
+    || seenItemIds === null || seenItemIds.size !== attestation.seenItemIds.length
     || attestation.seenItemIds.some(id => typeof id !== "string" || !/^[A-Za-z0-9_=-]{1,256}$/.test(id))
     || attestation.issues.some(issue => !issue || typeof issue !== "object"
-      || !attestation.seenItemIds.includes(issue.boardItemId))
+      || !seenItemIds.has(issue.boardItemId))
     || new Set(attestation.issues.map(issue => issue.boardItemId)).size !== attestation.issues.length
     || new Set(attestation.issues.map(issue => issue.githubIssueNodeId)).size !== attestation.issues.length
     || new Set(attestation.issues.map(issue => issue.sourceUrl)).size !== attestation.issues.length) {
@@ -138,18 +141,34 @@ export function assertCompleteGitHubProjectAttestation(
   }
   return attestation;
 }
+/**
+ * Validate the complete attestation once, then check any number of intents
+ * against it with an indexed lookup. A plan over a whole board uses this, so
+ * the attestation is not revalidated per intent. An independent import
+ * boundary uses `assertGitHubProjectAttestedIntent`, which validates in full.
+ */
+export function gitHubProjectAttestedIntentChecker(
+  value: unknown, binding: GitHubProjectBinding, authorizationDigest: string, now = Date.now(),
+): { attestation: GitHubProjectAttestation; assertIntent: (intent: BoardImportIntent) => void } {
+  const attestation = assertCompleteGitHubProjectAttestation(value, binding, authorizationDigest, now);
+  // Board item ids are unique in a complete attestation (checked above).
+  const issuesByBoardItemId = new Map(attestation.issues.map(issue => [issue.boardItemId, issue] as const));
+  const assertIntent = (intent: BoardImportIntent) => {
+    if (intent.companyId !== binding.companyId || intent.projectId !== binding.projectId
+      || intent.boardId !== binding.boardId || intent.boardUrl !== binding.boardUrl
+      || attestation.sourceUpdatedAt !== intent.sourceUpdatedAt) {
+      throw conflict("A fresh complete host-observed board preview is required before import");
+    }
+    const observed = issuesByBoardItemId.get(intent.boardItemId);
+    if (!observed || observed.githubIssueNodeId !== intent.githubIssueNodeId || observed.title !== intent.task.title
+      || observed.sourceUrl !== intent.task.sourceUrl || !isDeepStrictEqual(observed.fields, intent.fields)) {
+      throw conflict("Import intent differs from the host-observed GitHub issue and board metadata");
+    }
+  };
+  return { attestation, assertIntent };
+}
 export function assertGitHubProjectAttestedIntent(
   value: unknown, binding: GitHubProjectBinding, intent: BoardImportIntent, authorizationDigest: string, now = Date.now(),
 ) {
-  const attestation = assertCompleteGitHubProjectAttestation(value, binding, authorizationDigest, now);
-  if (intent.companyId !== binding.companyId || intent.projectId !== binding.projectId
-    || intent.boardId !== binding.boardId || intent.boardUrl !== binding.boardUrl
-    || attestation.sourceUpdatedAt !== intent.sourceUpdatedAt) {
-    throw conflict("A fresh complete host-observed board preview is required before import");
-  }
-  const observed = attestation.issues.find(issue => issue.boardItemId === intent.boardItemId);
-  if (!observed || observed.githubIssueNodeId !== intent.githubIssueNodeId || observed.title !== intent.task.title
-    || observed.sourceUrl !== intent.task.sourceUrl || !isDeepStrictEqual(observed.fields, intent.fields)) {
-    throw conflict("Import intent differs from the host-observed GitHub issue and board metadata");
-  }
+  gitHubProjectAttestedIntentChecker(value, binding, authorizationDigest, now).assertIntent(intent);
 }

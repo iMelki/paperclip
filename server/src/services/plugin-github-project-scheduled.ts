@@ -12,7 +12,7 @@ import { pluginImportedIssuesService } from "./plugin-imported-issues.js";
 import { boardImportDigest, validateBoardImportIntent, type BoardImportIntent,
   type BoardImportReceipt } from "./plugin-imported-issues-contract.js";
 import { parseGitHubProjectBoardUrl, checkedGitHubProjectPage, type GitHubProjectPageInput } from "./github-oauth-project-page.js";
-import { assertCompleteGitHubProjectAttestation, assertGitHubProjectAttestedIntent } from "./github-project-board-attestation.js";
+import { gitHubProjectAttestedIntentChecker } from "./github-project-board-attestation.js";
 import { createScheduledBoardProgressPlan, scheduledBoardProgressService, summarizeScheduledBoardProgress,
   selectScheduledBoardProgressBatch,
   type ScheduledBoardProgress, type ScheduledBoardProgressPlan, type ScheduledBoardProgressSummary } from "./github-project-scheduled-progress.js";
@@ -179,7 +179,9 @@ export function createScheduledGitHubProjectBoardService(
     const result = await transaction(async executor => {
       const verified = await access.validate(executor, authority, target, "record-page");
       const value = await pluginStateStore(executor).get(identity.pluginId, "company", `attestation:${target.projectId}`, scopeOptions(target.companyId));
-      const observed = assertCompleteGitHubProjectAttestation(value, verified.binding, verified.authorizationDigest);
+      // Validate the attestation once; each intent is then an indexed check.
+      const { attestation: observed, assertIntent } = gitHubProjectAttestedIntentChecker(
+        value, verified.binding, verified.authorizationDigest);
       const allIntents = observed.issues.map(item => {
         const task = { companyId: target.companyId, projectId: target.projectId, githubIssueNodeId: item.githubIssueNodeId,
           title: item.title, sourceUrl: item.sourceUrl, status: "backlog", assigneeAgentId: null, assigneeUserId: null, noDispatch: true };
@@ -190,7 +192,7 @@ export function createScheduledGitHubProjectBoardService(
           boardUrl: observed.boardUrl, sourceUpdatedAt: observed.sourceUpdatedAt, task, fields: item.fields };
         const hash = boardImportDigest(["board-import-v1", data]);
         const intent = validateBoardImportIntent({ ...data, operationId: hash, intentHash: hash }, target.companyId);
-        assertGitHubProjectAttestedIntent(observed, verified.binding, intent, verified.authorizationDigest);
+        assertIntent(intent);
         return intent;
       });
       const plan = createScheduledBoardProgressPlan(verified, observed, allIntents);
