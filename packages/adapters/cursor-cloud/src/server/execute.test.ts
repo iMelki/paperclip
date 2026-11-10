@@ -394,9 +394,12 @@ describe("cursor_cloud execute", () => {
     expect(cancelled).toBe(true);
     expect(result.sessionParams).toMatchObject({
       cursorAgentId: "agent-hung",
-      latestRunId: "run-hung",
+      timedOutRunId: "run-hung",
       runtime: "cloud",
+      envType: "cloud",
+      repos: [{ url: "https://github.com/paperclipai/paperclip.git", startingRef: "main" }],
     });
+    expect(result.sessionParams).not.toHaveProperty("latestRunId");
   });
 
   it("returns the timeout when Cursor cancel never settles", async () => {
@@ -418,8 +421,66 @@ describe("cursor_cloud execute", () => {
     expect(result.timedOut).toBe(true);
     expect(result.sessionParams).toMatchObject({
       cursorAgentId: "agent-cancel-hang",
-      latestRunId: "run-cancel-hang",
+      timedOutRunId: "run-cancel-hang",
     });
+    expect(result.sessionParams).not.toHaveProperty("latestRunId");
+  });
+
+  it("starts a new run after a timeout instead of waiting on the timed-out run again", async () => {
+    const stuckRun = {
+      ...createMockRun({ id: "run-stuck", agentId: "agent-stuck", status: "running" }),
+      async wait(): Promise<Record<string, unknown>> {
+        return new Promise(() => {});
+      },
+      cancel() {
+        return new Promise(() => {});
+      },
+    };
+    createMock.mockResolvedValue(createMockSdkAgent({ agentId: "agent-stuck", sendRun: stuckRun }));
+    const first = createContext();
+    first.config.timeoutSec = 0.05;
+
+    const timedOut = await execute(first);
+
+    expect(timedOut.timedOut).toBe(true);
+    expect(timedOut.sessionParams).toMatchObject({
+      cursorAgentId: "agent-stuck",
+      timedOutRunId: "run-stuck",
+      envType: "cloud",
+    });
+    expect(timedOut.sessionParams).not.toHaveProperty("latestRunId");
+
+    const stillRunning = {
+      ...createMockRun({ id: "run-stuck", agentId: "agent-stuck", status: "running" }),
+      async wait(): Promise<Record<string, unknown>> {
+        return new Promise(() => {});
+      },
+    };
+    getRunMock.mockResolvedValue(stillRunning);
+    const nextRun = createMockRun({ id: "run-next", agentId: "agent-stuck" });
+    const resumed = createMockSdkAgent({ agentId: "agent-stuck", sendRun: nextRun });
+    resumeMock.mockResolvedValue(resumed);
+    const second = createContext({
+      runtime: {
+        sessionId: "agent-stuck",
+        sessionDisplayId: "agent-stuck",
+        taskKey: null,
+        sessionParams: timedOut.sessionParams ?? null,
+      },
+    });
+    second.config.timeoutSec = 0.05;
+
+    const followedUp = await execute(second);
+
+    expect(getRunMock).not.toHaveBeenCalled();
+    expect(resumeMock).toHaveBeenCalledTimes(1);
+    expect(resumed.send).toHaveBeenCalledTimes(1);
+    expect(followedUp.timedOut).toBe(false);
+    expect(followedUp.sessionParams).toMatchObject({
+      cursorAgentId: "agent-stuck",
+      latestRunId: "run-next",
+    });
+    expect(second.logs.map((entry) => entry.chunk).join("")).not.toContain("Reattached to existing Cursor run");
   });
 
   it("terminates a hung Cursor wait when timeoutSec is 0 by using the env default", async () => {
@@ -439,6 +500,8 @@ describe("cursor_cloud execute", () => {
       const result = await execute(ctx);
       expect(result.timedOut).toBe(true);
       expect(result.errorCode).toBe("cursor_cloud_timeout");
+      expect(result.sessionParams).not.toHaveProperty("latestRunId");
+      expect(result.sessionParams).toMatchObject({ timedOutRunId: "run-hung-default" });
     } finally {
       if (previous === undefined) delete process.env.PAPERCLIP_ADAPTER_TIMEOUT_SEC;
       else process.env.PAPERCLIP_ADAPTER_TIMEOUT_SEC = previous;

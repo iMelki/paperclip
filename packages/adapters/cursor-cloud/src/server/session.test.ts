@@ -21,6 +21,27 @@ describe("cursorCloud sessionCodec", () => {
     });
   });
 
+  it("does not keep a timed-out run id as the run to reattach", () => {
+    expect(
+      sessionCodec.serialize({
+        cursorAgentId: "agent-123",
+        latestRunId: "run-stuck",
+        timedOutRunId: "run-stuck",
+        runtime: "cloud",
+        envType: "pool",
+        envName: "trusted",
+        repos: [{ url: "https://github.com/paperclipai/paperclip.git", startingRef: "main" }],
+      }),
+    ).toEqual({
+      cursorAgentId: "agent-123",
+      timedOutRunId: "run-stuck",
+      runtime: "cloud",
+      envType: "pool",
+      envName: "trusted",
+      repos: [{ url: "https://github.com/paperclipai/paperclip.git", startingRef: "main" }],
+    });
+  });
+
   it("drops invalid session payloads and exposes the display id", () => {
     expect(sessionCodec.deserialize({ latestRunId: "run-1" })).toBeNull();
     expect(sessionCodec.getDisplayId?.({

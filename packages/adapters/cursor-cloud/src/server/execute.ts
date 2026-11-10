@@ -31,6 +31,8 @@ import {
 type CursorCloudSession = {
   cursorAgentId: string;
   latestRunId?: string;
+  /** A run that already hit the wall-clock deadline. Never used for reattach. */
+  timedOutRunId?: string;
   runtime: "cloud";
   envType?: "cloud" | "pool" | "machine";
   envName?: string;
@@ -141,16 +143,20 @@ function cursorCloudTimeoutResult(input: {
   repos: CursorCloudSession["repos"];
 }): AdapterExecutionResult {
   const { timeoutSec, session, run, envType, envName, repos } = input;
-  const nextSession: CursorCloudSession | null = run
+  const timedOutRunId = run?.id ?? session?.timedOutRunId ?? session?.latestRunId;
+  // Keep the agent and environment so the next heartbeat can resume, but do
+  // not store latestRunId. getAttachedRun would otherwise wait on this run
+  // again when cancel hangs or loses the dispose race.
+  const nextSession: CursorCloudSession | null = (run || session)
     ? {
-        cursorAgentId: run.agentId,
-        latestRunId: run.id,
+        cursorAgentId: run?.agentId ?? session!.cursorAgentId,
         runtime: "cloud",
-        envType: envType ?? "cloud",
-        ...(envName ? { envName } : {}),
-        repos,
+        envType: envType ?? session?.envType ?? "cloud",
+        ...(envName ? { envName } : session?.envName ? { envName: session.envName } : {}),
+        repos: repos.length > 0 ? repos : session?.repos ?? [],
+        ...(timedOutRunId ? { timedOutRunId } : {}),
       }
-    : session;
+    : null;
   return {
     exitCode: 1,
     signal: null,
@@ -304,7 +310,13 @@ function readSession(params: Record<string, unknown> | null): CursorCloudSession
     trimNullable(record.agentId) ??
     trimNullable(record.sessionId);
   if (!cursorAgentId) return null;
-  const latestRunId = trimNullable(record.latestRunId) ?? trimNullable(record.runId) ?? undefined;
+  const timedOutRunId = trimNullable(record.timedOutRunId) ?? undefined;
+  const storedLatestRunId = trimNullable(record.latestRunId) ?? trimNullable(record.runId) ?? undefined;
+  // A timed-out run must not be waited on again. Drop it even if an older
+  // result stored the same id as latestRunId.
+  const latestRunId = storedLatestRunId && storedLatestRunId !== timedOutRunId
+    ? storedLatestRunId
+    : undefined;
   const envType = trimNullable(record.envType);
   const envName = trimNullable(record.envName);
   const reposValue = Array.isArray(record.repos) ? record.repos : [];
@@ -320,6 +332,7 @@ function readSession(params: Record<string, unknown> | null): CursorCloudSession
   return {
     cursorAgentId,
     ...(latestRunId ? { latestRunId } : {}),
+    ...(timedOutRunId ? { timedOutRunId } : {}),
     runtime: "cloud",
     ...(envType ? { envType: normalizeEnvType(envType) } : {}),
     ...(envName ? { envName } : {}),
@@ -401,6 +414,7 @@ async function getAttachedRun(input: {
   const latestRunId = input.session?.latestRunId;
   const cursorAgentId = input.session?.cursorAgentId;
   if (!latestRunId || !cursorAgentId) return null;
+  if (input.session?.timedOutRunId === latestRunId) return null;
   try {
     const run = await Agent.getRun(latestRunId, {
       runtime: "cloud",
