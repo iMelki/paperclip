@@ -380,7 +380,7 @@ const NON_RETRYABLE_CONTINUATION_ERROR_CODES = new Set<string>([
   "issue_paused",
   "issue_dependencies_blocked",
   // A provider session/usage limit is not a continuation failure. Retry and
-  // wake go through the quota clock, or not at all when that clock is missing.
+  // wake go through the quota clock or, without one, the default quota backoff.
   ACPX_PROVIDER_QUOTA_ERROR_CODE,
 ]);
 
@@ -418,7 +418,6 @@ const CONFIGURATION_INCOMPLETE_ERROR_RE =
 export type AdapterFailureRecoveryClassification =
   | { kind: "provider_quota"; retryAt: Date; parsedResetTime: boolean }
   | { kind: "configuration_incomplete" }
-  | { kind: "acpx_provider_quota_hold" }
   | null;
 
 /**
@@ -552,9 +551,16 @@ export function classifyAdapterFailureForRecovery(
   const failedAt = latestRun.finishedAt ?? latestRun.startedAt ?? latestRun.createdAt ?? null;
   if (latestRun.errorCode === ACPX_PROVIDER_QUOTA_ERROR_CODE) {
     const followUp = classifyAcpxProviderQuotaFollowUp(latestRun, now);
-    // No parsed reset: do not schedule a wake at all. Callers must not fall
-    // through to a generic continuation wake.
-    if (!followUp.notBefore) return { kind: "acpx_provider_quota_hold" };
+    // No parsed reset: park behind the default quota backoff, as every other
+    // provider quota failure without a clock does. Holding forever would leave
+    // the issue in progress with no wake and no escalation.
+    if (!followUp.notBefore) {
+      return {
+        kind: "provider_quota",
+        retryAt: new Date(now.getTime() + PROVIDER_QUOTA_RECOVERY_DEFAULT_BACKOFF_MS),
+        parsedResetTime: false,
+      };
+    }
     return {
       kind: "provider_quota",
       retryAt: followUp.notBefore.getTime() > now.getTime() ? followUp.notBefore : now,
@@ -3928,9 +3934,6 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
           }
           result.skipped += 1;
           continue;
-        } else if (adapterFailureClassification.kind === "acpx_provider_quota_hold") {
-          result.skipped += 1;
-          continue;
         } else {
           const updated = await escalateStrandedAssignedIssue({
             issue,
@@ -4119,10 +4122,6 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
           } else {
             result.skipped += 1;
           }
-          continue;
-        }
-        if (participantAdapterFailureClassification?.kind === "acpx_provider_quota_hold") {
-          result.skipped += 1;
           continue;
         }
         if (participantAdapterFailureClassification?.kind === "configuration_incomplete") {

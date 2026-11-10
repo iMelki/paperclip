@@ -101,6 +101,7 @@ import {
   DEFAULT_ACP_ENGINE_WARM_HANDLE_IDLE_MS,
 } from "./constants.js";
 import {
+  ACPX_PROVIDER_QUOTA_ERROR_CODE,
   classifyAcpxProviderQuotaTurn,
   classifyAcpxProviderQuotaTurnFromTexts,
   type AcpxProviderQuotaTurnClassification,
@@ -4405,9 +4406,17 @@ export function createAcpxEngineExecutor(deps: AcpxEngineExecutorOptions = {}) {
           emitted = null;
         }
         const message = emitted?.message ?? preEmitMessage;
-        const quotaFailure = timedOut
-          ? null
-          : classifyAcpxProviderQuotaTurnFromTexts([message, preEmitMessage]);
+        // classifyError already applied the phase and auth-first rules: it yields
+        // the quota code only for a turn-phase failure, so reuse its verdict.
+        const quotaFailure: AcpxProviderQuotaTurnClassification | null =
+          !timedOut && emitted?.classified.errorCode === ACPX_PROVIDER_QUOTA_ERROR_CODE
+            ? {
+              errorCode: ACPX_PROVIDER_QUOTA_ERROR_CODE,
+              quotaResetAt: typeof emitted.classified.errorMeta?.quotaResetAt === "string"
+                ? emitted.classified.errorMeta.quotaResetAt
+                : null,
+            }
+            : null;
         capturedResult = {
           exitCode: 1,
           signal: timedOut ? "SIGTERM" : null,

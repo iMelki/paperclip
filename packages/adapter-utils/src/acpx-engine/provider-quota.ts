@@ -8,9 +8,12 @@
  * Accepted statements:
  * - "You've hit your session limit" / "You've hit your usage limit"
  *   (straight or curly apostrophe)
- * - "usage limit", "usage limit reached", "usage limit exceeded"
- *   (hyphen or space)
- * - "quota exceeded", "quota limit exceeded" (hyphen or space)
+ * - "usage limit reached", "usage limit exceeded" (hyphen or space)
+ * - "quota exceeded", "quota limit exceeded" (hyphen or space), unless the word
+ *   before "quota" names a local resource (disk, storage, file, memory)
+ *
+ * A bare "usage limit" is not enough: it is a prefix of "usage limitations" and
+ * appears in tool and API errors that are not the provider's session limit.
  *
  * A reset clock counts only inside the 120 characters after that statement,
  * and only for "resets", "resets at", or "try again at". The clock must carry
@@ -21,7 +24,7 @@
 export const ACPX_PROVIDER_QUOTA_ERROR_CODE = "acpx_provider_quota";
 
 const ACPX_PROVIDER_QUOTA_STATEMENT_RE =
-  /you(?:'|’)ve hit your (?:session|usage) limit|usage[-\s]limit(?:[-\s](?:reached|exceeded))?|quota(?:[-\s]limit)?[-\s]exceeded/i;
+  /you(?:'|’)ve hit your (?:session|usage) limit\b|\busage[-\s]limit[-\s](?:reached|exceeded)\b|(?<!\b(?:disk|storage|file|filesystem|inode|memory|space)[-\s])\bquota(?:[-\s]limit)?[-\s]exceeded\b/i;
 
 /** Same window the recovery classifier uses so a distant clock is not this statement's reset. */
 const ACPX_PROVIDER_QUOTA_RESET_WINDOW_CHARS = 120;
@@ -47,9 +50,11 @@ export function classifyAcpxProviderQuotaTurn(
 ): AcpxProviderQuotaTurnClassification | null {
   const statement = ACPX_PROVIDER_QUOTA_STATEMENT_RE.exec(message);
   if (!statement || statement.index === undefined) return null;
-  const windowEnd = statement.index + statement[0].length + ACPX_PROVIDER_QUOTA_RESET_WINDOW_CHARS;
-  const window = message.slice(statement.index, windowEnd);
-  const quotaResetAt = parseAcpxProviderQuotaReset(window, now);
+  // The clock must start within the window after the statement, but it is
+  // parsed whole: a timezone that ends past the window must not be cut off.
+  const tail = message.slice(statement.index);
+  const maxClockStart = statement[0].length + ACPX_PROVIDER_QUOTA_RESET_WINDOW_CHARS;
+  const quotaResetAt = parseAcpxProviderQuotaReset(tail, now, maxClockStart);
   return {
     errorCode: ACPX_PROVIDER_QUOTA_ERROR_CODE,
     quotaResetAt: quotaResetAt ? quotaResetAt.toISOString() : null,
@@ -87,9 +92,10 @@ function canonicalizeQuotaTimeZone(zone: string): string | null {
   return zone;
 }
 
-function parseAcpxProviderQuotaReset(window: string, now: Date): Date | null {
-  const matches = window.matchAll(new RegExp(ACPX_PROVIDER_QUOTA_CLOCK_RE.source, "gi"));
+function parseAcpxProviderQuotaReset(text: string, now: Date, maxClockStart: number): Date | null {
+  const matches = text.matchAll(new RegExp(ACPX_PROVIDER_QUOTA_CLOCK_RE.source, "gi"));
   for (const match of matches) {
+    if ((match.index ?? 0) > maxClockStart) break;
     // A bare "resets 7" is prose. A quota clock needs minutes, a meridiem, or both.
     const clockLike = match[2] !== undefined || match[3] !== undefined;
     if (!clockLike) continue;

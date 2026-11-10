@@ -4,7 +4,11 @@ import {
   acpxProviderQuotaHeartbeatRetryNotBefore,
   classifyAcpxProviderQuotaFollowUp,
 } from "./acpx-provider-quota.js";
-import { classifyAdapterFailureForRecovery, classifyContinuationFailure } from "./service.js";
+import {
+  PROVIDER_QUOTA_RECOVERY_DEFAULT_BACKOFF_MS,
+  classifyAdapterFailureForRecovery,
+  classifyContinuationFailure,
+} from "./service.js";
 
 describe("ACPX provider quota follow-up", () => {
   it("does not retry or wake a run with the quota code before the parsed reset", () => {
@@ -42,8 +46,12 @@ describe("ACPX provider quota follow-up", () => {
       notBefore: null,
     });
     expect(acpxProviderQuotaHeartbeatRetryNotBefore(unparsed, now)).toBeNull();
+    // No clock still wakes later behind the default quota backoff; it is never
+    // held forever.
     expect(classifyAdapterFailureForRecovery(unparsed, now)).toEqual({
-      kind: "acpx_provider_quota_hold",
+      kind: "provider_quota",
+      retryAt: new Date(now.getTime() + PROVIDER_QUOTA_RECOVERY_DEFAULT_BACKOFF_MS),
+      parsedResetTime: false,
     });
     expect(classifyContinuationFailure(unparsed as never).kind).toBe("non_retryable");
   });

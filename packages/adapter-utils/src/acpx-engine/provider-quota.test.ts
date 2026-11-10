@@ -65,4 +65,41 @@ describe("classifyAcpxProviderQuotaTurn", () => {
       quotaResetAt: null,
     });
   });
+
+  it("does not treat local resource quotas or loose wording as a provider limit", () => {
+    for (const message of [
+      "EDQUOT: Disk quota exceeded",
+      "write failed: disk quota exceeded",
+      "Cloud storage quota exceeded for this bucket",
+      "The workspace has hit its file quota exceeded limit",
+      "Tool notice: usage limitations apply to this endpoint",
+      "usage limit",
+      "the usage limiter rejected the call",
+    ]) {
+      expect(classifyAcpxProviderQuotaTurn(message, sessionNow), message).toBeNull();
+    }
+  });
+
+  it("still maps a provider quota statement that names no local resource", () => {
+    for (const message of [
+      "Quota exceeded for quota metric 'Generate Content API requests per minute'",
+      "usage-limit-reached for this account",
+      "Usage limit exceeded",
+    ]) {
+      expect(classifyAcpxProviderQuotaTurn(message, sessionNow)?.errorCode, message)
+        .toBe(ACPX_PROVIDER_QUOTA_ERROR_CODE);
+    }
+  });
+
+  it("parses a reset clock whose timezone ends after the 120 character window", () => {
+    const filler = " ".repeat(100);
+    const message = `You've hit your session limit${filler}resets 10:40pm (Asia/Jerusalem)`;
+    expect(classifyAcpxProviderQuotaTurn(message, sessionNow)).toEqual({
+      errorCode: ACPX_PROVIDER_QUOTA_ERROR_CODE,
+      quotaResetAt: "2026-10-13T19:40:00.000Z",
+    });
+    // A clock that starts beyond the window is not this statement's reset.
+    const far = `You've hit your session limit${" ".repeat(130)}resets 10:40pm (Asia/Jerusalem)`;
+    expect(classifyAcpxProviderQuotaTurn(far, sessionNow)?.quotaResetAt).toBeNull();
+  });
 });

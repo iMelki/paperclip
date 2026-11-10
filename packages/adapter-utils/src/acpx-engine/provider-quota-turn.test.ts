@@ -115,3 +115,18 @@ it("leaves an unrelated failed turn on acpx_turn_failed", async () => {
   expect(result.quotaResetAt).toBeUndefined();
   expect((result.resultJson as Record<string, unknown>).quotaResetAt).toBeUndefined();
 });
+
+it("keeps the auth-first verdict when an auth failure also mentions a usage limit", async () => {
+  const result = await runTurn({
+    events: async function* () {
+      throw Object.assign(
+        new Error("You've hit your usage limit on this plan, please login with another account"),
+        { code: "ACP_TURN_FAILED" },
+      );
+    },
+    result: Promise.resolve({ status: "completed", stopReason: "end_turn" }),
+  });
+  expect(result.errorCode).toBe("acpx_auth_required");
+  expect(result.quotaResetAt).toBeUndefined();
+  expect((result.resultJson as Record<string, unknown>).quotaResetAt).toBeUndefined();
+});
