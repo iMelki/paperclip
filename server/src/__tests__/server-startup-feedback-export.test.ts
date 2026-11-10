@@ -222,6 +222,9 @@ vi.mock("detect-port", () => ({
 
 vi.mock("@paperclipai/db", () => ({
   createDb: createDbMock,
+  // startServer sizes the heartbeat sweep gate from this export. The real
+  // helper reads DATABASE_POOL_MAX and otherwise returns the driver default.
+  effectiveDatabasePoolMax: () => 10,
   ensurePostgresDatabase: vi.fn(),
   getPostgresDataDirectory: vi.fn(),
   prepareEmbeddedPostgresNativeRuntime: vi.fn(async () => {}),
@@ -876,8 +879,11 @@ describe("startServer feedback export wiring", () => {
 
       expect(intervalCallback).not.toBeNull();
       intervalCallback?.();
-      await Promise.resolve();
-      await Promise.resolve();
+      // The sweep gate runs at most poolMax-1 sweeps at once, so a tick's
+      // later sweeps start after the first wave releases its slots.
+      await vi.waitFor(() => {
+        expect(routineServiceMock.tickScheduledTriggers).toHaveBeenCalledTimes(1);
+      });
 
       expect(heartbeatServiceMock.tickTimers).not.toHaveBeenCalled();
       expect(externalObjectsServiceMock.refreshDueObjectsForActiveCompanies).toHaveBeenCalledTimes(1);
