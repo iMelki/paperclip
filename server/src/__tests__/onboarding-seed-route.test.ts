@@ -15,6 +15,7 @@ import {
   projects,
 } from "@paperclipai/db";
 import { onboardingSeedRoutes } from "../routes/onboarding-seed.js";
+import { approvalService } from "../services/approvals.js";
 import { logActivity } from "../services/activity-log.js";
 import {
   describeEmbeddedPostgres,
@@ -607,5 +608,38 @@ describeEmbeddedPostgres("POST /api/companies/:companyId/onboarding-seed", () =>
     const companyIssues = await ctx.db.select().from(issues).where(eq(issues.companyId, companyId));
     expect(companyIssues).toHaveLength(1);
     expect(companyIssues[0]?.assigneeAgentId).toBeNull();
+  });
+
+  it("assigns the seeded first task to the CEO when the pending hire is approved", async () => {
+    const { companyId, userId, app } = await seedCompany();
+    await ctx.db
+      .update(companies)
+      .set({ requireBoardApprovalForNewAgents: true })
+      .where(eq(companies.id, companyId));
+
+    const response = await post(app, companyId, SEED);
+    expect(response.status).toBe(200);
+
+    const before = await ctx.db.select().from(issues).where(eq(issues.companyId, companyId));
+    expect(before).toHaveLength(1);
+    expect(before[0]?.assigneeAgentId).toBeNull();
+
+    const [ceo] = await ctx.db.select().from(agents).where(eq(agents.companyId, companyId));
+    const [approval] = await ctx.db
+      .select()
+      .from(approvals)
+      .where(and(eq(approvals.companyId, companyId), eq(approvals.type, "hire_agent")));
+    expect(ceo?.id).toBeTruthy();
+    expect(approval?.id).toBeTruthy();
+
+    await approvalService(ctx.db).approve(approval!.id, userId);
+    const after = await ctx.db.select().from(issues).where(eq(issues.companyId, companyId));
+    expect(after).toHaveLength(1);
+    expect(after[0]?.assigneeAgentId).toBe(ceo?.id);
+
+    await approvalService(ctx.db).approve(approval!.id, userId);
+    const replayed = await ctx.db.select().from(issues).where(eq(issues.companyId, companyId));
+    expect(replayed).toHaveLength(1);
+    expect(replayed[0]?.assigneeAgentId).toBe(ceo?.id);
   });
 });

@@ -1,7 +1,13 @@
 import { isPausedAgentSetup, pausedAgentSetupFields } from "@paperclipai/shared";
-import { and, asc, eq, inArray, sql } from "drizzle-orm";
+import { and, asc, eq, inArray, isNull, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { approvalComments, approvals } from "@paperclipai/db";
+import {
+  approvalComments,
+  approvals,
+  companyOnboardingSeeds,
+  issueCreateIdempotencyKeys,
+  issues,
+} from "@paperclipai/db";
 import { notFound, unprocessable } from "../errors.js";
 import { redactCurrentUserText } from "../log-redaction.js";
 import { agentService } from "./agents.js";
@@ -259,6 +265,44 @@ export function approvalService(db: Db) {
     });
   }
 
+  /**
+   * The onboarding seed leaves its first task unassigned while the CEO hire is
+   * pending. Approval is the moment that lead can take the task. Only the
+   * issue this company recorded for `onboarding-seed:${companyId}` is touched,
+   * and only while it has no assignee, so a second approval is a no-op.
+   */
+  async function assignSeededOnboardingTask(source: Db, companyId: string, agentId: string) {
+    const seed = await source
+      .select({
+        agentId: companyOnboardingSeeds.agentId,
+        issueId: companyOnboardingSeeds.issueId,
+      })
+      .from(companyOnboardingSeeds)
+      .where(eq(companyOnboardingSeeds.companyId, companyId))
+      .then((rows) => rows[0] ?? null);
+    if (!seed?.issueId || seed.agentId !== agentId) return;
+
+    const seededIssueId = await source
+      .select({ issueId: issueCreateIdempotencyKeys.issueId })
+      .from(issueCreateIdempotencyKeys)
+      .where(and(
+        eq(issueCreateIdempotencyKeys.companyId, companyId),
+        eq(issueCreateIdempotencyKeys.idempotencyKey, `onboarding-seed:${companyId}`),
+        eq(issueCreateIdempotencyKeys.issueId, seed.issueId),
+      ))
+      .then((rows) => rows[0]?.issueId ?? null);
+    if (!seededIssueId) return;
+
+    await source
+      .update(issues)
+      .set({ assigneeAgentId: agentId, updatedAt: new Date() })
+      .where(and(
+        eq(issues.id, seededIssueId),
+        eq(issues.companyId, companyId),
+        isNull(issues.assigneeAgentId),
+      ));
+  }
+
   async function applyApprovedHire(
     source: Db,
     approval: ApprovalRecord,
@@ -287,6 +331,8 @@ export function approvalService(db: Db) {
         decidedByUserId,
       );
     }
+
+    await assignSeededOnboardingTask(source, approval.companyId, hireApprovedAgentId);
 
     return {
       companyId: approval.companyId,
