@@ -11,6 +11,10 @@ import {
 } from "@cursor/sdk";
 import type { AdapterExecutionContext, AdapterExecutionResult, AdapterInvocationMeta } from "@paperclipai/adapter-utils";
 import {
+  ADAPTER_DEFAULT_TIMEOUT_SEC,
+  resolveAdapterTimeoutSec,
+} from "@paperclipai/adapter-utils/adapter-timeout";
+import {
   DEFAULT_PAPERCLIP_AGENT_PROMPT_TEMPLATE,
   asBoolean,
   asString,
@@ -94,6 +98,61 @@ function toSummary(result: RunResult): string | null {
   const direct = trimNullable(result.result);
   if (direct) return firstNonEmptyLine(direct);
   return null;
+}
+
+async function waitForCursorRun(
+  run: Run,
+  timeoutSec: number,
+): Promise<{ timedOut: true } | { timedOut: false; result: RunResult }> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<{ timedOut: true }>((resolve) => {
+    timer = setTimeout(() => resolve({ timedOut: true }), timeoutSec * 1000);
+  });
+  const waited = run.wait().then(
+    (result) => ({ timedOut: false as const, result }),
+    (error: unknown) => Promise.reject(error),
+  );
+  void waited.catch(() => undefined);
+  try {
+    const outcome = await Promise.race([waited, timeout]);
+    if (outcome.timedOut) {
+      const cancel = (run as Run & { cancel?: () => Promise<unknown> | unknown }).cancel;
+      if (typeof cancel === "function") {
+        await Promise.resolve(cancel.call(run)).catch(() => undefined);
+      }
+      return { timedOut: true };
+    }
+    return outcome;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+function cursorCloudTimeoutResult(
+  timeoutSec: number,
+  session: CursorCloudSession | null,
+  run: Run | null,
+): AdapterExecutionResult {
+  return {
+    exitCode: 1,
+    signal: null,
+    timedOut: true,
+    errorCode: "cursor_cloud_timeout",
+    errorMessage: `Cursor cloud run timed out after ${timeoutSec}s.`,
+    sessionId: run?.agentId ?? session?.cursorAgentId ?? null,
+    sessionDisplayId: run?.agentId ?? session?.cursorAgentId ?? null,
+    sessionParams: session,
+    provider: "cursor",
+    biller: "cursor",
+    billingType: "api",
+    costUsd: null,
+    clearSession: false,
+    resultJson: {
+      status: "timeout",
+      ...(run ? { cursorRunId: run.id, cursorAgentId: run.agentId } : {}),
+      timeoutSec,
+    },
+  };
 }
 
 function formatRunError(err: unknown): string {
@@ -381,6 +440,10 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   const autoCreatePR = asBoolean(config.autoCreatePR, false);
   const skipReviewerRequest = asBoolean(config.skipReviewerRequest, false);
   const model = toModelSelection(asString(config.model, ""));
+  const timeoutSec = resolveAdapterTimeoutSec({
+    configured: config.timeoutSec,
+    adapterDefaultSec: ADAPTER_DEFAULT_TIMEOUT_SEC.cursor_cloud,
+  }).timeoutSec;
   const repos = [{
     url: repoUrl,
     ...(repoStartingRef ? { startingRef: repoStartingRef } : {}),
@@ -496,7 +559,14 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       const priorStreamPromise = streamRun(attachedRun, onLog).catch((err) => {
         streamError = formatRunError(err);
       });
-      if (attachedRun.supports("wait")) await attachedRun.wait();
+      if (attachedRun.supports("wait")) {
+        const waited = await waitForCursorRun(attachedRun, timeoutSec);
+        if (waited.timedOut) {
+          await onLog("stderr", `[cursor-cloud] timed out after ${timeoutSec}s while waiting for ${attachedRun.id}\n`);
+          void priorStreamPromise;
+          return cursorCloudTimeoutResult(timeoutSec, session, attachedRun);
+        }
+      }
       await priorStreamPromise;
       streamError = null;
       await emitStatus(
@@ -524,16 +594,25 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     const streamPromise = streamRun(run, onLog).catch((err) => {
       streamError = formatRunError(err);
     });
-    const result = run.supports("wait")
-      ? await run.wait()
+    const waited = run.supports("wait")
+      ? await waitForCursorRun(run, timeoutSec)
       : {
-          id: run.id,
-          status: run.status === "running" ? "error" : run.status,
-          result: run.result,
-          model: run.model,
-          durationMs: run.durationMs,
-          git: run.git,
+          timedOut: false as const,
+          result: {
+            id: run.id,
+            status: run.status === "running" ? "error" : run.status,
+            result: run.result,
+            model: run.model,
+            durationMs: run.durationMs,
+            git: run.git,
+          },
         };
+    if (waited.timedOut) {
+      await onLog("stderr", `[cursor-cloud] timed out after ${timeoutSec}s while waiting for ${run.id}\n`);
+      void streamPromise;
+      return cursorCloudTimeoutResult(timeoutSec, session, run);
+    }
+    const result = waited.result;
     await streamPromise;
 
     const modelId = result.model?.id ?? model?.id ?? null;

@@ -222,7 +222,7 @@ Create issues in Paperclip and assign them to your Hermes agent. On each heartbe
 |-------|------|---------|-------------|
 | `model` | string | `auto` | Model name; strict mode requires an explicit value |
 | `provider` | string | *(auto-detected)* | API provider: `auto`, `openrouter`, `nous`, `openai-codex`, `zai`, `kimi-coding`, `minimax`, `minimax-cn` |
-| `timeoutSec` | number | `1800` | Execution timeout in seconds |
+| `timeoutSec` | number | `1800` | Execution timeout in seconds. Missing, 0, and negative values use 1800. |
 | `graceSec` | number | `10` | Grace period before SIGKILL |
 
 For a bounded three-turn job, the UI now sets `timeoutSec: 900`. The local

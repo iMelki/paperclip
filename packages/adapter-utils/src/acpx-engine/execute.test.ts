@@ -2387,7 +2387,7 @@ describe("gemini ACP flag selection", () => {
     );
   });
 
-  it("keeps local execution unlimited by default and logs the unlimited timeout", async () => {
+  it("applies the adapter default timeout when local timeoutSec is unset", async () => {
     const root = await makeTempRoot();
     const stateDir = path.join(root, "state");
     const cwd = path.join(root, "worktree");
@@ -2400,12 +2400,15 @@ describe("gemini ACP flag selection", () => {
       cwd,
     });
 
-    expect(runtimeOptions[0]?.timeoutMs).toBeUndefined();
+    expect(runtimeOptions[0]?.timeoutMs).toBe(DEFAULT_REMOTE_SANDBOX_ADAPTER_TIMEOUT_SEC * 1000);
     const startLine = logs.find(
       (entry) => entry.stream === "stderr" && entry.text.includes("Adapter execution timeout:"),
     );
     expect(startLine).toBeTruthy();
-    expect(startLine!.text).toContain("Adapter execution timeout: none");
+    expect(startLine!.text).toContain(
+      `Adapter execution timeout: timeoutSec=${DEFAULT_REMOTE_SANDBOX_ADAPTER_TIMEOUT_SEC} ` +
+        "(adapter default; set adapterConfig.timeoutSec to override).",
+    );
   });
 
   it("prefers a configured timeoutSec over the sandbox default", async () => {
@@ -2434,7 +2437,7 @@ describe("gemini ACP flag selection", () => {
     );
   });
 
-  it("keeps the sandbox backstop for an explicit timeoutSec of 0 but honors a negative opt-out", async () => {
+  it("resolves timeoutSec 0 and negative values to the sandbox default", async () => {
     const root = await makeTempRoot();
     const stateDir = path.join(root, "state");
     const cwd = path.join(root, "worktree");
@@ -2457,19 +2460,19 @@ describe("gemini ACP flag selection", () => {
       DEFAULT_REMOTE_SANDBOX_ADAPTER_TIMEOUT_SEC * 1000,
     );
 
-    // A negative timeoutSec is the documented opt-out from any adapter
-    // wall-clock timeout, sandbox targets included.
     const negativeOptOut = await runExecutor(
       { agent: "custom", agentCommand: "node ./fake-acp.js", stateDir, cwd, timeoutSec: -1 },
       sandboxContext,
     );
-    expect(negativeOptOut.runtimeOptions[0]?.timeoutMs).toBeUndefined();
+    expect(negativeOptOut.runtimeOptions[0]?.timeoutMs).toBe(
+      DEFAULT_REMOTE_SANDBOX_ADAPTER_TIMEOUT_SEC * 1000,
+    );
     const startLine = negativeOptOut.logs.find(
       (entry) => entry.stream === "stderr" && entry.text.includes("Adapter execution timeout:"),
     );
     expect(startLine!.text).toContain(
-      "Adapter execution timeout: none (explicitly disabled via adapterConfig.timeoutSec; " +
-        "set it to a positive value to add one).",
+      `Adapter execution timeout: timeoutSec=${DEFAULT_REMOTE_SANDBOX_ADAPTER_TIMEOUT_SEC} ` +
+        "(sandbox default; set adapterConfig.timeoutSec to override).",
     );
   });
 

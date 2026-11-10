@@ -4,6 +4,10 @@ import type {
   AdapterRuntimeServiceReport,
 } from "@paperclipai/adapter-utils";
 import {
+  ADAPTER_DEFAULT_TIMEOUT_SEC,
+  resolveAdapterTimeoutSec,
+} from "@paperclipai/adapter-utils/adapter-timeout";
+import {
   asNumber,
   asString,
   buildPaperclipEnv,
@@ -1058,10 +1062,13 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     };
   }
 
-  const timeoutSec = Math.max(0, Math.floor(asNumber(ctx.config.timeoutSec, 120)));
-  const timeoutMs = timeoutSec > 0 ? timeoutSec * 1000 : 0;
-  const connectTimeoutMs = timeoutMs > 0 ? Math.min(timeoutMs, 15_000) : 10_000;
-  const waitTimeoutMs = parseOptionalPositiveInteger(ctx.config.waitTimeoutMs) ?? (timeoutMs > 0 ? timeoutMs : 30_000);
+  const timeoutSec = resolveAdapterTimeoutSec({
+    configured: ctx.config.timeoutSec,
+    adapterDefaultSec: ADAPTER_DEFAULT_TIMEOUT_SEC.openclaw_gateway,
+  }).timeoutSec;
+  const timeoutMs = timeoutSec * 1000;
+  const connectTimeoutMs = Math.min(timeoutMs, 15_000);
+  const waitTimeoutMs = parseOptionalPositiveInteger(ctx.config.waitTimeoutMs) ?? timeoutMs;
 
   const payloadTemplate = parseObject(ctx.config.payloadTemplate);
   const transportHint = nonEmpty(ctx.config.streamTransport) ?? nonEmpty(ctx.config.transport);

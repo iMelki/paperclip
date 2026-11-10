@@ -371,4 +371,49 @@ describe("cursor_cloud execute", () => {
       },
     });
   });
+
+  it("terminates a hung Cursor wait when timeoutSec elapses", async () => {
+    let cancelled = false;
+    const hungRun = {
+      ...createMockRun({ id: "run-hung", agentId: "agent-hung" }),
+      async wait(): Promise<Record<string, unknown>> {
+        return new Promise(() => {});
+      },
+      async cancel() {
+        cancelled = true;
+      },
+    };
+    createMock.mockResolvedValue(createMockSdkAgent({ agentId: "agent-hung", sendRun: hungRun }));
+    const ctx = createContext();
+    ctx.config.timeoutSec = 0.05;
+
+    const result = await execute(ctx);
+
+    expect(result.timedOut).toBe(true);
+    expect(result.errorCode).toBe("cursor_cloud_timeout");
+    expect(cancelled).toBe(true);
+  });
+
+  it("terminates a hung Cursor wait when timeoutSec is 0 by using the env default", async () => {
+    const previous = process.env.PAPERCLIP_ADAPTER_TIMEOUT_SEC;
+    process.env.PAPERCLIP_ADAPTER_TIMEOUT_SEC = "0.05";
+    const hungRun = {
+      ...createMockRun({ id: "run-hung-default", agentId: "agent-hung" }),
+      async wait(): Promise<Record<string, unknown>> {
+        return new Promise(() => {});
+      },
+    };
+    createMock.mockResolvedValue(createMockSdkAgent({ agentId: "agent-hung", sendRun: hungRun }));
+    const ctx = createContext();
+    ctx.config.timeoutSec = 0;
+
+    try {
+      const result = await execute(ctx);
+      expect(result.timedOut).toBe(true);
+      expect(result.errorCode).toBe("cursor_cloud_timeout");
+    } finally {
+      if (previous === undefined) delete process.env.PAPERCLIP_ADAPTER_TIMEOUT_SEC;
+      else process.env.PAPERCLIP_ADAPTER_TIMEOUT_SEC = previous;
+    }
+  });
 });

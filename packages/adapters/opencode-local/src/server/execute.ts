@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { inferOpenAiCompatibleBiller, type AdapterExecutionContext, type AdapterExecutionResult } from "@paperclipai/adapter-utils";
+import { ADAPTER_DEFAULT_TIMEOUT_SEC } from "@paperclipai/adapter-utils/adapter-timeout";
 import {
   adapterExecutionTargetIsRemote,
   adapterExecutionTargetRemoteCwd,
@@ -331,7 +332,8 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     );
     const timeoutSec = resolveAdapterExecutionTargetTimeoutSec(
       executionTarget,
-      asNumber(config.timeoutSec, 0),
+      config.timeoutSec,
+      { adapterDefaultSec: ADAPTER_DEFAULT_TIMEOUT_SEC.opencode_local },
     );
     const graceSec = asNumber(config.graceSec, 20);
     await ensureAdapterExecutionTargetRuntimeCommandInstalled({

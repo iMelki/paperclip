@@ -1,6 +1,25 @@
-import { describe, expect, it } from "vitest";
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import { afterEach, describe, expect, it } from "vitest";
 import type { AdapterExecutionContext } from "../types.js";
 import { buildProcessExecutionContextEnv, execute } from "./execute.js";
+
+const previousAdapterTimeout = process.env.PAPERCLIP_ADAPTER_TIMEOUT_SEC;
+
+afterEach(() => {
+  if (previousAdapterTimeout === undefined) delete process.env.PAPERCLIP_ADAPTER_TIMEOUT_SEC;
+  else process.env.PAPERCLIP_ADAPTER_TIMEOUT_SEC = previousAdapterTimeout;
+});
+
+function isPidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 function buildContext(): Pick<AdapterExecutionContext, "runId" | "agent" | "context"> {
   return {
@@ -162,5 +181,69 @@ describe("buildProcessExecutionContextEnv", () => {
     expect(payload.cwd.toLowerCase()).toBe(workspace.toLowerCase());
     expect(payload.issueId).toBe("issue-123");
     expect(payload.custom).toBe("forwarded");
+  });
+
+  async function runHangingProcess(timeoutSec: number): Promise<{ timedOut: boolean; pid: number }> {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-process-timeout-"));
+    const pidFile = path.join(root, "pid");
+    const previous = process.env.PAPERCLIP_ADAPTER_TIMEOUT_SEC;
+    if (timeoutSec <= 0) process.env.PAPERCLIP_ADAPTER_TIMEOUT_SEC = "0.2";
+    else delete process.env.PAPERCLIP_ADAPTER_TIMEOUT_SEC;
+    try {
+      const result = await execute({
+        runId: `run-${timeoutSec}`,
+        agent: {
+          id: "agent-123",
+          companyId: "company-123",
+          name: "Process",
+          adapterType: "process",
+          adapterConfig: {},
+        },
+        runtime: {
+          sessionId: null,
+          sessionParams: null,
+          sessionDisplayId: null,
+          taskKey: null,
+        },
+        config: {
+          command: process.execPath,
+          args: [
+            "-e",
+            "require('node:fs').writeFileSync(process.env.PID_FILE, String(process.pid)); setInterval(() => {}, 1000);",
+          ],
+          cwd: root,
+          env: { PID_FILE: pidFile },
+          timeoutSec,
+          graceSec: 1,
+        },
+        context: { paperclipWorkspace: { cwd: root } },
+        onLog: async () => {},
+      });
+      const pid = Number.parseInt(await fs.readFile(pidFile, "utf8"), 10);
+      if (isPidAlive(pid)) {
+        try {
+          process.kill(pid, "SIGKILL");
+        } catch {
+          // already gone
+        }
+      }
+      return { timedOut: result.timedOut, pid };
+    } finally {
+      if (previous === undefined) delete process.env.PAPERCLIP_ADAPTER_TIMEOUT_SEC;
+      else process.env.PAPERCLIP_ADAPTER_TIMEOUT_SEC = previous;
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  }
+
+  it("terminates the child when a positive timeoutSec elapses", async () => {
+    const result = await runHangingProcess(0.2);
+    expect(result.timedOut).toBe(true);
+    expect(isPidAlive(result.pid)).toBe(false);
+  });
+
+  it("terminates the child when timeoutSec is 0 by using the env default", async () => {
+    const result = await runHangingProcess(0);
+    expect(result.timedOut).toBe(true);
+    expect(isPidAlive(result.pid)).toBe(false);
   });
 });
