@@ -1459,7 +1459,9 @@ export function routineService(
           ? "skipped_paused"
           : input.reason === "no_external_activity"
             ? "skipped_no_activity"
-            : "skipped_worktree_execution_cutoff",
+            : input.reason === "no_eligible_actor"
+              ? "skipped_no_eligible_actor"
+              : "skipped_worktree_execution_cutoff",
         nextRunAt: input.nextRunAt,
       }, txDb);
       return createdRun;

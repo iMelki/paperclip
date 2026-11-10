@@ -2657,6 +2657,51 @@ describeEmbeddedPostgres("routine service live-execution coalescing", () => {
     expect(runsAfterResume.some((run) => run.status === "issue_created")).toBe(true);
   });
 
+  it("records skipped_no_eligible_actor when a built-in routine has no company member", async () => {
+    const previousActorUserId = process.env.PAPERCLIP_BUILT_IN_ACTOR_USER_ID;
+    delete process.env.PAPERCLIP_BUILT_IN_ACTOR_USER_ID;
+    try {
+      const { routine, svc } = await seedFixture();
+      await db.update(routines).set({
+        originKind: "built_in_agent_bundle",
+        originId: "summarizer:daily",
+        responsibleUserId: "built-in-bundles",
+      }).where(eq(routines.id, routine.id));
+      const { trigger } = await svc.createTrigger(routine.id, {
+        kind: "schedule",
+        label: "daily",
+        cronExpression: "0 0 * * *",
+        timezone: "UTC",
+      }, {});
+      const pastDue = new Date("2020-01-01T00:00:00.000Z");
+      await db.update(routineTriggers).set({ nextRunAt: pastDue }).where(eq(routineTriggers.id, trigger.id));
+
+      expect(await svc.tickScheduledTriggers(new Date())).toEqual({ triggered: 0 });
+
+      const runs = await db.select().from(routineRuns).where(eq(routineRuns.routineId, routine.id));
+      expect(runs).toHaveLength(1);
+      expect(runs[0]).toMatchObject({
+        status: "skipped",
+        source: "schedule",
+        failureReason: "no_eligible_actor",
+        linkedIssueId: null,
+      });
+
+      const firedTrigger = await db
+        .select()
+        .from(routineTriggers)
+        .where(eq(routineTriggers.id, trigger.id))
+        .then((rows) => rows[0]);
+      expect(firedTrigger?.lastResult).toBe("skipped_no_eligible_actor");
+
+      const issuesAfterTick = await db.select().from(issues).where(eq(issues.companyId, routine.companyId));
+      expect(issuesAfterTick).toHaveLength(0);
+    } finally {
+      if (previousActorUserId === undefined) delete process.env.PAPERCLIP_BUILT_IN_ACTOR_USER_ID;
+      else process.env.PAPERCLIP_BUILT_IN_ACTOR_USER_ID = previousActorUserId;
+    }
+  });
+
   it("skips a gated scheduled tick when quiet without advancing the activity window", async () => {
     const { companyId, routine, svc } = await seedFixture();
     await db.update(routines).set({
