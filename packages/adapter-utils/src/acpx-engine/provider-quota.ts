@@ -17,7 +17,8 @@
  *
  * A reset clock counts only inside the 120 characters after that statement,
  * and only for "resets", "resets at", or "try again at". The clock must carry
- * a real timezone (`(Asia/Jerusalem)`, `(UTC)`, or a bare `UTC`/`GMT`). An
+ * a real timezone (`(Asia/Jerusalem)`, `(UTC)`, or a bare `UTC`/`GMT`); a
+ * whole hour with such a zone ("resets 9 (UTC)") is a clock. An
  * unparseable clock, a missing clock, or an unknown timezone leaves
  * `quotaResetAt` null. The classifier does not invent a zone or a time.
  */
@@ -96,8 +97,11 @@ function parseAcpxProviderQuotaReset(text: string, now: Date, maxClockStart: num
   const matches = text.matchAll(new RegExp(ACPX_PROVIDER_QUOTA_CLOCK_RE.source, "gi"));
   for (const match of matches) {
     if ((match.index ?? 0) > maxClockStart) break;
-    // A bare "resets 7" is prose. A quota clock needs minutes, a meridiem, or both.
-    const clockLike = match[2] !== undefined || match[3] !== undefined;
+    // A bare "resets 7" is prose. A quota clock needs minutes, a meridiem, or an
+    // explicit timezone ("resets 9 (UTC)"). A zone that is not real still
+    // leaves the reset unparsed when it is resolved below.
+    const clockLike =
+      match[2] !== undefined || match[3] !== undefined || match[5] !== undefined || match[6] !== undefined;
     if (!clockLike) continue;
     const resolved = resolveAcpxProviderQuotaClock(match, now);
     if (resolved) return resolved;

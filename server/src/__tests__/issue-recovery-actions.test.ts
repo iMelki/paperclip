@@ -26,7 +26,7 @@ import { errorHandler } from "../middleware/index.js";
 import { issueRoutes } from "../routes/issues.js";
 import { buildPaperclipWakePayload } from "../services/heartbeat.js";
 import { issueRecoveryActionService } from "../services/issue-recovery-actions.js";
-import { recoveryService } from "../services/recovery/service.js";
+import { classifyAdapterFailureForRecovery, recoveryService } from "../services/recovery/service.js";
 import { noticeMetadataReferencesRecoveryAction } from "../services/recovery/successful-run-handoff.js";
 
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
@@ -741,6 +741,48 @@ describeEmbeddedPostgres("issue recovery actions", () => {
     const secondResult = await recovery.reconcileStrandedAssignedIssues();
     expect(secondResult).toMatchObject({ providerQuotaMonitored: 0, skipped: 1 });
     expect(await db.select().from(issueRecoveryActions)).toHaveLength(0);
+  });
+
+  it("keeps the ACPX provider-quota code so a later sweep still honors the parsed reset", async () => {
+    const { companyId, coderId, sourceIssueId } = await seedCompany();
+    const runId = randomUUID();
+    const failedAt = new Date(Date.now() - 60_000);
+    const resetAt = new Date(failedAt.getTime() + 3 * 60 * 60_000);
+    await db.insert(heartbeatRuns).values({
+      id: runId,
+      companyId,
+      agentId: coderId,
+      invocationSource: "manual",
+      status: "failed",
+      // The wording the older clock parser does not read, so only the ACPX
+      // reset carried in resultJson can say when the quota is over.
+      error: "usage-limit exceeded - resets soon",
+      errorCode: "acpx_provider_quota",
+      resultJson: { quotaResetAt: resetAt.toISOString() },
+      startedAt: new Date(failedAt.getTime() - 60_000),
+      finishedAt: failedAt,
+      contextSnapshot: { issueId: sourceIssueId },
+    });
+    const recovery = recoveryService(db, { enqueueWakeup: vi.fn(async () => null) });
+
+    const result = await recovery.reconcileStrandedAssignedIssues();
+
+    expect(result.providerQuotaMonitored).toBe(1);
+    const [updatedRun] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, runId));
+    expect(updatedRun).toMatchObject({ errorCode: "acpx_provider_quota" });
+    expect(updatedRun?.resultJson).toMatchObject({
+      quotaResetAt: resetAt.toISOString(),
+      errorFamily: "provider_quota",
+      recoveryClassification: "provider_quota",
+    });
+    // Once the reset passed, the same persisted run is due now, not one default
+    // backoff later.
+    const afterReset = new Date(resetAt.getTime() + 60_000);
+    expect(classifyAdapterFailureForRecovery(updatedRun!, afterReset)).toEqual({
+      kind: "provider_quota",
+      retryAt: afterReset,
+      parsedResetTime: true,
+    });
   });
 
   it("schedules another provider-quota monitor after a prior quota monitor fired", async () => {

@@ -38,6 +38,31 @@ describe("classifyAcpxProviderQuotaTurn", () => {
     )).toBeNull();
   });
 
+  it("parses a whole-hour reset when the clock carries an explicit timezone", () => {
+    // sessionNow is 18:00 UTC, so the next 21:00 UTC is the same day.
+    expect(classifyAcpxProviderQuotaTurn(
+      "You've hit your session limit · resets 21 (UTC)",
+      sessionNow,
+    )).toEqual({
+      errorCode: ACPX_PROVIDER_QUOTA_ERROR_CODE,
+      quotaResetAt: "2026-10-13T21:00:00.000Z",
+    });
+    expect(classifyAcpxProviderQuotaTurn(
+      "usage limit exceeded, resets 9 GMT",
+      sessionNow,
+    )?.quotaResetAt).toBe("2026-10-14T09:00:00.000Z");
+    // A bare number, or a number followed by something that is not a zone, is prose.
+    for (const message of [
+      "You've hit your session limit · resets 9",
+      "You've hit your session limit · resets 7 (days)",
+    ]) {
+      expect(classifyAcpxProviderQuotaTurn(message, sessionNow)).toEqual({
+        errorCode: ACPX_PROVIDER_QUOTA_ERROR_CODE,
+        quotaResetAt: null,
+      });
+    }
+  });
+
   it("maps quota wording and leaves the reset null when the clock cannot be parsed", () => {
     expect(classifyAcpxProviderQuotaTurn("You've hit your session limit", sessionNow)).toEqual({
       errorCode: ACPX_PROVIDER_QUOTA_ERROR_CODE,

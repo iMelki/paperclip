@@ -553,8 +553,15 @@ export function classifyAdapterFailureForRecovery(
     const followUp = classifyAcpxProviderQuotaFollowUp(latestRun, now);
     // No parsed reset: park behind the default quota backoff, as every other
     // provider quota failure without a clock does. Holding forever would leave
-    // the issue in progress with no wake and no escalation.
+    // the issue in progress with no wake and no escalation. The backoff time
+    // persisted by an earlier sweep stays the retry time until it is due, so a
+    // sweep does not push it out again.
     if (!followUp.notBefore) {
+      const persistedBackoff = readNonEmptyString(resultJson.providerQuotaRetryNotBefore);
+      const persistedBackoffAt = persistedBackoff ? new Date(persistedBackoff) : null;
+      if (persistedBackoffAt && !Number.isNaN(persistedBackoffAt.getTime()) && persistedBackoffAt > now) {
+        return { kind: "provider_quota", retryAt: persistedBackoffAt, parsedResetTime: false };
+      }
       return {
         kind: "provider_quota",
         retryAt: new Date(now.getTime() + PROVIDER_QUOTA_RECOVERY_DEFAULT_BACKOFF_MS),
@@ -3631,7 +3638,12 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
           providerQuotaRetryNotBefore: classification.retryAt.toISOString(),
         }
       : { errorFamily: "configuration_incomplete" };
-    const errorCode = classification.kind;
+    // The dedicated ACPX code carries the parsed provider reset (`quotaResetAt`)
+    // that later sweeps read, so it stays on the run. The recovery family is
+    // recorded separately in `errorFamily` and `recoveryClassification`.
+    const errorCode = latestRun.errorCode === ACPX_PROVIDER_QUOTA_ERROR_CODE && classification.kind === "provider_quota"
+      ? ACPX_PROVIDER_QUOTA_ERROR_CODE
+      : classification.kind;
 
     return {
       ...latestRun,
@@ -3639,7 +3651,7 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
       resultJson: {
         ...resultJson,
         ...providerQuotaMetadata,
-        recoveryClassification: errorCode,
+        recoveryClassification: classification.kind,
       },
     };
   }
