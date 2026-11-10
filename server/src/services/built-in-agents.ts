@@ -720,9 +720,13 @@ function canonicalPaperclipSkillSync(config: Record<string, unknown>): Record<st
   const raw = config.paperclipSkillSync;
   if (!isPlainRecord(raw)) return undefined;
   const preference = readPaperclipSkillSyncPreference(config);
+  // Sorted by key so the stored value does not depend on insertion order:
+  // ensure and bundled skill-sync would otherwise keep moving the bundled
+  // entry and write a revision each time.
   const written = writePaperclipSkillSyncPreference(
     { paperclipSkillSync: raw },
-    preference.desiredSkillEntries,
+    [...preference.desiredSkillEntries].sort((left, right) =>
+      left.key < right.key ? -1 : left.key > right.key ? 1 : 0),
   );
   return isPlainRecord(written.paperclipSkillSync) ? written.paperclipSkillSync : undefined;
 }
@@ -1671,13 +1675,22 @@ export function builtInAgentService(db: Db) {
         const incomingConfig = resolvedInput.adapterConfig === undefined
           ? existingConfig
           : asAdapterConfig(resolvedInput.adapterConfig);
+        // Settings belong to one adapter (command, model, args). When the
+        // adapter type changes and a new config is given, only the adapter
+        // independent skill selection carries over, so a leftover command from
+        // the old adapter can never launch under the new one.
+        const mergeBase = adapterType !== existing.adapterType && resolvedInput.adapterConfig !== undefined
+          ? Object.prototype.hasOwnProperty.call(existingConfig, "paperclipSkillSync")
+            ? { paperclipSkillSync: existingConfig.paperclipSkillSync }
+            : {}
+          : existingConfig;
         // Shallow-merge onto the current adapter config. Omitted keys stay,
         // including `paperclipSkillSync`, so ensure does not clear the value
         // that bundled skill-sync restores.
         // When `incomingConfig.env` is set, that assignment replaces the whole
         // env map. Do not deep-merge env keys. PATCH `adapterConfig.env` has
         // the same full-replacement behavior; leave that route alone.
-        const nextConfig = withCanonicalSkillSync({ ...existingConfig, ...incomingConfig });
+        const nextConfig = withCanonicalSkillSync({ ...mergeBase, ...incomingConfig });
         if (adapterType !== existing.adapterType) patch.adapterType = adapterType;
         if (!adapterConfigsEffectivelyEqual(existingConfig, nextConfig)) {
           patch.adapterConfig = nextConfig;

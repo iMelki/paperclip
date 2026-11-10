@@ -1706,4 +1706,69 @@ describeEmbeddedPostgres("built-in agents", () => {
     const afterFollowUp = await revisionSources(agentId);
     expect(afterFollowUp.length, afterFollowUp.join("\n")).toBe(beforeChange + 1);
   });
+
+  it("does not keep another adapter's settings when a built-in switches adapter type", async () => {
+    const companyId = await seedCompany({ requireApproval: false });
+    const builtIns = builtInAgentService(db);
+    const first = await builtIns.ensure(companyId, "briefs", {
+      adapterType: "process",
+      adapterConfig: { command: "/bin/echo", paperclipSkillSync: { desiredSkills: ["company/kept-skill"] } },
+    });
+    expect(first.agent?.adapterConfig).toMatchObject({ command: "/bin/echo" });
+
+    const switched = await builtIns.ensure(companyId, "briefs", {
+      adapterType: "codex_local",
+      adapterConfig: { model: "gpt-5.4" },
+    });
+
+    expect(switched.agent?.adapterType).toBe("codex_local");
+    expect(switched.agent?.adapterConfig).toMatchObject({ model: "gpt-5.4" });
+    expect(switched.agent?.adapterConfig).not.toHaveProperty("command");
+    expect(
+      readPaperclipSkillSyncPreference(switched.agent!.adapterConfig as Record<string, unknown>).desiredSkills,
+    ).toContain("company/kept-skill");
+  });
+
+  it("converges with several skills without writing a revision on every ensure", async () => {
+    const companyId = await seedCompany({ requireApproval: false });
+    await agentService(db).create(companyId, {
+      name: "CEO",
+      role: "ceo",
+      status: "idle",
+      adapterType: "codex_local",
+      adapterConfig: { model: "gpt-5.4" },
+      runtimeConfig: {},
+      permissions: {},
+    });
+    const builtIns = builtInAgentService(db);
+    const converged = await builtIns.ensure(companyId, "reflection-coach");
+    const agentId = converged.agentId!;
+    const bundledSkill = readPaperclipSkillSyncPreference(
+      converged.agent!.adapterConfig as Record<string, unknown>,
+    ).desiredSkills.find((key) => key.includes("reflection-coach"))!;
+
+    // A caller that keeps sending the bundled skill first and a custom skill
+    // second must not make ensure and bundled skill-sync trade places forever.
+    const desiredInput = () => ({
+      adapterType: "codex_local",
+      adapterConfig: {
+        model: "gpt-5.4",
+        paperclipSkillSync: { desiredSkills: [bundledSkill, "aaa/custom-skill"] },
+      },
+    });
+    await builtIns.ensure(companyId, "reflection-coach", desiredInput());
+    const countRevisions = () => db
+      .select({ id: agentConfigRevisions.id })
+      .from(agentConfigRevisions)
+      .where(eq(agentConfigRevisions.agentId, agentId))
+      .then((rows) => rows.length);
+    const settled = await countRevisions();
+    for (let cycle = 0; cycle < 4; cycle += 1) {
+      await builtIns.ensure(companyId, "reflection-coach", desiredInput());
+    }
+    expect(await countRevisions()).toBe(settled);
+    const final = await agentService(db).getById(agentId);
+    expect(readPaperclipSkillSyncPreference(final!.adapterConfig as Record<string, unknown>).desiredSkills.sort())
+      .toEqual([bundledSkill, "aaa/custom-skill"].sort());
+  });
 });
