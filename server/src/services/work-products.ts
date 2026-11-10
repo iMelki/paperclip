@@ -2,6 +2,7 @@ import { and, desc, eq, inArray } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { issueWorkProducts, workspaceRuntimeServices } from "@paperclipai/db";
 import type { IssueWorkProduct } from "@paperclipai/shared";
+import { unprocessable } from "../errors.js";
 import { insertRowsInChunks } from "./batch-insert.js";
 import type { ImportIssueWorkProductRow } from "./import-write-types.js";
 
@@ -71,6 +72,31 @@ export function reconcileRuntimeServiceWorkProducts(
   });
 }
 
+/**
+ * The read path only selects a runtime service when both the id and the
+ * company match. Writes use that same predicate and fail closed: a missing
+ * id and another company's id are the same rejection, so the response does
+ * not reveal that a foreign service exists.
+ */
+async function assertRuntimeServiceInCompany(
+  db: Db,
+  companyId: string,
+  runtimeServiceId: string | null | undefined,
+) {
+  if (!runtimeServiceId) return;
+  const match = await db
+    .select({ id: workspaceRuntimeServices.id })
+    .from(workspaceRuntimeServices)
+    .where(and(
+      eq(workspaceRuntimeServices.id, runtimeServiceId),
+      eq(workspaceRuntimeServices.companyId, companyId),
+    ))
+    .then((rows) => rows[0] ?? null);
+  if (!match) {
+    throw unprocessable("Runtime service was not found in this company");
+  }
+}
+
 export function workProductService(db: Db) {
   return {
     listForIssue: async (issueId: string) => {
@@ -84,6 +110,10 @@ export function workProductService(db: Db) {
         .map((product) => (product.type === "runtime_service" ? product.runtimeServiceId : null))
         .filter((value): value is string => Boolean(value));
       if (runtimeServiceIds.length === 0) return products;
+      // The foreign key is the service id alone. Match the owning company too,
+      // or a work product that names another company's service id would copy
+      // that service's URL and health into this company's issue.
+      const companyIds = [...new Set(products.map((product) => product.companyId))];
       const liveRuntimeServices = await db
         .select({
           id: workspaceRuntimeServices.id,
@@ -92,7 +122,10 @@ export function workProductService(db: Db) {
           healthStatus: workspaceRuntimeServices.healthStatus,
         })
         .from(workspaceRuntimeServices)
-        .where(inArray(workspaceRuntimeServices.id, [...new Set(runtimeServiceIds)]));
+        .where(and(
+          inArray(workspaceRuntimeServices.id, [...new Set(runtimeServiceIds)]),
+          inArray(workspaceRuntimeServices.companyId, companyIds),
+        ));
       return reconcileRuntimeServiceWorkProducts(products, liveRuntimeServices);
     },
 
@@ -107,6 +140,7 @@ export function workProductService(db: Db) {
 
     createForIssue: async (issueId: string, companyId: string, data: Omit<typeof issueWorkProducts.$inferInsert, "issueId" | "companyId">) => {
       const row = await db.transaction(async (tx) => {
+        await assertRuntimeServiceInCompany(tx as unknown as Db, companyId, data.runtimeServiceId);
         if (data.isPrimary) {
           await tx
             .update(issueWorkProducts)
@@ -140,6 +174,11 @@ export function workProductService(db: Db) {
           .where(eq(issueWorkProducts.id, id))
           .then((rows) => rows[0] ?? null);
         if (!existing) return null;
+
+        const companyId = typeof patch.companyId === "string" ? patch.companyId : existing.companyId;
+        if (Object.prototype.hasOwnProperty.call(patch, "runtimeServiceId")) {
+          await assertRuntimeServiceInCompany(tx as unknown as Db, companyId, patch.runtimeServiceId);
+        }
 
         if (patch.isPrimary === true) {
           await tx

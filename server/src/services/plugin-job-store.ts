@@ -290,11 +290,37 @@ export function pluginJobStore(db: Db) {
     async updateJobStatus(
       jobId: string,
       status: JobDefinitionStatus,
+      options?: { nextRunAt?: Date | null },
     ): Promise<void> {
+      // One UPDATE: a resume sets status and the armed pointer atomically.
       await db
         .update(pluginJobs)
-        .set({ status, updatedAt: new Date() })
+        .set({
+          status,
+          updatedAt: new Date(),
+          ...(options?.nextRunAt !== undefined ? { nextRunAt: options.nextRunAt } : {}),
+        })
         .where(eq(pluginJobs.id, jobId));
+    },
+
+    /**
+     * Arm a stuck job: set `nextRunAt` only if the row is still `active` with
+     * a null `nextRunAt` (one conditional UPDATE). Never touches the status or
+     * `lastRunAt`.
+     *
+     * @returns `true` if the row was updated
+     */
+    async armStuckActiveJob(jobId: string, nextRunAt: Date): Promise<boolean> {
+      const rows = await db
+        .update(pluginJobs)
+        .set({ nextRunAt, updatedAt: new Date() })
+        .where(and(
+          eq(pluginJobs.id, jobId),
+          eq(pluginJobs.status, "active"),
+          isNull(pluginJobs.nextRunAt),
+        ))
+        .returning({ id: pluginJobs.id });
+      return rows.length > 0;
     },
 
     /**

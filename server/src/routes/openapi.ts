@@ -6070,6 +6070,26 @@ registry.registerPath({
 });
 
 registry.registerPath({
+  method: "patch",
+  path: "/api/plugins/{pluginId}/jobs/{jobId}",
+  tags: ["plugins"],
+  summary: "Set a plugin job's status (pause or resume)",
+  request: {
+    params: z.object({ pluginId: z.string(), jobId: z.string() }),
+    body: jsonBody(z.object({ status: z.enum(["active", "paused"]) }).strict()),
+  },
+  responses: {
+    200: r.ok(),
+    400: r.badRequest,
+    401: r.unauthorized,
+    403: r.forbidden,
+    404: r.notFound,
+    422: r.unprocessable,
+    501: r.notImplemented,
+  },
+});
+
+registry.registerPath({
   method: "post",
   path: "/api/plugins/{pluginId}/jobs/{jobId}/trigger",
   tags: ["plugins"],
