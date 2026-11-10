@@ -393,6 +393,17 @@ export function createPluginJobScheduler(
           );
           continue;
         }
+        // A native board job still needs the host-authorized company set, which
+        // lives on the registered worker handle. Without a handle that set is
+        // unknown, not empty: leave the job due (no dispatch, so the schedule
+        // pointer does not advance) and run it once the worker is registered.
+        if (isNativeGitHubBoardJobKey(job.jobKey) && !workerManager.getWorker(job.pluginId)) {
+          log.debug(
+            { jobId: job.id, pluginId: job.pluginId },
+            "deferring native board job — worker not registered, authorized companies unknown",
+          );
+          continue;
+        }
 
         // Validate cron expression before dispatching
         if (!job.schedule) {

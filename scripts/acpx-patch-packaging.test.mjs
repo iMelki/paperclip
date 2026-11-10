@@ -48,9 +48,19 @@ test("published packages preserve the patched embedded-postgres runtime", () => 
     rootPackage.pnpm.patchedDependencies["embedded-postgres@18.1.0-beta.16"],
     "patches/embedded-postgres@18.1.0-beta.16.patch",
   );
-  assert.deepEqual(dbPackage.bundleDependencies, ["embedded-postgres"]);
+  assert.equal(dbPackage.bundleDependencies.includes("embedded-postgres"), true);
   assert.equal(bundledCliNpmDependencies.has("embedded-postgres"), true);
   assert.equal(cliEsbuildConfig.external.includes("embedded-postgres"), false);
+});
+
+test("published packages preserve the patched postgres driver", () => {
+  assert.equal(
+    rootPackage.pnpm.patchedDependencies["postgres@3.4.9"],
+    "patches/postgres@3.4.9.patch",
+  );
+  assert.equal(dbPackage.bundleDependencies.includes("postgres"), true);
+  assert.equal(bundledCliNpmDependencies.has("postgres"), true);
+  assert.equal(cliEsbuildConfig.external.includes("postgres"), false);
 });
 
 test("bundled package staging materializes publishConfig entrypoints", () => {
