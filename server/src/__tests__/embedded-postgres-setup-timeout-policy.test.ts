@@ -1,8 +1,47 @@
 import { readFileSync, readdirSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import ts from "typescript";
+// TypeScript 7 no longer ships the classic compiler API (ts.createSourceFile,
+// ts.ScriptTarget), so parse with the oxc parser that vite re-exports.
+import { parseSync } from "vite";
 import { describe, expect, it } from "vitest";
+
+type AstNode = { type: string; start: number; end: number; [key: string]: unknown };
+
+function isAstNode(value: unknown): value is AstNode {
+  return typeof value === "object" && value !== null && typeof (value as AstNode).type === "string";
+}
+
+function forEachChild(node: AstNode, visit: (child: AstNode) => void): void {
+  for (const [key, value] of Object.entries(node)) {
+    if (key === "parent") continue;
+    if (Array.isArray(value)) {
+      for (const item of value) if (isAstNode(item)) visit(item);
+    } else if (isAstNode(value)) {
+      visit(value);
+    }
+  }
+}
+
+function containsAwaitedCall(node: AstNode, calleeName: string): boolean {
+  if (node.type === "AwaitExpression") {
+    const argument = node.argument as AstNode | undefined;
+    const callee = argument?.type === "CallExpression" ? (argument.callee as AstNode) : undefined;
+    if (callee?.type === "Identifier" && callee.name === calleeName) return true;
+  }
+  let found = false;
+  forEachChild(node, (child) => {
+    if (!found && containsAwaitedCall(child, calleeName)) found = true;
+  });
+  return found;
+}
+
+function argumentText(node: AstNode | undefined): string {
+  if (!node) return "";
+  if (node.type === "Identifier") return String(node.name);
+  if (node.type === "Literal") return String(node.raw ?? node.value);
+  return node.type;
+}
 
 const REPO_ROOT = fileURLToPath(new URL("../../..", import.meta.url));
 const TEST_ROOTS = [
@@ -27,25 +66,19 @@ describe("embedded Postgres setup timeout policy", () => {
 
     for (const testFile of TEST_ROOTS.flatMap(listTestFiles)) {
       const sourceText = readFileSync(testFile, "utf8");
-      const sourceFile = ts.createSourceFile(
-        testFile,
-        sourceText,
-        ts.ScriptTarget.Latest,
-        true,
-        ts.ScriptKind.TS,
-      );
+      const { program } = parseSync(testFile, sourceText, { lang: "ts", sourceType: "module" });
 
-      const inspect = (node: ts.Node): void => {
+      const inspect = (node: AstNode): void => {
+        const callee = node.type === "CallExpression" ? (node.callee as AstNode) : undefined;
+        const args = (node.arguments as AstNode[] | undefined) ?? [];
         if (
-          ts.isCallExpression(node) &&
-          ts.isIdentifier(node.expression) &&
-          node.expression.text === "beforeAll" &&
-          node.arguments[0]?.getText(sourceFile).includes(
-            "await startEmbeddedPostgresTestDatabase",
-          )
+          callee?.type === "Identifier" &&
+          callee.name === "beforeAll" &&
+          args[0] !== undefined &&
+          containsAwaitedCall(args[0], "startEmbeddedPostgresTestDatabase")
         ) {
-          const timeoutText = node.arguments[1]?.getText(sourceFile) ?? "";
-          const line = sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile)).line + 1;
+          const timeoutText = argumentText(args[1]);
+          const line = sourceText.slice(0, node.start).split("\n").length;
           const relativePath = path.relative(REPO_ROOT, testFile).split(path.sep).join("/");
 
           if (timeoutText === "20_000") {
@@ -54,10 +87,10 @@ describe("embedded Postgres setup timeout policy", () => {
             sharedPolicyHookCount += 1;
           }
         }
-        ts.forEachChild(node, inspect);
+        forEachChild(node, inspect);
       };
 
-      inspect(sourceFile);
+      inspect(program as unknown as AstNode);
     }
 
     expect(violations).toEqual([]);

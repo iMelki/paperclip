@@ -5,11 +5,11 @@ export const createCostEventSchema = z.object({
   sourceSystem: z.string().trim().min(1).max(128).optional().nullable(),
   sourceAccountId: z.string().trim().min(1).max(256).optional().nullable(),
   sourceEventId: z.string().trim().min(1).max(512).optional().nullable(),
-  agentId: z.string().uuid(),
-  issueId: z.string().uuid().optional().nullable(),
-  projectId: z.string().uuid().optional().nullable(),
-  goalId: z.string().uuid().optional().nullable(),
-  heartbeatRunId: z.string().uuid().optional().nullable(),
+  agentId: z.string().guid(),
+  issueId: z.string().guid().optional().nullable(),
+  projectId: z.string().guid().optional().nullable(),
+  goalId: z.string().guid().optional().nullable(),
+  heartbeatRunId: z.string().guid().optional().nullable(),
   billingCode: z.string().optional().nullable(),
   provider: z.string().min(1),
   biller: z.string().min(1).optional(),
@@ -22,6 +22,7 @@ export const createCostEventSchema = z.object({
   costCents: z.number().int().nonnegative(),
   occurredAt: z.string().datetime(),
 }).superRefine((value, ctx) => {
+  // Fork contract (dev): a source identity is all three fields or none.
   const fields = ["sourceSystem", "sourceAccountId", "sourceEventId"] as const;
   const supplied = fields.filter((field) => value[field] != null);
   if (supplied.length > 0 && supplied.length !== fields.length) {
