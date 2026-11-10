@@ -29,6 +29,10 @@ import {
   issues,
 } from "@paperclipai/db";
 import { parseObject, asBoolean, asNumber } from "../../adapters/utils.js";
+import {
+  ACPX_PROVIDER_QUOTA_ERROR_CODE,
+  classifyAcpxProviderQuotaFollowUp,
+} from "./acpx-provider-quota.js";
 import { runningProcesses } from "../../adapters/index.js";
 import { visibleIssueCondition } from "../issue-visibility.js";
 import { forbidden, notFound } from "../../errors.js";
@@ -375,6 +379,9 @@ const NON_RETRYABLE_CONTINUATION_ERROR_CODES = new Set<string>([
   "budget_exhausted",
   "issue_paused",
   "issue_dependencies_blocked",
+  // A provider session/usage limit is not a continuation failure. Retry and
+  // wake go through the quota clock, or not at all when that clock is missing.
+  ACPX_PROVIDER_QUOTA_ERROR_CODE,
 ]);
 
 // A continuation cancelled with this code is a *deliberate wait* (the latest run
@@ -411,6 +418,7 @@ const CONFIGURATION_INCOMPLETE_ERROR_RE =
 export type AdapterFailureRecoveryClassification =
   | { kind: "provider_quota"; retryAt: Date; parsedResetTime: boolean }
   | { kind: "configuration_incomplete" }
+  | { kind: "acpx_provider_quota_hold" }
   | null;
 
 /**
@@ -535,12 +543,24 @@ export function classifyAdapterFailureForRecovery(
     latestRun.errorCode !== "adapter_failed" &&
     latestRun.errorCode !== "acpx_turn_failed" &&
     latestRun.errorCode !== "provider_quota" &&
-    latestRun.errorCode !== "configuration_incomplete"
+    latestRun.errorCode !== "configuration_incomplete" &&
+    latestRun.errorCode !== ACPX_PROVIDER_QUOTA_ERROR_CODE
   ) {
     return null;
   }
   const resultJson = parseObject(latestRun.resultJson);
   const failedAt = latestRun.finishedAt ?? latestRun.startedAt ?? latestRun.createdAt ?? null;
+  if (latestRun.errorCode === ACPX_PROVIDER_QUOTA_ERROR_CODE) {
+    const followUp = classifyAcpxProviderQuotaFollowUp(latestRun, now);
+    // No parsed reset: do not schedule a wake at all. Callers must not fall
+    // through to a generic continuation wake.
+    if (!followUp.notBefore) return { kind: "acpx_provider_quota_hold" };
+    return {
+      kind: "provider_quota",
+      retryAt: followUp.notBefore.getTime() > now.getTime() ? followUp.notBefore : now,
+      parsedResetTime: true,
+    };
+  }
   if (latestRun.errorCode === "acpx_turn_failed") {
     // Every failed ACP turn carries this code, so only Claude's own statement in the
     // error or stop reason counts; transcript text elsewhere in the result
@@ -3908,6 +3928,9 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
           }
           result.skipped += 1;
           continue;
+        } else if (adapterFailureClassification.kind === "acpx_provider_quota_hold") {
+          result.skipped += 1;
+          continue;
         } else {
           const updated = await escalateStrandedAssignedIssue({
             issue,
@@ -4096,6 +4119,10 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
           } else {
             result.skipped += 1;
           }
+          continue;
+        }
+        if (participantAdapterFailureClassification?.kind === "acpx_provider_quota_hold") {
+          result.skipped += 1;
           continue;
         }
         if (participantAdapterFailureClassification?.kind === "configuration_incomplete") {

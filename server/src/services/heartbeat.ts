@@ -253,6 +253,10 @@ import {
   withRecoveryModelProfileHint,
 } from "./recovery/model-profile-hint.js";
 import { ACTIVE_RUN_OUTPUT_SUSPICION_THRESHOLD_MS as RECOVERY_ACTIVE_RUN_OUTPUT_SUSPICION_THRESHOLD_MS, recoveryService } from "./recovery/service.js";
+import {
+  ACPX_PROVIDER_QUOTA_ERROR_CODE,
+  acpxProviderQuotaHeartbeatRetryNotBefore,
+} from "./recovery/acpx-provider-quota.js";
 import { collectDispositionRepairSourceState } from "./recovery/disposition-repair.js";
 import {
   buildIssueReviewPathLostIdempotencyKey,
@@ -718,7 +722,17 @@ function readTransientRetryNotBeforeFromRun(run: Pick<typeof heartbeatRuns.$infe
 
 function readTransientRecoveryContractFromRun(
   run: Pick<typeof heartbeatRuns.$inferSelect, "errorCode" | "resultJson">,
+  now = new Date(),
 ) {
+  if (run.errorCode === ACPX_PROVIDER_QUOTA_ERROR_CODE) {
+    const retryNotBefore = acpxProviderQuotaHeartbeatRetryNotBefore(run, now);
+    // No parsed reset: do not retry. A parsed reset is the earliest due time.
+    if (!retryNotBefore) return null;
+    return {
+      errorFamily: "provider_quota" as const,
+      retryNotBefore,
+    };
+  }
   const errorFamily = readHeartbeatRunErrorFamily(run);
   return errorFamily === "transient_upstream" || errorFamily === "provider_quota"
     ? {
@@ -16860,6 +16874,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           keepIdleOnFailure:
             outcome === "failed" &&
             ((finalizedRun ? readHeartbeatRunErrorFamily(finalizedRun) === "provider_quota" : runErrorCode === "provider_quota") ||
+              (finalizedRun ? finalizedRun.errorCode === ACPX_PROVIDER_QUOTA_ERROR_CODE : runErrorCode === ACPX_PROVIDER_QUOTA_ERROR_CODE) ||
               runErrorCode === WORKSPACE_VALIDATION_FAILURE_CODE ||
               isWorkspaceSyncConflictFailure(adapterResult.errorMessage)),
           wasFirstHeartbeat: timerClaimWasFirstHeartbeat(run),

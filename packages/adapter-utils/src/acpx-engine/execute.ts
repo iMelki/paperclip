@@ -100,6 +100,11 @@ import {
   DEFAULT_ACP_ENGINE_TIMEOUT_SEC,
   DEFAULT_ACP_ENGINE_WARM_HANDLE_IDLE_MS,
 } from "./constants.js";
+import {
+  classifyAcpxProviderQuotaTurn,
+  classifyAcpxProviderQuotaTurnFromTexts,
+  type AcpxProviderQuotaTurnClassification,
+} from "./provider-quota.js";
 import type {
   AcpRunContext,
   AcquiredRunResources,
@@ -2832,6 +2837,19 @@ function describeErrorDiagnostics(err: unknown): {
   return { errorName, acpCode, causeMessage, retryable, stackPreview };
 }
 
+function acpxQuotaResultFields(quota: AcpxProviderQuotaTurnClassification | null) {
+  if (!quota) return {};
+  return {
+    quotaResetAt: quota.quotaResetAt,
+    retryNotBefore: quota.quotaResetAt,
+  };
+}
+
+function acpxQuotaResultJsonFields(quota: AcpxProviderQuotaTurnClassification | null) {
+  if (!quota) return {};
+  return { quotaResetAt: quota.quotaResetAt };
+}
+
 function classifyError(
   err: unknown,
   phase?: AcpxExecutionPhase,
@@ -2866,6 +2884,21 @@ function classifyError(
     return null;
   })();
   if (phaseCode) {
+    // ACP_TURN_FAILED and a turn-phase failure are generic unless the provider
+    // stated a session limit or usage limit. That case gets its own quota code.
+    if (phaseCode === "acpx_turn_failed") {
+      const quota = classifyAcpxProviderQuotaTurn(message);
+      if (quota) {
+        return {
+          errorCode: quota.errorCode,
+          errorMeta: {
+            category: "quota",
+            quotaResetAt: quota.quotaResetAt,
+            ...baseMeta,
+          },
+        };
+      }
+    }
     return {
       errorCode: phaseCode,
       errorMeta: { category: acpCode ? "protocol" : "runtime", ...baseMeta },
@@ -4223,6 +4256,9 @@ export function createAcpxEngineExecutor(deps: AcpxEngineExecutorOptions = {}) {
             ? channelLostMessage
             : (terminalSessionFailureMessage ?? resultErrorMessage(terminal));
         const terminalStopReason = terminal.status === "failed" ? terminal.error.message : terminal.stopReason;
+        const quotaFailure = terminal.status === "failed" && !timedOut && !channelLost
+          ? classifyAcpxProviderQuotaTurnFromTexts([errorMessage, terminalStopReason])
+          : null;
         await emitAcpxLog(ctx, {
           type: turnSucceeded ? "acpx.result" : "acpx.error",
           summary: channelLost ? "duplex_channel_lost" : terminal.status,
@@ -4239,12 +4275,13 @@ export function createAcpxEngineExecutor(deps: AcpxEngineExecutorOptions = {}) {
           timedOut,
           errorMessage,
           errorCode: terminal.status === "failed"
-            ? "acpx_turn_failed"
+            ? (quotaFailure?.errorCode ?? "acpx_turn_failed")
             : timedOut
               ? "acpx_timeout"
               : channelLost
                 ? DUPLEX_CHANNEL_LOST_ERROR_CODE
                 : null,
+          ...acpxQuotaResultFields(quotaFailure),
           sessionId: sessionHandle.backendSessionId ?? sessionHandle.runtimeSessionName,
           sessionParams: buildSessionParams({ prepared, handle: sessionHandle }),
           sessionDisplayId: sessionHandle.agentSessionId ?? sessionHandle.backendSessionId ?? sessionHandle.runtimeSessionName,
@@ -4266,6 +4303,7 @@ export function createAcpxEngineExecutor(deps: AcpxEngineExecutorOptions = {}) {
             ...(turnUsage.cumulativeCostUsd != null
               ? { cumulativeCostUsd: turnUsage.cumulativeCostUsd }
               : {}),
+            ...acpxQuotaResultJsonFields(quotaFailure),
           },
           summary: terminalSessionFailureMessage || buildAcpxRunSummary({
             outputSegments,
@@ -4367,18 +4405,27 @@ export function createAcpxEngineExecutor(deps: AcpxEngineExecutorOptions = {}) {
           emitted = null;
         }
         const message = emitted?.message ?? preEmitMessage;
+        const quotaFailure = timedOut
+          ? null
+          : classifyAcpxProviderQuotaTurnFromTexts([message, preEmitMessage]);
         capturedResult = {
           exitCode: 1,
           signal: timedOut ? "SIGTERM" : null,
           timedOut,
           errorMessage: message,
-          errorCode: timedOut ? "acpx_timeout" : (emitted?.classified.errorCode ?? null),
+          errorCode: timedOut
+            ? "acpx_timeout"
+            : (quotaFailure?.errorCode ?? emitted?.classified.errorCode ?? null),
+          ...acpxQuotaResultFields(quotaFailure),
           errorMeta: emitted?.classified.errorMeta,
           ...billingFields,
           ...referencedProjectStagingFailuresField,
           model: prepared.requestedModel || null,
           clearSession: clearSession || timedOut,
-          resultJson: { phase },
+          resultJson: {
+            phase,
+            ...acpxQuotaResultJsonFields(quotaFailure),
+          },
           summary: message,
         };
         // Return a typed failed completion so the coordinator settles for a cause
