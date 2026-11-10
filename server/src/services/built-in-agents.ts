@@ -708,6 +708,42 @@ function hasCompleteAdapterConfig(adapterType: string, adapterConfig: unknown) {
   return nonEmptyString(adapterConfig.model);
 }
 
+function asAdapterConfig(value: unknown): Record<string, unknown> {
+  return isPlainRecord(value) ? value : {};
+}
+
+// Persisted shape shared by ensure and bundled skill-sync. String keys when no
+// entry is version-pinned; `{ key, versionId }` objects otherwise. Extra keys
+// on the existing object are kept. A missing or non-object value stays absent.
+function canonicalPaperclipSkillSync(config: Record<string, unknown>): Record<string, unknown> | undefined {
+  if (!Object.prototype.hasOwnProperty.call(config, "paperclipSkillSync")) return undefined;
+  const raw = config.paperclipSkillSync;
+  if (!isPlainRecord(raw)) return undefined;
+  const preference = readPaperclipSkillSyncPreference(config);
+  const written = writePaperclipSkillSyncPreference(
+    { paperclipSkillSync: raw },
+    preference.desiredSkillEntries,
+  );
+  return isPlainRecord(written.paperclipSkillSync) ? written.paperclipSkillSync : undefined;
+}
+
+function withCanonicalSkillSync(config: Record<string, unknown>): Record<string, unknown> {
+  if (!Object.prototype.hasOwnProperty.call(config, "paperclipSkillSync")) return config;
+  const canonical = canonicalPaperclipSkillSync(config);
+  if (!canonical) {
+    const next = { ...config };
+    delete next.paperclipSkillSync;
+    return next;
+  }
+  if (stableJson(config.paperclipSkillSync) === stableJson(canonical)) return config;
+  return { ...config, paperclipSkillSync: canonical };
+}
+
+function adapterConfigsEffectivelyEqual(left: unknown, right: unknown): boolean {
+  return stableJson(withCanonicalSkillSync(asAdapterConfig(left)))
+    === stableJson(withCanonicalSkillSync(asAdapterConfig(right)));
+}
+
 export function deriveBuiltInAgentStatus(agent: Pick<Agent, "adapterType" | "adapterConfig" | "status" | "pausedAt"> | null): BuiltInAgentStatus {
   if (!agent) return "not_provisioned";
   if (agent.status === "pending_approval") return "pending_approval";
@@ -1060,12 +1096,18 @@ export function builtInAgentService(db: Db) {
   }
 
   async function syncBundledSkillToAgent(agent: Agent, skill: CompanySkill) {
-    const desired = readPaperclipSkillSyncPreference(agent.adapterConfig as Record<string, unknown>).desiredSkillEntries;
+    const currentConfig = asAdapterConfig(agent.adapterConfig);
+    const desired = readPaperclipSkillSyncPreference(currentConfig).desiredSkillEntries;
     const nextDesired = [
       ...desired.filter((entry) => entry.key !== skill.key),
       { key: skill.key, versionId: skill.currentVersionId ?? null },
     ];
-    const adapterConfig = writePaperclipSkillSyncPreference(agent.adapterConfig as Record<string, unknown>, nextDesired);
+    const adapterConfig = withCanonicalSkillSync(
+      writePaperclipSkillSyncPreference(currentConfig, nextDesired),
+    );
+    // Same effective skill set (including string keys vs `{ key, versionId: null }`,
+    // and object key order) must not write a row or a config revision.
+    if (adapterConfigsEffectivelyEqual(currentConfig, adapterConfig)) return agent;
     const updated = await agentSvc.update(agent.id, { adapterConfig }, {
       allowBuiltInAgentMetadata: true,
       recordRevision: { source: "built-in-bundle:skill-sync" },
@@ -1625,8 +1667,21 @@ export function builtInAgentService(db: Db) {
       ) {
         const adapterType = resolvedInput.adapterType ?? existing.adapterType;
         assertAdapterAllowed(definition, adapterType);
-        patch.adapterType = adapterType;
-        patch.adapterConfig = resolvedInput.adapterConfig ?? existing.adapterConfig;
+        const existingConfig = asAdapterConfig(existing.adapterConfig);
+        const incomingConfig = resolvedInput.adapterConfig === undefined
+          ? existingConfig
+          : asAdapterConfig(resolvedInput.adapterConfig);
+        // Shallow-merge onto the current adapter config. Omitted keys stay,
+        // including `paperclipSkillSync`, so ensure does not clear the value
+        // that bundled skill-sync restores.
+        // When `incomingConfig.env` is set, that assignment replaces the whole
+        // env map. Do not deep-merge env keys. PATCH `adapterConfig.env` has
+        // the same full-replacement behavior; leave that route alone.
+        const nextConfig = withCanonicalSkillSync({ ...existingConfig, ...incomingConfig });
+        if (adapterType !== existing.adapterType) patch.adapterType = adapterType;
+        if (!adapterConfigsEffectivelyEqual(existingConfig, nextConfig)) {
+          patch.adapterConfig = nextConfig;
+        }
       }
       if (!existingPendingApproval && resolvedInput.budgetMonthlyCents !== undefined) {
         patch.budgetMonthlyCents = resolvedInput.budgetMonthlyCents;

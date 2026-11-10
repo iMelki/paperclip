@@ -1635,4 +1635,75 @@ describeEmbeddedPostgres("built-in agents", () => {
     const [resetRoutine] = await db.select().from(routines).where(eq(routines.companyId, companyId));
     expect(resetRoutine?.title).toBe("Review recent agent trajectories for coaching proposals");
   });
+
+  it("stops ensure and bundled skill-sync from rewriting paperclipSkillSync", async () => {
+    const companyId = await seedCompany({ requireApproval: false });
+    await agentService(db).create(companyId, {
+      name: "CEO",
+      role: "ceo",
+      status: "idle",
+      adapterType: "codex_local",
+      adapterConfig: { model: "gpt-5.4", apiKey: "do-not-copy" },
+      runtimeConfig: {},
+      permissions: {},
+    });
+    const builtIns = builtInAgentService(db);
+
+    async function revisionSources(agentId: string) {
+      const rows = await db
+        .select({
+          source: agentConfigRevisions.source,
+          changedKeys: agentConfigRevisions.changedKeys,
+        })
+        .from(agentConfigRevisions)
+        .where(eq(agentConfigRevisions.agentId, agentId));
+      return rows.map((row) => `${row.source}:${JSON.stringify(row.changedKeys)}`);
+    }
+
+    const converged = await builtIns.ensure(companyId, "reflection-coach");
+    const agentId = converged.agentId!;
+    expect(converged.agent?.adapterConfig).not.toMatchObject({ apiKey: "do-not-copy" });
+    const bundledSkill = readPaperclipSkillSyncPreference(
+      converged.agent!.adapterConfig as Record<string, unknown>,
+    ).desiredSkills.find((key) => key.includes("reflection-coach"));
+    expect(bundledSkill).toBeTruthy();
+
+    const afterConvergence = (await revisionSources(agentId)).length;
+
+    // Object entries with a null version and reversed key order are the same
+    // effective value as the canonical string list. Repeating ensure (which
+    // runs bundled skill-sync) must not record another revision.
+    const current = await agentService(db).getById(agentId);
+    const currentConfig = { ...(current!.adapterConfig as Record<string, unknown>) };
+    const desiredKeys = readPaperclipSkillSyncPreference(currentConfig).desiredSkills;
+    currentConfig.paperclipSkillSync = {
+      desiredSkills: [...desiredKeys].reverse().map((key) => ({ versionId: null, key })),
+    };
+    await db.update(agents).set({ adapterConfig: currentConfig }).where(eq(agents.id, agentId));
+
+    for (let cycle = 0; cycle < 5; cycle += 1) {
+      await builtIns.ensure(companyId, "reflection-coach");
+    }
+    const afterRepeats = await revisionSources(agentId);
+    expect(afterRepeats.length, afterRepeats.join("\n")).toBe(afterConvergence);
+
+    const beforeChange = afterRepeats.length;
+    const cleared = await agentService(db).getById(agentId);
+    const clearedConfig = { ...(cleared!.adapterConfig as Record<string, unknown>) };
+    clearedConfig.paperclipSkillSync = { desiredSkills: [] };
+    await db.update(agents).set({ adapterConfig: clearedConfig }).where(eq(agents.id, agentId));
+
+    await builtIns.ensure(companyId, "reflection-coach");
+    const afterChange = await revisionSources(agentId);
+    expect(afterChange.length, afterChange.join("\n")).toBe(beforeChange + 1);
+    expect(afterChange.at(-1)).toContain("built-in-bundle:skill-sync");
+
+    const restored = await agentService(db).getById(agentId);
+    expect(readPaperclipSkillSyncPreference(restored!.adapterConfig as Record<string, unknown>).desiredSkills)
+      .toContain(bundledSkill);
+
+    await builtIns.ensure(companyId, "reflection-coach");
+    const afterFollowUp = await revisionSources(agentId);
+    expect(afterFollowUp.length, afterFollowUp.join("\n")).toBe(beforeChange + 1);
+  });
 });
