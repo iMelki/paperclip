@@ -2603,6 +2603,7 @@ export function createTestHarness(options: TestHarnessOptions): TestHarness {
       const handler = jobs.get(jobKey);
       if (!handler) throw new Error(`No job handler registered for '${jobKey}'`);
       await handler({
+        ...(partial.companyId === undefined ? {} : { companyId: partial.companyId }),
         jobKey,
         runId: partial.runId ?? randomUUID(),
         trigger: partial.trigger ?? "manual",

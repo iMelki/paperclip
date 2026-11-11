@@ -1,6 +1,6 @@
 import express from "express";
 import request from "supertest";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 const issueId = "11111111-1111-4111-8111-111111111111";
 const closedWorkspaceId = "33333333-3333-4333-8333-333333333333";
@@ -193,6 +193,16 @@ function makeClosedWorkspace() {
 }
 
 describe.sequential("closed isolated workspace issue routes", () => {
+  // The issue route graph is large. Its first import transforms every module and
+  // can take longer than a test's budget on a loaded runner. A test that times
+  // out keeps its request running, and that request then calls the shared mocks
+  // during the next test. Import the graph once here, with its own budget, so
+  // each test only re-evaluates already transformed modules.
+  beforeAll(async () => {
+    registerServiceMocks();
+    await Promise.all([import("../routes/issues.js"), import("../middleware/index.js")]);
+  }, 180_000);
+
   beforeEach(() => {
     vi.resetModules();
     vi.doUnmock("@paperclipai/shared/telemetry");

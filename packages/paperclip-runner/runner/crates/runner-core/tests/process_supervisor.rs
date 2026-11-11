@@ -9,7 +9,16 @@ use paperclip_runner_core::local_runner::HarnessCommand;
 use paperclip_runner_core::process_supervisor::SupervisedProcess;
 use serde_json::{json, Value};
 
-fn process_exists(pid: u64) -> bool {
+// A killed grandchild may remain as a zombie until its parent or an external
+// subreaper waits for it. Test that it cannot execute, independently of that
+// owner's reaping schedule; live workers must still fail the cleanup checks.
+fn process_is_running(pid: u64) -> bool {
+    #[cfg(target_os = "linux")]
+    if let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+        if linux_process_is_zombie(&stat) {
+            return false;
+        }
+    }
     Command::new("kill")
         .args(["-0", &pid.to_string()])
         .stdout(Stdio::null())
@@ -73,8 +82,8 @@ fn spawn_linger_process() -> (SupervisedProcess, u32, u64) {
         }
     }
     let worker_pid = worker_pid.expect("linger script should report its worker pid");
-    assert!(process_exists(u64::from(harness_pid)));
-    assert!(process_exists(worker_pid));
+    assert!(process_is_running(u64::from(harness_pid)));
+    assert!(process_is_running(worker_pid));
     (process, harness_pid, worker_pid)
 }
 
@@ -86,8 +95,8 @@ fn forced_process_group_cleanup_stops_harness_and_worker() {
         .terminate_group()
         .expect("process group cleanup should finish");
     std::thread::sleep(Duration::from_millis(20));
-    assert!(!process_exists(u64::from(harness_pid)));
-    assert!(!process_exists(worker_pid));
+    assert!(!process_is_running(u64::from(harness_pid)));
+    assert!(!process_is_running(worker_pid));
 }
 
 #[test]
@@ -106,8 +115,8 @@ fn natural_harness_exit_also_cleans_up_workers() {
         .expect("harness should exit after interruption");
 
     std::thread::sleep(Duration::from_millis(20));
-    assert!(!process_exists(u64::from(harness_pid)));
-    assert!(!process_exists(worker_pid));
+    assert!(!process_is_running(u64::from(harness_pid)));
+    assert!(!process_is_running(worker_pid));
 }
 
 #[test]
@@ -173,4 +182,24 @@ fn oversized_harness_stdout_frame_is_rejected() {
     process
         .terminate_group()
         .expect("oversized-frame harness should be cleaned up");
+}
+
+#[cfg(target_os = "linux")]
+fn linux_process_is_zombie(stat: &str) -> bool {
+    stat.rsplit_once(") ")
+        .is_some_and(|(_, fields)| fields.split_ascii_whitespace().next() == Some("Z"))
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn linux_state_detection_does_not_mistake_live_or_malformed_processes_for_zombies() {
+    assert!(linux_process_is_zombie("42 (worker) Z 1 42 42 0"));
+    for state in ["S", "R", "D", "T", "t", "I", "X", "?"] {
+        assert!(!linux_process_is_zombie(&format!(
+            "42 (worker) {state} 1 42 42 0"
+        )));
+    }
+    assert!(!linux_process_is_zombie("42 (worker ) Z name) S 1 42 42 0"));
+    assert!(!linux_process_is_zombie("malformed Z"));
+    assert!(!linux_process_is_zombie("42 (worker) "));
 }

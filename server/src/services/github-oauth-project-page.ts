@@ -20,6 +20,85 @@ export function githubProjectAuthorizationDigest(connection: {
     credentialRevision: credential });
 }
 
+/**
+ * Connection facts that GitHub OAuth rewrites on every token refresh (the access token lasts 8 hours). They carry no
+ * consent: who is connected, with which scopes, to which app and server are other fields and stay in the digest.
+ * Every other field is kept, so an unknown new field fails closed (consent is revoked) rather than open.
+ */
+const ROTATING_CONNECTION_PATHS: readonly (readonly string[])[] = [
+  ["oauth", "expiresAt"], ["oauth", "refreshedAt"],
+  ["providerMetadata", "oauth", "expiresAt"], ["providerMetadata", "githubOAuth", "verifiedAt"],
+];
+
+/** Scope lists carry the same consent in any order or separator ("a b", "a,b", ["b","a"]). */
+const SCOPE_PATHS: readonly (readonly string[])[] = [["oauth", "scope"], ["oauth", "scopes"], ["providerMetadata", "oauth", "scope"]];
+function normalizeScopeValue(value: unknown): unknown {
+  if (typeof value === "string") return value.split(/[\s,]+/).filter(Boolean).sort().join(" ");
+  if (Array.isArray(value) && value.every(item => typeof item === "string")) return [...new Set(value as string[])].sort();
+  return value;
+}
+
+/** Object key order carries no consent either: hash every object with its keys sorted. */
+function canonicalJson(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonicalJson);
+  if (value && typeof value === "object") {
+    return Object.fromEntries(Object.entries(value as Record<string, unknown>).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)
+      .map(([key, item]) => [key, canonicalJson(item)]));
+  }
+  return value;
+}
+
+function withoutRotatingPaths(value: unknown): unknown {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+  const copy = structuredClone(value) as Record<string, unknown>;
+  for (const path of SCOPE_PATHS) {
+    let node: unknown = copy;
+    for (const key of path.slice(0, -1)) node = node && typeof node === "object" ? (node as Record<string, unknown>)[key] : undefined;
+    const last = path[path.length - 1];
+    if (node && typeof node === "object" && last in (node as Record<string, unknown>)) {
+      (node as Record<string, unknown>)[last] = normalizeScopeValue((node as Record<string, unknown>)[last]);
+    }
+  }
+  for (const path of ROTATING_CONNECTION_PATHS) {
+    let node: unknown = copy;
+    for (const key of path.slice(0, -1)) node = node && typeof node === "object" ? (node as Record<string, unknown>)[key] : undefined;
+    if (node && typeof node === "object") delete (node as Record<string, unknown>)[path[path.length - 1]];
+  }
+  return canonicalJson(copy);
+}
+
+function withoutSecretIds(refs: unknown): unknown {
+  if (!Array.isArray(refs)) return refs;
+  // A refresh that returns no new refresh token rewrites the refs in another order, so the order carries no consent.
+  return refs.map(ref => {
+    if (!ref || typeof ref !== "object") return ref;
+    const { secretId: _secretId, ...stable } = ref as Record<string, unknown>;
+    return stable;
+  }).sort((left, right) => JSON.stringify(left) < JSON.stringify(right) ? -1 : JSON.stringify(left) > JSON.stringify(right) ? 1 : 0);
+}
+
+/**
+ * Standing consent for a scheduled board import. It must survive the routine token rotation that GitHub OAuth does
+ * every 8 hours, or the grant stops working at the first rotation after it is granted (the live grant did, 2026-10-27).
+ * It excludes row freshness, the token expiry/refresh/verify times and the id and version of the current token secret.
+ * It keeps the connection, application, transport, status, ownership, client, scopes, URLs and the bound account.
+ * Provider reads still re-verify the bound account id and login, and the token secret must be active, on every read.
+ */
+export function githubProjectConsentDigest(
+  connection: Parameters<typeof githubProjectAuthorizationDigest>[0],
+  credential: Parameters<typeof githubProjectAuthorizationDigest>[1],
+) {
+  // Validate the real credential revision shape, then hash a fixed sentinel instead of its rotating value.
+  githubProjectAuthorizationDigest(connection, credential);
+  return boardImportDigest({ kind: "github-project-standing-consent-v2",
+    authorization: githubProjectAuthorizationDigest({ ...connection,
+      updatedAt: new Date(0), updatedAtExact: "1970-01-01T00:00:00.000000Z",
+      config: withoutRotatingPaths(connection.config), transportConfig: withoutRotatingPaths(connection.transportConfig),
+      credentialSecretRefs: withoutSecretIds(connection.credentialSecretRefs),
+      credentialRefs: withoutSecretIds(connection.credentialRefs),
+    }, { secretId: "00000000-0000-0000-0000-000000000000", latestVersion: 1 }) });
+}
+
 const owner = z.string().regex(/^[a-z\d](?:[a-z\d-]{0,37}[a-z\d])?$/i);
 const pageSchema = z.object({
   ownerType: z.enum(["user", "organization"]), owner,

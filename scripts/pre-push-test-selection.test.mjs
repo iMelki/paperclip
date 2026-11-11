@@ -396,3 +396,42 @@ test("does not treat generated declarations or docs as test-bearing production",
   assert.equal(isTestBearingProductionFile("doc/DEVELOPING.md"), false);
   assert.equal(isTestBearingProductionFile("scripts/check-no-git-push.mjs"), true);
 });
+
+// These declarations are integration boundaries; missing or untracked contracts
+// must remain a failure rather than falling back to an arbitrary whole project.
+test("board integration declarations select their concrete contract suites and reject a missing contract", () => {
+  withFixture(({ repoRoot, trackedFiles, write }) => {
+    const source = "server/src/services/plugin-job-batch.ts";
+    const pure = "server/src/__tests__/plugin-company-job-batch.test.ts";
+    const lifecycle = "server/src/__tests__/plugin-job-scheduler-company-scope.test.ts";
+    write(source, "export const dispatch = true;\n");
+    write(pure, "export {};\n");
+    write(lifecycle, "export {};\n");
+    write("server/src/__tests__/unrelated.test.ts", "export {};\n");
+    const selected = selectPrePushTests({ repoRoot, trackedFiles, changedFiles: [source] });
+    assert.deepEqual(selected.vitestFiles, [pure, lifecycle].sort());
+    assert.deepEqual(selected.selectionErrors, []);
+    trackedFiles.delete(lifecycle);
+    const untracked = selectPrePushTests({ repoRoot, trackedFiles, changedFiles: [source] });
+    assert.match(untracked.selectionErrors.join("\n"), /selected test is not tracked/);
+    rmSync(path.join(repoRoot, lifecycle));
+    const missing = selectPrePushTests({ repoRoot, trackedFiles, changedFiles: [source] });
+    assert.match(missing.selectionErrors.join("\n"), /declared deterministic test is not a regular file/);
+  });
+});
+
+test("new named coordinator and existing-reference tests are selected without a coverage waiver", () => {
+  withFixture(({ repoRoot, trackedFiles, write }) => {
+    const sources = ["server/src/services/plugin-job-coordinator.ts", "server/src/services/github-project-existing-reference-contract.ts"];
+    const tests = ["server/src/__tests__/plugin-job-coordinator.test.ts", "server/src/__tests__/github-project-existing-reference-contract.test.ts"];
+    sources.forEach((source) => write(source, "export {};\n"));
+    tests.forEach((suite) => write(suite, "export {};\n"));
+    const selected = selectPrePushTests({ repoRoot, trackedFiles, changedFiles: sources });
+    assert.deepEqual(selected.vitestFiles, tests.sort());
+    assert.deepEqual(selected.selectionErrors, []);
+    write("server/src/services/future-unmapped-feature.ts", "export const future = true;\n");
+    const unknown = selectPrePushTests({ repoRoot, trackedFiles, changedFiles: ["server/src/services/future-unmapped-feature.ts"] });
+    assert.match(unknown.selectionErrors.join("\n"), /lacks a deterministic sibling or declared test/);
+    assert.deepEqual(unknown.hostedCiFiles, []);
+  });
+});

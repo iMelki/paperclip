@@ -78,6 +78,12 @@ resolve_release_remote() {
 }
 
 fetch_release_remote() {
+  if [ "${2:-false}" = true ]; then
+    # Candidate payload previews must not prune or update local Git refs.
+    # Use the existing local tag inventory and fresh npm version reads below.
+    git -C "$REPO_ROOT" ls-remote --exit-code "$1" HEAD >/dev/null
+    return
+  fi
   git -C "$REPO_ROOT" fetch "$1" --prune --tags
 }
 
@@ -497,6 +503,18 @@ require_on_master_branch() {
   if [ "$current_branch" != "master" ]; then
     release_fail "this release step must run from branch master, but current branch is ${current_branch:-<detached>}."
   fi
+}
+
+require_canary_source_branch() {
+  local candidate_preview="${1:-false}"
+  local dry_run="${2:-false}"
+
+  if [ "$candidate_preview" = true ]; then
+    [ "$dry_run" = true ] || release_fail "candidate preview never authorizes publishing; --dry-run is required."
+    return 0
+  fi
+
+  require_on_master_branch
 }
 
 # Promotion channels only republish commits that already shipped on the
