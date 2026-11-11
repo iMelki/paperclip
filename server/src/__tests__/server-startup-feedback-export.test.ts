@@ -801,7 +801,7 @@ describe("startServer feedback export wiring", () => {
     const held = new Promise<{ expired: number }>((resolve) => {
       releaseHeld = () => resolve({ expired: 0 });
     });
-    const heldSweep = vi.fn(() => held);
+    const heldSweep = vi.fn().mockResolvedValueOnce({ expired: 0 }).mockImplementation(() => held);
     vi.mocked(decisionService).mockReturnValueOnce({ sweepExpired: heldSweep } as unknown as ReturnType<typeof decisionService>);
     let tick: (() => void) | undefined;
     let stop: (() => void) | undefined;
@@ -840,7 +840,7 @@ describe("startServer feedback export wiring", () => {
       expect(tick).toBeTypeOf("function");
       expect(stop).toBeTypeOf("function");
       tick!();
-      await vi.waitFor(() => expect(heldSweep).toHaveBeenCalledOnce());
+      await vi.waitFor(() => expect(heldSweep).toHaveBeenCalledTimes(2));
       expect(routineServiceMock.tickScheduledTriggers).toHaveBeenCalledTimes(routineBefore);
       shutdownRequested = true;
       stop!(); // Only this startServer's captured callback; never emit a real signal.
