@@ -64,7 +64,7 @@ Core fields:
 - warmHandleIdleMs (number, optional): warm ACP process idle timeout when engine="acp"; defaults to 0
 
 Operational fields:
-- timeoutSec (number, optional): run timeout in seconds
+- timeoutSec (number, optional): run timeout in seconds. Default 14400. Missing, 0, and negative values use that default.
 - graceSec (number, optional): SIGTERM grace period in seconds
 
 Notes:

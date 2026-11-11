@@ -2,7 +2,12 @@ export const DEFAULT_ACP_ENGINE_AGENT = "claude";
 export const DEFAULT_ACP_ENGINE_MODE = "persistent";
 export const DEFAULT_ACP_ENGINE_PERMISSION_MODE = "approve-all";
 export const DEFAULT_ACP_ENGINE_NON_INTERACTIVE_PERMISSIONS = "deny";
-export const DEFAULT_ACP_ENGINE_TIMEOUT_SEC = 0;
+/**
+ * Default ACP wall-clock timeout. Missing, 0, and negative timeoutSec values
+ * resolve to this through resolveAdapterExecutionTargetTimeout. It matches
+ * ADAPTER_DEFAULT_TIMEOUT_SEC.acpx.
+ */
+export const DEFAULT_ACP_ENGINE_TIMEOUT_SEC = 14_400;
 export const DEFAULT_ACP_ENGINE_WARM_HANDLE_IDLE_MS = 0;
 
 export const ACPX_ADAPTER_AGENT_IDS = {

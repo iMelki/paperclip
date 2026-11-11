@@ -22,7 +22,7 @@ The `codex_local` adapter runs OpenAI's Codex CLI locally. It supports session p
 | `model` | string | No | Model to use |
 | `promptTemplate` | string | No | Prompt used for all runs |
 | `env` | object | No | Environment variables (supports secret refs) |
-| `timeoutSec` | number | No | Process timeout (0 = no timeout) |
+| `timeoutSec` | number | No | Process timeout in seconds. Default 14400. Missing, 0, and negative values use that default. |
 | `graceSec` | number | No | Grace period before force-kill |
 | `fastMode` | boolean | No | Enables Codex Fast mode for supported or explicitly configured models; burns credits faster |
 | `sandboxMode` | string | No | Structured Codex sandbox mode: `read-only`, `workspace-write` (new-agent default), or `danger-full-access` |

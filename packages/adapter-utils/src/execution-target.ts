@@ -3,6 +3,10 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { randomBytes, randomUUID } from "node:crypto";
+import {
+  DEFAULT_ADAPTER_TIMEOUT_SEC,
+  resolveAdapterTimeoutSec,
+} from "./adapter-timeout.js";
 import type { SshRemoteExecutionSpec } from "./ssh.js";
 import {
   prepareCommandManagedRuntime,
@@ -527,52 +531,62 @@ export function describeAdapterExecutionTarget(
 
 export type AdapterExecutionTargetTimeoutSource =
   | "configured"
-  | "sandbox_default"
-  | "unlimited";
+  | "env"
+  | "adapter_default"
+  | "sandbox_default";
 
 export interface AdapterExecutionTargetTimeoutResolution {
-  /** Resolved wall-clock timeout in seconds; 0 means no adapter timeout. */
+  /** Resolved wall-clock timeout in seconds. Always greater than 0. */
   timeoutSec: number;
   /** Which knob produced the resolved value, for logs and error messages. */
   source: AdapterExecutionTargetTimeoutSource;
 }
 
+export interface ResolveAdapterExecutionTargetTimeoutOptions {
+  /** Per-adapter default used when timeoutSec is missing, 0, or negative. */
+  adapterDefaultSec?: number;
+  /** Env to read PAPERCLIP_ADAPTER_TIMEOUT_SEC from. Defaults to process.env. */
+  env?: NodeJS.ProcessEnv | Record<string, string | undefined>;
+}
+
 export function resolveAdapterExecutionTargetTimeout(
   target: AdapterExecutionTarget | null | undefined,
-  configuredTimeoutSec: number | null | undefined,
+  configuredTimeoutSec: unknown,
+  options?: ResolveAdapterExecutionTargetTimeoutOptions,
 ): AdapterExecutionTargetTimeoutResolution {
-  if (typeof configuredTimeoutSec === "number" && Number.isFinite(configuredTimeoutSec)) {
-    // Preserve fractional (sub-second) configured values instead of flooring:
-    // adapters historically honored e.g. timeoutSec=0.5, and flooring would
-    // silently turn it into "no timeout".
-    if (configuredTimeoutSec > 0) {
-      return { timeoutSec: configuredTimeoutSec, source: "configured" };
-    }
-    // A negative timeoutSec is the explicit "no adapter wall-clock timeout"
-    // opt-out, honored even on sandbox targets. Zero cannot carry that
-    // meaning: the adapter config UI persists the schema default of 0 for
-    // untouched fields, so timeoutSec=0 in stored config does not signal
-    // operator intent and falls through to target defaults below.
-    if (configuredTimeoutSec < 0) {
-      return { timeoutSec: 0, source: "configured" };
-    }
+  const sandboxTarget = target?.kind === "remote" && target.transport === "sandbox";
+  // Sandbox runs still fall back to the 4h backstop when the caller does not
+  // pass its own adapter default. Callers that pass one use that default on
+  // every target, including sandbox.
+  const fallbackDefaultSec = sandboxTarget && options?.adapterDefaultSec == null
+    ? DEFAULT_REMOTE_SANDBOX_ADAPTER_TIMEOUT_SEC
+    : (options?.adapterDefaultSec ?? DEFAULT_ADAPTER_TIMEOUT_SEC);
+  const resolved = resolveAdapterTimeoutSec({
+    configured: configuredTimeoutSec,
+    adapterDefaultSec: fallbackDefaultSec,
+    env: options?.env,
+  });
+  if (resolved.source === "configured") {
+    return { timeoutSec: resolved.timeoutSec, source: "configured" };
   }
-  // Local and SSH adapters preserve the historical "0 means no adapter
-  // timeout" behavior. Sandbox-backed runs execute through provider RPCs
-  // that usually apply their own shorter command defaults, so request an
-  // explicit longer timeout for full adapter runs when the adapter leaves
-  // timeoutSec unset.
-  if (target?.kind === "remote" && target.transport === "sandbox") {
-    return { timeoutSec: DEFAULT_REMOTE_SANDBOX_ADAPTER_TIMEOUT_SEC, source: "sandbox_default" };
+  if (resolved.source === "env") {
+    return { timeoutSec: resolved.timeoutSec, source: "env" };
   }
-  return { timeoutSec: 0, source: "unlimited" };
+  if (
+    sandboxTarget &&
+    resolved.timeoutSec === DEFAULT_REMOTE_SANDBOX_ADAPTER_TIMEOUT_SEC
+  ) {
+    return { timeoutSec: resolved.timeoutSec, source: "sandbox_default" };
+  }
+  return { timeoutSec: resolved.timeoutSec, source: "adapter_default" };
 }
 
 export function resolveAdapterExecutionTargetTimeoutSec(
   target: AdapterExecutionTarget | null | undefined,
-  configuredTimeoutSec: number | null | undefined,
+  configuredTimeoutSec: unknown,
+  options?: ResolveAdapterExecutionTargetTimeoutOptions,
 ): number {
-  return resolveAdapterExecutionTargetTimeout(target, configuredTimeoutSec).timeoutSec;
+  return resolveAdapterExecutionTargetTimeout(target, configuredTimeoutSec, options).timeoutSec;
 }
 
 function describeAdapterExecutionTimeoutSource(
@@ -581,10 +595,12 @@ function describeAdapterExecutionTimeoutSource(
   switch (source) {
     case "configured":
       return "configured via adapterConfig.timeoutSec";
+    case "env":
+      return "configured via PAPERCLIP_ADAPTER_TIMEOUT_SEC";
+    case "adapter_default":
+      return "adapter default";
     case "sandbox_default":
       return "sandbox default";
-    case "unlimited":
-      return "no adapter wall-clock timeout";
   }
 }
 
@@ -610,16 +626,10 @@ export function formatAdapterExecutionTimeoutErrorMessage(
 export function formatAdapterExecutionTimeoutStartLogLine(
   resolution: AdapterExecutionTargetTimeoutResolution,
 ): string {
-  if (resolution.timeoutSec <= 0) {
-    if (resolution.source === "configured") {
-      return (
-        "Adapter execution timeout: none " +
-        "(explicitly disabled via adapterConfig.timeoutSec; set it to a positive value to add one)."
-      );
-    }
+  if (!(resolution.timeoutSec > 0)) {
     return (
-      "Adapter execution timeout: none " +
-      "(no adapter wall-clock timeout for this target; set adapterConfig.timeoutSec to add one)."
+      `Adapter execution timeout: invalid non-positive timeoutSec=${resolution.timeoutSec}. ` +
+      "A positive timeout is required."
     );
   }
   return (

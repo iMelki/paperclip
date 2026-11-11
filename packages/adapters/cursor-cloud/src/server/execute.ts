@@ -11,6 +11,11 @@ import {
 } from "@cursor/sdk";
 import type { AdapterExecutionContext, AdapterExecutionResult, AdapterInvocationMeta } from "@paperclipai/adapter-utils";
 import {
+  ADAPTER_DEFAULT_TIMEOUT_SEC,
+  MAX_ADAPTER_TIMEOUT_MS,
+  resolveAdapterTimeoutSec,
+} from "@paperclipai/adapter-utils/adapter-timeout";
+import {
   DEFAULT_PAPERCLIP_AGENT_PROMPT_TEMPLATE,
   asBoolean,
   asString,
@@ -27,6 +32,8 @@ import {
 type CursorCloudSession = {
   cursorAgentId: string;
   latestRunId?: string;
+  /** A run that already hit the wall-clock deadline. Never used for reattach. */
+  timedOutRunId?: string;
   runtime: "cloud";
   envType?: "cloud" | "pool" | "machine";
   envName?: string;
@@ -94,6 +101,137 @@ function toSummary(result: RunResult): string | null {
   const direct = trimNullable(result.result);
   if (direct) return firstNonEmptyLine(direct);
   return null;
+}
+
+// Compatibility contract for the exactly pinned @cursor/sdk 1.2.0 CloudRun.
+// Agent.getRun returns an unowned handle: SDKAgent disposal cannot close its
+// stream. These two concrete methods are not part of the public Run interface.
+// In 1.2.0 abortClientStream synchronously aborts the local stream controller;
+// disposeClientStream aborts again and waits at most 2s for its producer. Neither
+// method requests remote cancellation. Check both before starting any stream or
+// wait; iterator.return() alone would only close the public message consumer.
+type OwnedAttachedCursorRun = Run & {
+  abortClientStream: () => void;
+  disposeClientStream: () => Promise<void>;
+};
+
+const ATTACHED_STREAM_DISPOSE_TIMEOUT_MS = 2_500;
+const ATTACHED_STREAM_CLEANUP_UNAVAILABLE =
+  "Cursor cloud reattach requires the pinned SDK 1.2.0 local stream cleanup contract.";
+
+class CursorStreamCleanupUnavailableError extends Error {
+  constructor() {
+    super(ATTACHED_STREAM_CLEANUP_UNAVAILABLE);
+    this.name = "CursorStreamCleanupUnavailableError";
+  }
+}
+
+function ownAttachedCursorRun(run: Run): OwnedAttachedCursorRun {
+  const candidate = run as Run & Partial<OwnedAttachedCursorRun>;
+  if (typeof candidate.abortClientStream !== "function"
+    || typeof candidate.disposeClientStream !== "function") {
+    throw new CursorStreamCleanupUnavailableError();
+  }
+  return candidate as OwnedAttachedCursorRun;
+}
+
+async function disposeAttachedCursorRun(run: OwnedAttachedCursorRun): Promise<void> {
+  // Abort locally before awaiting anything, including a possibly hung remote
+  // cancel. Always try dispose as well if an unexpected synchronous abort fails.
+  try {
+    run.abortClientStream();
+  } catch {
+    // The exact SDK implementation does not throw; dispose is a second attempt.
+  }
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const disposed = Promise.resolve().then(() => run.disposeClientStream()).catch(() => undefined);
+  try {
+    await Promise.race([
+      disposed,
+      new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, ATTACHED_STREAM_DISPOSE_TIMEOUT_MS);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+async function waitForCursorRun(
+  run: Run,
+  timeoutSec: number,
+): Promise<{ timedOut: true } | { timedOut: false; result: RunResult }> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<{ timedOut: true }>((resolve) => {
+    timer = setTimeout(() => resolve({ timedOut: true }), timeoutSec * 1000);
+  });
+  const waited = run.wait().then(
+    (result) => ({ timedOut: false as const, result }),
+    (error: unknown) => Promise.reject(error),
+  );
+  void waited.catch(() => undefined);
+  try {
+    const outcome = await Promise.race([waited, timeout]);
+    if (outcome.timedOut) {
+      const cancel = (run as Run & { cancel?: () => Promise<unknown> | unknown }).cancel;
+      if (typeof cancel === "function") {
+        // Do not await cancel. A hung SDK cancel must not keep the heartbeat alive
+        // after the wall-clock deadline has already fired.
+        void Promise.resolve()
+          .then(() => cancel.call(run))
+          .catch(() => undefined);
+      }
+      return { timedOut: true };
+    }
+    return outcome;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+function cursorCloudTimeoutResult(input: {
+  timeoutSec: number;
+  session: CursorCloudSession | null;
+  run: Run | null;
+  envType: CursorCloudSession["envType"];
+  envName: string | null;
+  repos: CursorCloudSession["repos"];
+}): AdapterExecutionResult {
+  const { timeoutSec, session, run, envType, envName, repos } = input;
+  const timedOutRunId = run?.id ?? session?.timedOutRunId ?? session?.latestRunId;
+  // Keep the agent and environment so the next heartbeat can resume, but do
+  // not store latestRunId. getAttachedRun would otherwise wait on this run
+  // again when cancel hangs or loses the dispose race.
+  const nextSession: CursorCloudSession | null = (run || session)
+    ? {
+        cursorAgentId: run?.agentId ?? session!.cursorAgentId,
+        runtime: "cloud",
+        envType: envType ?? session?.envType ?? "cloud",
+        ...(envName ? { envName } : session?.envName ? { envName: session.envName } : {}),
+        repos: repos.length > 0 ? repos : session?.repos ?? [],
+        ...(timedOutRunId ? { timedOutRunId } : {}),
+      }
+    : null;
+  return {
+    exitCode: 1,
+    signal: null,
+    timedOut: true,
+    errorCode: "cursor_cloud_timeout",
+    errorMessage: `Cursor cloud run timed out after ${timeoutSec}s.`,
+    sessionId: nextSession?.cursorAgentId ?? null,
+    sessionDisplayId: nextSession?.cursorAgentId ?? null,
+    sessionParams: nextSession,
+    provider: "cursor",
+    biller: "cursor",
+    billingType: "api",
+    costUsd: null,
+    clearSession: false,
+    resultJson: {
+      status: "timeout",
+      ...(run ? { cursorRunId: run.id, cursorAgentId: run.agentId } : {}),
+      timeoutSec,
+    },
+  };
 }
 
 function formatRunError(err: unknown): string {
@@ -227,7 +365,13 @@ function readSession(params: Record<string, unknown> | null): CursorCloudSession
     trimNullable(record.agentId) ??
     trimNullable(record.sessionId);
   if (!cursorAgentId) return null;
-  const latestRunId = trimNullable(record.latestRunId) ?? trimNullable(record.runId) ?? undefined;
+  const timedOutRunId = trimNullable(record.timedOutRunId) ?? undefined;
+  const storedLatestRunId = trimNullable(record.latestRunId) ?? trimNullable(record.runId) ?? undefined;
+  // A timed-out run must not be waited on again. Drop it even if an older
+  // result stored the same id as latestRunId.
+  const latestRunId = storedLatestRunId && storedLatestRunId !== timedOutRunId
+    ? storedLatestRunId
+    : undefined;
   const envType = trimNullable(record.envType);
   const envName = trimNullable(record.envName);
   const reposValue = Array.isArray(record.repos) ? record.repos : [];
@@ -243,6 +387,7 @@ function readSession(params: Record<string, unknown> | null): CursorCloudSession
   return {
     cursorAgentId,
     ...(latestRunId ? { latestRunId } : {}),
+    ...(timedOutRunId ? { timedOutRunId } : {}),
     runtime: "cloud",
     ...(envType ? { envType: normalizeEnvType(envType) } : {}),
     ...(envName ? { envName } : {}),
@@ -317,6 +462,32 @@ async function streamRun(run: Run, onLog: AdapterExecutionContext["onLog"]) {
   }
 }
 
+/**
+ * Waits for the event stream to finish after the run result arrived, but only
+ * until the same wall-clock deadline (at least a short grace period, never longer than the timeout itself). A stream
+ * that never closes must not keep the heartbeat alive once the run is done.
+ * Returns false when the stream was still open at the deadline.
+ */
+const STREAM_DRAIN_GRACE_MS = 5_000;
+
+async function drainStreamWithinDeadline(
+  streamPromise: Promise<void>,
+  startedAtMs: number,
+  timeoutSec: number,
+): Promise<boolean> {
+  const timeoutMs = timeoutSec * 1000;
+  const remainingMs = Math.max(Math.min(STREAM_DRAIN_GRACE_MS, timeoutMs), timeoutMs - (Date.now() - startedAtMs));
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const expired = new Promise<false>((resolve) => {
+    timer = setTimeout(() => resolve(false), Math.min(remainingMs, MAX_ADAPTER_TIMEOUT_MS));
+  });
+  try {
+    return await Promise.race([streamPromise.then(() => true as const), expired]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 async function getAttachedRun(input: {
   apiKey: string;
   session: CursorCloudSession | null;
@@ -324,6 +495,7 @@ async function getAttachedRun(input: {
   const latestRunId = input.session?.latestRunId;
   const cursorAgentId = input.session?.cursorAgentId;
   if (!latestRunId || !cursorAgentId) return null;
+  if (input.session?.timedOutRunId === latestRunId) return null;
   try {
     const run = await Agent.getRun(latestRunId, {
       runtime: "cloud",
@@ -381,6 +553,10 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   const autoCreatePR = asBoolean(config.autoCreatePR, false);
   const skipReviewerRequest = asBoolean(config.skipReviewerRequest, false);
   const model = toModelSelection(asString(config.model, ""));
+  const timeoutSec = resolveAdapterTimeoutSec({
+    configured: config.timeoutSec,
+    adapterDefaultSec: ADAPTER_DEFAULT_TIMEOUT_SEC.cursor_cloud,
+  }).timeoutSec;
   const repos = [{
     url: repoUrl,
     ...(repoStartingRef ? { startingRef: repoStartingRef } : {}),
@@ -477,6 +653,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   }
 
   let sdkAgent: SDKAgent | null = null;
+  let attachedRunOwner: OwnedAttachedCursorRun | null = null;
   let run: Run | null = null;
   let streamError: string | null = null;
   try {
@@ -485,6 +662,8 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       : null;
 
     if (attachedRun) {
+      // Register ownership before streamRun or wait can start a local producer.
+      attachedRunOwner = ownAttachedCursorRun(attachedRun);
       await emitStatus(onLog, "running", `Reattached to existing Cursor run ${attachedRun.id}.`);
       await onLog("stdout", eventLine({
         type: "cursor_cloud.init",
@@ -496,8 +675,27 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       const priorStreamPromise = streamRun(attachedRun, onLog).catch((err) => {
         streamError = formatRunError(err);
       });
-      if (attachedRun.supports("wait")) await attachedRun.wait();
-      await priorStreamPromise;
+      const priorStartedAt = Date.now();
+      if (attachedRun.supports("wait")) {
+        const waited = await waitForCursorRun(attachedRun, timeoutSec);
+        if (waited.timedOut) {
+          await onLog("stderr", `[cursor-cloud] timed out after ${timeoutSec}s while waiting for ${attachedRun.id}\n`);
+          void priorStreamPromise;
+          return cursorCloudTimeoutResult({
+            timeoutSec,
+            session,
+            run: attachedRun,
+            envType,
+            envName,
+            repos,
+          });
+        }
+      }
+      if (!(await drainStreamWithinDeadline(priorStreamPromise, priorStartedAt, timeoutSec))) {
+        await onLog("stderr", `[cursor-cloud] event stream for ${attachedRun.id} was still open at the deadline; continuing.\n`);
+      }
+      await disposeAttachedCursorRun(attachedRunOwner);
+      attachedRunOwner = null;
       streamError = null;
       await emitStatus(
         onLog,
@@ -524,17 +722,36 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     const streamPromise = streamRun(run, onLog).catch((err) => {
       streamError = formatRunError(err);
     });
-    const result = run.supports("wait")
-      ? await run.wait()
+    const startedAt = Date.now();
+    const waited = run.supports("wait")
+      ? await waitForCursorRun(run, timeoutSec)
       : {
-          id: run.id,
-          status: run.status === "running" ? "error" : run.status,
-          result: run.result,
-          model: run.model,
-          durationMs: run.durationMs,
-          git: run.git,
+          timedOut: false as const,
+          result: {
+            id: run.id,
+            status: run.status === "running" ? "error" : run.status,
+            result: run.result,
+            model: run.model,
+            durationMs: run.durationMs,
+            git: run.git,
+          },
         };
-    await streamPromise;
+    if (waited.timedOut) {
+      await onLog("stderr", `[cursor-cloud] timed out after ${timeoutSec}s while waiting for ${run.id}\n`);
+      void streamPromise;
+      return cursorCloudTimeoutResult({
+        timeoutSec,
+        session,
+        run,
+        envType,
+        envName,
+        repos,
+      });
+    }
+    const result = waited.result;
+    if (!(await drainStreamWithinDeadline(streamPromise, startedAt, timeoutSec))) {
+      await onLog("stderr", `[cursor-cloud] event stream for ${run.id} was still open at the deadline; using the run result.\n`);
+    }
 
     const modelId = result.model?.id ?? model?.id ?? null;
     await onLog("stdout", eventLine({
@@ -598,6 +815,9 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       signal: null,
       timedOut: false,
       errorMessage: reason,
+      ...(err instanceof CursorStreamCleanupUnavailableError
+        ? { errorCode: "cursor_cloud_stream_cleanup_unavailable" }
+        : {}),
       sessionId: session?.cursorAgentId ?? null,
       sessionDisplayId: session?.cursorAgentId ?? null,
       sessionParams: session,
@@ -614,6 +834,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       },
     };
   } finally {
+    if (attachedRunOwner) await disposeAttachedCursorRun(attachedRunOwner);
     if (sdkAgent) {
       try {
         await sdkAgent[Symbol.asyncDispose]();
