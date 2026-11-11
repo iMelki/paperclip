@@ -1884,7 +1884,7 @@ describeEmbeddedPostgres("built-in agents", () => {
       adapterType: "codex_local",
       adapterConfig: { model: "gpt-5.4", command: "old-command", apiKey: "synthetic-old-key", env: { OPENAI_API_KEY: "synthetic-old-env-key" }, paperclipSkillSync: { desiredSkills: ["company/kept-skill"] } },
     });
-    expect(first.agent?.adapterConfig).toMatchObject({ command: "old-command", apiKey: "synthetic-old-key", env: { OPENAI_API_KEY: "synthetic-old-env-key" } });
+    expect(first.agent?.adapterConfig).toMatchObject({ command: "old-command", apiKey: "synthetic-old-key", env: { OPENAI_API_KEY: { type: "plain", value: "synthetic-old-env-key" } } });
     const replaced = await builtIns.ensure(companyId, "briefs", {
       adapterType: "codex_local", adapterConfig: { model: "gpt-5.4" },
     });
