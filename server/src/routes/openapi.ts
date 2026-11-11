@@ -6151,6 +6151,65 @@ registry.registerPath({
   },
 });
 
+const githubBoardScheduleGrantParams = z.object({
+  pluginId: z.string().uuid(),
+  companyId: z.string().uuid(),
+  projectId: z.string().uuid(),
+});
+
+registry.registerPath({
+  method: "get",
+  path: "/api/plugins/{pluginId}/companies/{companyId}/projects/{projectId}/github-board/schedule-grant",
+  tags: ["plugins"],
+  summary: "Read a native GitHub board schedule grant",
+  request: { params: githubBoardScheduleGrantParams },
+  responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden, 404: r.notFound, 422: r.unprocessable },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/api/plugins/{pluginId}/companies/{companyId}/projects/{projectId}/github-board/schedule-grant",
+  tags: ["plugins"],
+  summary: "Create or replace a native GitHub board schedule grant",
+  request: {
+    params: githubBoardScheduleGrantParams,
+    body: jsonBody(z.object({
+      expectedRevision: z.number().int().nonnegative(),
+      jobId: z.string().uuid(),
+      enabled: z.boolean().optional(),
+      maxItems: z.number().int().min(1).max(20),
+      expiresAt: z.string().datetime(),
+    })),
+  },
+  responses: {
+    201: r.ok(),
+    401: r.unauthorized,
+    403: r.forbidden,
+    404: r.notFound,
+    409: r.conflict,
+    422: r.unprocessable,
+  },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/api/plugins/{pluginId}/companies/{companyId}/projects/{projectId}/github-board/schedule-grant/revoke",
+  tags: ["plugins"],
+  summary: "Revoke a native GitHub board schedule grant",
+  request: {
+    params: githubBoardScheduleGrantParams,
+    body: jsonBody(z.object({ expectedRevision: z.number().int().nonnegative() })),
+  },
+  responses: {
+    200: r.ok(),
+    401: r.unauthorized,
+    403: r.forbidden,
+    404: r.notFound,
+    409: r.conflict,
+    422: r.unprocessable,
+  },
+});
+
 registry.registerPath({
   method: "get",
   path: "/api/plugins/{pluginId}/dashboard",

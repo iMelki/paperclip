@@ -1,8 +1,10 @@
 import { isDeepStrictEqual } from "node:util";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
+import type { ScheduledBoardAccess, ScheduledGitHubPageInput } from "./github-project-scheduled-contract.js";
 import { readFileSync } from "node:fs";
 import { exactTimestampRevision } from "./exact-timestamp-revision.js";
 import { exactConnectionUpdatedAtPredicate, toolConnectionSnapshotColumns } from "./tool-connection-snapshot.js";
+import { lockToolConnectionMutation } from "./tool-connection-mutation-lock.js";
 import { and, asc, desc, eq, gte, inArray, isNull, lt, max, ne, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
@@ -136,12 +138,16 @@ import { isNativeGitHubOAuthConnection, githubOAuthToolDescriptors, getGitHubOAu
   verifyGitHubOAuthAccount, verifyGitHubOAuthAuthorization,
   executeGitHubOAuthTool as dispatchGitHubOAuthTool } from "./github-oauth-transport.js";
 import { readGitHubOAuthProjectPage, validateGitHubProjectPageInput, githubProjectAuthorizationDigest,
+  githubProjectConsentDigest, parseGitHubProjectBoardUrl,
   type GitHubProjectPageInput } from "./github-oauth-project-page.js";
 
 type ActorInfo = {
   actorType?: "agent" | "user" | "system" | "plugin";
   actorId?: string | null;
   sessionId?: string | null;
+};
+type GitHubCredentialRevision = {
+  current: typeof toolConnections.$inferSelect; secretId: string; latestVersion: number;
 };
 
 const ACTIVE_BROKER_RUN_STATUSES = new Set(["running"]);
@@ -4263,8 +4269,18 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
       privateRepoAccess: githubStoredPrivateRepoAccessOptIn(connection.config) };
   }
 
-  async function verifiedGitHubCredential(connection: typeof toolConnections.$inferSelect, actor?: ActorInfo) {
-    await maybeRefreshOAuthCredentials(connection, actor);
+  async function verifiedGitHubCredential(
+    connection: typeof toolConnections.$inferSelect, actor?: ActorInfo, allowRefresh = true,
+    beforeProvider?: (revision: GitHubCredentialRevision) => Promise<void>,
+  ) {
+    if (allowRefresh) await maybeRefreshOAuthCredentials(connection, actor);
+    else {
+      const expiry = oauthConfig(connection).expiresAt;
+      if (expiry !== undefined && expiry !== null &&
+        (typeof expiry !== "string" || !Number.isFinite(Date.parse(expiry)) || Date.parse(expiry) <= Date.now() + 60_000)) {
+        throw conflict("Scheduled GitHub authorization needs operator renewal; no unattended refresh is allowed");
+      }
+    }
     const current = await getConnectionRow(connection.id, connection.companyId);
     if (!isNativeGitHubOAuthConnection(current)) throw forbidden("GitHub connector configuration changed");
     const facts = asRecord(asRecord(current.config.providerMetadata).githubOAuth);
@@ -4282,6 +4298,7 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
       consumerType: "tool_connection", consumerId: current.id, configPath: "oauth.access_token",
       actorType: actor?.actorType ?? "system", actorId: actor?.actorId ?? null,
     });
+    await beforeProvider?.({ current, secretId: ref.secretId, latestVersion: secret.latestVersion });
     const headers = { Authorization: `Bearer ${value}` };
     const verified = await verifyGitHubOAuthAccount({ headers, scope: oauthConfig(current).scope,
       ...gitHubGrantExpectation(current) }, fetchRemoteHttpUrl);
@@ -4304,6 +4321,10 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
     verified: Awaited<ReturnType<typeof verifiedGitHubCredential>>, actor: ActorInfo,
   ) {
     await assertGitHubExecutionActor(verified.current.companyId, actor);
+    await assertGitHubBoardReadRevision(verified);
+  }
+
+  async function assertGitHubBoardReadRevision(verified: GitHubCredentialRevision) {
     await assertGitHubBoardReadApplication(verified.current);
     const [fresh] = await db.select({ id: toolConnections.id }).from(toolConnections).where(and(
       eq(toolConnections.id, verified.current.id), eq(toolConnections.companyId, verified.current.companyId),
@@ -4342,6 +4363,56 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
     return { page: result.data, account: { accountId: verified.facts.accountId, login: verified.facts.login },
       authorizationDigest: githubProjectAuthorizationDigest(verified.current,
         { secretId: verified.secretId, latestVersion: verified.latestVersion }) };
+  }
+
+  /** Native host only: authority comes from an in-process issuer, never worker JSON or a user API key. */
+  async function readVerifiedGitHubProjectPageScheduled(input: ScheduledGitHubPageInput, access: ScheduledBoardAccess) {
+    const page = validateGitHubProjectPageInput(input.page);
+    const validate = async () => db.transaction(async tx => {
+      const executor = tx as unknown as Db;
+      await executor.execute(sql`set local statement_timeout = '10000ms'`);
+      await executor.execute(sql`set local lock_timeout = '5000ms'`);
+      const verified = await access.validate(executor, input.authority, input.target, "read-page");
+      const board = parseGitHubProjectBoardUrl(verified.binding.boardUrl);
+      if (input.companyId !== input.target.companyId || verified.binding.companyId !== input.companyId
+        || verified.binding.connectionId !== input.connectionId || verified.binding.accountId !== input.expectedAccountId
+        || verified.binding.login !== input.expectedLogin || verified.authorizationDigest !== input.authorizationDigest
+        || page.ownerType !== board.ownerType || page.owner !== board.owner || page.number !== board.number) {
+        throw forbidden("Scheduled provider input differs from issued native binding");
+      }
+      return verified;
+    });
+    const native = await validate();
+    const connection = await getConnectionRow(input.connectionId, input.companyId);
+    if (!isNativeGitHubOAuthConnection(connection) || !connection.enabled || connection.status !== "active") {
+      throw forbidden("Selected native GitHub OAuth connection is not active");
+    }
+    await assertGitHubBoardReadApplication(connection);
+    // Secret resolution updates lastResolvedAt. No outer metadata SHARE transaction spans this call or HTTP.
+    const credential = await verifiedGitHubCredential(connection,
+      { actorType: "system", actorId: native.actorId }, false, async revision => {
+        const digest = githubProjectConsentDigest(revision.current,
+          { secretId: revision.secretId, latestVersion: revision.latestVersion });
+        if (digest !== input.authorizationDigest) throw conflict("Scheduled credential changed before provider access");
+        await validate();
+        await assertGitHubBoardReadRevision(revision);
+        access.inspect(input.authority, input.target);
+      });
+    const authorizationDigest = githubProjectConsentDigest(credential.current,
+      { secretId: credential.secretId, latestVersion: credential.latestVersion });
+    if (credential.facts.accountId !== input.expectedAccountId
+      || credential.facts.login.toLowerCase() !== input.expectedLogin.toLowerCase()
+      || authorizationDigest !== input.authorizationDigest) {
+      throw conflict("Scheduled GitHub credential differs from the delegated revision");
+    }
+    await validate();
+    await assertGitHubBoardReadRevision(credential);
+    access.inspect(input.authority, input.target);
+    const result = await readGitHubOAuthProjectPage(page, credential.headers, fetchRemoteHttpUrl);
+    await assertGitHubBoardReadRevision(credential);
+    await validate();
+    return { page: result.data,
+      account: { accountId: credential.facts.accountId, login: credential.facts.login }, authorizationDigest };
   }
 
   async function assertGitHubExecutionActor(companyId: string, actor?: ActorInfo) {
@@ -5868,6 +5939,12 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
           metadata: { source: "app_gallery_finish" },
         }));
     const transactionResult = await db.transaction(async (tx) => {
+      const lockedConnection = await lockToolConnectionMutation(tx as unknown as Db,
+        { connectionId: connection.id, companyId, applicationId: connection.applicationId });
+      if (lockedConnection.status === "archived"
+        || exactTimestampRevision(lockedConnection) !== exactTimestampRevision(connection)) {
+        throw conflict("App connection changed before its reviewed configuration could be finished");
+      }
       const [existingProfile] = await tx
         .select()
         .from(toolProfiles)
@@ -5998,12 +6075,14 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
       const [updatedConnection] = await tx
         .update(toolConnections)
         .set({ status: "active", enabled: true, updatedAt: new Date() })
-        .where(eq(toolConnections.id, connection.id))
+        .where(and(eq(toolConnections.id, connection.id), eq(toolConnections.companyId, companyId),
+          eq(toolConnections.applicationId, connection.applicationId)))
         .returning();
+      if (!updatedConnection) throw conflict("App connection scope changed before finish");
       await tx
         .update(toolApplications)
         .set({ status: "active", updatedAt: new Date() })
-        .where(eq(toolApplications.id, connection.applicationId));
+        .where(and(eq(toolApplications.id, connection.applicationId), eq(toolApplications.companyId, companyId)));
 
       return { profileId, profileBindings, policies, updatedConnection };
     });
@@ -6737,6 +6816,7 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
     connectGalleryApp,
     executeGitHubOAuthTool,
     readVerifiedGitHubProjectPage,
+    readVerifiedGitHubProjectPageScheduled,
 
     finishGalleryAppConnection,
 
@@ -7409,10 +7489,12 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
 
     archiveConnection: async (connectionId: string): Promise<ToolConnection> => {
       const row = await db.transaction(async (tx) => {
+        const lockedConnection = await lockToolConnectionMutation(tx as unknown as Db, { connectionId });
         const [updatedConnection] = await tx
           .update(toolConnections)
           .set({ status: "archived", enabled: false, updatedAt: new Date() })
-          .where(eq(toolConnections.id, connectionId))
+          .where(and(eq(toolConnections.id, connectionId), eq(toolConnections.companyId, lockedConnection.companyId),
+            eq(toolConnections.applicationId, lockedConnection.applicationId)))
           .returning();
         if (!updatedConnection) throw notFound("Tool connection not found");
 
@@ -7422,6 +7504,7 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
           .where(
             and(
               eq(toolConnections.applicationId, updatedConnection.applicationId),
+              eq(toolConnections.companyId, updatedConnection.companyId),
               ne(toolConnections.status, "archived"),
             ),
           )
@@ -7432,7 +7515,8 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
           await tx
             .update(toolApplications)
             .set({ status: "archived", archivedAt: now, updatedAt: now })
-            .where(eq(toolApplications.id, updatedConnection.applicationId));
+            .where(and(eq(toolApplications.id, updatedConnection.applicationId),
+              eq(toolApplications.companyId, updatedConnection.companyId)));
         }
 
         return updatedConnection;
