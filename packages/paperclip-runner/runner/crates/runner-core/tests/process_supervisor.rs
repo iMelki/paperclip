@@ -195,7 +195,9 @@ fn linux_process_is_zombie(stat: &str) -> bool {
 fn linux_state_detection_does_not_mistake_live_or_malformed_processes_for_zombies() {
     assert!(linux_process_is_zombie("42 (worker) Z 1 42 42 0"));
     for state in ["S", "R", "D", "T", "t", "I", "X", "?"] {
-        assert!(!linux_process_is_zombie(&format!("42 (worker) {state} 1 42 42 0")));
+        assert!(!linux_process_is_zombie(&format!(
+            "42 (worker) {state} 1 42 42 0"
+        )));
     }
     assert!(!linux_process_is_zombie("42 (worker ) Z name) S 1 42 42 0"));
     assert!(!linux_process_is_zombie("malformed Z"));
