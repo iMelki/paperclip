@@ -12,6 +12,7 @@ dry_run=false
 skip_verify=false
 print_version_only=false
 from_candidate=false
+candidate_preview=false
 notes_file_override=
 tag_name=""
 
@@ -20,7 +21,7 @@ cleanup_on_exit=false
 usage() {
   cat <<'EOF'
 Usage:
-  ./scripts/release.sh <canary|nightly|beta|stable> [--date YYYY-MM-DD] [--dry-run] [--skip-verify] [--print-version] [--notes-file PATH]
+  ./scripts/release.sh <canary|nightly|beta|stable> [--date YYYY-MM-DD] [--dry-run] [--skip-verify] [--print-version] [--notes-file PATH] [--candidate-preview]
 
 Examples:
   ./scripts/release.sh canary
@@ -53,6 +54,9 @@ Notes:
     or be supplied explicitly with --notes-file (stable only). The override
     exists so promotions can read notes maintained on master instead of
     requiring them inside the promoted source commit's tree.
+  - --candidate-preview is canary --dry-run only. It permits a prevalidated
+    existing branch or detached checkout for local payload validation; actual
+    canary publishing still requires master. Clean-tree and all other guards remain.
   - The script rewrites versions temporarily and restores the working tree on
     exit. Tags always point at the original source commit, not a generated
     release commit.
@@ -118,6 +122,7 @@ while [ $# -gt 0 ]; do
     --skip-verify) skip_verify=true ;;
     --print-version) print_version_only=true ;;
     --from-candidate) from_candidate=true ;;
+    --candidate-preview) candidate_preview=true ;;
     --notes-file)
       shift
       [ $# -gt 0 ] || release_fail "--notes-file requires a path."
@@ -141,6 +146,10 @@ done
 
 if [ "$from_candidate" = true ] && [ "$channel" != "beta" ]; then
   release_fail "--from-candidate only applies to the beta channel."
+fi
+
+if [ "$candidate_preview" = true ] && { [ "$channel" != "canary" ] || [ "$dry_run" != true ]; }; then
+  release_fail "--candidate-preview requires canary --dry-run and never authorizes publishing."
 fi
 
 if [ -n "$notes_file_override" ] && [ "$channel" != "stable" ]; then
@@ -177,7 +186,7 @@ TARGET_PUBLISH_VERSION="$TARGET_STABLE_VERSION"
 DIST_TAG="latest"
 
 if [ "$channel" = "canary" ]; then
-  require_on_master_branch
+  require_canary_source_branch "$candidate_preview" "$dry_run"
   TARGET_PUBLISH_VERSION="$(next_prerelease_version canary "$TARGET_STABLE_VERSION" "${PUBLIC_PACKAGE_NAMES[@]}")"
   DIST_TAG="canary"
   tag_name="$(prerelease_tag_name canary "$TARGET_PUBLISH_VERSION")"

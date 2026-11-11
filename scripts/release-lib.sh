@@ -499,6 +499,18 @@ require_on_master_branch() {
   fi
 }
 
+require_canary_source_branch() {
+  local candidate_preview="${1:-false}"
+  local dry_run="${2:-false}"
+
+  if [ "$candidate_preview" = true ]; then
+    [ "$dry_run" = true ] || release_fail "candidate preview never authorizes publishing; --dry-run is required."
+    return 0
+  fi
+
+  require_on_master_branch
+}
+
 # Promotion channels only republish commits that already shipped on the
 # previous lane, so the source commit must carry that lane's release tag.
 require_channel_tag_at_head() {
