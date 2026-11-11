@@ -103,6 +103,60 @@ function toSummary(result: RunResult): string | null {
   return null;
 }
 
+// Compatibility contract for the exactly pinned @cursor/sdk 1.2.0 CloudRun.
+// Agent.getRun returns an unowned handle: SDKAgent disposal cannot close its
+// stream. These two concrete methods are not part of the public Run interface.
+// In 1.2.0 abortClientStream synchronously aborts the local stream controller;
+// disposeClientStream aborts again and waits at most 2s for its producer. Neither
+// method requests remote cancellation. Check both before starting any stream or
+// wait; iterator.return() alone would only close the public message consumer.
+type OwnedAttachedCursorRun = Run & {
+  abortClientStream: () => void;
+  disposeClientStream: () => Promise<void>;
+};
+
+const ATTACHED_STREAM_DISPOSE_TIMEOUT_MS = 2_500;
+const ATTACHED_STREAM_CLEANUP_UNAVAILABLE =
+  "Cursor cloud reattach requires the pinned SDK 1.2.0 local stream cleanup contract.";
+
+class CursorStreamCleanupUnavailableError extends Error {
+  constructor() {
+    super(ATTACHED_STREAM_CLEANUP_UNAVAILABLE);
+    this.name = "CursorStreamCleanupUnavailableError";
+  }
+}
+
+function ownAttachedCursorRun(run: Run): OwnedAttachedCursorRun {
+  const candidate = run as Run & Partial<OwnedAttachedCursorRun>;
+  if (typeof candidate.abortClientStream !== "function"
+    || typeof candidate.disposeClientStream !== "function") {
+    throw new CursorStreamCleanupUnavailableError();
+  }
+  return candidate as OwnedAttachedCursorRun;
+}
+
+async function disposeAttachedCursorRun(run: OwnedAttachedCursorRun): Promise<void> {
+  // Abort locally before awaiting anything, including a possibly hung remote
+  // cancel. Always try dispose as well if an unexpected synchronous abort fails.
+  try {
+    run.abortClientStream();
+  } catch {
+    // The exact SDK implementation does not throw; dispose is a second attempt.
+  }
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const disposed = Promise.resolve().then(() => run.disposeClientStream()).catch(() => undefined);
+  try {
+    await Promise.race([
+      disposed,
+      new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, ATTACHED_STREAM_DISPOSE_TIMEOUT_MS);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 async function waitForCursorRun(
   run: Run,
   timeoutSec: number,
@@ -599,6 +653,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   }
 
   let sdkAgent: SDKAgent | null = null;
+  let attachedRunOwner: OwnedAttachedCursorRun | null = null;
   let run: Run | null = null;
   let streamError: string | null = null;
   try {
@@ -607,6 +662,8 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       : null;
 
     if (attachedRun) {
+      // Register ownership before streamRun or wait can start a local producer.
+      attachedRunOwner = ownAttachedCursorRun(attachedRun);
       await emitStatus(onLog, "running", `Reattached to existing Cursor run ${attachedRun.id}.`);
       await onLog("stdout", eventLine({
         type: "cursor_cloud.init",
@@ -637,6 +694,8 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       if (!(await drainStreamWithinDeadline(priorStreamPromise, priorStartedAt, timeoutSec))) {
         await onLog("stderr", `[cursor-cloud] event stream for ${attachedRun.id} was still open at the deadline; continuing.\n`);
       }
+      await disposeAttachedCursorRun(attachedRunOwner);
+      attachedRunOwner = null;
       streamError = null;
       await emitStatus(
         onLog,
@@ -756,6 +815,9 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       signal: null,
       timedOut: false,
       errorMessage: reason,
+      ...(err instanceof CursorStreamCleanupUnavailableError
+        ? { errorCode: "cursor_cloud_stream_cleanup_unavailable" }
+        : {}),
       sessionId: session?.cursorAgentId ?? null,
       sessionDisplayId: session?.cursorAgentId ?? null,
       sessionParams: session,
@@ -772,6 +834,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       },
     };
   } finally {
+    if (attachedRunOwner) await disposeAttachedCursorRun(attachedRunOwner);
     if (sdkAgent) {
       try {
         await sdkAgent[Symbol.asyncDispose]();

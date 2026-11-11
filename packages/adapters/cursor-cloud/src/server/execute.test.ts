@@ -52,6 +52,8 @@ function createMockRun(options: MockRunOptions = {}) {
     model: waitResult.model ?? null,
     durationMs: waitResult.durationMs ?? null,
     git: waitResult.git ?? null,
+    abortClientStream: vi.fn(() => {}),
+    disposeClientStream: vi.fn(async (): Promise<void> => {}),
     supports(capability: string) {
       return capability === "stream" || capability === "wait";
     },
@@ -133,6 +135,51 @@ function createContext(
     logs,
     meta,
   };
+}
+
+function createReattachedContext() {
+  return createContext({
+    runtime: {
+      sessionId: "agent-attached",
+      sessionDisplayId: "agent-attached",
+      taskKey: null,
+      sessionParams: {
+        cursorAgentId: "agent-attached",
+        latestRunId: "run-attached",
+        runtime: "cloud",
+        envType: "cloud",
+        repos: [{ url: "https://github.com/paperclipai/paperclip.git", startingRef: "main" }],
+      },
+    },
+  });
+}
+
+function createHangingAttachedRun() {
+  const controller = new AbortController();
+  let active = false;
+  const stopped = new Promise<void>((resolve) => {
+    controller.signal.addEventListener("abort", () => resolve(), { once: true });
+  });
+  const abortClientStream = vi.fn(() => controller.abort());
+  const run = {
+    ...createMockRun({ id: "run-attached", agentId: "agent-attached", status: "running" }),
+    stream: vi.fn(async function* () {
+      active = true;
+      try {
+        await stopped;
+      } finally {
+        active = false;
+      }
+    }),
+    wait: vi.fn(() => new Promise<never>(() => {})),
+    cancel: vi.fn(() => new Promise<void>(() => {})),
+    abortClientStream,
+    disposeClientStream: vi.fn(async (): Promise<void> => {
+      abortClientStream();
+      await stopped;
+    }),
+  };
+  return { run, controller, isActive: () => active };
 }
 
 describe("cursor_cloud execute", () => {
@@ -529,4 +576,97 @@ describe("cursor_cloud execute", () => {
       else process.env.PAPERCLIP_ADAPTER_TIMEOUT_SEC = previous;
     }
   });
+
+  it("aborts a reattached local stream even when remote cancel never settles", async () => {
+    const attached = createHangingAttachedRun();
+    getRunMock.mockResolvedValue(attached.run);
+    const ctx = createReattachedContext();
+    ctx.config.timeoutSec = 0.05;
+
+    try {
+      const result = await execute(ctx);
+      expect(result.timedOut).toBe(true);
+      expect(attached.run.stream).toHaveBeenCalledTimes(1);
+      expect(attached.run.wait).toHaveBeenCalledTimes(1);
+      expect(attached.run.cancel).toHaveBeenCalledTimes(1);
+      expect(attached.run.abortClientStream).toHaveBeenCalled();
+      expect(attached.run.disposeClientStream).toHaveBeenCalledTimes(1);
+      expect(attached.controller.signal.aborted).toBe(true);
+      expect(attached.isActive()).toBe(false);
+      expect(result.sessionParams).toMatchObject({
+        cursorAgentId: "agent-attached",
+        timedOutRunId: "run-attached",
+      });
+      expect(result.sessionParams).not.toHaveProperty("latestRunId");
+      expect(createMock).not.toHaveBeenCalled();
+      expect(resumeMock).not.toHaveBeenCalled();
+    } finally {
+      // The old implementation must fail the custody assertions, then this
+      // fixture cleanup releases its mock producer without any external work.
+      attached.controller.abort();
+    }
+  });
+
+  it.each(["abortClientStream", "disposeClientStream"] as const)(
+    "refuses reattach before starting work when %s is missing",
+    async (missingMethod) => {
+      const attached = createHangingAttachedRun();
+      const unsupported = { ...attached.run, [missingMethod]: undefined };
+      getRunMock.mockResolvedValue(unsupported);
+      const ctx = createReattachedContext();
+      ctx.config.timeoutSec = 0.05;
+
+      try {
+        const result = await execute(ctx);
+
+        expect(result).toMatchObject({
+          exitCode: 1,
+          timedOut: false,
+          errorCode: "cursor_cloud_stream_cleanup_unavailable",
+          errorMessage: "Cursor cloud reattach requires the pinned SDK 1.2.0 local stream cleanup contract.",
+        });
+        expect(result.sessionParams).toMatchObject({
+          cursorAgentId: "agent-attached",
+          latestRunId: "run-attached",
+        });
+        expect(attached.run.stream).not.toHaveBeenCalled();
+        expect(attached.run.wait).not.toHaveBeenCalled();
+        expect(attached.run.cancel).not.toHaveBeenCalled();
+        expect(attached.run.abortClientStream).not.toHaveBeenCalled();
+        expect(attached.run.disposeClientStream).not.toHaveBeenCalled();
+        expect(createMock).not.toHaveBeenCalled();
+        expect(resumeMock).not.toHaveBeenCalled();
+      } finally {
+        attached.controller.abort();
+      }
+    },
+  );
+
+  it("bounds local reattached disposal after synchronously aborting the producer", async () => {
+    vi.useFakeTimers();
+    const attached = createHangingAttachedRun();
+    attached.run.disposeClientStream.mockImplementation(() => new Promise<void>(() => {}));
+    getRunMock.mockResolvedValue(attached.run);
+    const ctx = createReattachedContext();
+    ctx.config.timeoutSec = 0.05;
+    const startedAt = Date.now();
+
+    try {
+      const execution = execute(ctx);
+      await vi.waitFor(() => expect(attached.run.wait).toHaveBeenCalledTimes(1));
+      await vi.advanceTimersByTimeAsync(2_550);
+      const result = await execution;
+      expect(result.timedOut).toBe(true);
+      expect(attached.run.disposeClientStream).toHaveBeenCalledTimes(1);
+      expect(attached.controller.signal.aborted).toBe(true);
+      expect(attached.isActive()).toBe(false);
+      expect(Date.now() - startedAt).toBeLessThanOrEqual(2_650);
+      expect(createMock).not.toHaveBeenCalled();
+      expect(resumeMock).not.toHaveBeenCalled();
+    } finally {
+      attached.controller.abort();
+      vi.useRealTimers();
+    }
+  });
+
 });
