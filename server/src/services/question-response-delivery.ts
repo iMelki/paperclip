@@ -8,6 +8,7 @@ import {
   issues,
   issueThreadInteractions,
 } from "@paperclipai/db";
+import { trackQuestionResponseDelivery } from "@paperclipai/shared/telemetry";
 import type {
   AskUserQuestionsInteraction,
   PaperclipQuestionSetPayload,
@@ -369,12 +370,14 @@ export function questionResponseDeliveryService(
       .then((rows) => rows[0] ?? null);
     const result: DeliveryRow = persisted ?? input.delivery;
     if (updated) {
-      getTelemetryClient()?.trackDynamic("question_response.delivery", {
-        adapter: input.adapter,
-        // A receipt can complete without a runtime delivery (continuation
-        // disabled by policy); only a failed status is a delivery failure.
-        outcome: input.mode ?? (input.status === "failed" ? "failed" : "skipped_policy"),
-      });
+      const telemetry = getTelemetryClient();
+      if (telemetry) {
+        trackQuestionResponseDelivery(telemetry, {
+          adapter: input.adapter,
+          // A policy-skipped receipt is not a failed runtime delivery.
+          outcome: input.mode ?? (input.status === "failed" ? "failed" : "skipped_policy"),
+        });
+      }
     }
     return {
       deliveryId: result.id,

@@ -127,6 +127,16 @@ Those proposed calls stay on `client.track()`, carry an `@ts-expect-error`
 marker on the event-name argument, and are swallowed at runtime until the
 generated schema registers the event name.
 
+First-party code must not use the plugin-only `trackDynamic()` path to bypass
+this guard. A dormant proposal leaves the backend-generated contract unchanged;
+privacy review still covers its planned dimensions and confirms it cannot
+initialize telemetry state, queue an envelope, or flush a request. Registration
+and a generated-contract sync are required before such an event may emit.
+
+The proposal extractor uses the pinned `typescript-compiler-api` JavaScript API
+dependency. Workspace type checking continues to use the canonical `typescript`
+compiler; adding the extractor dependency must not change that selected compiler.
+
 For stable event work:
 
 1. Start from `generated/paperclip-telemetry.ts`. The generated types are what
