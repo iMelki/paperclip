@@ -49,6 +49,7 @@ import type { PluginJobScheduler } from "./plugin-job-scheduler.js";
 import type { PluginJobStore } from "./plugin-job-store.js";
 import type { PluginToolDispatcher } from "./plugin-tool-dispatcher.js";
 import type { PluginLifecycleManager } from "./plugin-lifecycle.js";
+import type { GitHubProjectBoardSchedulerBridge } from "./plugin-github-project-board-scheduler-bridge.js";
 import { loadPluginMigrationFiles, pluginDatabaseService } from "./plugin-database.js";
 import { resolveBundledCatalogRoot } from "./bundled-plugins.js";
 
@@ -417,6 +418,8 @@ export interface PluginRuntimeServices {
   jobScheduler: PluginJobScheduler;
   /** Job store for syncing manifest job declarations to the DB. */
   jobStore: PluginJobStore;
+  /** Shared host declaration reconciliation for boot, loadSingle and runtime reload. */
+  nativeGitHubProjectBoard?: GitHubProjectBoardSchedulerBridge;
   /** Tool dispatcher for registering plugin-contributed agent tools. */
   toolDispatcher: PluginToolDispatcher;
   /** Lifecycle manager for state transitions and worker lifecycle events. */
@@ -2474,7 +2477,9 @@ export function pluginLoader(
       // ------------------------------------------------------------------
       // 6. Sync job declarations and register with scheduler
       // ------------------------------------------------------------------
-      const jobDeclarations = manifest.jobs ?? [];
+      const jobDeclarations = runtimeServices.nativeGitHubProjectBoard
+        ? await runtimeServices.nativeGitHubProjectBoard.reconcileDeclarations(pluginId, pluginKey, manifest.jobs ?? [])
+        : manifest.jobs ?? [];
       if (jobDeclarations.length > 0) {
         await jobStore.syncJobDeclarations(pluginId, jobDeclarations);
         await jobScheduler.registerPlugin(pluginId);

@@ -52,3 +52,10 @@ test('commitperclip-review.yml skips every bot-token step for Dependabot PRs', (
     );
   }
 });
+
+test('commitperclip-review.yml excludes only dev while preserving other PR targets and activity types', () => {
+  const onBlock = workflow.slice(workflow.indexOf("on:"), workflow.indexOf("\npermissions:"));
+  assert.match(onBlock, /^  pull_request:\n    branches-ignore:\n      - dev\n    types: \[opened, synchronize, reopened\]$/m);
+  assert.equal((onBlock.match(/^      - /gm) ?? []).length, 1);
+  assert.ok(!/^    branches:/m.test(onBlock));
+});

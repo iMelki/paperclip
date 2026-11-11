@@ -100,6 +100,9 @@ import {
 } from "./services/bundled-plugins.js";
 import { createPluginWorkerManager, type PluginWorkerManager } from "./services/plugin-worker-manager.js";
 import { createPluginJobScheduler } from "./services/plugin-job-scheduler.js";
+import { createGitHubProjectBoardSchedulerBridge } from "./services/plugin-github-project-board-scheduler-bridge.js";
+import { toolAccessService } from "./services/tool-access.js";
+import { resolvePluginJobDispatchPlan } from "./services/plugin-job-scope.js";
 import { pluginJobStore } from "./services/plugin-job-store.js";
 import { createPluginToolDispatcher } from "./services/plugin-tool-dispatcher.js";
 import { createToolGatewayService } from "./services/tool-gateway.js";
@@ -309,6 +312,8 @@ export async function createApp(
     localPluginDir?: string;
     pluginMigrationDb?: Db;
     pluginWorkerManager?: PluginWorkerManager;
+    /** Native board execution is off unless the managed host explicitly opts in. */
+    nativeGitHubProjectSchedulingEnabled?: boolean;
     decisionServiceOptions: DecisionServiceOptions;
     betterAuthHandler?: express.RequestHandler;
     resolveSession?: (req: ExpressRequest) => Promise<BetterAuthSessionResult | null>;
@@ -554,10 +559,32 @@ export async function createApp(
   setPluginEventBus(eventBus);
   const jobStore = pluginJobStore(db);
   const lifecycle = pluginLifecycleManager(db, { workerManager });
+  const nativeGitHubTools = toolAccessService(db, {
+    deploymentMode: opts.deploymentMode,
+    deploymentExposure: opts.deploymentExposure,
+    trustedLocalStdioRuntimeHost,
+  });
+  const nativeGitHubProjectBoard = createGitHubProjectBoardSchedulerBridge(
+    db,
+    (input, access) => nativeGitHubTools.readVerifiedGitHubProjectPageScheduled(input, access),
+    { enabled: opts.nativeGitHubProjectSchedulingEnabled === true },
+  );
   const scheduler = createPluginJobScheduler({
     db,
     jobStore,
     workerManager,
+    nativeGitHubProjectBoard,
+    resolveJobDispatch: async (pluginId, jobKey) => {
+      if (nativeGitHubProjectBoard.matches(jobKey)) {
+        return nativeGitHubProjectBoard.resolveDispatch(pluginId, jobKey);
+      }
+      const plugin = await pluginRegistry.getById(pluginId);
+      if (!plugin) throw new Error("Plugin is no longer installed");
+      return resolvePluginJobDispatchPlan(
+        plugin.manifestJson.jobs?.find((job) => job.jobKey === jobKey),
+        async () => (await pluginRegistry.listConfigs(pluginId)).map((config) => config.companyId),
+      );
+    },
   });
   const toolDispatcher = createPluginToolDispatcher({
     workerManager,
@@ -594,6 +621,7 @@ export async function createApp(
     lifecycle,
     scheduler,
     jobStore,
+    nativeGitHubProjectBoard,
   });
   const hostServiceCleanup = createPluginHostServiceCleanup(lifecycle, hostServicesDisposers);
   let viteHtmlRenderer: ReturnType<typeof createCachedViteHtmlRenderer> | null = null;
@@ -610,6 +638,7 @@ export async function createApp(
       eventBus,
       jobScheduler: scheduler,
       jobStore,
+      nativeGitHubProjectBoard,
       toolDispatcher,
       lifecycleManager: lifecycle,
       instanceInfo: {
@@ -932,6 +961,9 @@ export async function createApp(
   const shutdownAppServices = (): Promise<void> => {
     if (appServicesShutdown) return appServicesShutdown;
     appServicesShutdown = (async () => {
+      scheduler.stop();
+      jobCoordinator.stop();
+      nativeGitHubProjectBoard.stop();
       disableFeedbackExportFlushes();
       if (importTransferSweepTimer) {
         clearInterval(importTransferSweepTimer);

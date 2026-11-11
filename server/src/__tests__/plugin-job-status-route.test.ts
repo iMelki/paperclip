@@ -1,6 +1,6 @@
 import express from "express";
 import request from "supertest";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mockRegistry = vi.hoisted(() => ({
   getById: vi.fn(),
@@ -87,8 +87,12 @@ function readyPlugin() {
 const url = `/api/plugins/${pluginId}/jobs/job-1`;
 const pausedJob = { id: "job-1", jobKey: "sync.example", status: "paused" };
 
-// The first request cold-imports the whole plugin route module graph.
+// The route module graph is large and imported cold. Import it once in a hook with its own budget,
+// so no test's budget pays for it (the graph grew with the native board schedule-grant routes).
 describe.sequential("PATCH /plugins/:pluginId/jobs/:jobId", { timeout: 30_000 }, () => {
+  beforeAll(async () => {
+    await Promise.all([import("../routes/plugins.js"), import("../middleware/index.js")]);
+  }, 180_000);
   beforeEach(() => {
     vi.clearAllMocks();
     readyPlugin();

@@ -110,7 +110,6 @@ describe("plugin job scheduler company scope", () => {
   it.each([
     { scope: "instance" as const, companyIds: ["company-a", "company-b"] },
     { scope: "instance" as const, companyIds: [] },
-    { scope: "company" as const, companyIds: [] },
   ])("runs a $scope-scoped job once, unscoped, with companies $companyIds", async ({ scope, companyIds }) => {
     const ctx = setup({ scope, companyIds });
     await ctx.scheduler.tick();
@@ -172,6 +171,32 @@ describe("plugin job scheduler company scope", () => {
     );
     await vi.waitFor(() => expect(ctx.completeRun).toHaveBeenCalledTimes(1));
     expect(runJobParams(ctx.call).map((p) => p.companyId)).toEqual(["company-b"]);
+  });
+
+  it("dispatches nothing for a company-scoped job when no company is configured", async () => {
+    const ctx = setup({ scope: "company", companyIds: [] });
+    await ctx.scheduler.tick();
+
+    expect(ctx.call).not.toHaveBeenCalled();
+    expect(ctx.completeRun).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({ status: "failed", error: expect.stringContaining("no host-configured companies") }),
+    );
+    expect(ctx.createRun.mock.calls.every((args) => args[0].companyId === undefined)).toBe(true);
+
+    ctx.createRun.mockClear();
+    ctx.setWhereResult([]);
+    await expect(ctx.scheduler.triggerJob(JOB_ID, "manual")).rejects.toThrow(/no host-configured companies/);
+    expect(ctx.createRun).not.toHaveBeenCalled();
+    expect(ctx.call).not.toHaveBeenCalled();
+  });
+
+  it("refuses a retry of a company-scoped job without the original company", async () => {
+    const ctx = setup({ scope: "company", companyIds: ["company-a", "company-b"] });
+    ctx.setWhereResult([]);
+    await expect(ctx.scheduler.triggerJob(JOB_ID, "retry")).rejects.toThrow(/original company/);
+    expect(ctx.createRun).not.toHaveBeenCalled();
+    expect(ctx.call).not.toHaveBeenCalled();
   });
 
   it("rejects a per-company trigger for an unconfigured company or an instance-scoped job", async () => {

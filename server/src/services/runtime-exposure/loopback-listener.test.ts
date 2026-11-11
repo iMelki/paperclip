@@ -1,7 +1,7 @@
 import net from "node:net";
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 
-import { RUNTIME_EXPOSURE_APP_PORT_MIN, deriveViteHmrPort } from "@paperclipai/shared";
+import { RUNTIME_EXPOSURE_APP_PORT_MAX, RUNTIME_EXPOSURE_APP_PORT_MIN } from "@paperclipai/shared";
 
 import {
   diagnoseRuntimeListenerBinds,
@@ -9,6 +9,7 @@ import {
   listenerBindFactsForPort,
   parseProcNetListeners,
 } from "./loopback-listener.js";
+import { allocateExposurePortPair } from "./port-pair.js";
 
 // Real header and row shape, copied from a live /proc/net/tcp{,6} on the host
 // that produced the PAP-17256 failures. Port 42003 is A40B; 52003 is CB23.
@@ -128,9 +129,31 @@ describe("listenerBindFactsForPort", () => {
   });
 });
 
+// True when nothing holds the port on any address. A hostless listen is
+// dual-stack, so it fails if another process holds the port on loopback, on the
+// wildcard address, or on IPv6.
+async function isPortFreeEverywhere(port: number): Promise<boolean> {
+  const server = net.createServer();
+  return await new Promise<boolean>((resolve) => {
+    server.once("error", () => resolve(false));
+    server.listen(port, () => server.close(() => resolve(true)));
+  });
+}
+
 describe("diagnoseRuntimeListenerBinds against live listeners", () => {
-  const appPort = RUNTIME_EXPOSURE_APP_PORT_MIN + 900;
-  const hmrPort = deriveViteHmrPort(appPort);
+  // A fixed port collides with any other listener on a shared CI host
+  // (EADDRINUSE). Take a free app port and HMR companion for each test. Start
+  // at a random point in the range so parallel suites do not race for the
+  // same pair.
+  let appPort: number;
+  let hmrPort: number;
+  beforeEach(async () => {
+    const span = RUNTIME_EXPOSURE_APP_PORT_MAX - RUNTIME_EXPOSURE_APP_PORT_MIN + 1;
+    ({ appPort, hmrPort } = await allocateExposurePortPair({
+      isPortAvailable: isPortFreeEverywhere,
+      preferredAppPort: RUNTIME_EXPOSURE_APP_PORT_MIN + Math.floor(Math.random() * span),
+    }));
+  });
 
   async function withListener<T>(
     port: number,

@@ -237,7 +237,7 @@ function validateTrigger(workflow, failures) {
     return;
   }
   if (/^  (?:push|"push"|'push')\s*:/m.test(onBlock)) {
-    failures.push("workflow must not define a push event; dev validation is pull-request-only");
+    failures.push("workflow must not define a push event; dev validation uses the admitted local lane");
   }
   const eventKeys = validatePlainMappingKeys(
     onBlock,
@@ -265,8 +265,14 @@ function validateTrigger(workflow, failures) {
     failures.push("pull_request must define exactly one plain branches list");
   }
   const branches = new Set(extractEventList(pullRequestBlock, "branches"));
-  for (const required of ["master", "dev"]) {
+  const allowedTargets = new Set(["master", "agent/codex/129-upstream-host-integration"]);
+  for (const required of allowedTargets) {
     if (!branches.has(required)) failures.push(`pull_request.branches is missing ${required}`);
+  }
+  for (const target of branches) {
+    if (!allowedTargets.has(target)) {
+      failures.push(`pull_request.branches has unsupported target ${target}; dev uses admitted local validation`);
+    }
   }
 }
 
@@ -360,7 +366,7 @@ if (isMainModule(import.meta.url)) {
       process.stderr.write(`ERROR: PR workflow trigger policy failed:\n${failures.map((item) => `  ${item}`).join("\n")}\n`);
       process.exit(1);
     }
-    process.stdout.write("PR workflow trigger policy passed: pull requests into master and dev; no push event.\n");
+    process.stdout.write("PR workflow trigger policy passed: preserved master and upstream integration targets; dev uses admitted local validation; no push event.\n");
   } catch (error) {
     process.stderr.write(`ERROR: PR workflow trigger policy could not inspect pr.yml: ${error.message}\n`);
     process.exit(2);

@@ -2,6 +2,8 @@ name: commitperclip PR Review
 
 on:
   pull_request:
+    branches-ignore:
+      - dev
     types: [opened, synchronize, reopened]
 
 # Checks out and runs only the base branch scripts, never PR code.
