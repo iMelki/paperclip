@@ -17268,6 +17268,10 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     run: typeof heartbeatRuns.$inferSelect,
     options: { suppressImmediateRecovery?: boolean } = {},
   ) {
+    // Release execution locks normally, but never create a new automatic
+    // recovery wake while the dedicated provider quota is held.
+    const suppressImmediateRecovery = options.suppressImmediateRecovery
+      || Boolean(readAcpxProviderQuotaAutomaticWakeHold(run));
     const runContext = parseObject(run.contextSnapshot);
     const contextIssueId = readNonEmptyString(runContext.issueId);
     const taskKey = deriveTaskKeyWithHeartbeatFallback(runContext, null);
@@ -17723,7 +17727,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       if (issueNeedsReviewParticipantRecovery) {
         const existingReviewParticipantExecutionPath = await findExistingExecutionPath(currentParticipant.agentId);
         if (
-          options.suppressImmediateRecovery ||
+          suppressImmediateRecovery ||
           existingReviewParticipantExecutionPath ||
           issueHasPersistedMonitor ||
           await isAutomaticRecoverySuppressedByPauseHold(db, issue.companyId, issue.id, treeControlSvc)
@@ -17845,7 +17849,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       if (!issueNeedsImmediateRecovery) {
         return { kind: "released" as const };
       }
-      if (options.suppressImmediateRecovery) {
+      if (suppressImmediateRecovery) {
         return { kind: "released" as const };
       }
 

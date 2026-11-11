@@ -2311,12 +2311,13 @@ describeEmbeddedPostgres("heartbeat bounded retry scheduling", () => {
   const acpxHoldTestAdapter = "acpx_automatic_hold_regression";
   let acpxHoldExecutions = 0;
   let acpxHoldAdapterFails = false;
+  let acpxHoldAdapterFailureResultJson: Record<string, unknown> = {};
   beforeAll(() => registerServerAdapter({
     type: acpxHoldTestAdapter,
     execute: async () => {
       acpxHoldExecutions += 1;
       return acpxHoldAdapterFails
-        ? { exitCode: 1, signal: null, timedOut: false, errorCode: "acpx_provider_quota", errorMessage: "Provider quota exhausted", resultJson: {} }
+        ? { exitCode: 1, signal: null, timedOut: false, errorCode: "acpx_provider_quota", errorMessage: "Provider quota exhausted", resultJson: acpxHoldAdapterFailureResultJson }
         : { exitCode: 0, signal: null, timedOut: false, resultJson: { summary: "Synthetic completion" } };
     },
     testEnvironment: async () => ({ adapterType: acpxHoldTestAdapter, status: "pass", checks: [], testedAt: new Date().toISOString() }),
@@ -2326,6 +2327,7 @@ describeEmbeddedPostgres("heartbeat bounded retry scheduling", () => {
   async function seedAcpxAutomaticHold(resultJson: Record<string, unknown> = {}) {
     acpxHoldExecutions = 0;
     acpxHoldAdapterFails = false;
+    acpxHoldAdapterFailureResultJson = {};
     const companyId = randomUUID();
     const agentId = randomUUID();
     const sourceRunId = randomUUID();
@@ -2366,12 +2368,14 @@ describeEmbeddedPostgres("heartbeat bounded retry scheduling", () => {
     expect(rows.some((run) => run.status === "succeeded")).toBe(true);
   });
 
-  it("does not create a missing-comment follow-up after unknown ACPX quota", async () => {
+  it.each(["unknown", "future"] as const)("keeps automatic follow-ups held for %s ACPX quota", async (resetKind) => {
     const { companyId, agentId, sourceRunId } = await seedAcpxAutomaticHold();
     await db.update(heartbeatRuns).set({ status: "succeeded", error: null, errorCode: null }).where(eq(heartbeatRuns.id, sourceRunId));
     const issueId = randomUUID();
     await db.insert(issues).values({ id: issueId, companyId, title: "Synthetic required comment", status: "in_progress",
       priority: "medium", assigneeAgentId: agentId, responsibleUserId: "responsible-user", issueNumber: 1, identifier: "ACPX-HOLD-1" });
+    const trustedResetAt = resetKind === "future" ? new Date(Date.now() + 3_600_000) : null;
+    acpxHoldAdapterFailureResultJson = trustedResetAt ? { quotaResetAt: trustedResetAt.toISOString() } : {};
     acpxHoldAdapterFails = true;
     const initial = await heartbeat.wakeup(agentId, { source: "assignment", triggerDetail: "system", requestedByActorType: "system",
       reason: "issue_assigned", contextSnapshot: { issueId, wakeReason: "issue_assigned" } });
@@ -2379,9 +2383,17 @@ describeEmbeddedPostgres("heartbeat bounded retry scheduling", () => {
     expect((await waitForRunToFinish(heartbeat, initial!.id))?.errorCode).toBe("acpx_provider_quota");
     await heartbeat.waitForRunExecutionDrain(initial!.id);
     expect(acpxHoldExecutions).toBe(1);
-    expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.retryOfRunId, initial!.id))).toHaveLength(0);
+    const retries = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.retryOfRunId, initial!.id));
+    if (resetKind === "unknown") {
+      expect(retries).toHaveLength(0);
+    } else {
+      expect(retries).toHaveLength(1);
+      expect(retries[0]).toMatchObject({ status: "scheduled_retry", startedAt: null, scheduledRetryReason: "transient_failure" });
+      expect(retries[0]?.scheduledRetryAt).toEqual(trustedResetAt);
+    }
     const requests = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.companyId, companyId));
     expect(requests.some((row) => row.reason === "missing_issue_comment")).toBe(false);
+    expect(requests.some((row) => row.reason === "issue_continuation_needed")).toBe(false);
     const [completed] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, initial!.id));
     expect(completed?.issueCommentStatus).toBe("not_applicable");
     expect(completed?.issueCommentRetryQueuedAt).toBeNull();
