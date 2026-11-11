@@ -26,9 +26,15 @@ supervisor helpers from the merge, not the ownership checks. Adapt dependency
 recovery to the upstream blocked-cycle key contract.
 
 Retain deployed fork migrations 0212–0214 and their journal entries unchanged.
-Relocate the 19 upstream migrations 0212–0230 to 0215–0233 without changing SQL
-bytes. Assign increasing journal timestamps after the deployed fork's 0214;
-older timestamps can be skipped by the legacy timestamp migration fallback.
+Fork migration `0215_complete_dragon_lord.sql` (#156, agent hire idempotency)
+landed on `dev` before the merge, so the 19 upstream migrations 0212–0230 are
+relocated to 0216–0234 without changing SQL bytes (all 19 compare
+byte-identical to upstream `v2026.831.1`). `dev` ends at
+`0234_better_auth_account_issuer.sql`. From the deployed fork's 0214, a live
+migration therefore applies 0215–0234: one fork migration, then the 19
+relocated upstream ones. Assign increasing journal timestamps after the
+deployed fork's 0214; older timestamps can be skipped by the legacy timestamp
+migration fallback.
 Regenerate the final combined snapshot. Do not retain the generated duplicate
 SQL that would recreate already-applied upstream/fork changes.
 

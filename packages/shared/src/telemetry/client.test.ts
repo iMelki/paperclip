@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { TelemetryClient } from "./client.js";
+import { trackQuestionResponseDelivery } from "./events.js";
 import { resolveTelemetryConfig } from "./config.js";
 import type { TelemetryConfig, TelemetryDimensions, TelemetryState } from "./types.js";
 
@@ -58,6 +59,31 @@ describe("TelemetryClient runtime event gate", () => {
 
     await client.flush();
 
+    expect(stateFactory).not.toHaveBeenCalled();
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it.each(["steered", "coalesced", "wake_fallback", "failed", "skipped_policy"] as const)(
+    "drops the unregistered question-response %s proposal before state or network I/O",
+    async (outcome) => {
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true }));
+      const { client, stateFactory } = makeClient();
+      trackQuestionResponseDelivery(client, { adapter: "claude_local", outcome });
+      await client.flush();
+      expect(stateFactory).not.toHaveBeenCalled();
+      expect(fetch).not.toHaveBeenCalled();
+    },
+  );
+
+  it("bounds question-response adapter dimensions without exposing custom driver identifiers", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true }));
+    const { client, stateFactory } = makeClient();
+    const tracked = vi.spyOn(client, "track");
+    trackQuestionResponseDelivery(client, { adapter: "plugin:synthetic-private-driver", outcome: "skipped_policy" });
+    expect(tracked).toHaveBeenLastCalledWith("question_response.delivery", { adapter: "other", outcome: "skipped_policy" });
+    trackQuestionResponseDelivery(client, { adapter: "claude_local", outcome: "steered" });
+    expect(tracked).toHaveBeenLastCalledWith("question_response.delivery", { adapter: "claude_local", outcome: "steered" });
+    await client.flush();
     expect(stateFactory).not.toHaveBeenCalled();
     expect(fetch).not.toHaveBeenCalled();
   });

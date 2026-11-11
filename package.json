@@ -74,7 +74,8 @@
     "cross-env": "^10.1.0",
     "esbuild": "^0.28.2",
     "typescript": "^7.0.2",
-    "vitest": "^4.1.10"
+    "vitest": "^4.1.10",
+    "typescript-compiler-api": "npm:typescript@5.9.3"
   },
   "engines": {
     "node": ">=24.11.0"

@@ -25,6 +25,14 @@ import {
   questionResponseDeliveryService,
 } from "../services/question-response-delivery.js";
 
+const telemetryMocks = vi.hoisted(() => ({
+  track: vi.fn(),
+}));
+
+vi.mock("../telemetry.js", () => ({
+  getTelemetryClient: () => ({ track: telemetryMocks.track }),
+}));
+
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
 
@@ -57,6 +65,7 @@ describeEmbeddedPostgres("question response delivery", () => {
   }, EMBEDDED_POSTGRES_TEST_SETUP_TIMEOUT_MS);
 
   afterEach(async () => {
+    telemetryMocks.track.mockClear();
     await db.delete(issueQuestionResponseDeliveries);
     await db.delete(issueThreadInteractions);
     await db.delete(activityLog);
@@ -77,6 +86,7 @@ describeEmbeddedPostgres("question response delivery", () => {
     runtimeMode?: "legacy" | "native";
     sourceStatus?: string;
     successorStatus?: "queued" | "running";
+    continuationPolicy?: "none" | "wake_assignee" | "wake_assignee_on_accept";
   } = {}) {
     const companyId = randomUUID();
     const agentId = randomUUID();
@@ -141,7 +151,7 @@ describeEmbeddedPostgres("question response delivery", () => {
       { id: issueId, companyId },
       {
         kind: "ask_user_questions",
-        continuationPolicy: "wake_assignee",
+        continuationPolicy: args.continuationPolicy ?? "wake_assignee",
         sourceRunId,
         payload: {
           version: 1,
@@ -286,6 +296,116 @@ describeEmbeddedPostgres("question response delivery", () => {
       attemptCount: 1,
       lastErrorCode: "question_response_wake_skipped",
     });
+  });
+
+  it.each(["none", "wake_assignee_on_accept"] as const)(
+    "does not wake the assignee when the continuation policy is %s",
+    async (continuationPolicy) => {
+      const seeded = await seed({ continuationPolicy });
+      telemetryMocks.track.mockClear(); // Measure delivery after setup interaction telemetry.
+      const wakeup = vi.fn();
+      const steer = vi.fn();
+      const service = questionResponseDeliveryService(db, {
+        heartbeat: { wakeup } as never,
+        steer,
+      });
+
+      await expect(service.deliver(seeded.interaction.id)).resolves.toMatchObject({
+        status: "delivered",
+        mode: null,
+        targetRunId: null,
+        duplicate: false,
+      });
+      await expect(service.sweepPending()).resolves.toMatchObject({ scanned: 0 });
+
+      expect(wakeup).not.toHaveBeenCalled();
+      expect(steer).not.toHaveBeenCalled();
+      const [delivery] = await db.select().from(issueQuestionResponseDeliveries);
+      expect(delivery).toMatchObject({
+        status: "delivered",
+        deliveryMode: null,
+        attemptCount: 1,
+        errorCount: 0,
+        lastErrorCode: "question_response_continuation_disabled",
+      });
+      const wakeRequests = await db.select().from(agentWakeupRequests)
+        .where(eq(agentWakeupRequests.agentId, seeded.agentId));
+      expect(wakeRequests).toHaveLength(0);
+      expect(telemetryMocks.track).toHaveBeenCalledTimes(1);
+      expect(telemetryMocks.track).toHaveBeenCalledWith("question_response.delivery", {
+        adapter: "codex_local",
+        outcome: "skipped_policy",
+      });
+    },
+  );
+
+  it("still steers an answer into an already running successor when continuation is disabled", async () => {
+    const seeded = await seed({ continuationPolicy: "none", successorStatus: "running" });
+    await db.update(issues).set({ executionRunId: seeded.successorRunId })
+      .where(eq(issues.id, seeded.issueId));
+    const wakeup = vi.fn();
+    const steer = vi.fn().mockResolvedValue({ turnId: "turn-live" });
+
+    const outcome = await questionResponseDeliveryService(db, {
+      heartbeat: { wakeup } as never,
+      steer,
+    }).deliver(seeded.interaction.id);
+
+    expect(outcome).toMatchObject({
+      status: "delivered",
+      mode: "steered",
+      targetRunId: seeded.successorRunId,
+    });
+    expect(steer).toHaveBeenCalledTimes(1);
+    expect(wakeup).not.toHaveBeenCalled();
+  });
+
+  it("rotates suppressed responses behind untried ones in the retry page", async () => {
+    const suppressedA = await seed({ sourceStatus: "running" });
+    const suppressedB = await seed({ sourceStatus: "running" });
+    const runnable = await seed({ sourceStatus: "running" });
+    // Pin a strict creation order in the past so the two suppressed responses
+    // fill a two-row page by `createdAt`, as the 50 oldest would in production.
+    const base = Date.now() - 60 * 60 * 1000;
+    for (const [index, seeded] of [suppressedA, suppressedB, runnable].entries()) {
+      const at = new Date(base + index * 1000);
+      await db.update(issueQuestionResponseDeliveries)
+        .set({ createdAt: at, updatedAt: at })
+        .where(eq(issueQuestionResponseDeliveries.interactionId, seeded.interaction.id));
+    }
+    const fallbackRunId = randomUUID();
+    const wakeup = vi.fn().mockImplementation(async (agentId: string) => {
+      // wakeOnDemand disabled / subtree pause hold: the scheduler suppresses it.
+      if (agentId !== runnable.agentId) return null;
+      return db.insert(heartbeatRuns).values({
+        id: fallbackRunId,
+        companyId: runnable.companyId,
+        agentId: runnable.agentId,
+        invocationSource: "automation",
+        status: "queued",
+        runtimeMode: "legacy",
+        driverKind: "codex",
+        contextSnapshot: { issueId: runnable.issueId },
+      }).returning().then((rows) => rows[0]!);
+    });
+    const service = questionResponseDeliveryService(db, {
+      heartbeat: { wakeup } as never,
+      steer: vi.fn(),
+    });
+
+    await expect(service.sweepPending(2)).resolves.toMatchObject({ scanned: 2, wakeFallback: 0 });
+    await expect(service.sweepPending(2)).resolves.toMatchObject({ wakeFallback: 1 });
+
+    const delivered = await db.select().from(issueQuestionResponseDeliveries)
+      .where(eq(issueQuestionResponseDeliveries.interactionId, runnable.interaction.id))
+      .then((rows) => rows[0]);
+    expect(delivered).toMatchObject({ status: "fallback_queued", targetRunId: fallbackRunId });
+    const suppressed = await db.select().from(issueQuestionResponseDeliveries)
+      .where(eq(issueQuestionResponseDeliveries.status, "pending"));
+    expect(suppressed.map((row) => row.interactionId).sort()).toEqual(
+      [suppressedA.interaction.id, suppressedB.interaction.id].sort(),
+    );
+    expect(suppressed.every((row) => row.errorCount === 0)).toBe(true);
   });
 
   it("delivers after wake suppression outlasts the bounded error retry limit", async () => {
