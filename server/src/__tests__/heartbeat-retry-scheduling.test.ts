@@ -2307,4 +2307,96 @@ describeEmbeddedPostgres("heartbeat bounded retry scheduling", () => {
       retryNotBefore.toISOString(),
     );
   });
+  // These tests dispatch only this in-process adapter, never a provider CLI.
+  const acpxHoldTestAdapter = "acpx_automatic_hold_regression";
+  let acpxHoldExecutions = 0;
+  let acpxHoldAdapterFails = false;
+  let acpxHoldAdapterFailureResultJson: Record<string, unknown> = {};
+  beforeAll(() => registerServerAdapter({
+    type: acpxHoldTestAdapter,
+    execute: async () => {
+      acpxHoldExecutions += 1;
+      return acpxHoldAdapterFails
+        ? { exitCode: 1, signal: null, timedOut: false, errorCode: "acpx_provider_quota", errorMessage: "Provider quota exhausted", resultJson: acpxHoldAdapterFailureResultJson }
+        : { exitCode: 0, signal: null, timedOut: false, resultJson: { summary: "Synthetic completion" } };
+    },
+    testEnvironment: async () => ({ adapterType: acpxHoldTestAdapter, status: "pass", checks: [], testedAt: new Date().toISOString() }),
+  }));
+  afterAll(() => unregisterServerAdapter(acpxHoldTestAdapter));
+
+  async function seedAcpxAutomaticHold(resultJson: Record<string, unknown> = {}) {
+    acpxHoldExecutions = 0;
+    acpxHoldAdapterFails = false;
+    acpxHoldAdapterFailureResultJson = {};
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    const sourceRunId = randomUUID();
+    const now = new Date();
+    await seedRetryFixture({ companyId, agentId, runId: sourceRunId,
+      now: new Date(now.getTime() - 120_000), errorCode: "acpx_provider_quota",
+      adapterType: acpxHoldTestAdapter, resultJson });
+    await db.update(agents).set({ status: "idle" }).where(eq(agents.id, agentId));
+    return { companyId, agentId, sourceRunId, now };
+  }
+
+  it.each(["unknown", "future"] as const)("keeps timer cursor and dispatch untouched during %s ACPX quota", async (resetKind) => {
+    const resultJson = resetKind === "future" ? { quotaResetAt: new Date(Date.now() + 3_600_000).toISOString() } : {};
+    const { companyId, agentId, now } = await seedAcpxAutomaticHold(resultJson);
+    const baseline = new Date(now.getTime() - 3_600_000);
+    await db.update(agents).set({ lastHeartbeatAt: baseline, runtimeConfig: {
+      heartbeat: { enabled: true, intervalSec: 60, wakeOnDemand: true, maxConcurrentRuns: 1 },
+    } }).where(eq(agents.id, agentId));
+    const tick = await heartbeat.tickTimers(now);
+    expect(tick.enqueued).toBe(0);
+    const [agent] = await db.select().from(agents).where(eq(agents.id, agentId));
+    expect(agent?.lastHeartbeatAt).toEqual(baseline);
+    expect(acpxHoldExecutions).toBe(0);
+    expect(await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.companyId, companyId))).toHaveLength(0);
+    expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.companyId, companyId))).toHaveLength(1);
+  });
+
+  it("allows timer dispatch after the trusted ACPX reset", async () => {
+    const { companyId, agentId, now } = await seedAcpxAutomaticHold({ quotaResetAt: new Date(Date.now() - 60_000).toISOString() });
+    await db.update(agents).set({ lastHeartbeatAt: new Date(now.getTime() - 3_600_000), runtimeConfig: {
+      heartbeat: { enabled: true, intervalSec: 60, wakeOnDemand: true, maxConcurrentRuns: 1 },
+    } }).where(eq(agents.id, agentId));
+    const tick = await heartbeat.tickTimers(now);
+    expect(tick.enqueued).toBe(1);
+    await drainHeartbeatRunsToQuiescence(db, heartbeat);
+    expect(acpxHoldExecutions).toBe(1);
+    const rows = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.companyId, companyId));
+    expect(rows.some((run) => run.status === "succeeded")).toBe(true);
+  });
+
+  it.each(["unknown", "future"] as const)("keeps automatic follow-ups held for %s ACPX quota", async (resetKind) => {
+    const { companyId, agentId, sourceRunId } = await seedAcpxAutomaticHold();
+    await db.update(heartbeatRuns).set({ status: "succeeded", error: null, errorCode: null }).where(eq(heartbeatRuns.id, sourceRunId));
+    const issueId = randomUUID();
+    await db.insert(issues).values({ id: issueId, companyId, title: "Synthetic required comment", status: "in_progress",
+      priority: "medium", assigneeAgentId: agentId, responsibleUserId: "responsible-user", issueNumber: 1, identifier: "ACPX-HOLD-1" });
+    const trustedResetAt = resetKind === "future" ? new Date(Date.now() + 3_600_000) : null;
+    acpxHoldAdapterFailureResultJson = trustedResetAt ? { quotaResetAt: trustedResetAt.toISOString() } : {};
+    acpxHoldAdapterFails = true;
+    const initial = await heartbeat.wakeup(agentId, { source: "assignment", triggerDetail: "system", requestedByActorType: "system",
+      reason: "issue_assigned", contextSnapshot: { issueId, wakeReason: "issue_assigned" } });
+    expect(initial).not.toBeNull();
+    expect((await waitForRunToFinish(heartbeat, initial!.id))?.errorCode).toBe("acpx_provider_quota");
+    await heartbeat.waitForRunExecutionDrain(initial!.id);
+    expect(acpxHoldExecutions).toBe(1);
+    const retries = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.retryOfRunId, initial!.id));
+    if (resetKind === "unknown") {
+      expect(retries).toHaveLength(0);
+    } else {
+      expect(retries).toHaveLength(1);
+      expect(retries[0]).toMatchObject({ status: "scheduled_retry", startedAt: null, scheduledRetryReason: "transient_failure" });
+      expect(retries[0]?.scheduledRetryAt).toEqual(trustedResetAt);
+    }
+    const requests = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.companyId, companyId));
+    expect(requests.some((row) => row.reason === "missing_issue_comment")).toBe(false);
+    expect(requests.some((row) => row.reason === "issue_continuation_needed")).toBe(false);
+    const [completed] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, initial!.id));
+    expect(completed?.issueCommentStatus).toBe("not_applicable");
+    expect(completed?.issueCommentRetryQueuedAt).toBeNull();
+  });
+
 });

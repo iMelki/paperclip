@@ -345,3 +345,90 @@ for (const cliArgs of [
     assert.equal(result.calls, "");
   });
 }
+
+function runPreviewRemoteProbe({ preview = true, remoteOk = true } = {}) {
+  const fixtureDir = mkdtempSync(join(tmpdir(), "paperclip-preview-remote-"));
+  const scriptsDir = join(fixtureDir, "scripts");
+  const binDir = join(fixtureDir, "bin");
+  const callLog = join(fixtureDir, "calls.log");
+  mkdirSync(scriptsDir);
+  mkdirSync(binDir);
+  writeFileSync(callLog, "");
+  for (const name of ["release.sh", "release-lib.sh"]) {
+    writeFileSync(join(scriptsDir, name), readFileSync(join(repoRoot, "scripts", name)));
+  }
+  writeExecutable(join(binDir, "git"), [
+    "#!/usr/bin/env bash",
+    "set -euo pipefail",
+    'printf \'git %s\\n\' "$*" >> "$FAKE_CALL_LOG"',
+    '[ "$#" -ge 3 ] && [ "$1" = "-C" ] && [ "$2" = "$REPO_ROOT" ] || exit 93',
+    'shift 2',
+    'case "$1" in',
+    '  remote)',
+    '    [ "$#" -eq 3 ] && [ "$2" = "get-url" ] && [ "$3" = "origin" ] || exit 93',
+    '    printf \'%s\\n\' "https://github.com/example/preview-fixture.git" ;;',
+    '  ls-remote)',
+    '    [ "$#" -eq 4 ] && [ "$2" = "--exit-code" ] && [ "$3" = "origin" ] && [ "$4" = "HEAD" ] || exit 93',
+    '    [ "$FAKE_REMOTE_OK" = "true" ] || exit 41',
+    '    printf \'%s\\tHEAD\\n\' "0123456789012345678901234567890123456789" ;;',
+    '  fetch)',
+    '    [ "$#" -eq 4 ] && [ "$2" = "origin" ] && [ "$3" = "--prune" ] && [ "$4" = "--tags" ] || exit 93 ;;',
+    '  symbolic-ref)',
+    '    [ "$#" -eq 4 ] && [ "$2" = "--quiet" ] && [ "$3" = "--short" ] && [ "$4" = "HEAD" ] || exit 93',
+    '    printf \'%s\\n\' "preview-fixture" ;;',
+    '  rev-parse)',
+    '    [ "$#" -eq 2 ] && [ "$2" = "HEAD" ] || exit 93',
+    '    echo "preview-remote-probe-complete" >&2',
+    '    exit 37 ;;',
+    '  *) exit 93 ;;',
+    'esac',
+  ].join("\n") + "\n");
+  try {
+    const args = [join(scriptsDir, "release.sh"), "canary", "--dry-run"];
+    if (preview) args.push("--candidate-preview");
+    let status = 0;
+    let output = "";
+    try {
+      output = execFileSync("bash", args, {
+        cwd: fixtureDir, encoding: "utf8", timeout: 10_000, windowsHide: true,
+        stdio: ["ignore", "pipe", "pipe"],
+        env: { ...process.env, PATH: binDir + ":" + process.env.PATH,
+          RELEASE_REMOTE: "origin", REPO_ROOT: fixtureDir, FAKE_CALL_LOG: callLog,
+          FAKE_REMOTE_OK: String(remoteOk) },
+      });
+    } catch (error) {
+      status = error.status ?? 1;
+      output = String(error.stdout ?? "") + String(error.stderr ?? "");
+    }
+    return { status, output, calls: readFileSync(callLog, "utf8") };
+  } finally {
+    const owned = resolve(fixtureDir);
+    if (!owned.startsWith(resolve(tmpdir()) + sep + "paperclip-preview-remote-")) {
+      throw new Error("Refusing cleanup outside the owned remote probe fixture");
+    }
+    rmSync(owned, { recursive: true, force: true });
+  }
+}
+
+test("candidate preview CLI reads remote HEAD without fetching or pruning refs", () => {
+  const result = runPreviewRemoteProbe();
+  assert.equal(result.status, 37, result.output);
+  assert.match(result.output, /preview-remote-probe-complete/);
+  assert.match(result.calls, / ls-remote --exit-code origin HEAD$/m);
+  assert.doesNotMatch(result.calls, / fetch |--prune| checkout | update-ref | push | tag /);
+});
+
+test("candidate preview remote-read failure has no mutating fallback", () => {
+  const result = runPreviewRemoteProbe({ remoteOk: false });
+  assert.equal(result.status, 41, result.output);
+  assert.match(result.calls, / ls-remote --exit-code origin HEAD$/m);
+  assert.doesNotMatch(result.calls, / fetch |--prune| rev-parse | checkout | update-ref | push | tag /);
+});
+
+test("ordinary release CLI preserves its existing remote refresh path", () => {
+  const result = runPreviewRemoteProbe({ preview: false });
+  assert.equal(result.status, 37, result.output);
+  assert.match(result.output, /preview-remote-probe-complete/);
+  assert.match(result.calls, / fetch origin --prune --tags$/m);
+  assert.doesNotMatch(result.calls, / ls-remote /);
+});
