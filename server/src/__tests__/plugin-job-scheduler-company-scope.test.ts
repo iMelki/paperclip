@@ -14,8 +14,8 @@ function makeJob() {
     jobKey: "sync.github-issues",
     schedule: "*/5 * * * *",
     status: "active" as const,
-    lastRunAt: null,
-    nextRunAt: new Date(Date.now() - 1_000),
+    lastRunAt: null as Date | null,
+    nextRunAt: new Date(Date.now() - 1_000) as Date | null,
     createdAt: new Date(),
     updatedAt: new Date(),
   };
@@ -128,7 +128,10 @@ describe("plugin job scheduler company scope", () => {
     const before = Date.now();
     await ctx.scheduler.tick();
 
-    expect(ctx.createRun).not.toHaveBeenCalled();
+    // The strict planner keeps one failed instance diagnostic, never a tenant execution.
+    expect(ctx.createRun).toHaveBeenCalledTimes(1);
+    expect(ctx.createRun.mock.calls[0]?.[0]).not.toHaveProperty("companyId");
+    expect(ctx.completeRun).toHaveBeenCalledWith("run-1", expect.objectContaining({ status: "failed" }));
     expect(ctx.call).not.toHaveBeenCalled();
     const stamp = ctx.jobStore.updateRunTimestamps as ReturnType<typeof vi.fn>;
     expect(stamp).toHaveBeenCalledTimes(1);
@@ -150,24 +153,42 @@ describe("plugin job scheduler company scope", () => {
     expect(advancedTo.getTime()).toBeLessThan(before + 60 * 60 * 1000);
   });
 
-  it("refreshes authorized companies and then runs the company-scoped job", async () => {
-    const ctx = setup({ scope: "company", companyIds: [] });
-    const scheduler = (await import("../services/plugin-job-scheduler.js")).createPluginJobScheduler({
-      db: { select: () => ({ from: () => ({ where: async () => [ctx.job] }) }) } as never,
-      jobStore: ctx.jobStore,
-      workerManager: {
-        isRunning: () => true,
-        getProactiveCompanyScopes: vi.fn()
-          .mockReturnValueOnce([])
-          .mockReturnValue(["company-a"]),
-        setProactiveCompanyScopes: vi.fn(),
-        call: ctx.call,
-      } as never,
-      jobTimeoutMs: 1_000,
-      refreshAuthorizedCompanies: async () => ["company-a"],
-    });
-    await scheduler.tick();
-    expect(ctx.createRun).toHaveBeenCalledWith(expect.objectContaining({ companyId: "company-a" }));
+  it("waits for explicit settings application and the due time before company dispatch", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      const ctx = setup({ scope: "company", companyIds: [] });
+      let authorized: string[] = [];
+      const setScopes = vi.fn((_pluginId: string, ids: readonly string[]) => { authorized = [...ids]; });
+      vi.mocked(ctx.jobStore.updateRunTimestamps).mockImplementation(async (_id, last, next) => {
+        ctx.job.lastRunAt = last;
+        ctx.job.nextRunAt = next;
+      });
+      const scheduler = (await import("../services/plugin-job-scheduler.js")).createPluginJobScheduler({
+        db: { select: () => ({ from: () => ({ where: async () =>
+          ctx.job.nextRunAt && ctx.job.nextRunAt.getTime() <= Date.now() ? [ctx.job] : []
+        }) }) } as never,
+        jobStore: ctx.jobStore,
+        workerManager: { isRunning: () => true, getProactiveCompanyScopes: () => [...authorized],
+          setProactiveCompanyScopes: setScopes, call: ctx.call } as never,
+        jobTimeoutMs: 1_000,
+      });
+      const before = Date.now();
+      await scheduler.tick();
+      expect(setScopes).not.toHaveBeenCalled();
+      expect(ctx.call).not.toHaveBeenCalled();
+      expect(ctx.createRun.mock.calls.every(([input]) => input.companyId == null)).toBe(true);
+      const retryAt = ctx.job.nextRunAt!;
+      expect(retryAt.getTime()).toBeGreaterThanOrEqual(before + 6 * 60 * 60 * 1000);
+      // Only the existing explicit settings/loader flow installs authorization.
+      setScopes(ctx.job.pluginId, ["company-a"]);
+      await scheduler.tick();
+      expect(ctx.call).not.toHaveBeenCalled();
+      vi.setSystemTime(retryAt.getTime() + 1);
+      await scheduler.tick();
+      expect(ctx.createRun).toHaveBeenCalledWith(expect.objectContaining({ companyId: "company-a" }));
+      expect(ctx.call).toHaveBeenCalledTimes(1);
+      expect(setScopes).toHaveBeenCalledTimes(1);
+    } finally { vi.useRealTimers(); }
   });
 
   it("records each company's run separately when one company's run fails, and still runs the others", async () => {
@@ -219,6 +240,32 @@ describe("plugin job scheduler company scope", () => {
     );
     await vi.waitFor(() => expect(ctx.completeRun).toHaveBeenCalledTimes(1));
     expect(runJobParams(ctx.call).map((p) => p.companyId)).toEqual(["company-b"]);
+  });
+
+  it("dispatches nothing for a company-scoped job when no company is configured", async () => {
+    const ctx = setup({ scope: "company", companyIds: [] });
+    await ctx.scheduler.tick();
+
+    expect(ctx.call).not.toHaveBeenCalled();
+    expect(ctx.completeRun).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({ status: "failed", error: expect.stringContaining("no host-configured companies") }),
+    );
+    expect(ctx.createRun.mock.calls.every((args) => args[0].companyId === undefined)).toBe(true);
+
+    ctx.createRun.mockClear();
+    ctx.setWhereResult([]);
+    await expect(ctx.scheduler.triggerJob(JOB_ID, "manual")).rejects.toThrow(/no host-configured companies/);
+    expect(ctx.createRun).not.toHaveBeenCalled();
+    expect(ctx.call).not.toHaveBeenCalled();
+  });
+
+  it("refuses a retry of a company-scoped job without the original company", async () => {
+    const ctx = setup({ scope: "company", companyIds: ["company-a", "company-b"] });
+    ctx.setWhereResult([]);
+    await expect(ctx.scheduler.triggerJob(JOB_ID, "retry")).rejects.toThrow(/original company/);
+    expect(ctx.createRun).not.toHaveBeenCalled();
+    expect(ctx.call).not.toHaveBeenCalled();
   });
 
   it("rejects a per-company trigger for an unconfigured company or an instance-scoped job", async () => {

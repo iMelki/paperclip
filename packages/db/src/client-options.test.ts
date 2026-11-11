@@ -2,7 +2,9 @@ import { describe, expect, it } from "vitest";
 import {
   DEFAULT_DATABASE_APPLICATION_NAME,
   DEFAULT_DATABASE_IDLE_TIMEOUT_SECONDS,
+  POSTGRES_JS_DEFAULT_POOL_MAX,
   databaseClientOptionsFromEnv,
+  effectiveDatabasePoolMax,
   postgresJsOptions,
   resolveDatabaseClientOptions,
 } from "./client.js";
@@ -105,6 +107,17 @@ describe("resolveDatabaseClientOptions", () => {
       idle_timeout: DEFAULT_DATABASE_IDLE_TIMEOUT_SECONDS,
       connection: { application_name: DEFAULT_DATABASE_APPLICATION_NAME },
     });
+  });
+
+  it("uses the driver default of 10 when DATABASE_POOL_MAX is unset", () => {
+    expect(effectiveDatabasePoolMax(resolveDatabaseClientOptions({}))).toBe(POSTGRES_JS_DEFAULT_POOL_MAX);
+    expect(effectiveDatabasePoolMax(resolveDatabaseClientOptions(databaseClientOptionsFromEnv({})))).toBe(10);
+  });
+
+  it("uses DATABASE_POOL_MAX when it is set", () => {
+    expect(effectiveDatabasePoolMax(resolveDatabaseClientOptions(databaseClientOptionsFromEnv({
+      DATABASE_POOL_MAX: "25",
+    })))).toBe(25);
   });
 
   it("keeps every explicit value, including an idle timeout of 0", () => {

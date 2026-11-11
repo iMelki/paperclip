@@ -259,7 +259,9 @@ test("an empty server shard exits non-zero unless it is explicitly allowed", () 
     const plan = dryRunJson(args);
     assert.equal(plan[entry.selectedKey].length, 0, `${entry.label} fixture shard must select zero files`);
 
-    const blocked = runScript(args);
+    // Clear the opt-out so an ambient PAPERCLIP_ALLOW_EMPTY_SERVER_SHARD=1 in the
+    // caller's shell or CI cannot turn the must-fail case into a pass.
+    const blocked = runScript(args, { PAPERCLIP_ALLOW_EMPTY_SERVER_SHARD: "" });
     assert.notEqual(blocked.status, 0, `${entry.label} empty shard must fail: ${blocked.stderr}`);
     assert.match(blocked.stderr, /selected 0 test files/);
 

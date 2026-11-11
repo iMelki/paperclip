@@ -81,6 +81,11 @@ export interface AdapterExecutionResult {
   errorCode?: string | null;
   errorFamily?: AdapterExecutionErrorFamily | null;
   retryNotBefore?: string | null;
+  /**
+   * ISO-8601 provider reset time for an ACPX quota failure (`acpx_provider_quota`).
+   * Null when that failure has no parseable reset clock. Absent on other results.
+   */
+  quotaResetAt?: string | null;
   errorMeta?: Record<string, unknown>;
   usage?: UsageSummary;
   /**

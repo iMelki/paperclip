@@ -124,7 +124,7 @@ Core fields:
 - env (object, optional): KEY=VALUE environment variables
 
 Operational fields:
-- timeoutSec (number, optional): run timeout in seconds
+- timeoutSec (number, optional): run timeout in seconds. Default 14400. Missing, 0, and negative values use that default.
 - graceSec (number, optional): SIGTERM grace period in seconds
 
 Notes:

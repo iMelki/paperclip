@@ -4,7 +4,7 @@ import fs from "node:fs/promises";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   resetRuntimeServicesForTests,
   startRuntimeServicesForWorkspaceControl,
@@ -89,6 +89,92 @@ describe("local service supervision", () => {
       registryRecord = null;
     } finally {
       if (registryRecord) await terminateLocalService(registryRecord).catch(() => undefined);
+      if (previousPaperclipHome === undefined) delete process.env.PAPERCLIP_HOME;
+      else process.env.PAPERCLIP_HOME = previousPaperclipHome;
+      if (previousInstanceId === undefined) delete process.env.PAPERCLIP_INSTANCE_ID;
+      else process.env.PAPERCLIP_INSTANCE_ID = previousInstanceId;
+      await fs.rm(paperclipHome, { recursive: true, force: true });
+      await fs.rm(workspaceRoot, { recursive: true, force: true });
+    }
+  }, 15_000);
+
+  it("handles a failed background registry touch when a shared service is reused", async () => {
+    const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-service-touch-"));
+    const paperclipHome = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-service-touch-home-"));
+    const previousPaperclipHome = process.env.PAPERCLIP_HOME;
+    const previousInstanceId = process.env.PAPERCLIP_INSTANCE_ID;
+    process.env.PAPERCLIP_HOME = paperclipHome;
+    process.env.PAPERCLIP_INSTANCE_ID = `service-touch-${randomUUID()}`;
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => {
+      unhandled.push(reason);
+    };
+    process.on("unhandledRejection", onUnhandled);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const control = {
+      actor: { id: null, name: "Board", companyId: randomUUID() },
+      issue: null,
+      workspace: {
+        baseCwd: workspaceRoot,
+        source: "agent_home" as const,
+        projectId: null,
+        workspaceId: null,
+        repoUrl: null,
+        repoRef: null,
+        strategy: "project_primary" as const,
+        cwd: workspaceRoot,
+        branchName: null,
+        worktreePath: null,
+        warnings: [],
+        created: false,
+      },
+      config: {
+        workspaceRuntime: {
+          services: [{
+            name: "web",
+            command: "node -e \"require('node:http').createServer((req,res)=>res.end('ok')).listen(Number(process.env.PORT), '127.0.0.1')\"",
+            port: { type: "auto" },
+            readiness: {
+              type: "http",
+              urlTemplate: "http://127.0.0.1:{{port}}",
+              timeoutSec: 10,
+              intervalMs: 100,
+            },
+            lifecycle: "shared",
+            reuseScope: "agent",
+            stopPolicy: { type: "manual" },
+          }],
+        },
+      },
+      adapterEnv: {},
+    };
+
+    let rename: ReturnType<typeof vi.spyOn> | null = null;
+    try {
+      const [started] = await startRuntimeServicesForWorkspaceControl(control);
+      expect(started?.reused).toBe(false);
+
+      // Simulate the instance root disappearing while the detached touch is
+      // between its temp-file write and the rename (the CI teardown race).
+      rename = vi.spyOn(fs, "rename").mockRejectedValue(
+        Object.assign(new Error("ENOENT: no such file or directory, rename"), { code: "ENOENT" }),
+      );
+      const [reused] = await startRuntimeServicesForWorkspaceControl(control);
+      expect(reused).toMatchObject({ id: started!.id, reused: true });
+
+      await vi.waitFor(() => expect(rename).toHaveBeenCalled());
+      await vi.waitFor(() => expect(warn).toHaveBeenCalledWith(
+        expect.stringContaining(`registry touch failed for runtime service ${started!.id}`),
+      ));
+      // Let Node's unhandled-rejection detection run past the rejected touch.
+      await new Promise((resolve) => setImmediate(resolve));
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(unhandled).toEqual([]);
+    } finally {
+      rename?.mockRestore();
+      warn.mockRestore();
+      process.off("unhandledRejection", onUnhandled);
+      await resetRuntimeServicesForTests({ terminateProcesses: true });
       if (previousPaperclipHome === undefined) delete process.env.PAPERCLIP_HOME;
       else process.env.PAPERCLIP_HOME = previousPaperclipHome;
       if (previousInstanceId === undefined) delete process.env.PAPERCLIP_INSTANCE_ID;

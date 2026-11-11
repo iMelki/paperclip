@@ -602,6 +602,55 @@ describeEmbeddedPostgres("plugin database namespaces", () => {
     expect(migration?.status).toBe("failed");
   });
 
+  it("does not overwrite a migration another attempt applied while this one was failing", async () => {
+    const pluginManifest = manifest("paperclip.escape");
+    const packageRoot = await createPluginPackage(
+      pluginManifest,
+      "CREATE TABLE public.plugin_escape (id uuid PRIMARY KEY);",
+    );
+    const pluginId = await installPluginRecord(pluginManifest);
+    let injected = false;
+    // A concurrent attempt commits the same migration right after this one
+    // rolls back (which releases the advisory lock) and before its failure write.
+    const racingDb = new Proxy(db, {
+      get(target, prop) {
+        const value = Reflect.get(target, prop);
+        if (prop !== "transaction") return typeof value === "function" ? value.bind(target) : value;
+        return async (...args: unknown[]) => {
+          try {
+            return await (value as (...a: unknown[]) => Promise<unknown>).apply(target, args);
+          } catch (error) {
+            if (!injected) {
+              injected = true;
+              await target.insert(pluginMigrations).values({
+                pluginId,
+                pluginKey: pluginManifest.id,
+                namespaceName: derivePluginDatabaseNamespace(pluginManifest.id),
+                migrationKey: "001_init.sql",
+                checksum: "concurrent-attempt",
+                pluginVersion: pluginManifest.version,
+                status: "applied",
+                appliedAt: new Date(),
+              });
+            }
+            throw error;
+          }
+        };
+      },
+    }) as typeof db;
+
+    await expect(
+      pluginDatabaseService(racingDb).applyMigrations(pluginId, pluginManifest, packageRoot),
+    ).rejects.toThrow(/public/i);
+
+    const [migration] = await db
+      .select()
+      .from(pluginMigrations)
+      .where(eq(pluginMigrations.pluginId, pluginId));
+    expect(migration?.status).toBe("applied");
+    expect(migration?.checksum).toBe("concurrent-attempt");
+  });
+
   it("rolls back plugin install when migration validation fails", async () => {
     const pluginManifest = manifest("paperclip.escape");
     const namespace = derivePluginDatabaseNamespace(pluginManifest.id);

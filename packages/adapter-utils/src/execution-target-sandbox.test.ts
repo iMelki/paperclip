@@ -1663,8 +1663,10 @@ describe("sandbox adapter execution targets", () => {
         knownHosts: "host key",
         strictHostKeyChecking: true,
       },
-    }, 0)).toBe(0);
-    expect(resolveAdapterExecutionTargetTimeoutSec({ kind: "local" }, 0)).toBe(0);
+    }, 0)).toBe(DEFAULT_REMOTE_SANDBOX_ADAPTER_TIMEOUT_SEC);
+    expect(resolveAdapterExecutionTargetTimeoutSec({ kind: "local" }, 0)).toBe(
+      DEFAULT_REMOTE_SANDBOX_ADAPTER_TIMEOUT_SEC,
+    );
   });
 
   it("reports which knob produced the resolved timeout", () => {
@@ -1684,8 +1686,8 @@ describe("sandbox adapter execution targets", () => {
       source: "configured",
     });
     expect(resolveAdapterExecutionTargetTimeout({ kind: "local" }, 0)).toEqual({
-      timeoutSec: 0,
-      source: "unlimited",
+      timeoutSec: DEFAULT_REMOTE_SANDBOX_ADAPTER_TIMEOUT_SEC,
+      source: "adapter_default",
     });
     // Fractional (sub-second) configured timeouts are preserved rather than
     // floored to 0, which would silently mean "no timeout".
@@ -1699,7 +1701,7 @@ describe("sandbox adapter execution targets", () => {
     });
   });
 
-  it("treats a negative timeoutSec as the explicit no-timeout opt-out, even on sandbox targets", () => {
+  it("treats a negative or missing timeoutSec as the default, including on sandbox targets", () => {
     const sandboxTarget: AdapterSandboxExecutionTarget = {
       kind: "remote",
       transport: "sandbox",
@@ -1708,31 +1710,54 @@ describe("sandbox adapter execution targets", () => {
     };
 
     expect(resolveAdapterExecutionTargetTimeout(sandboxTarget, -1)).toEqual({
-      timeoutSec: 0,
-      source: "configured",
+      timeoutSec: DEFAULT_REMOTE_SANDBOX_ADAPTER_TIMEOUT_SEC,
+      source: "sandbox_default",
     });
     expect(resolveAdapterExecutionTargetTimeout({ kind: "local" }, -1)).toEqual({
-      timeoutSec: 0,
-      source: "configured",
+      timeoutSec: DEFAULT_REMOTE_SANDBOX_ADAPTER_TIMEOUT_SEC,
+      source: "adapter_default",
     });
-    expect(resolveAdapterExecutionTargetTimeoutSec(sandboxTarget, -1)).toBe(0);
+    expect(resolveAdapterExecutionTargetTimeoutSec(sandboxTarget, -1)).toBe(
+      DEFAULT_REMOTE_SANDBOX_ADAPTER_TIMEOUT_SEC,
+    );
 
-    // Explicit zero intentionally does NOT opt out: the adapter config UI
-    // persists the schema default of 0 for untouched fields, so a stored
-    // timeoutSec=0 cannot be read as operator intent. It keeps the sandbox
-    // backstop; the documented opt-out is a negative value.
+    // The adapter config UI persists 0 for untouched fields. Zero is not an
+    // unbounded run. It resolves to the same default as a missing value.
     expect(resolveAdapterExecutionTargetTimeout(sandboxTarget, 0)).toEqual({
       timeoutSec: DEFAULT_REMOTE_SANDBOX_ADAPTER_TIMEOUT_SEC,
       source: "sandbox_default",
     });
-    // Unset behaves like zero.
     expect(resolveAdapterExecutionTargetTimeout(sandboxTarget, undefined)).toEqual({
       timeoutSec: DEFAULT_REMOTE_SANDBOX_ADAPTER_TIMEOUT_SEC,
       source: "sandbox_default",
     });
     expect(resolveAdapterExecutionTargetTimeout({ kind: "local" }, undefined)).toEqual({
-      timeoutSec: 0,
-      source: "unlimited",
+      timeoutSec: DEFAULT_REMOTE_SANDBOX_ADAPTER_TIMEOUT_SEC,
+      source: "adapter_default",
+    });
+    expect(resolveAdapterExecutionTargetTimeout(
+      { kind: "local" },
+      0,
+      { adapterDefaultSec: 1800, env: {} },
+    )).toEqual({
+      timeoutSec: 1800,
+      source: "adapter_default",
+    });
+    expect(resolveAdapterExecutionTargetTimeout(
+      sandboxTarget,
+      -1,
+      { adapterDefaultSec: 1800, env: { PAPERCLIP_ADAPTER_TIMEOUT_SEC: "90" } },
+    )).toEqual({
+      timeoutSec: 90,
+      source: "env",
+    });
+    expect(resolveAdapterExecutionTargetTimeout(
+      { kind: "local" },
+      30,
+      { adapterDefaultSec: 1800, env: { PAPERCLIP_ADAPTER_TIMEOUT_SEC: "90" } },
+    )).toEqual({
+      timeoutSec: 30,
+      source: "configured",
     });
   });
 
@@ -1769,15 +1794,19 @@ describe("sandbox adapter execution targets", () => {
       "Adapter execution timeout: timeoutSec=900 (configured via adapterConfig.timeoutSec; set adapterConfig.timeoutSec to override).",
     );
     expect(
-      formatAdapterExecutionTimeoutStartLogLine({ timeoutSec: 0, source: "unlimited" }),
+      formatAdapterExecutionTimeoutStartLogLine({ timeoutSec: 14400, source: "adapter_default" }),
     ).toBe(
-      "Adapter execution timeout: none (no adapter wall-clock timeout for this target; set adapterConfig.timeoutSec to add one).",
+      "Adapter execution timeout: timeoutSec=14400 (adapter default; set adapterConfig.timeoutSec to override).",
     );
-    // Negative opt-out resolves to { timeoutSec: 0, source: "configured" }.
+    expect(
+      formatAdapterExecutionTimeoutStartLogLine({ timeoutSec: 600, source: "env" }),
+    ).toBe(
+      "Adapter execution timeout: timeoutSec=600 (configured via PAPERCLIP_ADAPTER_TIMEOUT_SEC; set adapterConfig.timeoutSec to override).",
+    );
     expect(
       formatAdapterExecutionTimeoutStartLogLine({ timeoutSec: 0, source: "configured" }),
     ).toBe(
-      "Adapter execution timeout: none (explicitly disabled via adapterConfig.timeoutSec; set it to a positive value to add one).",
+      "Adapter execution timeout: invalid non-positive timeoutSec=0. A positive timeout is required.",
     );
   });
 

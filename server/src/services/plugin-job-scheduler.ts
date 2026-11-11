@@ -22,10 +22,7 @@
  *
  * 4. **Job run recording** — Every execution creates a `plugin_job_runs` row:
  *    `queued` → `running` → `succeeded` | `failed`. Duration and error are
- *    captured. A job declared `scope: "company"` gets one row per configured
- *    company (with that `company_id`), each with its own run id and dispatched
- *    sequentially with that company's invocation scope. Instance-scoped jobs
- *    (the default) keep one row per trigger.
+ *    captured.
  *
  * 5. **Lifecycle integration** — The scheduler exposes `registerPlugin()` and
  *    `unregisterPlugin()` so the host lifecycle manager can wire up job
@@ -40,7 +37,7 @@
 import { and, eq, lte, or } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { pluginJobs, pluginJobRuns } from "@paperclipai/db";
-import type { PluginJobRunTrigger } from "@paperclipai/shared";
+import { PLUGIN_RPC_ERROR_CODES } from "@paperclipai/plugin-sdk";
 import type { PluginJobStore } from "./plugin-job-store.js";
 import {
   getTimedOutWorkerSettled,
@@ -48,6 +45,10 @@ import {
 } from "./plugin-worker-manager.js";
 import { parseCron, nextCronTick, validateCron } from "./cron.js";
 import { logger } from "../middleware/logger.js";
+import { selectPluginJobCompanies, type PluginJobDispatchPlan } from "./plugin-job-scope.js";
+import { dispatchPluginJobBatch, type ScopedPluginJobRun } from "./plugin-job-batch.js";
+import { isNativeGitHubBoardJobKey,
+  type GitHubProjectBoardSchedulerBridge } from "./plugin-github-project-board-scheduler-bridge.js";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -88,11 +89,10 @@ export interface PluginJobSchedulerOptions {
    * remaining companies of that trigger (default: `jobTimeoutMs`).
    */
   timedOutRunGraceMs?: number;
-  /**
-   * Re-read the plugin's stored company configs and install them as the
-   * worker's authorized company set. Used when that set is empty at run time.
-   */
-  refreshAuthorizedCompanies?: (pluginId: string) => Promise<readonly string[]>;
+  /** Host-persisted manifest/config only. Omitted retains legacy instance dispatch. */
+  resolveJobDispatch?: (pluginId: string, jobKey: string) => Promise<PluginJobDispatchPlan>;
+  /** Reserved host-only board jobs; absent handler NEVER authorizes worker fallback. */
+  nativeGitHubProjectBoard?: GitHubProjectBoardSchedulerBridge;
 }
 
 /** Company-scoped job has no host-authorized company and must not run unscoped. */
@@ -101,9 +101,9 @@ export class PluginJobMissingAuthorizedCompaniesError extends Error {
 
   constructor(pluginId: string, jobKey: string) {
     const remediation =
-      "Open Company settings, then Instance, then Plugins. Open this plugin and choose Save Configuration for the company that should run it.";
+      "Save the plugin configuration for the intended company. Native board jobs also require their separate explicit company grant; configuration alone does not grant import authority.";
     super(
-      `Plugin "${pluginId}" job "${jobKey}" is missing its authorized companies. ${remediation}`,
+      `Plugin "${pluginId}" job "${jobKey}" is missing its authorized companies. Company job has no host-configured companies; nothing dispatched. ${remediation}`,
     );
     this.name = "PluginJobMissingAuthorizedCompaniesError";
     this.remediation = remediation;
@@ -123,27 +123,20 @@ export interface TriggerJobOptions {
    * for companies that have not configured the plugin.
    */
   companyId?: string | null;
+  /** Retry the company of this prior failed or cancelled run of the same job. */
+  retryRunId?: string;
 }
 
 /**
  * Result of a manual job trigger.
  */
 export interface TriggerJobResult {
-  /** The first created run ID (the only one for an instance-scoped job). */
+  /** The created run ID. */
   runId: string;
   /** The job ID that was triggered. */
   jobId: string;
-  /**
-   * Every created run, in execution order. A company-scoped job gets one run
-   * per configured company, each with its own run ID and company ID.
-   */
-  runs: Array<{ runId: string; companyId: string | null }>;
-}
-
-/** A run record created for one target of a job trigger. */
-interface PlannedRun {
-  runId: string;
-  companyId: string | null;
+  /** Per-company executions; runId remains the first run for older callers. */
+  runs?: Array<{ runId: string; companyId: string | null }>;
 }
 
 /**
@@ -250,7 +243,7 @@ export interface PluginJobScheduler {
   triggerJob(
     jobId: string,
     trigger?: "manual" | "retry",
-    options?: TriggerJobOptions,
+    retryRunIdOrOptions?: string | TriggerJobOptions,
   ): Promise<TriggerJobResult>;
 
   /**
@@ -312,9 +305,10 @@ export function createPluginJobScheduler(
     tickIntervalMs = DEFAULT_TICK_INTERVAL_MS,
     jobTimeoutMs = DEFAULT_JOB_TIMEOUT_MS,
     maxConcurrentJobs = DEFAULT_MAX_CONCURRENT_JOBS,
+    resolveJobDispatch = async () => ({ scope: "instance" as const, companyIds: [] }),
+    nativeGitHubProjectBoard,
   } = options;
-    const timedOutRunGraceMs = options.timedOutRunGraceMs ?? jobTimeoutMs;
-    const refreshAuthorizedCompanies = options.refreshAuthorizedCompanies;
+  const timedOutRunGraceMs = options.timedOutRunGraceMs ?? jobTimeoutMs;
 
   const log = logger.child({ service: "plugin-job-scheduler" });
 
@@ -330,6 +324,12 @@ export function createPluginJobScheduler(
 
   /** Set of job IDs currently being executed (for overlap prevention). */
   const activeJobs = new Set<string>();
+  /** A new registration cannot revive the previous owner's in-flight batch. */
+  const jobOwners = new Map<string, symbol>();
+  const jobPlugins = new Map<string, string>();
+  const unregisteredPlugins = new Set<string>();
+  const unregisterOwners = new Map<string, symbol>();
+  const pluginRevocations = new Map<string, number>();
 
   /** Total number of ticks since start. */
   let tickCount = 0;
@@ -384,6 +384,7 @@ export function createPluginJobScheduler(
       const dispatches: Promise<void>[] = [];
 
       for (const job of dueJobs) {
+        if (unregisteredPlugins.has(job.pluginId)) continue;
         // Concurrency limit
         if (activeJobs.size >= maxConcurrentJobs) {
           log.warn(
@@ -403,10 +404,21 @@ export function createPluginJobScheduler(
         }
 
         // Check if the worker is available
-        if (!workerManager.isRunning(job.pluginId)) {
+        if (!isNativeGitHubBoardJobKey(job.jobKey) && !workerManager.isRunning(job.pluginId)) {
           log.debug(
             { jobId: job.id, pluginId: job.pluginId },
             "skipping job — worker not running",
+          );
+          continue;
+        }
+        // A native board job still needs the host-authorized company set, which
+        // lives on the registered worker handle. Without a handle that set is
+        // unknown, not empty: leave the job due (no dispatch, so the schedule
+        // pointer does not advance) and run it once the worker is registered.
+        if (isNativeGitHubBoardJobKey(job.jobKey) && !workerManager.getWorker(job.pluginId)) {
+          log.debug(
+            { jobId: job.id, pluginId: job.pluginId },
+            "deferring native board job — worker not registered, authorized companies unknown",
           );
           continue;
         }
@@ -437,63 +449,111 @@ export function createPluginJobScheduler(
   }
 
   // -----------------------------------------------------------------------
-  // Core: run targets (instance run, or one run per company)
+  // Core: dispatch a single job
   // -----------------------------------------------------------------------
 
+  function claimJob(jobId: string, pluginId: string): symbol {
+    if (unregisteredPlugins.has(pluginId)) throw new Error("Plugin jobs are unregistered");
+    if (activeJobs.has(jobId)) throw new Error("Job is already running");
+    const owner = Symbol(jobId);
+    activeJobs.add(jobId);
+    jobOwners.set(jobId, owner);
+    jobPlugins.set(jobId, pluginId);
+    return owner;
+  }
+
+  function releaseJob(jobId: string, owner: symbol): void {
+    if (jobOwners.get(jobId) !== owner) return;
+    jobOwners.delete(jobId);
+    jobPlugins.delete(jobId);
+    activeJobs.delete(jobId);
+  }
+
   /**
-   * Resolve the run targets for one trigger of a job.
-   *
-   * - Instance-scoped jobs (the default, including jobs that declare no
-   *   scope) run once: `[null]`.
-   * - Company-scoped jobs (`scope: "company"` in the manifest) run once per
-   *   host-authorized configured company, in sorted order. With no configured
-   *   company they do not run. An empty set is refreshed from stored plugin
-   *   config once, then the job waits out a long backoff.
-   * - `onlyCompanyId` restricts a company-scoped job to one configured
-   *   company (per-company manual trigger or retry).
+   * Plan for a worker-run (non-native) job. `scope: "company"` and `dispatchScope: "company"` are
+   * the same strict contract: the job runs once per host-configured company, nothing is dispatched
+   * when no company is configured, and a retry needs the original company.
    */
-  async function resolveRunTargets(
-    job: typeof pluginJobs.$inferSelect,
-    onlyCompanyId?: string | null,
-  ): Promise<Array<string | null>> {
-    const scope = await jobStore.getJobDeclarationScope(job.pluginId, job.jobKey);
-    if (scope !== "company") {
-      if (onlyCompanyId) {
-        throw new Error(
-          `Job "${job.jobKey}" is instance-scoped and cannot be triggered for one company`,
-        );
-      }
-      return [null];
-    }
-    let companyIds = [...workerManager.getProactiveCompanyScopes(job.pluginId)].sort();
-    if (companyIds.length === 0 && refreshAuthorizedCompanies) {
-      try {
-        const refreshed = await refreshAuthorizedCompanies(job.pluginId);
-        workerManager.setProactiveCompanyScopes(job.pluginId, refreshed);
-        companyIds = [...workerManager.getProactiveCompanyScopes(job.pluginId)].sort();
-      } catch (err) {
-        log.error(
-          {
-            pluginId: job.pluginId,
-            jobKey: job.jobKey,
-            err: err instanceof Error ? err.message : String(err),
-          },
-          "failed to refresh plugin authorized companies",
-        );
-      }
-    }
+  async function resolveWorkerJobDispatch(job: typeof pluginJobs.$inferSelect): Promise<PluginJobDispatchPlan> {
+    const strict = await resolveJobDispatch(job.pluginId, job.jobKey);
+    if (strict.scope === "company") return strict;
+    const declared = await jobStore.getJobDeclarationScope(job.pluginId, job.jobKey);
+    if (declared !== "company") return strict;
+    const companyIds = [...workerManager.getProactiveCompanyScopes(job.pluginId)].sort();
+    if (companyIds.length === 0) throw new Error("Company job has no host-configured companies; nothing dispatched");
+    return { scope: "company", companyIds };
+  }
+
+  async function resolveDispatchPlan(job: typeof pluginJobs.$inferSelect): Promise<PluginJobDispatchPlan> {
+    if (!isNativeGitHubBoardJobKey(job.jobKey)) return resolveWorkerJobDispatch(job);
+    if (!nativeGitHubProjectBoard) throw new Error("Native GitHub board scheduler handler is unavailable; worker fallback refused");
+    const plan = await nativeGitHubProjectBoard.resolveDispatch(job.pluginId, job.jobKey);
+    // Grants are not a second authorization source. A company runs only when
+    // it is also in the host-authorized set installed by setProactiveCompanyScopes.
+    // An empty intersection does not fall back to an unscoped run.
+    const authorized = new Set(workerManager.getProactiveCompanyScopes(job.pluginId));
+    const companyIds = plan.companyIds.filter((companyId) => authorized.has(companyId));
     if (companyIds.length === 0) {
+      throw new Error(
+        `Plugin "${job.pluginId}" job "${job.jobKey}" has no company that is both granted and authorized`,
+      );
+    }
+    return { ...plan, companyIds };
+  }
+
+  /** Errors thrown while inserting run records: the store is suspect, so no diagnostic row is attempted. */
+  const runRecordFailures = new WeakSet<object>();
+
+  /** Stored configuration cannot reinstall an absent runtime authorization. */
+  async function requireCompanyScopes(job: typeof pluginJobs.$inferSelect): Promise<void> {
+    const companyScoped = isNativeGitHubBoardJobKey(job.jobKey)
+      || await jobStore.getJobDeclarationScope(job.pluginId, job.jobKey) === "company";
+    if (companyScoped && [...workerManager.getProactiveCompanyScopes(job.pluginId)].length === 0) {
       throw new PluginJobMissingAuthorizedCompaniesError(job.pluginId, job.jobKey);
     }
-    if (onlyCompanyId) {
-      if (!companyIds.includes(onlyCompanyId)) {
-        throw new Error(
-          `Company "${onlyCompanyId}" has not configured plugin "${job.pluginId}" (job "${job.jobKey}")`,
-        );
+  }
+
+  async function prepareRuns(
+    job: typeof pluginJobs.$inferSelect,
+    trigger: "schedule" | "manual" | "retry",
+    owner: symbol,
+    companyId?: string,
+  ): Promise<ScopedPluginJobRun[]> {
+    await requireCompanyScopes(job);
+    const plan = await resolveDispatchPlan(job);
+    const companies = selectPluginJobCompanies(plan, trigger, companyId);
+    const runs: ScopedPluginJobRun[] = [];
+    try {
+      for (const company of companies) {
+        if (unregisteredPlugins.has(job.pluginId) || jobOwners.get(job.id) !== owner) {
+          throw new Error("Job was unregistered during preparation");
+        }
+        let run: Awaited<ReturnType<typeof jobStore.createRun>>;
+        try {
+          run = await jobStore.createRun({ jobId: job.id, pluginId: job.pluginId, trigger, companyId: company });
+        } catch (insertError) {
+          if (typeof insertError === "object" && insertError !== null) runRecordFailures.add(insertError);
+          throw insertError;
+        }
+        runs.push({ id: run.id, companyId: company });
       }
-      return [onlyCompanyId];
+      if (unregisteredPlugins.has(job.pluginId) || jobOwners.get(job.id) !== owner) {
+        throw new Error("Job was unregistered during preparation");
+      }
+      return runs;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      for (const run of runs) {
+        try {
+          await jobStore.completeRun(run.id, { status: "failed", durationMs: 0,
+            error: `Not started: creating the run records for this trigger failed: ${message}` });
+        } catch (completeErr) {
+          log.error({ runId: run.id, err: completeErr instanceof Error ? completeErr.message : String(completeErr) },
+            "failed to close an undispatched job run");
+        }
+      }
+      throw error;
     }
-    return companyIds;
   }
 
   /** True if `promise` settles within `ms`; false otherwise. */
@@ -509,190 +569,56 @@ export function createPluginJobScheduler(
     }
   }
 
-  /**
-   * Record a terminal status on runs that will never be dispatched, so no
-   * run row is left `queued` forever. Errors are logged, not thrown.
-   */
-  async function closeUndispatchedRuns(
-    runs: PlannedRun[],
-    status: "failed" | "cancelled",
-    error: string,
+  async function waitForTimedOutHandler(
+    error: unknown,
+    run: ScopedPluginJobRun,
+    graceMs: number,
+  ): Promise<string | null | undefined> {
+    const workerSettled = getTimedOutWorkerSettled(error);
+    if (!workerSettled) return undefined;
+    if (await settlesWithin(workerSettled, graceMs)) return null;
+    return `Not started: the timed-out run ${run.id}` + (run.companyId ? ` for company "${run.companyId}"` : "") +
+      ` was still running in the worker ${graceMs}ms after its timeout`;
+  }
+
+  async function runPreparedBatch(
+    job: typeof pluginJobs.$inferSelect,
+    runs: ScopedPluginJobRun[],
+    trigger: "schedule" | "manual" | "retry",
+    owner: symbol,
   ): Promise<void> {
-    for (const { runId, companyId } of runs) {
-      try {
-        await jobStore.completeRun(runId, { status, error, durationMs: 0 });
-      } catch (completeErr) {
-        log.error(
-          {
-            runId,
-            companyId,
-            err: completeErr instanceof Error ? completeErr.message : String(completeErr),
-          },
-          "failed to close an undispatched job run",
-        );
-      }
-    }
+    const native = isNativeGitHubBoardJobKey(job.jobKey);
+    const isCurrent = () => !unregisteredPlugins.has(job.pluginId) && jobOwners.get(job.id) === owner;
+    if (native && trigger !== "schedule") throw new Error("Native GitHub board jobs accept scheduled runs only");
+    await dispatchPluginJobBatch({ jobKey: job.jobKey, trigger, timeoutMs: jobTimeoutMs,
+      scheduledAt: (trigger === "schedule" ? job.nextRunAt ?? new Date() : new Date()).toISOString() }, runs, {
+      isCurrent,
+      isWorkerRunning: () => native || workerManager.isRunning(job.pluginId),
+      isCompanyAuthorized: async (companyId) => {
+        const plan = await resolveDispatchPlan(job);
+        return plan.scope === "company" && plan.companyIds.includes(companyId);
+      },
+      markRunning: (runId) => jobStore.markRunning(runId),
+      completeRun: (runId, outcome) => jobStore.completeRun(runId, outcome),
+      call: (params, timeoutMs) => {
+        if (!native) return workerManager.call(job.pluginId, "runJob", params, timeoutMs);
+        if (!nativeGitHubProjectBoard) throw new Error("Native board handler disappeared; worker fallback refused");
+        const companyId = params.companyId;
+        const isCompanyCurrent = () => isCurrent()
+          && typeof companyId === "string"
+          && new Set(workerManager.getProactiveCompanyScopes(job.pluginId)).has(companyId);
+        return nativeGitHubProjectBoard.run(job, params, timeoutMs, isCompanyCurrent);
+      },
+      isTimeout: (error) => typeof error === "object" && error !== null && "code" in error
+        && error.code === PLUGIN_RPC_ERROR_CODES.TIMEOUT,
+      // A timed-out worker handler may still be running: the next company starts only once it has settled.
+      awaitTimedOutHandler: (error, run) => waitForTimedOutHandler(error, run, timedOutRunGraceMs),
+    });
   }
 
   /**
-   * Create one queued run record per target, each with its own run id. If a
-   * later insert fails, the runs already created are closed as `failed`
-   * before the error is rethrown, so none stays `queued`.
-   */
-  async function createRuns(
-    job: typeof pluginJobs.$inferSelect,
-    trigger: PluginJobRunTrigger,
-    targets: Array<string | null>,
-  ): Promise<PlannedRun[]> {
-    const planned: PlannedRun[] = [];
-    try {
-      for (const companyId of targets) {
-        const run = await jobStore.createRun({
-          jobId: job.id,
-          pluginId: job.pluginId,
-          trigger,
-          companyId,
-        });
-        planned.push({ runId: run.id, companyId });
-      }
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      await closeUndispatchedRuns(
-        planned,
-        "failed",
-        `Not started: creating the run records for this trigger failed: ${message}`,
-      );
-      throw err;
-    }
-    return planned;
-  }
-
-  /**
-   * Execute planned runs sequentially. Each run is marked running, dispatched
-   * with its own run id (and, for a company run, its host-chosen company id),
-   * and completed. A failure in one company's run does not stop the others.
-   *
-   * Runs never overlap. When a run times out the worker handler may still be
-   * running, so the next run (if any) starts only after that handler has finished
-   * (bounded by `timedOutRunGraceMs`). If it has not finished by then, the
-   * remaining runs of this trigger are recorded as `cancelled` instead of
-   * being dispatched next to it.
-   *
-   * @returns the number of runs that did not succeed
-   */
-  async function executeRuns(
-    job: typeof pluginJobs.$inferSelect,
-    trigger: PluginJobRunTrigger,
-    scheduledAt: string,
-    planned: PlannedRun[],
-  ): Promise<number> {
-    const { id: jobId, pluginId, jobKey } = job;
-    let failures = 0;
-    let blockedReason: string | null = null;
-    let nextIndex = 0;
-
-    try {
-      for (const [index, { runId, companyId }] of planned.entries()) {
-        nextIndex = index + 1;
-        const isLastRun = index === planned.length - 1;
-        const runLog = log.child({ jobId, pluginId, jobKey, runId, trigger, companyId });
-        if (blockedReason) {
-          failures++;
-          runLog.warn({ reason: blockedReason }, "job run cancelled");
-          try {
-            await jobStore.completeRun(runId, {
-              status: "cancelled",
-              error: blockedReason,
-              durationMs: 0,
-            });
-          } catch (completeErr) {
-            runLog.error(
-              {
-                err: completeErr instanceof Error ? completeErr.message : String(completeErr),
-              },
-              "failed to record cancelled job run",
-            );
-          }
-          continue;
-        }
-        const startedAt = Date.now();
-        try {
-          await jobStore.markRunning(runId);
-          runLog.info("dispatching job run");
-
-          await workerManager.call(
-            pluginId,
-            "runJob",
-            {
-              job: {
-                jobKey,
-                runId,
-                trigger,
-                scheduledAt,
-                ...(companyId ? { companyId } : {}),
-              },
-              ...(companyId ? { companyId } : {}),
-            },
-            jobTimeoutMs,
-          );
-
-          const durationMs = Date.now() - startedAt;
-          await jobStore.completeRun(runId, { status: "succeeded", durationMs });
-          runLog.info({ durationMs }, "job run completed successfully");
-        } catch (err) {
-          failures++;
-          const durationMs = Date.now() - startedAt;
-          const errorMessage = err instanceof Error ? err.message : String(err);
-          runLog.error({ durationMs, err: errorMessage }, "job run failed");
-          try {
-            await jobStore.completeRun(runId, {
-              status: "failed",
-              error: errorMessage,
-              durationMs,
-            });
-          } catch (completeErr) {
-            runLog.error(
-              {
-                err: completeErr instanceof Error ? completeErr.message : String(completeErr),
-              },
-              "failed to record job run failure",
-            );
-          }
-
-          // Only a following run could overlap the timed-out handler; the last
-          // (or only) run returns as before.
-          const workerSettled = isLastRun ? null : getTimedOutWorkerSettled(err);
-          if (workerSettled) {
-            const finished = await settlesWithin(workerSettled, timedOutRunGraceMs);
-            if (!finished) {
-              blockedReason =
-                `Not started: the timed-out run ${runId}` +
-                (companyId ? ` for company "${companyId}"` : "") +
-                ` was still running in the worker ${timedOutRunGraceMs}ms after its timeout`;
-            }
-          }
-        }
-      }
-    } catch (err) {
-      // Unexpected: per-run errors are handled above. Close the runs that
-      // were never reached so they do not stay queued, then rethrow.
-      const message = err instanceof Error ? err.message : String(err);
-      const unreached = planned.slice(nextIndex);
-      failures += unreached.length;
-      await closeUndispatchedRuns(unreached, "failed", `Not started: job dispatch failed: ${message}`);
-      throw err;
-    }
-
-    return failures;
-  }
-
-  // -----------------------------------------------------------------------
-  // Core: dispatch a scheduled job
-  // -----------------------------------------------------------------------
-
-  /**
-   * Dispatch one scheduled trigger of a job: create the run record(s), call
-   * the worker, record each result, and advance the schedule pointer.
+   * Dispatch a single job run — create the run record, call the worker,
+   * record the result, and advance the schedule pointer.
    */
   async function dispatchJob(
     job: typeof pluginJobs.$inferSelect,
@@ -700,54 +626,66 @@ export function createPluginJobScheduler(
     const { id: jobId, pluginId, jobKey } = job;
     const jobLog = log.child({ jobId, pluginId, jobKey });
 
-    // Mark as active (overlap prevention)
-    activeJobs.add(jobId);
-    let skipScheduleAdvance = false;
+    const owner = claimJob(jobId, pluginId);
+    let runs: ScopedPluginJobRun[] = [];
+    const startedAt = Date.now();
+    let scheduleDelayed = false;
 
     try {
-      const targets = await resolveRunTargets(job);
-      const planned = await createRuns(job, "schedule", targets);
-      jobLog.info({ runCount: planned.length }, "dispatching scheduled job");
-      await executeRuns(
-        job,
-        "schedule",
-        (job.nextRunAt ?? new Date()).toISOString(),
-        planned,
-      );
+      runs = await prepareRuns(job, "schedule", owner);
+      jobLog.info({ runIds: runs.map((run) => run.id) }, "dispatching scheduled job executions");
+      await runPreparedBatch(job, runs, "schedule", owner);
+      jobLog.info({ durationMs: Date.now() - startedAt }, "scheduled job batch settled; inspect per-company outcomes");
     } catch (err) {
-      if (err instanceof PluginJobMissingAuthorizedCompaniesError) {
-        const nextRunAt = new Date(Date.now() + MISSING_COMPANY_GRANT_BACKOFF_MS);
-        jobLog.error(
-          { nextRunAt: nextRunAt.toISOString(), remediation: err.remediation },
-          err.message,
-        );
+      const durationMs = Date.now() - startedAt;
+      const errorMessage = err instanceof Error ? err.message : String(err);
+
+      jobLog.error(
+        { runIds: runs.map((run) => run.id), durationMs, err: errorMessage },
+        "job execution failed",
+      );
+
+      // A missing host scope gets a bounded backoff, never an unscoped execution.
+      if (err instanceof PluginJobMissingAuthorizedCompaniesError
+        && jobOwners.get(jobId) === owner && !unregisteredPlugins.has(pluginId)) {
         try {
-          await jobStore.updateRunTimestamps(job.id, job.lastRunAt ?? new Date(), nextRunAt);
-          // Only a stored backoff replaces the normal schedule advance. If the
-          // write failed, the normal advance below still moves the pointer so the
-          // job does not retry on every scheduler tick.
-          skipScheduleAdvance = true;
-        } catch (stampErr) {
+          await jobStore.updateRunTimestamps(job.id, job.lastRunAt ?? new Date(),
+            new Date(Date.now() + MISSING_COMPANY_GRANT_BACKOFF_MS));
+          scheduleDelayed = true;
+        } catch {
+          jobLog.error({ jobId }, "failed to delay a job missing authorized companies");
+        }
+      }
+
+      // Record the failure
+      if (jobOwners.get(jobId) === owner) {
+        try {
+          // A setup failure has no tenant execution: retain an instance-level diagnostic only.
+          if (runs.length === 0 && !(typeof err === "object" && err !== null && runRecordFailures.has(err))) {
+            const diagnostic = await jobStore.createRun({ jobId, pluginId, trigger: "schedule" });
+            runs = [{ id: diagnostic.id, companyId: null }];
+          }
+          for (const run of runs) {
+            await jobStore.completeRun(run.id, { status: "failed", error: errorMessage, durationMs });
+          }
+        } catch (completeErr) {
           jobLog.error(
-            { err: stampErr instanceof Error ? stampErr.message : String(stampErr) },
-            "failed to delay a job that is missing its authorized companies",
+            {
+              runIds: runs.map((run) => run.id),
+              err: completeErr instanceof Error ? completeErr.message : String(completeErr),
+            },
+            "failed to record job failure",
           );
         }
-      } else {
-        jobLog.error(
-          { err: err instanceof Error ? err.message : String(err) },
-          "scheduled job dispatch failed",
-        );
       }
     } finally {
       // Remove from active set
-      activeJobs.delete(jobId);
+      const stillOwned = jobOwners.get(jobId) === owner && !unregisteredPlugins.has(pluginId);
+      releaseJob(jobId, owner);
 
-      // Always advance the schedule pointer (even on failure), except when
-      // the job has no authorized company and already has a long backoff.
-      if (skipScheduleAdvance) return;
+      // Advance on success/failure only while this batch still owned the job.
       try {
-        await advanceSchedulePointer(job);
+        if (stillOwned && !scheduleDelayed) await advanceSchedulePointer(job);
       } catch (err) {
         jobLog.error(
           { err: err instanceof Error ? err.message : String(err) },
@@ -761,15 +699,43 @@ export function createPluginJobScheduler(
   // Core: manual trigger
   // -----------------------------------------------------------------------
 
+  async function assertManualJobAvailable(job: typeof pluginJobs.$inferSelect): Promise<void> {
+    const existingRuns = await db.select().from(pluginJobRuns).where(and(
+      eq(pluginJobRuns.jobId, job.id), eq(pluginJobRuns.status, "running"),
+    ));
+    if (existingRuns.length > 0) throw new Error(`Job "${job.jobKey}" already has a running execution`);
+    if (!workerManager.isRunning(job.pluginId)) throw new Error(`Worker for plugin "${job.pluginId}" is not running`);
+  }
+
+  async function retryCompanyId(
+    job: typeof pluginJobs.$inferSelect,
+    trigger: "manual" | "retry",
+    priorRunId?: string,
+  ): Promise<string | undefined> {
+    if (priorRunId === undefined) return undefined;
+    if (trigger !== "retry") throw new Error("A prior run ID is only accepted for retry dispatch");
+    const priorRun = await jobStore.getRunById(priorRunId);
+    if (!priorRun || priorRun.jobId !== job.id || priorRun.pluginId !== job.pluginId
+      || !["failed", "cancelled"].includes(priorRun.status)) {
+      throw new Error("Retry requires a failed or cancelled run of this exact plugin job");
+    }
+    return priorRun.companyId ?? undefined;
+  }
+
   async function triggerJob(
     jobId: string,
     trigger: "manual" | "retry" = "manual",
-    options: TriggerJobOptions = {},
+    retryRunIdOrOptions?: string | TriggerJobOptions,
   ): Promise<TriggerJobResult> {
+    const options: TriggerJobOptions = typeof retryRunIdOrOptions === "string"
+      ? { retryRunId: retryRunIdOrOptions } : retryRunIdOrOptions ?? {};
     const job = await jobStore.getJobById(jobId);
     if (!job) {
       throw new Error(`Job not found: ${jobId}`);
     }
+
+    // Reject before claim/createRun, independently of a missing or disabled native handler.
+    if (isNativeGitHubBoardJobKey(job.jobKey)) throw new Error("Native GitHub board jobs refuse manual and retry triggers");
 
     if (job.status !== "active") {
       throw new Error(
@@ -784,69 +750,63 @@ export function createPluginJobScheduler(
       );
     }
 
-    // Also check DB for running runs (defensive — covers multi-instance)
-    const existingRuns = await db
-      .select()
-      .from(pluginJobRuns)
-      .where(
-        and(
-          eq(pluginJobRuns.jobId, jobId),
-          eq(pluginJobRuns.status, "running"),
-        ),
-      );
-
-    if (existingRuns.length > 0) {
-      throw new Error(
-        `Job "${job.jobKey}" already has a running execution — cannot trigger while in progress`,
-      );
+    // Claim before any further await, including the defensive database check.
+    const owner = claimJob(jobId, job.pluginId);
+    let dispatched = false;
+    try {
+      await assertManualJobAvailable(job);
+      const retryCompany = await retryCompanyId(job, trigger, options.retryRunId);
+      if (retryCompany !== undefined && options.companyId != null && options.companyId !== retryCompany) {
+        throw new Error("Retry company differs from the company of the prior run");
+      }
+      const companyId = retryCompany ?? options.companyId ?? undefined;
+      const runs = await prepareRuns(job, trigger, owner, companyId);
+      // Dispatch in background — don't block the caller.
+      void dispatchManualRun(job, runs, trigger, owner);
+      dispatched = true;
+      return { runId: runs[0]!.id, jobId, runs: runs.map((run) => ({ runId: run.id, companyId: run.companyId })) };
+    } finally {
+      if (!dispatched) releaseJob(jobId, owner);
     }
-
-    // Check worker availability
-    if (!workerManager.isRunning(job.pluginId)) {
-      throw new Error(
-        `Worker for plugin "${job.pluginId}" is not running — cannot trigger job`,
-      );
-    }
-
-    // Create the run(s) and dispatch (non-blocking)
-    const targets = await resolveRunTargets(job, options.companyId ?? null);
-    const planned = await createRuns(job, trigger, targets);
-
-    // Dispatch in background — don't block the caller
-    void dispatchManualRun(job, planned, trigger);
-
-    return {
-      runId: planned[0]!.runId,
-      jobId,
-      runs: planned.map(({ runId, companyId }) => ({ runId, companyId })),
-    };
   }
 
   /**
-   * Dispatch a manually triggered job's planned run(s).
+   * Dispatch a manually triggered job run.
    */
   async function dispatchManualRun(
     job: typeof pluginJobs.$inferSelect,
-    planned: PlannedRun[],
+    runs: ScopedPluginJobRun[],
     trigger: "manual" | "retry",
+    owner: symbol,
   ): Promise<void> {
     const { id: jobId, pluginId, jobKey } = job;
-    const jobLog = log.child({ jobId, pluginId, jobKey, trigger });
+    const jobLog = log.child({ jobId, pluginId, jobKey, runIds: runs.map((run) => run.id), trigger });
+    const startedAt = Date.now();
 
-    activeJobs.add(jobId);
     try {
-      const failures = await executeRuns(job, trigger, new Date().toISOString(), planned);
-      jobLog.info(
-        { runCount: planned.length, failedRunCount: failures },
-        "manual job finished",
-      );
+      await runPreparedBatch(job, runs, trigger, owner);
+      jobLog.info({ durationMs: Date.now() - startedAt }, "manual job batch settled; inspect per-company outcomes");
     } catch (err) {
-      jobLog.error(
-        { err: err instanceof Error ? err.message : String(err) },
-        "manual job dispatch failed",
-      );
+      const durationMs = Date.now() - startedAt;
+      const errorMessage = err instanceof Error ? err.message : String(err);
+      jobLog.error({ durationMs, err: errorMessage }, "manual job failed");
+
+      try {
+        if (jobOwners.get(jobId) === owner) {
+          for (const run of runs) {
+            await jobStore.completeRun(run.id, { status: "failed", error: errorMessage, durationMs });
+          }
+        }
+      } catch (completeErr) {
+        jobLog.error(
+          {
+            err: completeErr instanceof Error ? completeErr.message : String(completeErr),
+          },
+          "failed to record manual job failure",
+        );
+      }
     } finally {
-      activeJobs.delete(jobId);
+      releaseJob(jobId, owner);
     }
   }
 
@@ -926,10 +886,11 @@ export function createPluginJobScheduler(
    * Ensure all active jobs for a plugin have a `nextRunAt` value.
    * Called when a plugin is registered with the scheduler.
    */
-  async function ensureNextRunTimestamps(pluginId: string): Promise<void> {
+  async function ensureNextRunTimestamps(pluginId: string, isCurrent: () => boolean): Promise<void> {
     const jobs = await jobStore.listJobs(pluginId, "active");
 
     for (const job of jobs) {
+      if (!isCurrent()) throw new Error("Plugin was unregistered during registration");
       await ensureNextRunTimestamp(job);
     }
   }
@@ -982,12 +943,30 @@ export function createPluginJobScheduler(
   // -----------------------------------------------------------------------
 
   async function registerPlugin(pluginId: string): Promise<void> {
+    if (unregisterOwners.has(pluginId)) throw new Error("Plugin unregister cleanup is still in progress");
+    const revision = pluginRevocations.get(pluginId) ?? 0;
+    const isCurrent = () => (pluginRevocations.get(pluginId) ?? 0) === revision;
     log.info({ pluginId }, "registering plugin with job scheduler");
-    await ensureNextRunTimestamps(pluginId);
+    await ensureNextRunTimestamps(pluginId, isCurrent);
+    if (!isCurrent() || unregisterOwners.has(pluginId)) throw new Error("Plugin was unregistered during registration");
+    unregisteredPlugins.delete(pluginId);
   }
 
   async function unregisterPlugin(pluginId: string): Promise<void> {
     log.info({ pluginId }, "unregistering plugin from job scheduler");
+    unregisteredPlugins.add(pluginId);
+    pluginRevocations.set(pluginId, (pluginRevocations.get(pluginId) ?? 0) + 1);
+    nativeGitHubProjectBoard?.cancelPlugin(pluginId);
+    const unregisterOwner = Symbol(pluginId);
+    unregisterOwners.set(pluginId, unregisterOwner);
+
+    // Revoke exact current owners synchronously; re-registration cannot revive them.
+    for (const [jobId, ownerPlugin] of jobPlugins) {
+      if (ownerPlugin !== pluginId) continue;
+      jobOwners.delete(jobId);
+      jobPlugins.delete(jobId);
+      activeJobs.delete(jobId);
+    }
 
     // Cancel any in-flight run records for this plugin that are still
     // queued or running. Active jobs in-memory will finish naturally.
@@ -1022,12 +1001,8 @@ export function createPluginJobScheduler(
         },
         "error cancelling in-flight runs during unregister",
       );
-    }
-
-    // Remove any active tracking for jobs owned by this plugin
-    const jobs = await jobStore.listJobs(pluginId);
-    for (const job of jobs) {
-      activeJobs.delete(job.id);
+    } finally {
+      if (unregisterOwners.get(pluginId) === unregisterOwner) unregisterOwners.delete(pluginId);
     }
   }
 

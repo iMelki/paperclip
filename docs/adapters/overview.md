@@ -14,6 +14,18 @@ When a heartbeat fires, Paperclip:
 3. The adapter spawns or calls the agent runtime
 4. The adapter captures stdout, parses usage/cost data, and returns a structured result
 
+## Run timeouts
+
+Every built-in adapter has a non-zero default `timeoutSec`. A missing, `0`, or negative value uses that default. It does not mean an unbounded run. Set a positive `adapterConfig.timeoutSec` to override the default for one agent. Set `PAPERCLIP_ADAPTER_TIMEOUT_SEC` to a positive number to override the built-in default for every adapter when the agent value is missing, `0`, or negative. The per-agent value still wins.
+
+| Adapter | Default `timeoutSec` |
+|---------|----------------------|
+| `claude_local`, `codex_local`, `cursor`, `gemini_local`, `grok_local`, `kimi_local`, `opencode_local`, `pi_local`, `cursor_cloud` | 14400 (4 hours) |
+| `hermes_local`, `process` | 1800 (30 minutes) |
+| `paperclip_runner` | 3600 (1 hour, capped at 24 hours) |
+| `hermes_gateway` | 600 (10 minutes) |
+| `openclaw_gateway`, `http` | 120 (2 minutes) |
+
 ## Built-in Adapters
 
 | Adapter | Type Key | Description |

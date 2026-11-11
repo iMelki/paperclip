@@ -2,6 +2,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { inferOpenAiCompatibleBiller, type AdapterExecutionContext, type AdapterExecutionResult } from "@paperclipai/adapter-utils";
+import { ADAPTER_DEFAULT_TIMEOUT_SEC } from "@paperclipai/adapter-utils/adapter-timeout";
 import { buildCodexAuthInboundProvision } from "./codex-auth-merge-scripts.js";
 import { copyBackCodexAuth } from "./codex-auth-copyback.js";
 import {
@@ -773,7 +774,8 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     );
     const timeoutResolution = resolveAdapterExecutionTargetTimeout(
       executionTarget,
-      asNumber(config.timeoutSec, 0),
+      config.timeoutSec,
+      { adapterDefaultSec: ADAPTER_DEFAULT_TIMEOUT_SEC.codex_local },
     );
     const timeoutSec = timeoutResolution.timeoutSec;
     const graceSec = asNumber(config.graceSec, 20);

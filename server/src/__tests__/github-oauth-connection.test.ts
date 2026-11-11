@@ -11,6 +11,7 @@ import {
 } from "@paperclipai/db";
 import { secretService } from "../services/secrets.js";
 import { toolAccessService } from "../services/tool-access.js";
+import { githubProjectAuthorizationDigest, githubProjectConsentDigest } from "../services/github-oauth-project-page.js";
 import { toolAccessRoutes } from "../routes/tool-access.js";
 import { errorHandler } from "../middleware/index.js";
 import { logger } from "../middleware/logger.js";
@@ -642,6 +643,29 @@ describe("native GitHub OAuth service and routes (mandatory private PostgreSQL)"
     expect(oldAccess.latestVersion).toBe(1); expect(await existingVersions(saved)).toEqual(versions);
     expect((current.config.oauth as Record<string, unknown>).refreshLease).toBeUndefined();
     await expectNoAgentEffects(fixture.companyId);
+  });
+
+  it("keeps the scheduled-board consent digest across a real token refresh (the exact authorization digest changes)", async () => {
+    const fixture = await seed(); const saved = await active(fixture);
+    const digests = async (connection: Connection) => {
+      const access = connection.credentialSecretRefs.find((ref) => ref.configPath === "oauth.access_token")!;
+      const [secret] = await db.select().from(companySecrets).where(eq(companySecrets.id, access.secretId));
+      const credential = { secretId: access.secretId, latestVersion: secret.latestVersion };
+      return { consent: githubProjectConsentDigest(connection, credential), exact: githubProjectAuthorizationDigest(connection, credential), access };
+    };
+    const before = await digests(saved);
+    await changeConnection(saved, { ...saved.config, oauth: { ...(saved.config.oauth as object), expiresAt: new Date(0).toISOString() } });
+    io.tokenPayload = token("rotated");
+    const beforeTokenCount = tokenCalls().length;
+    await fixture.service.checkHealth(saved.id, fixture.actor);
+    expect(tokenCalls()).toHaveLength(beforeTokenCount + 1);
+    const current = await readConnection(saved.id);
+    const after = await digests(current);
+    // The real writer rotated the token: new expiry, new refresh time, new secret refs.
+    expect(Date.parse((current.config.oauth as Record<string, string>).expiresAt)).toBeGreaterThan(Date.now());
+    expect(after.access.secretId === before.access.secretId && after.exact === before.exact).toBe(false);
+    expect(after.consent).toBe(before.consent);
+    expect(after.exact).not.toBe(before.exact);
   });
 
   it("refuses late refresh adoption after connection or application changes, including timestamp collisions", async () => {

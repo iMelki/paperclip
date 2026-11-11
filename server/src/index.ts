@@ -32,12 +32,18 @@ import {
   companies,
   companyMemberships,
   instanceUserRoles,
+  effectiveDatabasePoolMax,
 } from "@paperclipai/db";
 import detectPort from "detect-port";
 import { createApp } from "./app.js";
 import { loadConfig } from "./config.js";
 import { resolveListenPort } from "./listen-port.js";
 import { resolveEmbeddedPostgresLogFile } from "./embedded-postgres-log-file.js";
+import {
+  createNamedSweepScheduler,
+  runHeartbeatTickWithConnectRetry,
+  schedulerSweepConcurrency,
+} from "./services/heartbeat-scheduler-sweeps.js";
 import {
   embeddedPostgresServerLogPath,
   isPostmasterPidAlive,
@@ -989,6 +995,7 @@ export async function startServer(): Promise<StartedServer> {
     pluginWorkerManager,
     decisionServiceOptions,
     managedPluginAutoInstall,
+    nativeGitHubProjectSchedulingEnabled: config.nativeGitHubProjectSchedulingEnabled,
   });
   const server = createServer(app as unknown as Parameters<typeof createServer>[0]);
 
@@ -1202,13 +1209,37 @@ export async function startServer(): Promise<StartedServer> {
     heartbeatSchedulerInterval = setInterval(callback, config.heartbeatSchedulerIntervalMs);
     heartbeatSchedulerInterval?.unref?.();
   };
+  // Keep concurrent sweeps strictly below the postgres.js pool. The driver
+  // opens one backend per concurrent query until `max` (10 unless
+  // DATABASE_POOL_MAX is set). A tick that starts every sweep at once fills
+  // that pool, and the next checkout fails with write CONNECT_TIMEOUT.
+  const heartbeatSweeps = createNamedSweepScheduler(
+    schedulerSweepConcurrency(effectiveDatabasePoolMax()),
+  );
+  const trackBoundedSweep = (name: string, start: () => Promise<unknown>) => {
+    if (heartbeatSchedulerStopped) return;
+    const work = heartbeatSweeps.start(name, async () => {
+      // A sweep can wait behind another one. Shutdown may begin before its slot
+      // is granted; skip new work then, while the runner still releases its slot.
+      if (heartbeatSchedulerStopped) return;
+      try {
+        return await start();
+      } catch (error) {
+        // Local handlers own errors they consume. Only an otherwise-unhandled
+        // rejection reaches this boundary; keep its diagnostic bounded/value-free.
+        logger.error({ sweep: name }, "heartbeat scheduler sweep rejected");
+        throw error;
+      }
+    });
+    if (work) trackHeartbeatSchedulerWork(work);
+  };
   const externalObjects = externalObjectService(db as any, {
     pluginWorkerManager,
     enabled: async () => (await instanceSettingsService(db).getExperimental()).enableExternalObjects === true,
   });
   const scheduleExternalObjectRefreshSweep = (now = new Date()) => {
     if (heartbeatSchedulerStopped) return;
-    trackHeartbeatSchedulerWork(externalObjects
+    trackBoundedSweep("external-object-refresh", () => externalObjects
       .refreshDueObjectsForActiveCompanies(50, now)
       .then((result) => {
         if (result.checked > 0 || result.refreshed > 0) {
@@ -1260,7 +1291,10 @@ export async function startServer(): Promise<StartedServer> {
       });
   const scheduleEnvironmentLeaseCleanupSweep = () => {
     if (heartbeatSchedulerStopped) return;
-    trackHeartbeatSchedulerWork(runEnvironmentLeaseCleanupSweep(ENVIRONMENT_LEASE_CLEANUP_SWEEP_BACKOFF_MS));
+    trackBoundedSweep(
+      "environment-lease-cleanup",
+      () => runEnvironmentLeaseCleanupSweep(ENVIRONMENT_LEASE_CLEANUP_SWEEP_BACKOFF_MS),
+    );
   };
 
   await questionResponseDeliveries.sweepPending().then((result) => {
@@ -1293,7 +1327,7 @@ export async function startServer(): Promise<StartedServer> {
     });
     const scheduleMergedPullRequestConfirmationSweep = () => {
       if (heartbeatSchedulerStopped) return;
-      trackHeartbeatSchedulerWork(mergedPullRequestConfirmations
+      trackBoundedSweep("merged-pr-confirmation", () => mergedPullRequestConfirmations
         .sweepMergedPullRequestConfirmations()
         .then((result) => {
           if (result.accepted > 0) {
@@ -1311,7 +1345,7 @@ export async function startServer(): Promise<StartedServer> {
     const terminalWorkspaceSkipLogIntervalMs = 10 * 60 * 1000;
     const scheduleTerminalWorkspaceSweep = () => {
       if (heartbeatSchedulerStopped) return;
-      trackHeartbeatSchedulerWork(terminalWorkspaces
+      trackBoundedSweep("terminal-workspace", () => terminalWorkspaces
         .sweepTerminalWorkspaces()
         .then((result) => {
           if (result.archived > 0 || result.cleanupFailed > 0) {
@@ -1362,7 +1396,7 @@ export async function startServer(): Promise<StartedServer> {
     };
     const scheduleAdapterLoginReaperSweep = () => {
       if (heartbeatSchedulerStopped) return;
-      trackHeartbeatSchedulerWork(adapterLoginReaper
+      trackBoundedSweep("adapter-login-reaper", () => adapterLoginReaper
         .sweep()
         .then(logAdapterLoginReaperResult)
         .catch((err) => {
@@ -1388,7 +1422,7 @@ export async function startServer(): Promise<StartedServer> {
     };
     const scheduleSetupTokenReaperSweep = () => {
       if (heartbeatSchedulerStopped) return;
-      trackHeartbeatSchedulerWork(setupTokenReaper
+      trackBoundedSweep("setup-token-reaper", () => setupTokenReaper
         .sweep()
         .then(logSetupTokenReaperResult)
         .catch((err) => {
@@ -1571,10 +1605,10 @@ export async function startServer(): Promise<StartedServer> {
       // captures the authoritative set of running heartbeat rows.
       trackHeartbeatSchedulerWork((async () => {
         if (heartbeatSchedulerStopped) return;
-        trackHeartbeatSchedulerWork(decisionExecutor.sweepExpired().catch((err: unknown) => {
+        trackBoundedSweep("decision-expiry", () => decisionExecutor.sweepExpired().catch((err: unknown) => {
           logger.error({ err }, "decision expiry sweep failed");
         }));
-        trackHeartbeatSchedulerWork(runRetentionSweep().catch((err: unknown) => {
+        trackBoundedSweep("decision-retention", () => runRetentionSweep().catch((err: unknown) => {
           logger.error({ err }, "decision retention sweep failed");
         }));
         const sweptRuntimeStatuses = heartbeat.sweepExpiredRuntimeStatuses();
@@ -1585,18 +1619,27 @@ export async function startServer(): Promise<StartedServer> {
           );
         }
 
-        if (!(await heartbeat.resolveSchedulingSuppression()).suppressed) {
-          trackHeartbeatSchedulerWork(heartbeat
-            .tickTimers(new Date())
-            .then((result) => {
-              if (result.enqueued > 0) {
-                logger.info({ ...result }, "heartbeat timer tick enqueued runs");
-              }
-            })
-            .catch((err) => {
-              logger.error({ err }, "heartbeat timer tick failed");
-            }));
-        }
+        trackBoundedSweep("heartbeat-timer", async () => {
+          try {
+            if ((await heartbeat.resolveSchedulingSuppression()).suppressed) return;
+            const result = await runHeartbeatTickWithConnectRetry(
+              () => heartbeat.tickTimers(new Date()),
+              {
+                onRetry: (attempt, err) => {
+                  logger.warn(
+                    { err, attempt },
+                    "heartbeat timer tick hit a transient CONNECT_TIMEOUT; retrying",
+                  );
+                },
+              },
+            );
+            if (result.enqueued > 0) {
+              logger.info({ ...result }, "heartbeat timer tick enqueued runs");
+            }
+          } catch (err) {
+            logger.error({ err }, "heartbeat timer tick failed");
+          }
+        });
 
         if (heartbeatSchedulerStopped) return;
         scheduleExternalObjectRefreshSweep(new Date());
@@ -1609,7 +1652,7 @@ export async function startServer(): Promise<StartedServer> {
         scheduleEnvironmentLeaseCleanupSweep();
 
         if (heartbeatSchedulerStopped) return;
-        trackHeartbeatSchedulerWork(routines
+        trackBoundedSweep("routine-scheduler", () => routines
           .tickScheduledTriggers(new Date())
           .then((result) => {
             if (result.triggered > 0) {
@@ -1621,7 +1664,7 @@ export async function startServer(): Promise<StartedServer> {
           }));
 
         if (heartbeatSchedulerStopped) return;
-        trackHeartbeatSchedulerWork((async () => {
+        trackBoundedSweep("status-card", () => (async () => {
           const experimental = await instanceSettingsService(db).getExperimental();
           if (experimental.enableStatusCards !== true) return;
           const result = await statusCards.tickDueStatusCards(new Date());
@@ -1650,7 +1693,7 @@ export async function startServer(): Promise<StartedServer> {
         }));
 
         if (heartbeatSchedulerStopped) return;
-        trackHeartbeatSchedulerWork(environmentCustomImages
+        trackBoundedSweep("environment-custom-image-cleanup", () => environmentCustomImages
           .cleanupExpiredSetupSessions()
           .then((result) => {
             if (result.timedOut > 0 || result.failed > 0) {
@@ -1662,7 +1705,7 @@ export async function startServer(): Promise<StartedServer> {
           }));
 
         if (heartbeatSchedulerStopped) return;
-        trackHeartbeatSchedulerWork(tools
+        trackBoundedSweep("tool-connection-health", () => tools
           .sweepConnectionHealth()
           .then((swept) => {
             if (swept.failed > 0) {
@@ -1673,7 +1716,7 @@ export async function startServer(): Promise<StartedServer> {
             logger.error({ err }, "periodic tool connection health sweep failed");
           }));
 
-        trackHeartbeatSchedulerWork(secretProposals.sweepExpired()
+        trackBoundedSweep("secret-proposal-expiry", () => secretProposals.sweepExpired()
           .then((expired) => {
             if (expired > 0) logger.warn({ expired }, "periodic secret proposal expiry scrubbed proposals");
           })
@@ -1681,7 +1724,7 @@ export async function startServer(): Promise<StartedServer> {
             logger.error({ err }, "periodic secret proposal expiry sweep failed");
           }));
 
-        trackHeartbeatSchedulerWork(questionResponseDeliveries.sweepPending()
+        trackBoundedSweep("question-response-delivery", () => questionResponseDeliveries.sweepPending()
           .then((result) => {
             if (result.scanned > 0) {
               logger.info(result, "periodic question-response delivery sweep completed");
@@ -1692,10 +1735,11 @@ export async function startServer(): Promise<StartedServer> {
           }));
 
         if (heartbeatSchedulerStopped) return;
-        if (!(await heartbeat.resolveSchedulingSuppression()).suppressed) {
+        trackBoundedSweep("heartbeat-recovery", async () => {
+          if ((await heartbeat.resolveSchedulingSuppression()).suppressed) return;
           // Periodically reap orphaned runs (5-min staleness threshold) and make sure
           // persisted queued work is still being driven forward.
-          trackHeartbeatSchedulerWork(heartbeat
+          await heartbeat
             .reapOrphanedRuns({ staleThresholdMs: 5 * 60 * 1000 })
             .then(() => heartbeat.promoteDueScheduledRetries())
             .then(async (promotion) => {
@@ -1747,8 +1791,8 @@ export async function startServer(): Promise<StartedServer> {
             })
             .catch((err) => {
               logger.error({ err }, "periodic heartbeat recovery failed");
-            }));
-        }
+            });
+        });
       })().catch((err) => {
         logger.error({ err }, "heartbeat scheduler tick failed");
       }));
@@ -1867,12 +1911,13 @@ export async function startServer(): Promise<StartedServer> {
   
   {
     const shutdown = async (signal: "SIGINT" | "SIGTERM") => {
-      await systemdNotify(["--stopping", `--status=Stopping after ${signal}`]);
+      // Quiesce synchronously: notification can wait on an external process.
       heartbeatSchedulerStopped = true;
       if (heartbeatSchedulerInterval) {
         clearInterval(heartbeatSchedulerInterval);
         heartbeatSchedulerInterval = null;
       }
+      await systemdNotify(["--stopping", `--status=Stopping after ${signal}`]);
 
       const heartbeatShutdown = await coordinateHeartbeatSchedulerShutdown({
         signal,
