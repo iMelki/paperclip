@@ -57,6 +57,8 @@ Notes:
   - --candidate-preview is canary --dry-run only. It permits a prevalidated
     existing branch or detached checkout for local payload validation; actual
     canary publishing still requires master. Clean-tree and all other guards remain.
+    Candidate previews read remote HEAD without refreshing/pruning Git refs,
+    using the existing local tag inventory plus fresh npm version reads.
   - The script rewrites versions temporarily and restores the working tree on
     exit. Tags always point at the original source commit, not a generated
     release commit.
@@ -157,7 +159,7 @@ if [ -n "$notes_file_override" ] && [ "$channel" != "stable" ]; then
 fi
 
 PUBLISH_REMOTE="$(resolve_release_remote)"
-fetch_release_remote "$PUBLISH_REMOTE"
+fetch_release_remote "$PUBLISH_REMOTE" "$candidate_preview"
 
 CURRENT_BRANCH="$(git_current_branch)"
 CURRENT_SHA="$(git -C "$REPO_ROOT" rev-parse HEAD)"

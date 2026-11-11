@@ -78,6 +78,12 @@ resolve_release_remote() {
 }
 
 fetch_release_remote() {
+  if [ "${2:-false}" = true ]; then
+    # Candidate payload previews must not prune or update local Git refs.
+    # Use the existing local tag inventory and fresh npm version reads below.
+    git -C "$REPO_ROOT" ls-remote --exit-code "$1" HEAD >/dev/null
+    return
+  fi
   git -C "$REPO_ROOT" fetch "$1" --prune --tags
 }
 
