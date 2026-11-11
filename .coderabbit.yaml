@@ -13,8 +13,8 @@
 #       https://docs.coderabbit.ai/guides/configuration-overview
 reviews:
   auto_review:
-    # Review PRs automatically, with no label gate.
-    enabled: true
+    # Keep automatic reviews off; request reviewed provider work explicitly.
+    enabled: false
     labels: []
     # Fleet PRs open as drafts, so include them.
     drafts: true

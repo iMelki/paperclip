@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve, sep } from "node:path";
 import test from "node:test";
 
 const repoRoot = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
@@ -264,3 +264,84 @@ test("publish_package_to_npm_and_wait blocks the release when registry visibilit
   assert.match(result.calls, /^npm view @paperclipai\/example@1\.2\.3 version$/m);
   assert.match(result.output, /did not become registry-visible/);
 });
+
+function runCanarySourceGuard({ preview = false, dryRun = false, branch = "topic", cliArgs = null } = {}) {
+  const fixtureDir = mkdtempSync(join(tmpdir(), "paperclip-canary-source-"));
+  const binDir = join(fixtureDir, "bin");
+  const callLog = join(fixtureDir, "calls.log");
+  mkdirSync(binDir);
+  writeFileSync(callLog, "");
+  writeExecutable(join(binDir, "git"), "#!/usr/bin/env bash\nset -euo pipefail\nprintf 'git %s\\n' \"$*\" >> \"$FAKE_CALL_LOG\"\n[ \"$#\" -eq 6 ] && [ \"$1\" = \"-C\" ] && [ \"$2\" = \"$REPO_ROOT\" ] && [ \"$3\" = \"symbolic-ref\" ] && [ \"$4\" = \"--quiet\" ] && [ \"$5\" = \"--short\" ] && [ \"$6\" = \"HEAD\" ]\nprintf '%s\\n' \"$FAKE_BRANCH\"\n");
+  try {
+    let args = ["-c", "set -euo pipefail\nsource \"$PAPERCLIP_GUARD_LIBRARY\"\nrequire_canary_source_branch \"$FAKE_PREVIEW\" \"$FAKE_DRY_RUN\"\n"];
+    if (cliArgs) {
+      const scriptsDir = join(fixtureDir, "scripts");
+      mkdirSync(scriptsDir);
+      for (const name of ["release.sh", "release-lib.sh"]) {
+        writeFileSync(join(scriptsDir, name), readFileSync(join(repoRoot, "scripts", name)));
+      }
+      args = [join(scriptsDir, "release.sh"), ...cliArgs];
+    }
+    let status = 0;
+    let output = "";
+    try {
+      output = execFileSync("bash", args, {
+        cwd: fixtureDir, encoding: "utf8", timeout: 10_000, windowsHide: true,
+        stdio: ["ignore", "pipe", "pipe"],
+        env: { ...process.env, PATH: binDir + ":" + process.env.PATH, REPO_ROOT: fixtureDir,
+          PAPERCLIP_GUARD_LIBRARY: join(repoRoot, "scripts/release-lib.sh"),
+          FAKE_CALL_LOG: callLog, FAKE_BRANCH: branch,
+          FAKE_PREVIEW: String(preview), FAKE_DRY_RUN: String(dryRun) },
+      });
+    } catch (error) {
+      status = error.status ?? 1;
+      output = String(error.stdout ?? "") + String(error.stderr ?? "");
+    }
+    return { status, output, calls: readFileSync(callLog, "utf8") };
+  } finally {
+    const owned = resolve(fixtureDir);
+    if (!owned.startsWith(resolve(tmpdir()) + sep + "paperclip-canary-source-")) {
+      throw new Error("Refusing cleanup outside the owned preview fixture");
+    }
+    rmSync(owned, { recursive: true, force: true });
+  }
+}
+
+test("canary publication and default preview still require master", () => {
+  assert.equal(runCanarySourceGuard({ branch: "master" }).status, 0);
+  for (const dryRun of [false, true]) {
+    const result = runCanarySourceGuard({ dryRun, branch: "topic" });
+    assert.equal(result.status, 1);
+    assert.match(result.output, /must run from branch master/);
+    assert.match(result.calls, /symbolic-ref --quiet --short HEAD/);
+  }
+});
+
+test("explicit canary dry-run preview accepts an existing topic or detached checkout", () => {
+  for (const branch of ["topic", ""]) {
+    const result = runCanarySourceGuard({ preview: true, dryRun: true, branch });
+    assert.equal(result.status, 0, result.output);
+    assert.equal(result.calls, "");
+  }
+});
+
+test("candidate preview never permits publishing even from master", () => {
+  const result = runCanarySourceGuard({ preview: true, dryRun: false, branch: "master" });
+  assert.equal(result.status, 1);
+  assert.match(result.output, /never authorizes publishing/);
+  assert.equal(result.calls, "");
+});
+
+for (const cliArgs of [
+  ["canary", "--candidate-preview"],
+  ["beta", "--dry-run", "--candidate-preview"],
+  ["nightly", "--dry-run", "--candidate-preview"],
+  ["stable", "--dry-run", "--candidate-preview"],
+]) {
+  test("release CLI rejects unsafe candidate-preview mode before Git or registry work: " + cliArgs.join(" "), () => {
+    const result = runCanarySourceGuard({ cliArgs });
+    assert.equal(result.status, 1);
+    assert.match(result.output, /requires canary --dry-run/);
+    assert.equal(result.calls, "");
+  });
+}

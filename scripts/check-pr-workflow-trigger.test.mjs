@@ -9,7 +9,7 @@ import { validatePrWorkflowTrigger } from "./check-pr-workflow-trigger.mjs";
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const realWorkflow = readFileSync(path.join(repoRoot, ".github/workflows/pr.yml"), "utf8");
 
-test("the real PR workflow covers master and dev without a push event", () => {
+test("the real PR workflow preserves non-dev targets without a push event", () => {
   assert.deepEqual(validatePrWorkflowTrigger(realWorkflow), []);
 });
 
@@ -26,10 +26,28 @@ test("the policy job must run the stable Vitest runner regression suite", () => 
   );
 });
 
-test("removing dev fails for the exact missing-branch reason", () => {
-  const broken = realWorkflow.replace(/^\s{6}- dev\s*$/m, "");
-  assert.notEqual(broken, realWorkflow, "negative fixture must remove dev");
-  assert.deepEqual(validatePrWorkflowTrigger(broken), ["pull_request.branches is missing dev"]);
+test("removing master fails for the exact missing-branch reason", () => {
+  const broken = realWorkflow.replace(/^\s{6}- master\s*$/m, "");
+  assert.notEqual(broken, realWorkflow, "negative fixture must remove master");
+  assert.deepEqual(validatePrWorkflowTrigger(broken), ["pull_request.branches is missing master"]);
+});
+
+test("dev and wildcard branch targets fail closed instead of launching hosted jobs", () => {
+  for (const target of ["dev", "*", "**"]) {
+    const broken = realWorkflow.replace(/^    branches:\s*$/m, `    branches:\n      - ${target}`);
+    assert.notEqual(broken, realWorkflow, "negative fixture must add a forbidden target");
+    assert.ok(validatePrWorkflowTrigger(broken).includes(
+      `pull_request.branches has unsupported target ${target}; dev uses admitted local validation`,
+    ));
+  }
+});
+
+test("removing the preserved upstream integration target fails closed", () => {
+  const broken = realWorkflow.replace(/^\s{6}- agent\/codex\/129-upstream-host-integration\s*$/m, "");
+  assert.notEqual(broken, realWorkflow, "negative fixture must remove the preserved integration target");
+  assert.deepEqual(validatePrWorkflowTrigger(broken), [
+    "pull_request.branches is missing agent/codex/129-upstream-host-integration",
+  ]);
 });
 
 test("adding a push event fails even when pull-request coverage remains", () => {
@@ -37,7 +55,7 @@ test("adding a push event fails even when pull-request coverage remains", () => 
   assert.notEqual(broken, realWorkflow, "negative fixture must add push:dev");
   assert.ok(
     validatePrWorkflowTrigger(broken).includes(
-      "workflow must not define a push event; dev validation is pull-request-only",
+      "workflow must not define a push event; dev validation uses the admitted local lane",
     ),
   );
 });
@@ -50,7 +68,7 @@ test("a column-zero comment cannot hide a later event in the on block", () => {
   assert.notEqual(broken, realWorkflow, "negative fixture must add a push after a comment");
   assert.ok(
     validatePrWorkflowTrigger(broken).includes(
-      "workflow must not define a push event; dev validation is pull-request-only",
+      "workflow must not define a push event; dev validation uses the admitted local lane",
     ),
   );
 });
@@ -61,7 +79,7 @@ test("quoted or whitespace-padded push keys cannot bypass the no-push policy", (
     assert.notEqual(broken, realWorkflow, `negative fixture must add ${pushKey}`);
     assert.ok(
       validatePrWorkflowTrigger(broken).includes(
-        "workflow must not define a push event; dev validation is pull-request-only",
+        "workflow must not define a push event; dev validation uses the admitted local lane",
       ),
     );
   }
