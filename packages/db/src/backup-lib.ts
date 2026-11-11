@@ -2,6 +2,7 @@ import { createReadStream, createWriteStream, existsSync, mkdirSync, readdirSync
 import { basename, resolve } from "node:path";
 import { createInterface } from "node:readline";
 import { spawn } from "node:child_process";
+import { Readable } from "node:stream";
 import { open as openFile } from "node:fs/promises";
 import { pipeline } from "node:stream/promises";
 import { createGunzip, createGzip } from "node:zlib";
@@ -403,7 +404,11 @@ async function hasStatementBreakpoints(backupFile: string): Promise<boolean> {
   }
 }
 
-async function* readRestoreStatements(backupFile: string): AsyncGenerator<string> {
+type RestoreCommand =
+  | { type: "sql"; statement: string }
+  | { type: "copy"; statement: string; data: Readable };
+
+async function* readRestoreCommands(backupFile: string): AsyncGenerator<RestoreCommand> {
   const raw = createReadStream(backupFile);
   const stream = backupFile.endsWith(".gz") ? raw.pipe(createGunzip()) : raw;
   stream.setEncoding("utf8");
@@ -411,6 +416,7 @@ async function* readRestoreStatements(backupFile: string): AsyncGenerator<string
     input: stream,
     crlfDelay: Infinity,
   });
+  const lines = reader[Symbol.asyncIterator]();
   let statementLines: string[] = [];
 
   const flushStatement = () => {
@@ -419,12 +425,43 @@ async function* readRestoreStatements(backupFile: string): AsyncGenerator<string
     return statement;
   };
 
+  const copyData = async function* (): AsyncGenerator<string> {
+    while (true) {
+      const { value: line, done } = await lines.next();
+      if (done) break;
+      if (line === "\\.") return;
+      yield `${line}\n`;
+    }
+    throw new Error("COPY data block is missing its terminator");
+  };
+
   try {
-    for await (const line of reader) {
+    while (true) {
+      const { value: line, done } = await lines.next();
+      if (done) break;
+      const copyLine = line.trim();
+      // Fallback backups emit one-line, default text COPY commands at a statement boundary.
+      const onlyCommentsBeforeLine = statementLines.every((statementLine) => /^\s*(?:--.*)?$/.test(statementLine));
+      const copyFromStdin = onlyCommentsBeforeLine && /^COPY\b.*\bFROM\s+stdin\b/i.test(copyLine);
+      if (copyFromStdin && !/^COPY\b.+\bFROM\s+stdin\s*;\s*$/i.test(copyLine)) {
+        throw new Error("Unsupported COPY format in fallback restore");
+      }
+      if (copyFromStdin) {
+        const precedingStatement = flushStatement();
+        if (precedingStatement.length > 0) {
+          yield { type: "sql", statement: precedingStatement };
+        }
+        yield {
+          type: "copy",
+          statement: copyLine,
+          data: Readable.from(copyData(), { objectMode: false }),
+        };
+        continue;
+      }
       if (line === STATEMENT_BREAKPOINT) {
         const statement = flushStatement();
         if (statement.length > 0) {
-          yield statement;
+          yield { type: "sql", statement };
         }
         continue;
       }
@@ -433,7 +470,7 @@ async function* readRestoreStatements(backupFile: string): AsyncGenerator<string
 
     const trailingStatement = flushStatement();
     if (trailingStatement.length > 0) {
-      yield trailingStatement;
+      yield { type: "sql", statement: trailingStatement };
     }
   } finally {
     reader.close();
@@ -1065,8 +1102,13 @@ export async function runDatabaseRestore(opts: RunDatabaseRestoreOptions): Promi
 
   try {
     await sql`SELECT 1`;
-    for await (const statement of readRestoreStatements(opts.backupFile)) {
-      await sql.unsafe(statement).execute();
+    for await (const command of readRestoreCommands(opts.backupFile)) {
+      if (command.type === "copy") {
+        const copySink = await sql.unsafe(command.statement).writable();
+        await pipeline(command.data, copySink);
+      } else {
+        await sql.unsafe(command.statement).execute();
+      }
     }
   } catch (error) {
     const statementPreview = typeof error === "object" && error !== null && typeof (error as Record<string, unknown>).query === "string"

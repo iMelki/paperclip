@@ -2372,4 +2372,53 @@ describeEmbeddedPostgres("issue recovery actions", () => {
       .where(eq(issueRecoveryActions.id, action.id));
     expect(actionRow?.status).toBe("active");
   });
+  it.each(["assignee", "review participant", "existing recovery"] as const)("holds unknown ACPX reset for %s across repeated recovery sweeps", async (target) => {
+    const { companyId, managerId, coderId, sourceIssueId, prefix } = await seedCompany();
+    let issueId = sourceIssueId;
+    let targetAgentId = coderId;
+    if (target === "review participant") {
+      targetAgentId = managerId;
+      const stageId = randomUUID();
+      await db.update(issues).set({ status: "in_review", executionPolicy: {
+        mode: "normal", commentRequired: true,
+        stages: [{ id: stageId, type: "review", approvalsNeeded: 1,
+          participants: [{ id: randomUUID(), type: "agent", agentId: managerId, userId: null }] }],
+      }, executionState: {
+        status: "pending", currentStageId: stageId, currentStageIndex: 0, currentStageType: "review",
+        currentParticipant: { type: "agent", agentId: managerId, userId: null },
+        returnAssignee: { type: "agent", agentId: coderId, userId: null }, reviewRequest: null,
+        completedStageIds: [], lastDecisionId: null, lastDecisionOutcome: null,
+      } }).where(eq(issues.id, issueId));
+    } else if (target === "existing recovery") {
+      await db.update(issues).set({ status: "done" }).where(eq(issues.id, sourceIssueId));
+      issueId = randomUUID();
+      targetAgentId = managerId;
+      await db.insert(issues).values({ id: issueId, companyId, title: "Synthetic existing recovery", status: "in_progress",
+        priority: "medium", assigneeAgentId: managerId, parentId: sourceIssueId, issueNumber: 2, identifier: prefix + "-2",
+        originKind: "stranded_issue_recovery", originId: sourceIssueId, originFingerprint: "stranded_issue_recovery:" + sourceIssueId });
+    }
+    const runId = randomUUID();
+    await db.insert(heartbeatRuns).values({ id: runId, companyId, agentId: targetAgentId, invocationSource: "automation",
+      status: "failed", errorCode: "acpx_provider_quota", error: "Provider quota exhausted", resultJson: {
+        retryNotBefore: "2099-04-01T15:00:00.000Z", providerQuotaRetryNotBefore: "2099-04-01T15:00:00.000Z",
+      }, startedAt: new Date(Date.now() - 120_000), finishedAt: new Date(Date.now() - 60_000), contextSnapshot: { issueId } });
+    const [beforeIssue] = await db.select().from(issues).where(eq(issues.id, issueId));
+    const [beforeRun] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, runId));
+    const enqueueWakeup = vi.fn(async () => null);
+    const recovery = recoveryService(db, { enqueueWakeup });
+    for (let sweep = 0; sweep < 2; sweep += 1) {
+      const result = await recovery.reconcileStrandedAssignedIssues();
+      expect(result).toMatchObject({ providerQuotaMonitored: 0, reviewParticipantRequeued: 0, escalated: 0, skipped: 1 });
+      const [afterIssue] = await db.select().from(issues).where(eq(issues.id, issueId));
+      const [afterRun] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, runId));
+      expect(afterIssue).toEqual(beforeIssue);
+      expect(afterRun).toEqual(beforeRun);
+      expect(afterIssue?.monitorNextCheckAt).toBeNull();
+      expect(await db.select().from(issueRecoveryActions)).toHaveLength(0);
+      expect(await db.select().from(agentWakeupRequests)).toHaveLength(0);
+      expect(await db.select().from(issueComments)).toHaveLength(0);
+      expect(enqueueWakeup).not.toHaveBeenCalled();
+    }
+  });
+
 });

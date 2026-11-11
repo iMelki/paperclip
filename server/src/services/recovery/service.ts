@@ -418,6 +418,7 @@ const CONFIGURATION_INCOMPLETE_ERROR_RE =
 export type AdapterFailureRecoveryClassification =
   | { kind: "provider_quota"; retryAt: Date; parsedResetTime: boolean }
   | { kind: "configuration_incomplete" }
+  | { kind: "provider_quota_hold" }
   | null;
 
 /**
@@ -551,23 +552,9 @@ export function classifyAdapterFailureForRecovery(
   const failedAt = latestRun.finishedAt ?? latestRun.startedAt ?? latestRun.createdAt ?? null;
   if (latestRun.errorCode === ACPX_PROVIDER_QUOTA_ERROR_CODE) {
     const followUp = classifyAcpxProviderQuotaFollowUp(latestRun, now);
-    // No parsed reset: park behind the default quota backoff, as every other
-    // provider quota failure without a clock does. Holding forever would leave
-    // the issue in progress with no wake and no escalation. The backoff time
-    // persisted by an earlier sweep stays the retry time until it is due, so a
-    // sweep does not push it out again.
-    if (!followUp.notBefore) {
-      const persistedBackoff = readNonEmptyString(resultJson.providerQuotaRetryNotBefore);
-      const persistedBackoffAt = persistedBackoff ? new Date(persistedBackoff) : null;
-      if (persistedBackoffAt && !Number.isNaN(persistedBackoffAt.getTime()) && persistedBackoffAt > now) {
-        return { kind: "provider_quota", retryAt: persistedBackoffAt, parsedResetTime: false };
-      }
-      return {
-        kind: "provider_quota",
-        retryAt: new Date(now.getTime() + PROVIDER_QUOTA_RECOVERY_DEFAULT_BACKOFF_MS),
-        parsedResetTime: false,
-      };
-    }
+    // No provider reset is not permission to invent an automatic wake.
+    // In particular an older generated backoff cannot become a trusted reset.
+    if (!followUp.notBefore) return { kind: "provider_quota_hold" };
     return {
       kind: "provider_quota",
       retryAt: followUp.notBefore.getTime() > now.getTime() ? followUp.notBefore : now,
@@ -3629,6 +3616,7 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
     latestRun: NonNullable<LatestIssueRun>,
     classification: NonNullable<AdapterFailureRecoveryClassification>,
   ): NonNullable<LatestIssueRun> {
+    if (classification.kind === "provider_quota_hold") return latestRun;
     const resultJson = parseObject(latestRun.resultJson);
     const providerQuotaMetadata = classification.kind === "provider_quota"
       ? {
@@ -3903,6 +3891,16 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
       const providerQuotaMonitorRun = issue.status === "in_review"
         ? participantLatestRunForRecovery
         : latestRun;
+      // Unknown quota alone must not escalate an already-created recovery
+      // issue. Separate org and budget safety checks above remain effective.
+      const quotaFailureRun = providerQuotaMonitorRun ?? (
+        isStrandedIssueRecoveryIssue(issue) && latestRun?.agentId === agentId ? latestRun : null
+      );
+      if (quotaFailureRun && isUnsuccessfulTerminalIssueRun(quotaFailureRun)
+        && classifyAdapterFailureForRecovery(quotaFailureRun, recoveryNow)?.kind === "provider_quota_hold") {
+        result.skipped += 1;
+        continue;
+      }
       if (hasPendingProviderQuotaRecoveryMonitor(issue, providerQuotaMonitorRun, recoveryNow)) {
         result.skipped += 1;
         continue;
@@ -3932,6 +3930,10 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
           continue;
         }
 
+        if (adapterFailureClassification.kind === "provider_quota_hold") {
+          result.skipped += 1;
+          continue;
+        }
         if (adapterFailureClassification.kind === "provider_quota") {
           const monitored = await scheduleProviderQuotaRecoveryMonitor({
             issue,
@@ -4118,6 +4120,10 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
         const participantAdapterFailureClassification = isUnsuccessfulTerminalIssueRun(participantLatestRun)
           ? classifyAdapterFailureForRecovery(participantLatestRun, recoveryNow)
           : null;
+        if (participantAdapterFailureClassification?.kind === "provider_quota_hold") {
+          result.skipped += 1;
+          continue;
+        }
         if (participantAdapterFailureClassification?.kind === "provider_quota") {
           const monitored = await scheduleProviderQuotaRecoveryMonitor({
             issue,

@@ -128,3 +128,61 @@ describe("classifyAcpxProviderQuotaTurn", () => {
     expect(classifyAcpxProviderQuotaTurn(far, sessionNow)?.quotaResetAt).toBeNull();
   });
 });
+
+describe("quota reset timezone boundaries", () => {
+  it("does not accept a bare UTC or GMT prefix of a signed offset", () => {
+    for (const zone of ["GMT-05:00", "UTC+02:00", "GMT +05:30", "UTC−03:00"]) {
+      expect(classifyAcpxProviderQuotaTurn(
+        `You've hit your session limit — resets 9pm ${zone}`,
+        sessionNow,
+      )?.quotaResetAt, zone).toBeNull();
+    }
+    for (const zone of ["UTC", "GMT"]) {
+      expect(classifyAcpxProviderQuotaTurn(
+        `You've hit your session limit — resets 9pm ${zone}`,
+        sessionNow,
+      )?.quotaResetAt, zone).toBe("2026-10-13T21:00:00.000Z");
+    }
+  });
+
+  it("uses the remaining New York fall-back occurrence before tomorrow", () => {
+    expect(classifyAcpxProviderQuotaTurn(
+      "You've hit your session limit — resets 1:30am (America/New_York)",
+      new Date("2026-11-01T06:20:00.000Z"),
+    )?.quotaResetAt).toBe("2026-11-01T06:30:00.000Z");
+  });
+
+  it("handles Lord Howe's half-hour fall-back without assuming a one-hour shift", () => {
+    expect(classifyAcpxProviderQuotaTurn(
+      "You've hit your session limit — resets 1:45am (Australia/Lord_Howe)",
+      new Date("2026-04-04T15:05:00.000Z"),
+    )?.quotaResetAt).toBe("2026-04-04T15:15:00.000Z");
+    expect(classifyAcpxProviderQuotaTurn(
+      "You've hit your session limit — resets 1:45am (Australia/Lord_Howe)",
+      new Date("2026-04-04T15:20:00.000Z"),
+    )?.quotaResetAt).toBe("2026-04-04T15:15:00.000Z");
+  });
+
+  it("keeps the elapsed grace and rolls past both repeated occurrences", () => {
+    const message = "You've hit your session limit — resets 1:30am (America/New_York)";
+    expect(classifyAcpxProviderQuotaTurn(message, new Date("2026-11-01T06:40:00.000Z"))?.quotaResetAt)
+      .toBe("2026-11-01T06:30:00.000Z");
+    expect(classifyAcpxProviderQuotaTurn(message, new Date("2026-11-01T07:10:00.000Z"))?.quotaResetAt)
+      .toBe("2026-11-02T06:30:00.000Z");
+  });
+
+  it("never invents the missing local clock during a spring-forward gap", () => {
+    expect(classifyAcpxProviderQuotaTurn(
+      "You've hit your session limit — resets 2:30am (America/New_York)",
+      new Date("2026-03-08T06:00:00.000Z"),
+    )?.quotaResetAt).toBe("2026-03-09T06:30:00.000Z");
+  });
+});
+
+
+it("prefers the future overlap occurrence over an earlier clock within grace", () => {
+  expect(classifyAcpxProviderQuotaTurn(
+    "You've hit your session limit — resets 1:30am (America/New_York)",
+    new Date("2026-11-01T05:50:00.000Z"),
+  )?.quotaResetAt).toBe("2026-11-01T06:30:00.000Z");
+});

@@ -3,9 +3,9 @@ import { ACPX_PROVIDER_QUOTA_ERROR_CODE } from "@paperclipai/adapter-utils/acpx-
 import {
   acpxProviderQuotaHeartbeatRetryNotBefore,
   classifyAcpxProviderQuotaFollowUp,
+  readAcpxProviderQuotaAutomaticWakeHold,
 } from "./acpx-provider-quota.js";
 import {
-  PROVIDER_QUOTA_RECOVERY_DEFAULT_BACKOFF_MS,
   classifyAdapterFailureForRecovery,
   classifyContinuationFailure,
 } from "./service.js";
@@ -46,13 +46,37 @@ describe("ACPX provider quota follow-up", () => {
       notBefore: null,
     });
     expect(acpxProviderQuotaHeartbeatRetryNotBefore(unparsed, now)).toBeNull();
-    // No clock still wakes later behind the default quota backoff; it is never
-    // held forever.
+    // No parsed clock must not manufacture an automatic wake.
     expect(classifyAdapterFailureForRecovery(unparsed, now)).toEqual({
-      kind: "provider_quota",
-      retryAt: new Date(now.getTime() + PROVIDER_QUOTA_RECOVERY_DEFAULT_BACKOFF_MS),
-      parsedResetTime: false,
+      kind: "provider_quota_hold",
     });
     expect(classifyContinuationFailure(unparsed as never).kind).toBe("non_retryable");
+  });
+});
+
+describe("ACPX automatic hold boundaries", () => {
+  const now = new Date("2026-11-11T12:00:00.000Z");
+  it.each([{}, { quotaResetAt: "not-a-date" }, {
+    retryNotBefore: "2099-04-01T15:00:00.000Z",
+    providerQuotaRetryNotBefore: "2099-04-01T15:00:00.000Z",
+  }])("holds unknown reset without trusting old generated backoff: %j", (resultJson) => {
+    const run = { errorCode: ACPX_PROVIDER_QUOTA_ERROR_CODE, error: null, resultJson };
+    expect(readAcpxProviderQuotaAutomaticWakeHold(run, now)).toEqual({
+      reason: "provider_quota_reset_unknown", retryNotBefore: null,
+    });
+    expect(classifyAdapterFailureForRecovery(run, now)).toEqual({ kind: "provider_quota_hold" });
+  });
+  it("holds only before an explicit reset, including exact due boundary", () => {
+    const reset = "2026-11-11T13:00:00.000Z";
+    const run = { errorCode: ACPX_PROVIDER_QUOTA_ERROR_CODE, resultJson: { quotaResetAt: reset } };
+    expect(readAcpxProviderQuotaAutomaticWakeHold(run, now)).toEqual({
+      reason: "provider_quota_reset_pending", retryNotBefore: reset,
+    });
+    expect(readAcpxProviderQuotaAutomaticWakeHold(run, new Date(reset))).toBeNull();
+    expect(readAcpxProviderQuotaAutomaticWakeHold(run, new Date("2026-11-11T14:00:00.000Z"))).toBeNull();
+  });
+  it("preserves unrelated-code behavior", () => {
+    expect(readAcpxProviderQuotaAutomaticWakeHold({ errorCode: "adapter_failed", resultJson: {} }, now)).toBeNull();
+    expect(classifyAdapterFailureForRecovery({ errorCode: "adapter_failed", error: "unrelated failure", resultJson: {} }, now)).toBeNull();
   });
 });

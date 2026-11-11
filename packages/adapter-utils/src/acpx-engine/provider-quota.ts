@@ -37,7 +37,7 @@ const ACPX_PROVIDER_QUOTA_RESET_WINDOW_CHARS = 120;
 const ACPX_PROVIDER_QUOTA_RESET_ELAPSED_GRACE_MS = 30 * 60 * 1000;
 
 const ACPX_PROVIDER_QUOTA_CLOCK_RE =
-  /\b(?:try again at|resets(?: at)?)\s+(\d{1,2})(?::(\d{2}))?(?![\d:])(?:\s*([ap])\.?\s*m\.?)?(?=(:?\d)?)(?:\s*\(([^)]+)\)|\s+(UTC|GMT)\b)?/gi;
+  /\b(?:try again at|resets(?: at)?)\s+(\d{1,2})(?::(\d{2}))?(?![\d:])(?:\s*([ap])\.?\s*m\.?)?(?=(:?\d)?)(?:\s*\(([^)]+)\)|\s+(UTC|GMT)\b(?!\s*[-+−]\s*\d))?/gi;
 
 export type AcpxProviderQuotaTurnClassification = {
   errorCode: typeof ACPX_PROVIDER_QUOTA_ERROR_CODE;
@@ -140,33 +140,37 @@ function resolveAcpxProviderQuotaClock(match: RegExpMatchArray, now: Date): Date
       }).formatToParts(date).map((part) => [part.type, part.value]),
     );
     const nowParts = wallClock(base);
-    const buildResetAt = (dayOffset: number) => {
-      const targetDay = new Date(Date.UTC(
-        Number(nowParts.year),
-        Number(nowParts.month) - 1,
-        Number(nowParts.day) + dayOffset,
-        hour,
-        minute,
-      ));
-      let candidate = targetDay;
-      const targetMs = targetDay.getTime();
-      for (let attempt = 0; attempt < 4; attempt += 1) {
-        const actual = wallClock(candidate);
-        const actualMs = Date.UTC(
-          Number(actual.year),
-          Number(actual.month) - 1,
-          Number(actual.day),
-          Number(actual.hour),
-          Number(actual.minute),
-        );
-        const adjustment = targetMs - actualMs;
-        if (adjustment === 0) break;
-        candidate = new Date(candidate.getTime() + adjustment);
-      }
-      return candidate;
+    const wallClockMs = (date: Date) => {
+      const parts = wallClock(date);
+      return Date.UTC(
+        Number(parts.year), Number(parts.month) - 1, Number(parts.day),
+        Number(parts.hour), Number(parts.minute),
+      );
     };
-    const sameDay = buildResetAt(0);
-    return sameDay.getTime() >= base.getTime() ? sameDay : buildResetAt(1);
+    const buildResetAt = (dayOffset: number): Date | null => {
+      const targetMs = Date.UTC(
+        Number(nowParts.year), Number(nowParts.month) - 1,
+        Number(nowParts.day) + dayOffset, hour, minute,
+      );
+      // Sample offsets on both sides of the local date. A fall-back can repeat
+      // a wall clock by 30 minutes, an hour, or another zone-specific amount.
+      // Validate each candidate rather than assuming the size of the shift.
+      const offsets = new Set<number>();
+      for (const hours of [-36, -24, -12, 0, 12, 24, 36]) {
+        const sample = new Date(targetMs + hours * 60 * 60 * 1000);
+        offsets.add(wallClockMs(sample) - sample.getTime());
+      }
+      const candidates = [...offsets]
+        .map((offset) => new Date(targetMs - offset))
+        .filter((candidate) => wallClockMs(candidate) === targetMs)
+        .sort((left, right) => left.getTime() - right.getTime());
+      // Prefer an occurrence still ahead during an overlap, then allow the
+      // recent-past grace only when no future occurrence remains today.
+      return candidates.find((candidate) => candidate.getTime() >= now.getTime())
+        ?? candidates.find((candidate) => candidate.getTime() >= base.getTime())
+        ?? null;
+    };
+    return buildResetAt(0) ?? buildResetAt(1);
   } catch {
     return null;
   }

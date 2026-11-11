@@ -46,6 +46,20 @@ export function classifyAcpxProviderQuotaFollowUp(
   return { applies: true, retry: due, wake: due, notBefore };
 }
 
+/** Unknown reset holds automatic work; a known reset releases only when due. */
+export function readAcpxProviderQuotaAutomaticWakeHold(
+  run: { errorCode?: string | null; resultJson?: unknown } | null | undefined,
+  now = new Date(),
+) {
+  if (!run) return null;
+  const followUp = classifyAcpxProviderQuotaFollowUp(run, now);
+  if (!followUp.applies || followUp.wake) return null;
+  return {
+    reason: followUp.notBefore ? "provider_quota_reset_pending" : "provider_quota_reset_unknown",
+    retryNotBefore: followUp.notBefore?.toISOString() ?? null,
+  };
+}
+
 /**
  * Earliest heartbeat retry time for this code. Null means the bounded retry
  * scheduler must not enqueue a retry.

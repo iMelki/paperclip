@@ -256,6 +256,7 @@ import { ACTIVE_RUN_OUTPUT_SUSPICION_THRESHOLD_MS as RECOVERY_ACTIVE_RUN_OUTPUT_
 import {
   ACPX_PROVIDER_QUOTA_ERROR_CODE,
   acpxProviderQuotaHeartbeatRetryNotBefore,
+  readAcpxProviderQuotaAutomaticWakeHold,
 } from "./recovery/acpx-provider-quota.js";
 import { collectDispositionRepairSourceState } from "./recovery/disposition-repair.js";
 import {
@@ -10087,6 +10088,21 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     }
   }
 
+  async function readAgentAcpxProviderQuotaWakeHold(companyId: string, agentId: string, now: Date) {
+    const latestRun = await db
+      .select({ errorCode: heartbeatRuns.errorCode, resultJson: heartbeatRuns.resultJson })
+      .from(heartbeatRuns)
+      .where(and(
+        eq(heartbeatRuns.companyId, companyId),
+        eq(heartbeatRuns.agentId, agentId),
+        inArray(heartbeatRuns.status, ["failed", "succeeded"]),
+      ))
+      .orderBy(desc(heartbeatRuns.createdAt), desc(heartbeatRuns.id))
+      .limit(1)
+      .then((rows) => rows[0] ?? null);
+    return readAcpxProviderQuotaAutomaticWakeHold(latestRun, now);
+  }
+
   async function enqueueMissingIssueCommentRetry(
     run: typeof heartbeatRuns.$inferSelect,
     agent: typeof agents.$inferSelect,
@@ -10281,6 +10297,23 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         issueCommentRetryQueuedAt: null,
       });
       return { outcome: "satisfied" as const, queuedRun: null };
+    }
+
+    const quotaHold = readAcpxProviderQuotaAutomaticWakeHold(run);
+    if (quotaHold) {
+      await patchRunIssueCommentStatus(run.id, {
+        issueCommentStatus: "not_applicable",
+        issueCommentSatisfiedByCommentId: null,
+        issueCommentRetryQueuedAt: null,
+      });
+      await appendRunEvent(run, await nextRunEventSeq(run.id), {
+        eventType: "lifecycle",
+        stream: "system",
+        level: "info",
+        message: "Missing-comment retry suppressed while the provider quota is held",
+        payload: quotaHold,
+      });
+      return { outcome: "not_applicable" as const, queuedRun: null };
     }
 
     if (readNonEmptyString(contextSnapshot.retryReason) === "missing_issue_comment") {
@@ -19954,6 +19987,10 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         const baseline = new Date(agent.lastHeartbeatAt ?? agent.createdAt).getTime();
         const elapsedMs = now.getTime() - baseline;
         if (elapsedMs < policy.intervalSec * 1000) continue;
+        if (await readAgentAcpxProviderQuotaWakeHold(agent.companyId, agent.id, now)) {
+          skipped += 1;
+          continue;
+        }
         const timerClaim = await claimDueTimerHeartbeat(agent, now, policy.intervalSec);
         if (!timerClaim) continue;
 
