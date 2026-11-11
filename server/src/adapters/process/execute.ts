@@ -1,3 +1,4 @@
+import { ADAPTER_DEFAULT_TIMEOUT_SEC, resolveAdapterTimeoutSec } from "@paperclipai/adapter-utils/adapter-timeout";
 import type { AdapterExecutionContext, AdapterExecutionResult } from "../types.js";
 import {
   asString,
@@ -140,7 +141,10 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     resolvedCommand,
   });
 
-  const timeoutSec = asNumber(config.timeoutSec, 0);
+  const timeoutSec = resolveAdapterTimeoutSec({
+    configured: config.timeoutSec,
+    adapterDefaultSec: ADAPTER_DEFAULT_TIMEOUT_SEC.process,
+  }).timeoutSec;
   const graceSec = asNumber(config.graceSec, 15);
 
   if (onMeta) {

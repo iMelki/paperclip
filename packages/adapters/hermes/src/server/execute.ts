@@ -26,6 +26,7 @@ import type {
   AdapterExecutionResult,
   UsageSummary,
 } from "@paperclipai/adapter-utils";
+import { resolveAdapterTimeoutSec } from "@paperclipai/adapter-utils/adapter-timeout";
 
 import {
   runChildProcess,
@@ -343,7 +344,10 @@ export async function execute(
   // ── Resolve configuration ──────────────────────────────────────────────
   const hermesCmd = resolveHermesCommand(config);
   const model = cfgString(config.model) || DEFAULT_MODEL;
-  const timeoutSec = strictIsolation?.timeoutSec ?? (cfgNumber(config.timeoutSec) || DEFAULT_TIMEOUT_SEC);
+  const timeoutSec = strictIsolation?.timeoutSec ?? resolveAdapterTimeoutSec({
+    configured: config.timeoutSec,
+    adapterDefaultSec: DEFAULT_TIMEOUT_SEC,
+  }).timeoutSec;
   const graceSec = cfgNumber(config.graceSec) || DEFAULT_GRACE_SEC;
   const maxTurns = strictIsolation?.maxTurns ?? cfgNumber(config.maxTurnsPerRun);
   const toolsets = cfgString(config.toolsets) || cfgStringArray(config.enabledToolsets)?.join(",");

@@ -73,6 +73,7 @@ import {
 import { conflict, HttpError, notFound } from "../errors.js";
 import { getStartupTraceContext, getStartupTracer } from "../instrumentation.js";
 import { createHostDuplexObservabilityRecorder } from "./duplex-observability-recorder.js";
+import { resolvePaperclipRunnerTimeoutMs } from "@paperclipai/adapter-utils/adapter-timeout";
 import type { DuplexAggregateByteLedger } from "@paperclipai/adapter-utils/duplex-aggregate-byte-ledger";
 import { incrementToolRuntimeMetricCounter } from "./tool-runtime-metrics.js";
 import { logger } from "../middleware/logger.js";
@@ -16360,10 +16361,9 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           });
           const prompt = readNonEmptyString(context.paperclipTaskMarkdown)
             ?? `# ${issueRef.identifier ?? issueRef.id}: ${issueRef.title}`;
-          const configuredTimeoutSec = Number(runtimeConfig.timeoutSec);
-          const timeoutMs = Number.isFinite(configuredTimeoutSec) && configuredTimeoutSec > 0
-            ? Math.min(configuredTimeoutSec * 1_000, 24 * 60 * 60 * 1_000)
-            : 60 * 60 * 1_000;
+          const timeoutMs = resolvePaperclipRunnerTimeoutMs({
+            configured: runtimeConfig.timeoutSec,
+          });
           const environment = Object.fromEntries(
             Object.entries(parseObject(runtimeConfig.env)).filter(
               (entry): entry is [string, string] => typeof entry[1] === "string",

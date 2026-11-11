@@ -12,6 +12,7 @@ import type {
   AdapterExecutionResult,
   UsageSummary,
 } from "@paperclipai/adapter-utils";
+import { ADAPTER_DEFAULT_TIMEOUT_SEC } from "../adapter-timeout.js";
 import {
   adapterExecutionTargetSessionIdentity,
   describeAdapterExecutionTarget,
@@ -97,7 +98,6 @@ import {
   DEFAULT_ACP_ENGINE_MODE,
   DEFAULT_ACP_ENGINE_NON_INTERACTIVE_PERMISSIONS,
   DEFAULT_ACP_ENGINE_PERMISSION_MODE,
-  DEFAULT_ACP_ENGINE_TIMEOUT_SEC,
   DEFAULT_ACP_ENGINE_WARM_HANDLE_IDLE_MS,
 } from "./constants.js";
 import {
@@ -1708,12 +1708,14 @@ async function buildRuntime(input: {
     url: server.url,
     headers: [{ name: "Authorization", value: `Bearer ${server.token}` }],
   }));
-  // Resolve the wall-clock timeout through the shared execution-target
-  // resolver so sandbox-backed runs pick up the 4h backstop default while
-  // local/SSH runs keep the historical "0 = no adapter timeout" behavior.
+  // Missing, 0, and negative timeoutSec resolve to the ACP default (4h).
+  // A positive adapterConfig.timeoutSec, or PAPERCLIP_ADAPTER_TIMEOUT_SEC,
+  // overrides that default. Sandbox targets keep the 4h backstop label when
+  // the resolved value is the sandbox constant.
   const timeoutResolution = resolveAdapterExecutionTargetTimeout(
     executionTarget,
-    asNumber(config.timeoutSec, DEFAULT_ACP_ENGINE_TIMEOUT_SEC),
+    config.timeoutSec,
+    { adapterDefaultSec: ADAPTER_DEFAULT_TIMEOUT_SEC.acpx },
   );
   const timeoutSec = timeoutResolution.timeoutSec;
   const stateDir = path.resolve(asString(config.stateDir, "") || defaultStateDir(agent.companyId, agent.id));

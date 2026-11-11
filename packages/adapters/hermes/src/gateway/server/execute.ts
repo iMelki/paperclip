@@ -3,6 +3,7 @@ import type {
   AdapterExecutionResult,
   UsageSummary,
 } from "@paperclipai/adapter-utils";
+import { resolveAdapterTimeoutSec } from "@paperclipai/adapter-utils/adapter-timeout";
 import {
   asNumber,
   asString,
@@ -818,8 +819,11 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     };
   }
 
-  const timeoutSec = parseNonNegativeNumber(ctx.config.timeoutSec, DEFAULT_TIMEOUT_SEC);
-  const timeoutMs = timeoutSec > 0 ? Math.ceil(timeoutSec * 1000) : 0;
+  const timeoutSec = resolveAdapterTimeoutSec({
+    configured: ctx.config.timeoutSec,
+    adapterDefaultSec: DEFAULT_TIMEOUT_SEC,
+  }).timeoutSec;
+  const timeoutMs = Math.ceil(timeoutSec * 1000);
   const reconnectMs = Math.floor(clamp(parseNonNegativeNumber(ctx.config.eventReconnectMs, DEFAULT_EVENT_RECONNECT_MS), 250, 30_000));
   const pollIntervalMs = Math.floor(clamp(parseNonNegativeNumber(ctx.config.pollIntervalMs, DEFAULT_POLL_INTERVAL_MS), 250, 10_000));
   const strategy = normalizeSessionKeyStrategy(ctx.config.sessionKeyStrategy);
@@ -917,7 +921,6 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
 
   let timeoutTimer: ReturnType<typeof setTimeout> | null = null;
   const timeoutPromise = new Promise<"timeout">((resolve) => {
-    if (timeoutMs <= 0) return;
     timeoutTimer = setTimeout(() => resolve("timeout"), timeoutMs);
   });
 

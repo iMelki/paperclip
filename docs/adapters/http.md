@@ -22,7 +22,7 @@ The `http` adapter sends a webhook request to an external agent service. The age
 |-------|------|----------|-------------|
 | `url` | string | Yes | Webhook URL to POST to |
 | `headers` | object | No | Additional HTTP headers |
-| `timeoutSec` | number | No | Request timeout |
+| `timeoutSec` | number | No | Request timeout in seconds. Default 120. A positive `timeoutMs` is still accepted when `timeoutSec` is missing, 0, or negative. |
 
 ## How It Works
 

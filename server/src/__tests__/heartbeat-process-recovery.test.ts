@@ -1,3 +1,4 @@
+import { ADAPTER_DEFAULT_TIMEOUT_SEC } from "@paperclipai/adapter-utils/adapter-timeout";
 import { randomUUID } from "node:crypto";
 import { spawn, type ChildProcess } from "node:child_process";
 import fs from "node:fs/promises";
@@ -4993,7 +4994,7 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     expect(cancelled?.status).toBe("cancelled");
     expect(cancelled?.resultJson).toMatchObject({
       stopReason: "cancelled",
-      effectiveTimeoutSec: 0,
+      effectiveTimeoutSec: ADAPTER_DEFAULT_TIMEOUT_SEC.codex_local,
       timeoutConfigured: false,
       timeoutFired: false,
     });
