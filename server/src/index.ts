@@ -1217,7 +1217,19 @@ export async function startServer(): Promise<StartedServer> {
   );
   const trackBoundedSweep = (name: string, start: () => Promise<unknown>) => {
     if (heartbeatSchedulerStopped) return;
-    const work = heartbeatSweeps.start(name, start);
+    const work = heartbeatSweeps.start(name, async () => {
+      // A sweep can wait behind another one. Shutdown may begin before its slot
+      // is granted; skip new work then, while the runner still releases its slot.
+      if (heartbeatSchedulerStopped) return;
+      try {
+        return await start();
+      } catch (error) {
+        // Local handlers own errors they consume. Only an otherwise-unhandled
+        // rejection reaches this boundary; keep its diagnostic bounded/value-free.
+        logger.error({ sweep: name }, "heartbeat scheduler sweep rejected");
+        throw error;
+      }
+    });
     if (work) trackHeartbeatSchedulerWork(work);
   };
   const externalObjects = externalObjectService(db as any, {
@@ -1898,12 +1910,13 @@ export async function startServer(): Promise<StartedServer> {
   
   {
     const shutdown = async (signal: "SIGINT" | "SIGTERM") => {
-      await systemdNotify(["--stopping", `--status=Stopping after ${signal}`]);
+      // Quiesce synchronously: notification can wait on an external process.
       heartbeatSchedulerStopped = true;
       if (heartbeatSchedulerInterval) {
         clearInterval(heartbeatSchedulerInterval);
         heartbeatSchedulerInterval = null;
       }
+      await systemdNotify(["--stopping", `--status=Stopping after ${signal}`]);
 
       const heartbeatShutdown = await coordinateHeartbeatSchedulerShutdown({
         signal,

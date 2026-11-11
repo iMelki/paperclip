@@ -3,7 +3,61 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { ensurePostgresDatabase, getPostgresDataDirectory } from "@paperclipai/db";
+import { effectiveDatabasePoolMax, ensurePostgresDatabase, getPostgresDataDirectory } from "@paperclipai/db";
+import { decisionService } from "../services/index.js";
+import { logger } from "../middleware/logger.js";
+
+// Only the captured-shutdown regression bypasses shutdown I/O. Keep the real
+// scheduler shutdown coordinator and its wait-for-idle behavior in every test.
+const capturedShutdownTest = vi.hoisted(() => ({
+  enabled: false,
+  stoppingNotify: null as (() => Promise<boolean>) | null,
+}));
+
+vi.mock("../shutdown.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../shutdown.js")>();
+  return {
+    ...actual,
+    finalizeServerShutdown: vi.fn(async (...args: Parameters<typeof actual.finalizeServerShutdown>) => {
+      if (capturedShutdownTest.enabled) return;
+      return actual.finalizeServerShutdown(...args);
+    }),
+  };
+});
+
+vi.mock("../services/systemd-notify.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../services/systemd-notify.js")>();
+  return {
+    ...actual,
+    systemdNotify: vi.fn((...args: Parameters<typeof actual.systemdNotify>) => {
+      if (!capturedShutdownTest.enabled) return actual.systemdNotify(...args);
+      return args[0].includes("--stopping") && capturedShutdownTest.stoppingNotify
+        ? capturedShutdownTest.stoppingNotify()
+        : Promise.resolve(false);
+    }),
+  };
+});
+
+vi.mock("../services/run-log-store.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../services/run-log-store.js")>();
+  return {
+    ...actual,
+    flushInFlightRunLogMirrors: vi.fn(async (...args: Parameters<typeof actual.flushInFlightRunLogMirrors>) => {
+      if (capturedShutdownTest.enabled) return;
+      return actual.flushInFlightRunLogMirrors(...args);
+    }),
+  };
+});
+
+vi.mock("../telemetry.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../telemetry.js")>();
+  return {
+    ...actual,
+    getTelemetryClient: vi.fn((...args: Parameters<typeof actual.getTelemetryClient>) => (
+      capturedShutdownTest.enabled ? null : actual.getTelemetryClient(...args)
+    )),
+  };
+});
 
 const { pgStartMock, pgCtorMock } = vi.hoisted(() => {
   const pgStartMock = vi.fn(async () => {});
@@ -68,6 +122,7 @@ const {
   const heartbeatServiceMock = {
     resolveSchedulingSuppression: resolveHeartbeatSchedulingSuppressionMock,
     reconcileHotRestartAdoption: vi.fn(async () => ({ mode: "none" })),
+    drainRunningRunsForShutdown: vi.fn(async () => ({ drained: 0 })),
     reapOrphanedRuns: vi.fn(async () => ({ reaped: 0, runIds: [] })),
     promoteDueScheduledRetries: vi.fn(async () => ({ promoted: 0, runIds: [] })),
     resumeQueuedRuns: vi.fn(async () => undefined),
@@ -224,7 +279,8 @@ vi.mock("@paperclipai/db", () => ({
   createDb: createDbMock,
   // startServer sizes the heartbeat sweep gate from this export. The real
   // helper reads DATABASE_POOL_MAX and otherwise returns the driver default.
-  effectiveDatabasePoolMax: () => 10,
+  effectiveDatabasePoolMax: vi.fn(() => 10),
+  closeAllRegisteredClients: vi.fn(async () => {}),
   ensurePostgresDatabase: vi.fn(),
   getPostgresDataDirectory: vi.fn(),
   prepareEmbeddedPostgresNativeRuntime: vi.fn(async () => {}),
@@ -737,6 +793,133 @@ describe("startServer embedded PostgreSQL identity", () => {
 });
 
 describe("startServer feedback export wiring", () => {
+
+  it("skips queued sweeps after shutdown while draining the sweep already running", async () => {
+    loadConfigMock.mockReturnValue(buildTestConfig({ heartbeatSchedulerEnabled: true }));
+    vi.mocked(effectiveDatabasePoolMax).mockReturnValueOnce(2);
+    let releaseHeld!: () => void;
+    const held = new Promise<{ expired: number }>((resolve) => {
+      releaseHeld = () => resolve({ expired: 0 });
+    });
+    const heldSweep = vi.fn(() => held);
+    vi.mocked(decisionService).mockReturnValueOnce({ sweepExpired: heldSweep } as unknown as ReturnType<typeof decisionService>);
+    let tick: (() => void) | undefined;
+    let stop: (() => void) | undefined;
+    let releaseNotify!: () => void;
+    const pendingNotify = new Promise<boolean>((resolve) => {
+      releaseNotify = () => resolve(false);
+    });
+    const stoppingNotify = vi.fn(() => pendingNotify);
+    let shutdownRequested = false;
+    let markShutdownComplete!: () => void;
+    const shutdownComplete = new Promise<void>((resolve) => {
+      markShutdownComplete = resolve;
+    });
+    const originalOnce = process.once;
+    const onceSpy = vi.spyOn(process, "once").mockImplementation(((event, listener) => {
+      if (event === "SIGTERM") { stop = listener as () => void; return process; }
+      if (event === "SIGINT") return process;
+      return originalOnce.call(process, event, listener);
+    }) as typeof process.once);
+    const intervalSpy = vi.spyOn(globalThis, "setInterval").mockImplementation(((callback: () => void) => {
+      tick = callback;
+      return 1 as unknown as ReturnType<typeof setInterval>;
+    }) as typeof setInterval);
+    const clearSpy = vi.spyOn(globalThis, "clearInterval").mockImplementation(() => {});
+    const exitSpy = vi.spyOn(process, "exit").mockImplementation((() => {
+      markShutdownComplete();
+      return undefined;
+    }) as never);
+    capturedShutdownTest.enabled = true;
+    capturedShutdownTest.stoppingNotify = stoppingNotify;
+    try {
+      await startServer();
+      const routineBefore = routineServiceMock.tickScheduledTriggers.mock.calls.length;
+      const timerBefore = heartbeatServiceMock.tickTimers.mock.calls.length;
+      const externalBefore = externalObjectsServiceMock.refreshDueObjectsForActiveCompanies.mock.calls.length;
+      expect(tick).toBeTypeOf("function");
+      expect(stop).toBeTypeOf("function");
+      tick!();
+      await vi.waitFor(() => expect(heldSweep).toHaveBeenCalledOnce());
+      expect(routineServiceMock.tickScheduledTriggers).toHaveBeenCalledTimes(routineBefore);
+      shutdownRequested = true;
+      stop!(); // Only this startServer's captured callback; never emit a real signal.
+      expect(clearSpy).toHaveBeenCalled(); // No await before scheduler quiescence.
+      await vi.waitFor(() => expect(stoppingNotify).toHaveBeenCalledOnce());
+      expect(exitSpy).not.toHaveBeenCalled();
+      releaseHeld();
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      // The external notification is still pending while the queued slot drains.
+      expect(routineServiceMock.tickScheduledTriggers).toHaveBeenCalledTimes(routineBefore);
+      expect(heartbeatServiceMock.tickTimers).toHaveBeenCalledTimes(timerBefore);
+      expect(externalObjectsServiceMock.refreshDueObjectsForActiveCompanies).toHaveBeenCalledTimes(externalBefore);
+      expect(exitSpy).not.toHaveBeenCalled();
+      releaseNotify();
+      await shutdownComplete;
+      expect(exitSpy).toHaveBeenCalledWith(0);
+      expect(routineServiceMock.tickScheduledTriggers).toHaveBeenCalledTimes(routineBefore);
+      expect(heartbeatServiceMock.tickTimers).toHaveBeenCalledTimes(timerBefore);
+      expect(externalObjectsServiceMock.refreshDueObjectsForActiveCompanies).toHaveBeenCalledTimes(externalBefore);
+    } finally {
+      releaseHeld();
+      releaseNotify();
+      // Even a failed assertion must drain this captured shutdown before the real
+      // process.exit is restored. Shutdown I/O doubles are scoped to this case.
+      if (shutdownRequested) await shutdownComplete;
+      capturedShutdownTest.stoppingNotify = null;
+      capturedShutdownTest.enabled = false;
+      vi.mocked(effectiveDatabasePoolMax).mockReset().mockReturnValue(10);
+      exitSpy.mockRestore();
+      clearSpy.mockRestore();
+      intervalSpy.mockRestore();
+      onceSpy.mockRestore();
+    }
+  });
+
+  it("logs an unhandled recovery suppression rejection once without values and frees the sweep name", async () => {
+    loadConfigMock.mockReturnValue(buildTestConfig({ heartbeatSchedulerEnabled: true }));
+    let tick: (() => void) | undefined;
+    const originalOnce = process.once;
+    const onceSpy = vi.spyOn(process, "once").mockImplementation(((event, listener) => {
+      if (event === "SIGTERM" || event === "SIGINT") return process;
+      return originalOnce.call(process, event, listener);
+    }) as typeof process.once);
+    const intervalSpy = vi.spyOn(globalThis, "setInterval").mockImplementation(((callback: () => void) => {
+      tick = callback;
+      return 1 as unknown as ReturnType<typeof setInterval>;
+    }) as typeof setInterval);
+    try {
+      await startServer();
+      const recoveryBefore = heartbeatServiceMock.reapOrphanedRuns.mock.calls.length;
+      vi.mocked(logger.error).mockClear();
+      const syntheticSecret = "not-for-logs-synthetic-credential";
+      resolveHeartbeatSchedulingSuppressionMock
+        .mockImplementationOnce(() => ({ suppressed: true, reason: null }))
+        .mockImplementationOnce(() => { throw new Error("CONNECT_TIMEOUT " + syntheticSecret); });
+      expect(tick).toBeTypeOf("function");
+      tick!();
+      await vi.waitFor(() => expect(logger.error).toHaveBeenCalledWith(
+        { sweep: "heartbeat-recovery" }, "heartbeat scheduler sweep rejected",
+      ));
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      const boundedLogs = vi.mocked(logger.error).mock.calls.filter((args) => args[1] === "heartbeat scheduler sweep rejected");
+      expect(boundedLogs).toEqual([[{ sweep: "heartbeat-recovery" }, "heartbeat scheduler sweep rejected"]]);
+      expect(JSON.stringify(boundedLogs)).not.toContain(syntheticSecret);
+      expect(heartbeatServiceMock.reapOrphanedRuns).toHaveBeenCalledTimes(recoveryBefore);
+      heartbeatServiceMock.tickTimers.mockRejectedValueOnce(new Error("locally handled timer fixture"));
+      tick!();
+      await vi.waitFor(() => expect(heartbeatServiceMock.reapOrphanedRuns).toHaveBeenCalledTimes(recoveryBefore + 1));
+      expect(vi.mocked(logger.error).mock.calls.filter((args) => args[1] === "heartbeat timer tick failed")).toHaveLength(1);
+      expect(vi.mocked(logger.error).mock.calls.filter((args) => args[1] === "heartbeat scheduler sweep rejected")).toHaveLength(1);
+    } finally {
+      resolveHeartbeatSchedulingSuppressionMock.mockReset().mockReturnValue({ suppressed: false, reason: null });
+      heartbeatServiceMock.tickTimers.mockReset().mockResolvedValue({ checked: 0, enqueued: 0, skipped: 0 });
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      intervalSpy.mockRestore();
+      onceSpy.mockRestore();
+    }
+  });
+
   beforeEach(() => {
     vi.clearAllMocks();
     process.env.PAPERCLIP_DECISION_SIGNING_SECRET = "fedcba9876543210fedcba9876543210";
