@@ -29,6 +29,10 @@ import {
   issues,
 } from "@paperclipai/db";
 import { parseObject, asBoolean, asNumber } from "../../adapters/utils.js";
+import {
+  ACPX_PROVIDER_QUOTA_ERROR_CODE,
+  classifyAcpxProviderQuotaFollowUp,
+} from "./acpx-provider-quota.js";
 import { runningProcesses } from "../../adapters/index.js";
 import { visibleIssueCondition } from "../issue-visibility.js";
 import { forbidden, notFound } from "../../errors.js";
@@ -375,6 +379,9 @@ const NON_RETRYABLE_CONTINUATION_ERROR_CODES = new Set<string>([
   "budget_exhausted",
   "issue_paused",
   "issue_dependencies_blocked",
+  // A provider session/usage limit is not a continuation failure. Retry and
+  // wake go through the quota clock or, without one, the default quota backoff.
+  ACPX_PROVIDER_QUOTA_ERROR_CODE,
 ]);
 
 // A continuation cancelled with this code is a *deliberate wait* (the latest run
@@ -411,6 +418,7 @@ const CONFIGURATION_INCOMPLETE_ERROR_RE =
 export type AdapterFailureRecoveryClassification =
   | { kind: "provider_quota"; retryAt: Date; parsedResetTime: boolean }
   | { kind: "configuration_incomplete" }
+  | { kind: "provider_quota_hold" }
   | null;
 
 /**
@@ -535,12 +543,24 @@ export function classifyAdapterFailureForRecovery(
     latestRun.errorCode !== "adapter_failed" &&
     latestRun.errorCode !== "acpx_turn_failed" &&
     latestRun.errorCode !== "provider_quota" &&
-    latestRun.errorCode !== "configuration_incomplete"
+    latestRun.errorCode !== "configuration_incomplete" &&
+    latestRun.errorCode !== ACPX_PROVIDER_QUOTA_ERROR_CODE
   ) {
     return null;
   }
   const resultJson = parseObject(latestRun.resultJson);
   const failedAt = latestRun.finishedAt ?? latestRun.startedAt ?? latestRun.createdAt ?? null;
+  if (latestRun.errorCode === ACPX_PROVIDER_QUOTA_ERROR_CODE) {
+    const followUp = classifyAcpxProviderQuotaFollowUp(latestRun, now);
+    // No provider reset is not permission to invent an automatic wake.
+    // In particular an older generated backoff cannot become a trusted reset.
+    if (!followUp.notBefore) return { kind: "provider_quota_hold" };
+    return {
+      kind: "provider_quota",
+      retryAt: followUp.notBefore.getTime() > now.getTime() ? followUp.notBefore : now,
+      parsedResetTime: true,
+    };
+  }
   if (latestRun.errorCode === "acpx_turn_failed") {
     // Every failed ACP turn carries this code, so only Claude's own statement in the
     // error or stop reason counts; transcript text elsewhere in the result
@@ -3596,6 +3616,7 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
     latestRun: NonNullable<LatestIssueRun>,
     classification: NonNullable<AdapterFailureRecoveryClassification>,
   ): NonNullable<LatestIssueRun> {
+    if (classification.kind === "provider_quota_hold") return latestRun;
     const resultJson = parseObject(latestRun.resultJson);
     const providerQuotaMetadata = classification.kind === "provider_quota"
       ? {
@@ -3605,7 +3626,12 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
           providerQuotaRetryNotBefore: classification.retryAt.toISOString(),
         }
       : { errorFamily: "configuration_incomplete" };
-    const errorCode = classification.kind;
+    // The dedicated ACPX code carries the parsed provider reset (`quotaResetAt`)
+    // that later sweeps read, so it stays on the run. The recovery family is
+    // recorded separately in `errorFamily` and `recoveryClassification`.
+    const errorCode = latestRun.errorCode === ACPX_PROVIDER_QUOTA_ERROR_CODE && classification.kind === "provider_quota"
+      ? ACPX_PROVIDER_QUOTA_ERROR_CODE
+      : classification.kind;
 
     return {
       ...latestRun,
@@ -3613,7 +3639,7 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
       resultJson: {
         ...resultJson,
         ...providerQuotaMetadata,
-        recoveryClassification: errorCode,
+        recoveryClassification: classification.kind,
       },
     };
   }
@@ -3865,6 +3891,16 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
       const providerQuotaMonitorRun = issue.status === "in_review"
         ? participantLatestRunForRecovery
         : latestRun;
+      // Unknown quota alone must not escalate an already-created recovery
+      // issue. Separate org and budget safety checks above remain effective.
+      const quotaFailureRun = providerQuotaMonitorRun ?? (
+        isStrandedIssueRecoveryIssue(issue) && latestRun?.agentId === agentId ? latestRun : null
+      );
+      if (quotaFailureRun && isUnsuccessfulTerminalIssueRun(quotaFailureRun)
+        && classifyAdapterFailureForRecovery(quotaFailureRun, recoveryNow)?.kind === "provider_quota_hold") {
+        result.skipped += 1;
+        continue;
+      }
       if (hasPendingProviderQuotaRecoveryMonitor(issue, providerQuotaMonitorRun, recoveryNow)) {
         result.skipped += 1;
         continue;
@@ -3894,6 +3930,10 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
           continue;
         }
 
+        if (adapterFailureClassification.kind === "provider_quota_hold") {
+          result.skipped += 1;
+          continue;
+        }
         if (adapterFailureClassification.kind === "provider_quota") {
           const monitored = await scheduleProviderQuotaRecoveryMonitor({
             issue,
@@ -4080,6 +4120,10 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
         const participantAdapterFailureClassification = isUnsuccessfulTerminalIssueRun(participantLatestRun)
           ? classifyAdapterFailureForRecovery(participantLatestRun, recoveryNow)
           : null;
+        if (participantAdapterFailureClassification?.kind === "provider_quota_hold") {
+          result.skipped += 1;
+          continue;
+        }
         if (participantAdapterFailureClassification?.kind === "provider_quota") {
           const monitored = await scheduleProviderQuotaRecoveryMonitor({
             issue,
