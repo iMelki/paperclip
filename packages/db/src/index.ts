@@ -13,6 +13,10 @@ export {
   migratePostgresIfEmpty,
   type MigrationBootstrapResult,
   type Db,
+  POSTGRES_JS_DEFAULT_POOL_MAX,
+  effectiveDatabasePoolMax,
+  databaseClientOptionsFromEnv,
+  resolveDatabaseClientOptions,
 } from "./client.js";
 export {
   EMBEDDED_POSTGRES_TEST_SETUP_TIMEOUT_MS,
@@ -42,6 +46,11 @@ export {
   createEmbeddedPostgresLogBuffer,
   formatEmbeddedPostgresError,
 } from "./embedded-postgres-error.js";
+export {
+  resolveEmbeddedPostgresLock,
+  type EmbeddedPostgresLockOperations,
+  type EmbeddedPostgresLockResult,
+} from "./embedded-postgres-lock.js";
 export {
   ensureLinuxSharedLibraryAliases,
   prepareEmbeddedPostgresNativeRuntime,

@@ -253,6 +253,11 @@ import {
   withRecoveryModelProfileHint,
 } from "./recovery/model-profile-hint.js";
 import { ACTIVE_RUN_OUTPUT_SUSPICION_THRESHOLD_MS as RECOVERY_ACTIVE_RUN_OUTPUT_SUSPICION_THRESHOLD_MS, recoveryService } from "./recovery/service.js";
+import {
+  ACPX_PROVIDER_QUOTA_ERROR_CODE,
+  acpxProviderQuotaHeartbeatRetryNotBefore,
+  readAcpxProviderQuotaAutomaticWakeHold,
+} from "./recovery/acpx-provider-quota.js";
 import { collectDispositionRepairSourceState } from "./recovery/disposition-repair.js";
 import {
   buildIssueReviewPathLostIdempotencyKey,
@@ -718,7 +723,17 @@ function readTransientRetryNotBeforeFromRun(run: Pick<typeof heartbeatRuns.$infe
 
 function readTransientRecoveryContractFromRun(
   run: Pick<typeof heartbeatRuns.$inferSelect, "errorCode" | "resultJson">,
+  now = new Date(),
 ) {
+  if (run.errorCode === ACPX_PROVIDER_QUOTA_ERROR_CODE) {
+    const retryNotBefore = acpxProviderQuotaHeartbeatRetryNotBefore(run, now);
+    // No parsed reset: do not retry. A parsed reset is the earliest due time.
+    if (!retryNotBefore) return null;
+    return {
+      errorFamily: "provider_quota" as const,
+      retryNotBefore,
+    };
+  }
   const errorFamily = readHeartbeatRunErrorFamily(run);
   return errorFamily === "transient_upstream" || errorFamily === "provider_quota"
     ? {
@@ -10073,6 +10088,21 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     }
   }
 
+  async function readAgentAcpxProviderQuotaWakeHold(companyId: string, agentId: string, now: Date) {
+    const latestRun = await db
+      .select({ errorCode: heartbeatRuns.errorCode, resultJson: heartbeatRuns.resultJson })
+      .from(heartbeatRuns)
+      .where(and(
+        eq(heartbeatRuns.companyId, companyId),
+        eq(heartbeatRuns.agentId, agentId),
+        inArray(heartbeatRuns.status, ["failed", "succeeded"]),
+      ))
+      .orderBy(desc(heartbeatRuns.createdAt), desc(heartbeatRuns.id))
+      .limit(1)
+      .then((rows) => rows[0] ?? null);
+    return readAcpxProviderQuotaAutomaticWakeHold(latestRun, now);
+  }
+
   async function enqueueMissingIssueCommentRetry(
     run: typeof heartbeatRuns.$inferSelect,
     agent: typeof agents.$inferSelect,
@@ -10267,6 +10297,23 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         issueCommentRetryQueuedAt: null,
       });
       return { outcome: "satisfied" as const, queuedRun: null };
+    }
+
+    const quotaHold = readAcpxProviderQuotaAutomaticWakeHold(run);
+    if (quotaHold) {
+      await patchRunIssueCommentStatus(run.id, {
+        issueCommentStatus: "not_applicable",
+        issueCommentSatisfiedByCommentId: null,
+        issueCommentRetryQueuedAt: null,
+      });
+      await appendRunEvent(run, await nextRunEventSeq(run.id), {
+        eventType: "lifecycle",
+        stream: "system",
+        level: "info",
+        message: "Missing-comment retry suppressed while the provider quota is held",
+        payload: quotaHold,
+      });
+      return { outcome: "not_applicable" as const, queuedRun: null };
     }
 
     if (readNonEmptyString(contextSnapshot.retryReason) === "missing_issue_comment") {
@@ -16860,6 +16907,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           keepIdleOnFailure:
             outcome === "failed" &&
             ((finalizedRun ? readHeartbeatRunErrorFamily(finalizedRun) === "provider_quota" : runErrorCode === "provider_quota") ||
+              (finalizedRun ? finalizedRun.errorCode === ACPX_PROVIDER_QUOTA_ERROR_CODE : runErrorCode === ACPX_PROVIDER_QUOTA_ERROR_CODE) ||
               runErrorCode === WORKSPACE_VALIDATION_FAILURE_CODE ||
               isWorkspaceSyncConflictFailure(adapterResult.errorMessage)),
           wasFirstHeartbeat: timerClaimWasFirstHeartbeat(run),
@@ -17220,6 +17268,10 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     run: typeof heartbeatRuns.$inferSelect,
     options: { suppressImmediateRecovery?: boolean } = {},
   ) {
+    // Release execution locks normally, but never create a new automatic
+    // recovery wake while the dedicated provider quota is held.
+    const suppressImmediateRecovery = options.suppressImmediateRecovery
+      || Boolean(readAcpxProviderQuotaAutomaticWakeHold(run));
     const runContext = parseObject(run.contextSnapshot);
     const contextIssueId = readNonEmptyString(runContext.issueId);
     const taskKey = deriveTaskKeyWithHeartbeatFallback(runContext, null);
@@ -17675,7 +17727,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       if (issueNeedsReviewParticipantRecovery) {
         const existingReviewParticipantExecutionPath = await findExistingExecutionPath(currentParticipant.agentId);
         if (
-          options.suppressImmediateRecovery ||
+          suppressImmediateRecovery ||
           existingReviewParticipantExecutionPath ||
           issueHasPersistedMonitor ||
           await isAutomaticRecoverySuppressedByPauseHold(db, issue.companyId, issue.id, treeControlSvc)
@@ -17797,7 +17849,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       if (!issueNeedsImmediateRecovery) {
         return { kind: "released" as const };
       }
-      if (options.suppressImmediateRecovery) {
+      if (suppressImmediateRecovery) {
         return { kind: "released" as const };
       }
 
@@ -19939,22 +19991,45 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         const baseline = new Date(agent.lastHeartbeatAt ?? agent.createdAt).getTime();
         const elapsedMs = now.getTime() - baseline;
         if (elapsedMs < policy.intervalSec * 1000) continue;
+        if (await readAgentAcpxProviderQuotaWakeHold(agent.companyId, agent.id, now)) {
+          skipped += 1;
+          continue;
+        }
         const timerClaim = await claimDueTimerHeartbeat(agent, now, policy.intervalSec);
         if (!timerClaim) continue;
 
-        const run = await enqueueWakeup(agent.id, {
-          source: "timer",
-          triggerDetail: "system",
-          reason: "heartbeat_timer",
-          requestedByActorType: "system",
-          requestedByActorId: "heartbeat_scheduler",
-          contextSnapshot: {
-            source: "scheduler",
-            reason: "interval_elapsed",
-            now: now.toISOString(),
-            timerClaimWasFirstHeartbeat: timerClaim.wasFirstHeartbeat,
-          },
-        });
+        let run: Awaited<ReturnType<typeof enqueueWakeup>>;
+        try {
+          run = await enqueueWakeup(agent.id, {
+            source: "timer",
+            triggerDetail: "system",
+            reason: "heartbeat_timer",
+            requestedByActorType: "system",
+            requestedByActorId: "heartbeat_scheduler",
+            contextSnapshot: {
+              source: "scheduler",
+              reason: "interval_elapsed",
+              now: now.toISOString(),
+              timerClaimWasFirstHeartbeat: timerClaim.wasFirstHeartbeat,
+            },
+          });
+        } catch (error) {
+          // The claim already moved lastHeartbeatAt. Give it back, so a retry of
+          // this tick (or the next one) finds the agent still due instead of
+          // skipping a wake that was never queued.
+          await db
+            .update(agents)
+            .set({ lastHeartbeatAt: agent.lastHeartbeatAt ?? null, updatedAt: new Date() })
+            .where(and(
+              eq(agents.id, agent.id),
+              eq(agents.companyId, agent.companyId),
+              eq(agents.lastHeartbeatAt, now),
+            ))
+            .catch((restoreError) => {
+              logger.warn({ err: restoreError, agentId: agent.id }, "failed to release the timer claim after a failed wakeup");
+            });
+          throw error;
+        }
         if (run) enqueued += 1;
         else skipped += 1;
       }

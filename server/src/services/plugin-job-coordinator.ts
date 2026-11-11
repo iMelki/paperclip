@@ -30,6 +30,7 @@ import type { PluginJobStore } from "./plugin-job-store.js";
 import { pluginRegistryService } from "./plugin-registry.js";
 import type { Db } from "@paperclipai/db";
 import { logger } from "../middleware/logger.js";
+import type { GitHubProjectBoardSchedulerBridge } from "./plugin-github-project-board-scheduler-bridge.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -47,6 +48,8 @@ export interface PluginJobCoordinatorOptions {
   scheduler: PluginJobScheduler;
   /** The job store for syncing declarations. */
   jobStore: PluginJobStore;
+  /** Reconciles a host-owned initially paused declaration without resuming legacy jobs. */
+  nativeGitHubProjectBoard?: GitHubProjectBoardSchedulerBridge;
 }
 
 /**
@@ -95,7 +98,7 @@ export interface PluginJobCoordinator {
 export function createPluginJobCoordinator(
   options: PluginJobCoordinatorOptions,
 ): PluginJobCoordinator {
-  const { db, lifecycle, scheduler, jobStore } = options;
+  const { db, lifecycle, scheduler, jobStore, nativeGitHubProjectBoard } = options;
   const log = logger.child({ service: "plugin-job-coordinator" });
   const registry = pluginRegistryService(db);
 
@@ -123,7 +126,9 @@ export function createPluginJobCoordinator(
 
       // Sync job declarations from the manifest
       const manifest = plugin.manifestJson;
-      const jobDeclarations = manifest.jobs ?? [];
+      const jobDeclarations = nativeGitHubProjectBoard
+        ? await nativeGitHubProjectBoard.reconcileDeclarations(pluginId, pluginKey, manifest.jobs ?? [])
+        : manifest.jobs ?? [];
 
       if (jobDeclarations.length > 0) {
         log.info(

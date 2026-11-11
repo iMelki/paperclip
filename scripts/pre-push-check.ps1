@@ -104,7 +104,12 @@ if ($DryRun) {
   exit $LASTEXITCODE
 }
 
-$pnpmCommand = Get-Command pnpm.cmd -ErrorAction SilentlyContinue
+# Batch wrappers are executable only on Windows. PowerShell on POSIX must
+# choose the native pnpm shim even if a Windows pnpm.cmd is on PATH.
+$pnpmCommand = $null
+if ([IO.Path]::DirectorySeparatorChar -eq '\') {
+  $pnpmCommand = Get-Command pnpm.cmd -ErrorAction SilentlyContinue
+}
 if (-not $pnpmCommand) { $pnpmCommand = Get-Command pnpm -ErrorAction SilentlyContinue }
 if (-not $pnpmCommand) { throw 'pnpm was not found on PATH.' }
 $pnpm = $pnpmCommand.Source
