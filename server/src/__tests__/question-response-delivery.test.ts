@@ -302,6 +302,7 @@ describeEmbeddedPostgres("question response delivery", () => {
     "does not wake the assignee when the continuation policy is %s",
     async (continuationPolicy) => {
       const seeded = await seed({ continuationPolicy });
+      telemetryMocks.track.mockClear(); // Measure delivery after setup interaction telemetry.
       const wakeup = vi.fn();
       const steer = vi.fn();
       const service = questionResponseDeliveryService(db, {
