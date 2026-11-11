@@ -575,7 +575,11 @@ export function createPluginJobScheduler(
       call: (params, timeoutMs) => {
         if (!native) return workerManager.call(job.pluginId, "runJob", params, timeoutMs);
         if (!nativeGitHubProjectBoard) throw new Error("Native board handler disappeared; worker fallback refused");
-        return nativeGitHubProjectBoard.run(job, params, timeoutMs, isCurrent);
+        const companyId = params.companyId;
+        const isCompanyCurrent = () => isCurrent()
+          && typeof companyId === "string"
+          && new Set(workerManager.getProactiveCompanyScopes(job.pluginId)).has(companyId);
+        return nativeGitHubProjectBoard.run(job, params, timeoutMs, isCompanyCurrent);
       },
       isTimeout: (error) => typeof error === "object" && error !== null && "code" in error
         && error.code === PLUGIN_RPC_ERROR_CODES.TIMEOUT,

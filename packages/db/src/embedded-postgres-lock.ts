@@ -47,10 +47,12 @@ const defaultOperations: EmbeddedPostgresLockOperations = {
   },
 };
 
-function samePath(left: string, right: string): boolean {
-  const a = path.resolve(left);
-  const b = path.resolve(right);
-  return process.platform === "win32" ? a.toLowerCase() === b.toLowerCase() : a === b;
+export function isSameEmbeddedPostgresDataDirectory(left: string, right: string): boolean {
+  const windows = process.platform === "win32";
+  const resolve = windows ? path.win32.resolve : path.resolve;
+  const a = resolve(left);
+  const b = resolve(right);
+  return windows ? a.toLowerCase() === b.toLowerCase() : a === b;
 }
 
 function parseLock(raw: string): { pid: number; dataDir: string; port: number } {
@@ -86,7 +88,7 @@ export async function resolveEmbeddedPostgresLock(
   }
 
   const lock = parseLock(raw);
-  if (!samePath(lock.dataDir, expectedDataDir)) {
+  if (!isSameEmbeddedPostgresDataDirectory(lock.dataDir, expectedDataDir)) {
     throw new Error("Embedded PostgreSQL postmaster.pid points to a different data directory; preserving it and refusing startup");
   }
   const assertLockUnchanged = () => {
@@ -104,7 +106,7 @@ export async function resolveEmbeddedPostgresLock(
   const processState = ops.probeProcess(lock.pid);
   if (processState === "running") {
     const actualDataDir = await ops.getDataDirectory(lock.port);
-    if (!actualDataDir || !samePath(actualDataDir, expectedDataDir)) {
+    if (!actualDataDir || !isSameEmbeddedPostgresDataDirectory(actualDataDir, expectedDataDir)) {
       throw new Error("Embedded PostgreSQL process identity could not be verified; preserving postmaster.pid and refusing startup");
     }
     assertLockUnchanged();
@@ -114,7 +116,7 @@ export async function resolveEmbeddedPostgresLock(
   const portState = await ops.probePort(lock.port);
   if (portState === "open") {
     const actualDataDir = await ops.getDataDirectory(lock.port);
-    if (actualDataDir && samePath(actualDataDir, expectedDataDir)) {
+    if (actualDataDir && isSameEmbeddedPostgresDataDirectory(actualDataDir, expectedDataDir)) {
       assertLockUnchanged();
       return { state: "running", pid: lock.pid, port: lock.port };
     }

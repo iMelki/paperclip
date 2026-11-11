@@ -15,7 +15,8 @@ vi.mock("./runtime-config.js", () => ({
   })),
 }));
 
-vi.mock("./embedded-postgres-lock.js", () => ({
+vi.mock("./embedded-postgres-lock.js", async (importOriginal) => ({
+  ...await importOriginal<typeof import("./embedded-postgres-lock.js")>(),
   resolveEmbeddedPostgresLock: resolveEmbeddedPostgresLockMock,
 }));
 

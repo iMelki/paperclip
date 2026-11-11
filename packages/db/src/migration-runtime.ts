@@ -3,7 +3,7 @@ import { createServer } from "node:net";
 import path from "node:path";
 import { ensurePostgresDatabase, getPostgresDataDirectory } from "./client.js";
 import { createEmbeddedPostgresLogBuffer, formatEmbeddedPostgresError } from "./embedded-postgres-error.js";
-import { resolveEmbeddedPostgresLock } from "./embedded-postgres-lock.js";
+import { isSameEmbeddedPostgresDataDirectory, resolveEmbeddedPostgresLock } from "./embedded-postgres-lock.js";
 import { prepareEmbeddedPostgresNativeRuntime } from "./embedded-postgres-native.js";
 import { resolveDatabaseTarget } from "./runtime-config.js";
 
@@ -90,7 +90,7 @@ async function ensureEmbeddedPostgresConnection(
     } catch {
       // A failed probe is not evidence that PostgreSQL is stopped.
     }
-    if (typeof actualDataDir === "string" && path.resolve(actualDataDir) === path.resolve(dataDir)) {
+    if (typeof actualDataDir === "string" && isSameEmbeddedPostgresDataDirectory(actualDataDir, dataDir)) {
       await ensurePostgresDatabase(preferredAdminConnectionString, "paperclip");
       process.emitWarning(
         `Adopting an existing PostgreSQL instance on port ${preferredPort} for embedded data dir ${dataDir} because postmaster.pid is missing.`,

@@ -40,7 +40,7 @@ function setup(opts: { grantedCompanyIds: string[]; authorizedCompanyIds: string
     setProactiveCompanyScopes: vi.fn(),
     call: vi.fn(),
   } as unknown as PluginWorkerManager;
-  const nativeRun = vi.fn(async () => ({ status: "verified" }));
+  const nativeRun = vi.fn(async (_job: unknown, _params: unknown, _timeoutMs: number, _isCurrent: () => boolean) => ({ status: "verified" }));
   const scheduler = createPluginJobScheduler({
     db: { select: () => ({ from: () => ({ where: async () => [job] }) }) } as unknown as Db,
     jobStore,
@@ -119,4 +119,69 @@ describe("native GitHub board job authorization", () => {
     expect(ctx.nativeRun).not.toHaveBeenCalled();
     expect(ctx.jobStore.updateRunTimestamps).not.toHaveBeenCalled();
   });
+  it("fences an in-flight native import when its company authorization is revoked", async () => {
+    const options = { grantedCompanyIds: ["company-authorized"], authorizedCompanyIds: ["company-authorized"] };
+    const ctx = setup(options);
+    let signalStarted!: () => void;
+    let allowFinish!: () => void;
+    const started = new Promise<void>((resolve) => { signalStarted = resolve; });
+    const resume = new Promise<void>((resolve) => { allowFinish = resolve; });
+    let current: () => boolean = () => { throw new Error("Native dispatch did not start"); };
+    let imported = 0;
+    ctx.nativeRun.mockImplementation(async (_job, _params, _timeoutMs, isCurrent) => {
+      current = isCurrent;
+      expect(current()).toBe(true);
+      signalStarted();
+      await resume;
+      if (!current()) throw new Error("Company authorization changed before import");
+      imported += 1;
+      return { status: "verified" };
+    });
+    const running = ctx.scheduler.tick();
+    try {
+      await started;
+      options.authorizedCompanyIds = [];
+      expect(current()).toBe(false);
+    } finally {
+      allowFinish();
+      await running;
+    }
+    expect(imported).toBe(0);
+    expect(ctx.jobStore.completeRun).toHaveBeenCalledWith(
+      "run-1", expect.objectContaining({ status: "failed" }),
+    );
+  });
+
+  it("keeps an authorized company's in-flight native import when another company is removed", async () => {
+    const options = { grantedCompanyIds: ["company-authorized"], authorizedCompanyIds: ["company-authorized", "company-other"] };
+    const ctx = setup(options);
+    let signalStarted!: () => void;
+    let allowFinish!: () => void;
+    const started = new Promise<void>((resolve) => { signalStarted = resolve; });
+    const resume = new Promise<void>((resolve) => { allowFinish = resolve; });
+    let current: () => boolean = () => { throw new Error("Native dispatch did not start"); };
+    let imported = 0;
+    ctx.nativeRun.mockImplementation(async (_job, _params, _timeoutMs, isCurrent) => {
+      current = isCurrent;
+      signalStarted();
+      await resume;
+      if (!current()) throw new Error("Unrelated company incorrectly cancelled this import");
+      imported += 1;
+      return { status: "verified" };
+    });
+    const running = ctx.scheduler.tick();
+    try {
+      await started;
+      options.authorizedCompanyIds = ["company-authorized"];
+      expect(current()).toBe(true);
+    } finally {
+      allowFinish();
+      await running;
+    }
+    expect(imported).toBe(1);
+    expect(ctx.jobStore.completeRun).toHaveBeenCalledWith(
+      "run-1", expect.objectContaining({ status: "succeeded" }),
+    );
+  });
+
 });
