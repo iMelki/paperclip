@@ -279,6 +279,56 @@ describeEmbeddedPostgres("recovery sweepStaleIssueLocks", () => {
     expect(event?.message).toContain("process and sandbox gone");
   });
 
+  it("does not orphan a live run whose heartbeat write is stale after a connect timeout", async () => {
+    // A failed heartbeat output flush leaves updatedAt old. That is not
+    // process death. The periodic recovery must not mark the run interrupted
+    // with orphaned_running_run while the recorded pid is still alive.
+    const { companyId, agentId, runningRunId } = await seed();
+    const staleWriteAt = new Date(Date.now() - 2 * 60 * 60 * 1000);
+    await db
+      .update(heartbeatRuns)
+      .set({
+        processPid: process.pid,
+        updatedAt: staleWriteAt,
+        lastOutputAt: staleWriteAt,
+      })
+      .where(eq(heartbeatRuns.id, runningRunId));
+    const issueId = randomUUID();
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      title: "Live run — stale heartbeat write",
+      status: "in_progress",
+      priority: "high",
+      assigneeAgentId: agentId,
+      checkoutRunId: runningRunId,
+      executionRunId: runningRunId,
+      executionLockedAt: new Date(),
+    });
+
+    const heartbeat = heartbeatService(db);
+    const swept = await heartbeat.sweepStaleIssueLocks();
+    expect(swept.terminalizedRunIds).toEqual([]);
+    expect(swept.cleared).toBe(0);
+
+    await heartbeat.reapOrphanedRuns({ staleThresholdMs: 5 * 60 * 1000 });
+
+    const run = await db
+      .select({ status: heartbeatRuns.status, errorCode: heartbeatRuns.errorCode })
+      .from(heartbeatRuns)
+      .where(eq(heartbeatRuns.id, runningRunId))
+      .then((rows) => rows[0]);
+    expect(run?.status).toBe("running");
+    expect(run?.errorCode).not.toBe("orphaned_running_run");
+
+    const lock = await db
+      .select({ checkoutRunId: issues.checkoutRunId, executionRunId: issues.executionRunId })
+      .from(issues)
+      .where(eq(issues.id, issueId))
+      .then((rows) => rows[0]);
+    expect(lock).toEqual({ checkoutRunId: runningRunId, executionRunId: runningRunId });
+  });
+
   it("terminalizes a running run whose issue is terminal, even while the process stays alive (reuse-lease path)", async () => {
     // Reuse Lease ON stops the sandbox but keeps the server process alive, so
     // the in-memory handle and the recorded pid can both persist. The

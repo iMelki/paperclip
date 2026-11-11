@@ -13,6 +13,10 @@ export {
   migratePostgresIfEmpty,
   type MigrationBootstrapResult,
   type Db,
+  POSTGRES_JS_DEFAULT_POOL_MAX,
+  effectiveDatabasePoolMax,
+  databaseClientOptionsFromEnv,
+  resolveDatabaseClientOptions,
 } from "./client.js";
 export {
   EMBEDDED_POSTGRES_TEST_SETUP_TIMEOUT_MS,

@@ -181,6 +181,22 @@ export interface DatabaseClientOptions {
 export const DEFAULT_DATABASE_IDLE_TIMEOUT_SECONDS = 60;
 /** `application_name` reported to PostgreSQL unless `DATABASE_APPLICATION_NAME` overrides it. */
 export const DEFAULT_DATABASE_APPLICATION_NAME = "paperclip";
+/**
+ * postgres.js pool size when `DATABASE_POOL_MAX` is unset. The driver opens
+ * one backend per concurrent query until this cap, then queues.
+ */
+export const POSTGRES_JS_DEFAULT_POOL_MAX = 10;
+
+/**
+ * Pool size `createDb` actually gives postgres.js. An explicit
+ * `maxConnections` wins. Otherwise the driver default applies, because
+ * `postgresJsOptions` omits `max` and postgres.js uses 10.
+ */
+export function effectiveDatabasePoolMax(
+  options: DatabaseClientOptions = resolveDatabaseClientOptions(databaseClientOptionsFromEnv()),
+): number {
+  return options.maxConnections ?? POSTGRES_JS_DEFAULT_POOL_MAX;
+}
 
 function envBoolean(env: NodeJS.ProcessEnv, name: string): boolean | undefined {
   const value = env[name]?.trim().toLowerCase();

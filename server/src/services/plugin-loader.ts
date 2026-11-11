@@ -50,7 +50,7 @@ import type { PluginJobStore } from "./plugin-job-store.js";
 import type { PluginToolDispatcher } from "./plugin-tool-dispatcher.js";
 import type { PluginLifecycleManager } from "./plugin-lifecycle.js";
 import type { GitHubProjectBoardSchedulerBridge } from "./plugin-github-project-board-scheduler-bridge.js";
-import { pluginDatabaseService } from "./plugin-database.js";
+import { loadPluginMigrationFiles, pluginDatabaseService } from "./plugin-database.js";
 import { resolveBundledCatalogRoot } from "./bundled-plugins.js";
 
 const execFileAsync = promisify(execFile);
@@ -1775,6 +1775,12 @@ export function pluginLoader(
     async installPlugin(installOptions: PluginInstallOptions): Promise<DiscoveredPlugin> {
       const discovered = await fetchAndValidate(installOptions);
       const manifest = discovered.manifest!;
+      // Read migration files before the install transaction. The transaction
+      // locks the plugin row; holding that lock across filesystem reads is what
+      // makes a concurrent `plugins ... FOR SHARE` sit until statement_timeout.
+      const loadedMigrations = manifest.database
+        ? await loadPluginMigrationFiles(discovered.packagePath, manifest)
+        : undefined;
 
       // Step 6: Persist install record and apply plugin-owned schema migrations
       // in one database transaction. If migration validation fails, the plugin
@@ -1800,7 +1806,7 @@ export function pluginLoader(
             installed.id,
             manifest,
             discovered.packagePath,
-            { persistFailure: false },
+            { persistFailure: false, loadedMigrations },
           );
         }
       });
