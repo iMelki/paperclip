@@ -1876,4 +1876,23 @@ describeEmbeddedPostgres("built-in agents", () => {
     const unpinned = await agentService(db).getById(agentId);
     expect(entriesOf(unpinned!).find((entry) => entry.key === customKey)?.versionId).toBeNull();
   });
+
+  it("replaces explicit settings for the same adapter without retaining removed credentials", async () => {
+    const companyId = await seedCompany({ requireApproval: false });
+    const builtIns = builtInAgentService(db);
+    const first = await builtIns.ensure(companyId, "briefs", {
+      adapterType: "codex_local",
+      adapterConfig: { model: "gpt-5.4", command: "old-command", apiKey: "synthetic-old-key", env: { OPENAI_API_KEY: "synthetic-old-env-key" }, paperclipSkillSync: { desiredSkills: ["company/kept-skill"] } },
+    });
+    expect(first.agent?.adapterConfig).toMatchObject({ command: "old-command", apiKey: "synthetic-old-key", env: { OPENAI_API_KEY: "synthetic-old-env-key" } });
+    const replaced = await builtIns.ensure(companyId, "briefs", {
+      adapterType: "codex_local", adapterConfig: { model: "gpt-5.4" },
+    });
+    expect(replaced.agent?.adapterConfig).not.toHaveProperty("command");
+    expect(replaced.agent?.adapterConfig).not.toHaveProperty("apiKey");
+    expect(replaced.agent?.adapterConfig).not.toHaveProperty("env");
+    expect(replaced.agent?.adapterConfig).toMatchObject({ model: "gpt-5.4" });
+    expect(readPaperclipSkillSyncPreference(replaced.agent!.adapterConfig as Record<string, unknown>).desiredSkills)
+      .toContain("company/kept-skill");
+  });
 });

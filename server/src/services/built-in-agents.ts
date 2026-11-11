@@ -1709,18 +1709,17 @@ export function builtInAgentService(db: Db) {
         const incomingConfig = resolvedInput.adapterConfig === undefined
           ? existingConfig
           : asAdapterConfig(resolvedInput.adapterConfig);
-        // Settings belong to one adapter (command, model, args). When the
-        // adapter type changes and a new config is given, only the adapter
-        // independent skill selection carries over, so a leftover command from
-        // the old adapter can never launch under the new one.
-        const mergeBase = adapterType !== existing.adapterType && resolvedInput.adapterConfig !== undefined
+        // Explicit setup replaces adapter settings, including omitted credentials
+        // and commands. Only the adapter-independent skill selection carries
+        // over. Implicit reconciliation can retain the current config.
+        const mergeBase = input.adapterConfig !== undefined
+          || (adapterType !== existing.adapterType && resolvedInput.adapterConfig !== undefined)
           ? Object.prototype.hasOwnProperty.call(existingConfig, "paperclipSkillSync")
             ? { paperclipSkillSync: existingConfig.paperclipSkillSync }
             : {}
           : existingConfig;
-        // Shallow-merge onto the current adapter config. Omitted keys stay,
-        // including `paperclipSkillSync`, so ensure does not clear the value
-        // that bundled skill-sync restores.
+        // Apply the incoming settings onto the selected base while preserving
+        // the skill selection that bundled skill-sync manages.
         // When `incomingConfig.env` is set, that assignment replaces the whole
         // env map. Do not deep-merge env keys. PATCH `adapterConfig.env` has
         // the same full-replacement behavior; leave that route alone.
