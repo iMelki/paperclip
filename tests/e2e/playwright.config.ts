@@ -55,9 +55,10 @@ export default defineConfig({
     },
   ],
   // The webServer directive bootstraps a throwaway instance and then starts it.
-  // `onboard --yes --run` works in a non-interactive temp PAPERCLIP_HOME.
+  // Save the throwaway setup first so onboarding cannot force a browser open.
+  // Plain run then starts that same instance with browser opening disabled.
   webServer: {
-    command: `pnpm paperclipai onboard --yes --run`,
+    command: `pnpm paperclipai onboard --yes --no-run --no-install-service && pnpm paperclipai run`,
     url: `${BASE_URL}/api/health`,
     // Always boot a dedicated throwaway instance for e2e so browser tests
     // never attach to the developer's active Paperclip home/server.
@@ -68,6 +69,7 @@ export default defineConfig({
     env: {
       ...process.env,
       NODE_ENV: "test",
+      PAPERCLIP_OPEN_ON_LISTEN: "false",
       PORT: String(PORT),
       PAPERCLIP_HOME,
       PAPERCLIP_INSTANCE_ID,
