@@ -16,12 +16,14 @@ import {
   companySecretBindings,
   companySecrets,
   companySkills,
+  companyMemberships,
   companies,
   costEvents,
   documentAnnotationAnchorSnapshots,
   documentAnnotationComments,
   documentAnnotationThreads,
   createDb,
+  effectiveDatabasePoolMax,
   documentRevisions,
   documents,
   environmentLeases,
@@ -50,6 +52,8 @@ import {
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
 import { runningProcesses } from "../adapters/index.ts";
+import { isUniqueViolation } from "../db-errors.js";
+import * as liveEvents from "../services/live-events.js";
 const mockTelemetryClient = vi.hoisted(() => ({ track: vi.fn() }));
 const mockTrackAgentFirstHeartbeat = vi.hoisted(() => vi.fn());
 const mockTerminateLocalService = vi.hoisted(() => vi.fn());
@@ -2402,43 +2406,85 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     });
     const heartbeat = heartbeatService(db);
 
-    const result = await heartbeat.reapOrphanedRuns();
-    expect(result.reaped).toBe(1);
-    expect(result.runIds).toEqual([runId]);
-
-    expect(await waitForPidExit(orphan.descendantPid, 2_000)).toBe(true);
-
-    const runs = await db
-      .select()
-      .from(heartbeatRuns)
-      .where(eq(heartbeatRuns.agentId, agentId));
-    expect(runs).toHaveLength(2);
-
-    const failedRun = runs.find((row) => row.id === runId);
-    expect(failedRun?.status).toBe("failed");
-    expect(failedRun?.errorCode).toBe("process_lost");
-    expect(failedRun?.error).toContain("descendant process group");
-    expect(failedRun?.resultJson).toMatchObject({
-      stopReason: UNMANAGED_BACKGROUND_TASK_STOP_REASON,
-      unmanagedBackgroundTask: {
-        kind: "orphaned_process_group_cleanup",
-        stopped: true,
-        stopReason: UNMANAGED_BACKGROUND_TASK_STOP_REASON,
-        reason: UNMANAGED_BACKGROUND_TASK_LIVENESS_REASON,
-        processPid: orphan.processPid,
-        processGroupId: orphan.processGroupId,
-      },
+    let releaseRetry!: () => void;
+    const retryReleased = new Promise<void>((resolve) => { releaseRetry = resolve; });
+    let retryAdapterRunId: string | null = null;
+    const retrySummary = "Completed the owned orphan-group retry fixture.";
+    mockAdapterExecute.mockImplementation(async (input?: unknown) => {
+      retryAdapterRunId = (input as { runId: string }).runId;
+      let retryTimer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        await Promise.race([retryReleased, new Promise<never>((_, reject) => {
+          retryTimer = setTimeout(() => reject(new Error("Owned orphan retry fixture was not released")), 5_000);
+        })]);
+      } finally {
+        if (retryTimer) clearTimeout(retryTimer);
+      }
+      // Give this successful fixture a durable disposition before normal finish
+      // handoff logic runs, so only its one owned retry needs to be drained.
+      await db.update(issues).set({ status: "done" }).where(eq(issues.id, issueId));
+      return { exitCode: 0, signal: null, timedOut: false, errorMessage: null,
+        summary: retrySummary, provider: "test", model: "test-model" };
     });
 
-    const retryRun = runs.find((row) => row.id !== runId);
-    expect(["queued", "running"]).toContain(retryRun?.status);
+    try {
+      const result = await heartbeat.reapOrphanedRuns();
+      expect(result.reaped).toBe(1);
+      expect(result.runIds).toEqual([runId]);
 
-    const issue = await db
-      .select()
-      .from(issues)
-      .where(eq(issues.id, issueId))
-      .then((rows) => rows[0] ?? null);
-    expect(issue?.executionRunId).toBe(retryRun?.id ?? null);
+      expect(await waitForPidExit(orphan.descendantPid, 2_000)).toBe(true);
+
+      const runs = await db
+        .select()
+        .from(heartbeatRuns)
+        .where(eq(heartbeatRuns.agentId, agentId));
+      expect(runs).toHaveLength(2);
+
+      const failedRun = runs.find((row) => row.id === runId);
+      expect(failedRun?.status).toBe("failed");
+      expect(failedRun?.errorCode).toBe("process_lost");
+      expect(failedRun?.error).toContain("descendant process group");
+      expect(failedRun?.resultJson).toMatchObject({
+        stopReason: UNMANAGED_BACKGROUND_TASK_STOP_REASON,
+        unmanagedBackgroundTask: {
+          kind: "orphaned_process_group_cleanup",
+          stopped: true,
+          stopReason: UNMANAGED_BACKGROUND_TASK_STOP_REASON,
+          reason: UNMANAGED_BACKGROUND_TASK_LIVENESS_REASON,
+          processPid: orphan.processPid,
+          processGroupId: orphan.processGroupId,
+        },
+      });
+
+      const retryRun = runs.find((row) => row.id !== runId);
+      expect(["queued", "running"]).toContain(retryRun?.status);
+
+      const issue = await db
+        .select()
+        .from(issues)
+        .where(eq(issues.id, issueId))
+        .then((rows) => rows[0] ?? null);
+      expect(issue?.executionRunId).toBe(retryRun?.id ?? null);
+      const enteredRetry = await waitForValue(async () => retryAdapterRunId);
+      expect(enteredRetry).toBe(retryRun?.id);
+      releaseRetry();
+      const completedRetry = await waitForRunToSettle(heartbeat, enteredRetry!, 5_000);
+      await heartbeat.drainActiveRunExecutions();
+      expect(completedRetry?.id).toBe(retryRun?.id);
+      expect(completedRetry?.status).toBe("succeeded");
+      expect(completedRetry?.exitCode).toBe(0);
+      const persistedRetry = await db.select().from(heartbeatRuns)
+        .where(eq(heartbeatRuns.id, enteredRetry!)).then((rows) => rows[0] ?? null);
+      expect(persistedRetry?.id).toBe(retryRun?.id);
+      expect(persistedRetry?.resultJson).toMatchObject({ summary: retrySummary });
+      expect(mockAdapterExecute.mock.calls.filter(([input]) =>
+        (input as { runId?: string } | undefined)?.runId === retryRun?.id,
+      )).toHaveLength(1);
+    } finally {
+      await db.update(agents).set({ status: "paused" }).where(eq(agents.id, agentId));
+      releaseRetry();
+      await heartbeat.drainActiveRunExecutions();
+    }
   });
 
   it.skipIf(process.platform === "win32")("does not kill a reused process group whose recorded leader is already dead", async () => {
@@ -4980,6 +5026,380 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
       expect(runningProcesses.has(runId)).toBe(false);
     } finally {
       updateSpy.mockRestore();
+    }
+  });
+
+  it("cancelling a run for a discarded issue does not start assignment recovery", async () => {
+    const { agentId, runId, issueId } = await seedRunFixture({
+      agentStatus: "idle",
+      includeIssue: true,
+    });
+    const heartbeat = heartbeatService(db);
+
+    const cancelled = await heartbeat.cancelRun(runId, "Cancelled because the routine execution issue was discarded", {
+      discardIssueWork: true,
+    });
+
+    expect(cancelled?.status).toBe("cancelled");
+    const runs = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.agentId, agentId));
+    expect(runs).toHaveLength(1);
+    const issue = await db.select().from(issues).where(eq(issues.id, issueId)).then((rows) => rows[0]!);
+    expect(issue.executionRunId).toBeNull();
+  });
+
+  it("defers discarded-issue queues until both target runs are cancelled and resumes unrelated work explicitly", async () => {
+    const { companyId, agentId, runId, issueId } = await seedRunFixture({ agentStatus: "idle", includeIssue: true });
+    const queuedTargetRunId = randomUUID();
+    const unrelatedRunId = randomUUID();
+    const executedRunIds: string[] = [];
+    mockAdapterExecute.mockClear();
+    mockAdapterExecute.mockImplementation(async (rawInput?: unknown) => {
+      executedRunIds.push((rawInput as { runId: string }).runId);
+      return { exitCode: 0, signal: null, timedOut: false, errorMessage: null,
+        summary: "Completed unrelated mock work.", provider: "test", model: "test-model" };
+    });
+    await db.insert(heartbeatRuns).values([
+      { id: queuedTargetRunId, companyId, agentId, invocationSource: "assignment", status: "queued", contextSnapshot: { issueId } },
+      { id: unrelatedRunId, companyId, agentId, invocationSource: "on_demand", status: "queued", contextSnapshot: {} },
+    ]);
+    const heartbeat = heartbeatService(db);
+    try {
+      await heartbeat.cancelRun(runId, "Discard target fixture", { discardIssueWork: true });
+      // The old cancellation path claims the second target here, before its
+      // owner can cancel the rest of the batch or commit the issue deletion.
+      expect((await heartbeat.getRun(queuedTargetRunId))?.status).toBe("queued");
+      expect((await heartbeat.getRun(unrelatedRunId))?.status).toBe("queued");
+      expect(mockAdapterExecute).not.toHaveBeenCalled();
+      await heartbeat.cancelRun(queuedTargetRunId, "Discard target fixture", { discardIssueWork: true });
+      expect((await heartbeat.getRun(runId))?.status).toBe("cancelled");
+      expect((await heartbeat.getRun(queuedTargetRunId))?.status).toBe("cancelled");
+      expect(mockAdapterExecute).not.toHaveBeenCalled();
+      await db.transaction(async (tx) => {
+        await tx.delete(issues).where(and(eq(issues.companyId, companyId), eq(issues.id, issueId)));
+      });
+      expect(await db.select({ id: issues.id }).from(issues).where(eq(issues.id, issueId))).toEqual([]);
+      await heartbeat.resumeQueuedRuns({ agentIds: [agentId] });
+      await waitForRunToSettle(heartbeat, unrelatedRunId, 5_000);
+      await heartbeat.drainActiveRunExecutions();
+      expect(executedRunIds).toEqual([unrelatedRunId]);
+      expect((await heartbeat.getRun(unrelatedRunId))?.status).toBe("succeeded");
+    } finally {
+      // Negative execution must also leave this private fixture drained. Pause
+      // only its own agent before cancelling any accidentally-started target.
+      await db.update(agents).set({ status: "paused" }).where(eq(agents.id, agentId));
+      for (const id of [runId, queuedTargetRunId, unrelatedRunId]) {
+        await heartbeat.cancelRun(id, "Discard fixture cleanup", { discardIssueWork: true });
+      }
+      await heartbeat.drainActiveRunExecutions();
+    }
+  });
+
+  it("targets queue resume without starting other agents and keeps the default resume route", async () => {
+    const first = await seedRunFixture({ agentStatus: "idle", runStatus: "queued", includeIssue: false });
+    const second = await seedRunFixture({ agentStatus: "idle", runStatus: "queued", includeIssue: false });
+    const heartbeat = heartbeatService(db);
+    mockAdapterExecute.mockClear();
+    try {
+      await heartbeat.resumeQueuedRuns({ agentIds: [] });
+      expect((await heartbeat.getRun(first.runId))?.status).toBe("queued");
+      expect((await heartbeat.getRun(second.runId))?.status).toBe("queued");
+      expect(mockAdapterExecute).not.toHaveBeenCalled();
+      await heartbeat.resumeQueuedRuns({ agentIds: [first.agentId, first.agentId] });
+      await waitForRunToSettle(heartbeat, first.runId, 5_000);
+      await heartbeat.drainActiveRunExecutions();
+      expect((await heartbeat.getRun(first.runId))?.status).toBe("succeeded");
+      expect((await heartbeat.getRun(second.runId))?.status).toBe("queued");
+      expect(mockAdapterExecute).toHaveBeenCalledTimes(1);
+      await heartbeat.resumeQueuedRuns();
+      await waitForRunToSettle(heartbeat, second.runId, 5_000);
+      await heartbeat.drainActiveRunExecutions();
+      expect((await heartbeat.getRun(second.runId))?.status).toBe("succeeded");
+      expect(mockAdapterExecute).toHaveBeenCalledTimes(2);
+    } finally {
+      for (const fixture of [first, second]) {
+        await db.update(agents).set({ status: "paused" }).where(eq(agents.id, fixture.agentId));
+        await heartbeat.cancelRun(fixture.runId, "Targeted resume fixture cleanup", { discardIssueWork: true });
+      }
+      await heartbeat.drainActiveRunExecutions();
+    }
+  });
+
+  it.each(["issueId", "taskId"] as const)("rolls back a real execution-key claim conflict for %s before publishing or starting an adapter", async (contextKey) => {
+    const { companyId, agentId, runId, wakeupRequestId, issueId } = await seedRunFixture({ agentStatus: "idle", runStatus: "queued", includeIssue: true });
+    await db.update(heartbeatRuns).set({ contextSnapshot: { [contextKey]: issueId } }).where(eq(heartbeatRuns.id, runId));
+    const originId = randomUUID();
+    const holderRunId = randomUUID();
+    const holderIssueId = randomUUID();
+    await db.update(issues).set({ executionRunId: null, checkoutRunId: null,
+      originKind: "routine_execution", originId, originFingerprint: "atomic-claim-fixture" }).where(eq(issues.id, issueId));
+    await db.update(agentWakeupRequests).set({ status: "queued", claimedAt: null }).where(eq(agentWakeupRequests.id, wakeupRequestId));
+    await db.insert(heartbeatRuns).values({ id: holderRunId, companyId, agentId, invocationSource: "assignment", status: "failed" });
+    await db.insert(issues).values({ id: holderIssueId, companyId, title: "Occupied execution key", status: "todo",
+      assigneeAgentId: agentId, originKind: "routine_execution", originId, originFingerprint: "atomic-claim-fixture", executionRunId: holderRunId });
+    const heartbeat = heartbeatService(db);
+    const statusSpy = vi.spyOn(liveEvents, "publishLiveEvent");
+    mockAdapterExecute.mockClear();
+    mockAdapterExecute.mockImplementation(async () => {
+      await db.update(issues).set({ status: "done" }).where(eq(issues.id, issueId));
+      return { exitCode: 0, signal: null, timedOut: false, errorMessage: null,
+        summary: "Finished atomic claim fixture.", provider: "test", model: "test-model" };
+    });
+    try {
+      await expect(heartbeat.resumeQueuedRuns({ agentIds: [agentId] })).rejects.toSatisfy(
+        (error: unknown) => isUniqueViolation(error, "issues_open_routine_execution_uq"),
+      );
+      expect((await heartbeat.getRun(runId))?.status).toBe("queued");
+      const wake = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, wakeupRequestId)).then((rows) => rows[0]!);
+      expect(wake.status).toBe("queued");
+      expect(wake.claimedAt).toBeNull();
+      expect(mockAdapterExecute).not.toHaveBeenCalled();
+      expect(statusSpy.mock.calls.filter(([event]) => {
+        const value = event as { type: string; payload?: { runId?: unknown } };
+        return value.type === "heartbeat.run.status" && value.payload?.runId === runId;
+      })).toHaveLength(0);
+      await db.delete(issues).where(eq(issues.id, holderIssueId));
+      await heartbeat.resumeQueuedRuns({ agentIds: [agentId] });
+      await waitForRunToSettle(heartbeat, runId, 5_000);
+      await heartbeat.drainActiveRunExecutions();
+      expect((await heartbeat.getRun(runId))?.status).toBe("succeeded");
+      expect(mockAdapterExecute).toHaveBeenCalledTimes(1);
+    } finally {
+      await db.update(agents).set({ status: "paused" }).where(eq(agents.id, agentId));
+      await heartbeat.cancelRun(runId, "Atomic claim fixture cleanup", { discardIssueWork: true });
+      await heartbeat.drainActiveRunExecutions();
+      statusSpy.mockRestore();
+    }
+  }, 15_000);
+
+  it("does not publish or start a queued run while another live run owns its issue despite spare agent capacity", async () => {
+    const { companyId, agentId, runId, wakeupRequestId, issueId } = await seedRunFixture({ agentStatus: "idle", runStatus: "queued", includeIssue: true });
+    const holderId = randomUUID();
+    await db.update(agents).set({ runtimeConfig: { heartbeat: { maxConcurrentRuns: 2 } } }).where(eq(agents.id, agentId));
+    await db.insert(heartbeatRuns).values({ id: holderId, companyId, agentId, invocationSource: "assignment", status: "running", contextSnapshot: { issueId } });
+    await db.update(issues).set({ executionRunId: holderId }).where(eq(issues.id, issueId));
+    await db.update(agentWakeupRequests).set({ status: "queued", claimedAt: null }).where(eq(agentWakeupRequests.id, wakeupRequestId));
+    const heartbeat = heartbeatService(db);
+    const events = vi.spyOn(liveEvents, "publishLiveEvent");
+    mockAdapterExecute.mockClear();
+    try {
+      await heartbeat.resumeQueuedRuns({ agentIds: [agentId] });
+      expect((await heartbeat.getRun(runId))?.status).toBe("queued");
+      expect((await heartbeat.getRun(holderId))?.status).toBe("running");
+      expect(mockAdapterExecute).not.toHaveBeenCalled();
+      expect(events.mock.calls.filter(([event]) => {
+        const value = event as { type: string; payload?: { runId?: unknown } };
+        return value.type === "heartbeat.run.status" && value.payload?.runId === runId;
+      })).toHaveLength(0);
+    } finally {
+      await db.update(agents).set({ status: "paused" }).where(eq(agents.id, agentId));
+      for (const id of [runId, holderId]) await heartbeat.cancelRun(id, "Owned live-owner fixture cleanup", { discardIssueWork: true });
+      await heartbeat.drainActiveRunExecutions();
+      events.mockRestore();
+    }
+  });
+
+  it("resolves a queued claimant's fallback actor through its open transaction executor", async () => {
+    const { agentId, runId, issueId } = await seedRunFixture({ agentStatus: "idle", runStatus: "queued", includeIssue: true });
+    await db.update(heartbeatRuns).set({ responsibleUserId: null, contextSnapshot: { issueId } }).where(eq(heartbeatRuns.id, runId));
+    await db.update(issues).set({ responsibleUserId: null, parentId: null }).where(eq(issues.id, issueId));
+    const heartbeat = heartbeatService(db);
+    const originalSelect = db.select.bind(db);
+    const originalTransaction = db.transaction.bind(db);
+    let transactionOpen = false;
+    let observingAdmission = true;
+    let sawTransaction = false;
+    const actorTables = new Map<unknown, string>([
+      [companies, "companies"], [issues, "issues"],
+      [companyMemberships, "companyMemberships"], [authUsers, "authUsers"],
+    ]);
+    const rootActorReadsDuringClaim: string[] = [];
+    const transactionActorReadsDuringClaim: string[] = [];
+    const observeActorSelect = (select: typeof db.select, root: boolean) => ((...args: unknown[]) => {
+      const builder = Reflect.apply(select, db, args);
+      return new Proxy(builder, {
+        get(target, key, receiver) {
+          if (key !== "from") return Reflect.get(target, key, receiver);
+          return (table: unknown, ...fromArgs: unknown[]) => {
+            const actorTable = actorTables.get(table);
+            if (observingAdmission && transactionOpen && actorTable) {
+              (root ? rootActorReadsDuringClaim : transactionActorReadsDuringClaim).push(actorTable);
+            }
+            return Reflect.apply(target.from, target, [table, ...fromArgs]);
+          };
+        },
+      });
+    }) as typeof db.select;
+    const selectSpy = vi.spyOn(db, "select").mockImplementation(observeActorSelect(originalSelect, true));
+    const transactionSpy = vi.spyOn(db, "transaction").mockImplementation(((callback, config) => originalTransaction(async (tx) => {
+      transactionOpen = true;
+      sawTransaction = true;
+      // Capture before spyOn installs its replacement; binding tx.select afterward would bind the spy itself.
+      const originalTransactionSelect = tx.select.bind(tx);
+      const transactionSelectSpy = vi.spyOn(tx, "select").mockImplementation(
+        observeActorSelect(originalTransactionSelect, false) as typeof tx.select,
+      );
+      try { return await callback(tx); } finally {
+        transactionSelectSpy.mockRestore();
+        transactionOpen = false;
+      }
+    }, config)) as typeof db.transaction);
+    mockAdapterExecute.mockClear();
+    mockAdapterExecute.mockImplementation(async () => {
+      await db.update(issues).set({ status: "done" }).where(eq(issues.id, issueId));
+      return { exitCode: 0, signal: null, timedOut: false, errorMessage: null,
+        summary: "Completed transaction actor fixture.", provider: "test", model: "test-model" };
+    });
+    try {
+      await heartbeat.resumeQueuedRuns({ agentIds: [agentId] });
+      observingAdmission = false; // Claim and fallback resolution have committed before test polling begins.
+      await waitForRunToSettle(heartbeat, runId, 5_000);
+      await heartbeat.drainActiveRunExecutions();
+      expect(sawTransaction).toBe(true);
+      expect(rootActorReadsDuringClaim).toEqual([]);
+      expect(transactionActorReadsDuringClaim).toContain("companies");
+      expect((await heartbeat.getRun(runId))?.responsibleUserId).toBe("responsible-user");
+      expect((await heartbeat.getRun(runId))?.status).toBe("succeeded");
+      expect(mockAdapterExecute).toHaveBeenCalledTimes(1);
+    } finally {
+      transactionSpy.mockRestore();
+      selectSpy.mockRestore();
+      await db.update(agents).set({ status: "paused" }).where(eq(agents.id, agentId));
+      await heartbeat.cancelRun(runId, "Owned actor executor fixture cleanup", { discardIssueWork: true });
+      await heartbeat.drainActiveRunExecutions();
+    }
+  });
+
+
+  it("preserves a terminal wake written after queued cancellation commits but before its blocked wake update", async () => {
+    expect(effectiveDatabasePoolMax()).toBeGreaterThanOrEqual(3);
+    const missingIssueId = randomUUID();
+    const { companyId, agentId, runId, wakeupRequestId } = await seedRunFixture({
+      agentStatus: "idle", runStatus: "queued", includeIssue: false,
+      contextSnapshot: { issueId: missingIssueId },
+    });
+    await db.update(agentWakeupRequests).set({ status: "queued", claimedAt: null })
+      .where(eq(agentWakeupRequests.id, wakeupRequestId));
+    const heartbeat = heartbeatService(db);
+    mockAdapterExecute.mockClear();
+    let releaseWakeHolder!: () => void;
+    const wakeHolderRelease = new Promise<void>((resolve) => { releaseWakeHolder = resolve; });
+    let holder: Promise<unknown> | null = null;
+    let resume: Promise<unknown> | null = null;
+    let holderFailure: unknown;
+    let resumeFailure: unknown;
+    let holderWitness: { pid: number; rowCount: number } | null = null;
+    const terminalReason = "Cancelled by the owned terminal-wake fixture";
+    try {
+      holder = db.transaction(async (tx) => {
+        const locked = await tx.execute(sql`select id from ${agentWakeupRequests}
+          where ${agentWakeupRequests.companyId} = ${companyId}
+            and ${agentWakeupRequests.id} = ${wakeupRequestId} for update`);
+        const rows = locked as unknown as Array<{ id: string }>;
+        expect(rows).toHaveLength(1);
+        expect(rows[0]?.id).toBe(wakeupRequestId);
+        const identity = await tx.execute(sql`select pg_backend_pid()::int as pid`);
+        const pid = Number((identity as unknown as Array<{ pid: number }>)[0]?.pid ?? 0);
+        expect(Number.isInteger(pid) && pid > 0).toBe(true);
+        holderWitness = { pid, rowCount: rows.length };
+        await wakeHolderRelease;
+        // The queued-run CAS has already committed. This independent owner now
+        // gives the wake its terminal outcome before the waiting update resumes.
+        await tx.update(agentWakeupRequests).set({
+          status: "cancelled", error: terminalReason, finishedAt: new Date(), updatedAt: new Date(),
+        }).where(and(eq(agentWakeupRequests.companyId, companyId), eq(agentWakeupRequests.id, wakeupRequestId)));
+      });
+      void holder.catch((error) => { holderFailure = error; });
+      const observedHolder = await waitForValue<{ pid: number; rowCount: number }>(async () => {
+        if (holderFailure) throw holderFailure;
+        return holderWitness;
+      });
+      expect(observedHolder?.rowCount).toBe(1);
+      expect(observedHolder?.pid).toBeGreaterThan(0);
+      resume = heartbeat.resumeQueuedRuns({ agentIds: [agentId] });
+      void resume.catch((error) => { resumeFailure = error; });
+      const blockedCancellation = await waitForValue(async () => {
+        if (holderFailure) throw holderFailure;
+        if (resumeFailure) throw resumeFailure;
+        const waiting = await db.execute(sql`select count(*)::int as count from pg_stat_activity
+          where datname = current_database() and pid <> pg_backend_pid()
+            and ${observedHolder!.pid} = any(pg_blocking_pids(pid))`);
+        const waiterCount = Number((waiting as unknown as Array<{ count: number }>)[0]?.count ?? 0);
+        if (waiterCount < 1) return null;
+        const run = await db.select({ status: heartbeatRuns.status, errorCode: heartbeatRuns.errorCode })
+          .from(heartbeatRuns).where(eq(heartbeatRuns.id, runId)).then((rows) => rows[0] ?? null);
+        return run?.status === "cancelled" ? { waiterCount, run } : null;
+      }, 5_000);
+      expect(blockedCancellation?.waiterCount).toBeGreaterThanOrEqual(1);
+      expect(blockedCancellation?.run).toEqual({ status: "cancelled", errorCode: "issue_not_found" });
+      const beforeRelease = await db.select().from(agentWakeupRequests)
+        .where(eq(agentWakeupRequests.id, wakeupRequestId)).then((rows) => rows[0] ?? null);
+      expect(beforeRelease?.status).toBe("queued");
+      expect(mockAdapterExecute).not.toHaveBeenCalled();
+      releaseWakeHolder();
+      await Promise.all([holder, resume]);
+      const wake = await db.select().from(agentWakeupRequests)
+        .where(eq(agentWakeupRequests.id, wakeupRequestId)).then((rows) => rows[0] ?? null);
+      expect(wake?.status).toBe("cancelled");
+      expect(wake?.error).toBe(terminalReason);
+      expect(wake?.finishedAt).toBeTruthy();
+      expect((await heartbeat.getRun(runId))?.status).toBe("cancelled");
+      expect(mockAdapterExecute).not.toHaveBeenCalled();
+    } finally {
+      releaseWakeHolder();
+      await Promise.allSettled([holder, resume].filter((value): value is Promise<unknown> => value !== null));
+      await db.update(agents).set({ status: "paused" }).where(eq(agents.id, agentId));
+      await heartbeat.drainActiveRunExecutions();
+    }
+  }, 15_000);
+
+  it("starts an earlier committed claim when a later queued claimant hits the real execution-key constraint", async () => {
+    const { companyId, agentId, runId, issueId } = await seedRunFixture({ agentStatus: "idle", runStatus: "queued", includeIssue: true });
+    const collisionRunId = randomUUID();
+    const collisionIssueId = randomUUID();
+    const holderRunId = randomUUID();
+    const holderIssueId = randomUUID();
+    const originId = randomUUID();
+    await db.update(agents).set({ runtimeConfig: { heartbeat: { maxConcurrentRuns: 2 } } }).where(eq(agents.id, agentId));
+    await db.update(heartbeatRuns).set({ createdAt: new Date("2026-03-19T00:00:00.000Z") }).where(eq(heartbeatRuns.id, runId));
+    await db.insert(heartbeatRuns).values([
+      { id: holderRunId, companyId, agentId, invocationSource: "assignment", status: "failed" },
+      { id: collisionRunId, companyId, agentId, invocationSource: "assignment", status: "queued",
+        contextSnapshot: { issueId: collisionIssueId }, createdAt: new Date("2026-03-19T00:00:01.000Z") },
+    ]);
+    await db.insert(issues).values([
+      { id: collisionIssueId, companyId, title: "Queued collision fixture", status: "in_progress", assigneeAgentId: agentId,
+        responsibleUserId: "responsible-user", originKind: "routine_execution", originId, originFingerprint: "batch-claim" },
+      { id: holderIssueId, companyId, title: "Occupied batch execution key", status: "todo", assigneeAgentId: agentId,
+        originKind: "routine_execution", originId, originFingerprint: "batch-claim", executionRunId: holderRunId },
+    ]);
+    const heartbeat = heartbeatService(db);
+    const events = vi.spyOn(liveEvents, "publishLiveEvent");
+    const executed: string[] = [];
+    mockAdapterExecute.mockClear();
+    mockAdapterExecute.mockImplementation(async (input?: unknown) => {
+      executed.push((input as { runId: string }).runId);
+      await db.update(issues).set({ status: "done" }).where(eq(issues.id, issueId));
+      return { exitCode: 0, signal: null, timedOut: false, errorMessage: null,
+        summary: "Completed earlier batch claim.", provider: "test", model: "test-model" };
+    });
+    try {
+      await expect(heartbeat.resumeQueuedRuns({ agentIds: [agentId] })).rejects.toSatisfy(
+        (error: unknown) => isUniqueViolation(error, "issues_open_routine_execution_uq"),
+      );
+      await waitForRunToSettle(heartbeat, runId, 5_000);
+      await heartbeat.drainActiveRunExecutions();
+      expect((await heartbeat.getRun(runId))?.status).toBe("succeeded");
+      expect((await heartbeat.getRun(collisionRunId))?.status).toBe("queued");
+      expect(executed).toEqual([runId]);
+      expect(events.mock.calls.filter(([event]) => {
+        const value = event as { type: string; payload?: { runId?: unknown } };
+        return value.type === "heartbeat.run.status" && value.payload?.runId === collisionRunId;
+      })).toHaveLength(0);
+    } finally {
+      await db.update(agents).set({ status: "paused" }).where(eq(agents.id, agentId));
+      for (const id of [runId, collisionRunId]) await heartbeat.cancelRun(id, "Owned batch fixture cleanup", { discardIssueWork: true });
+      await heartbeat.drainActiveRunExecutions();
+      events.mockRestore();
     }
   });
 
