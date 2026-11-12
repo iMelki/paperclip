@@ -12,6 +12,7 @@ import {
   assertAdvertisedDevAncestor,
   assertPushMatchesWorkingTree,
   executeTestPlan,
+  listChangedWorkflowFiles,
   parsePushUpdates,
   readHeadTrackedFiles,
   resolveOutgoingChangedFiles,
@@ -473,4 +474,67 @@ test("Node suites run before exact Vitest suites with literal argv", () => {
   ]);
   assert.ok(calls.every(({ command }) => command === process.execPath));
   assert.ok(calls.every(({ options }) => options.shell === false));
+});
+
+test("workflow-only topic-branch plans run the local workflow lint and skip unit suites", () => {
+  const calls = [];
+  const logs = [];
+  const status = executeTestPlan(
+    {
+      selection: baseSelection({
+        changedFiles: [".github/workflows/docker.yml"],
+        hostedCiFiles: [".github/workflows/docker.yml"],
+      }),
+      targetRefs: ["refs/heads/topic"],
+    },
+    {
+      repoRoot: "C:/repo",
+      spawn: (command, args, options) => {
+        calls.push({ command, args, options });
+        return { status: 0 };
+      },
+      log: (message) => logs.push(message),
+      error: () => {},
+    },
+  );
+  assert.equal(status, 0);
+  assert.deepEqual(calls.map(({ args }) => args), [
+    [
+      path.join("C:/repo", "scripts/lint-changed-workflows.mjs"),
+      "--file",
+      ".github/workflows/docker.yml",
+    ],
+  ]);
+  assert.ok(calls.every(({ command }) => command === process.execPath));
+  assert.ok(calls.every(({ options }) => options.shell === false));
+  assert.match(logs.join("\n"), /No local unit suite was selected/);
+});
+
+test("a failed workflow lint rejects the topic-branch plan", () => {
+  const status = executeTestPlan(
+    {
+      selection: baseSelection({
+        hostedCiFiles: [".github/workflows/docker.yml"],
+      }),
+      targetRefs: ["refs/heads/topic"],
+    },
+    {
+      repoRoot: "C:/repo",
+      spawn: () => ({ status: 19 }),
+      log: () => {},
+      error: () => {},
+    },
+  );
+  assert.equal(status, 19);
+});
+
+test("listChangedWorkflowFiles unions changed and hosted paths and ignores non-workflows", () => {
+  assert.deepEqual(
+    listChangedWorkflowFiles({
+      changedFiles: [".github/workflows/docker.yml", "scripts/run-pre-push-tests.mjs"],
+      hostedCiFiles: [".github/workflows/pr.yml", "pnpm-lock.yaml"],
+    }),
+    [".github/workflows/docker.yml", ".github/workflows/pr.yml"],
+  );
+  assert.deepEqual(listChangedWorkflowFiles(baseSelection()), []);
 });

@@ -18,6 +18,7 @@ const ZERO_OID_PATTERN = /^0{40}(?:0{24})?$/;
 const OID_PATTERN = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i;
 const SAFE_REMOTE_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const PROTECTED_REFS = new Set(["refs/heads/dev", "refs/heads/master"]);
+const WORKFLOW_FILE_PATTERN = /^\.github\/workflows\/[^/]+\.ya?ml$/i;
 
 export class PrePushIntegrityError extends Error {
   constructor(message, { cause, exitCode } = {}) {
@@ -25,6 +26,14 @@ export class PrePushIntegrityError extends Error {
     this.name = "PrePushIntegrityError";
     this.exitCode = exitCode;
   }
+}
+
+export function listChangedWorkflowFiles(selection) {
+  const files = new Set();
+  for (const file of [...(selection.changedFiles ?? []), ...(selection.hostedCiFiles ?? [])]) {
+    if (WORKFLOW_FILE_PATTERN.test(file)) files.add(file);
+  }
+  return [...files].sort();
 }
 
 function validateOid(oid, label) {
@@ -328,6 +337,23 @@ export function executeTestPlan(
   if (selection.hostedCiFiles.length > 0) {
     log(`Hosted PR CI required for ${selection.hostedCiFiles.length} changed path(s).`);
     selection.hostedCiFiles.forEach((file) => log(`  CI: ${file}`));
+  }
+
+  // Workflow-only topic-branch pushes have no hosted PR admission on dev
+  // (#257). Lint those files locally, including a docker.yml IMAGE
+  // lowercase proof, so the admitted local lane is not a no-op.
+  // A missing default actionlint is a skip. This step does not download it.
+  const workflowFiles = listChangedWorkflowFiles(selection);
+  if (workflowFiles.length > 0) {
+    const status = runChild(
+      `changed workflow lint (${workflowFiles.length})`,
+      [
+        path.join(repoRoot, "scripts/lint-changed-workflows.mjs"),
+        ...workflowFiles.flatMap((file) => ["--file", file]),
+      ],
+      { spawn, log, error, cwd: repoRoot },
+    );
+    if (status !== 0) return status;
   }
 
   if (selection.nodeTestFiles.length > 0) {
