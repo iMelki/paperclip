@@ -81,6 +81,26 @@ function uniqueNonEmpty(values) {
   return Array.from(new Set(values.map((value) => value?.trim() ?? "").filter(Boolean)));
 }
 
+// Exact dynamic account names that are not operator identifiers. Matching these
+// as substrings false-positives on ordinary words (sandbox, checkbox, ubuntu-latest).
+// Explicit private and tracked tokens remain authoritative, even for these spellings.
+const GENERIC_DYNAMIC_USERNAMES = new Set([
+  "agent",
+  "box",
+  "root",
+  "ubuntu",
+  "runner",
+  "user",
+  "admin",
+  "node",
+]);
+
+function isIgnoredDynamicUsername(candidate) {
+  const value = String(candidate ?? "").trim().toLowerCase();
+  if (value.length < 4) return true;
+  return GENERIC_DYNAMIC_USERNAMES.has(value);
+}
+
 function resolveDynamicForbiddenTokens(env = process.env, osModule = os) {
   const candidates = [env.USER, env.LOGNAME, env.USERNAME];
 
@@ -90,9 +110,40 @@ function resolveDynamicForbiddenTokens(env = process.env, osModule = os) {
     // Some environments do not expose userInfo; env vars are enough fallback.
   }
 
-  // The Cloud worker's generic service account is not an operator identifier.
-  // Explicit private/tracked tokens remain authoritative, even for this spelling.
-  return uniqueNonEmpty(candidates).filter((candidate) => candidate.toLowerCase() !== "agent");
+  return uniqueNonEmpty(candidates).filter((candidate) => !isIgnoredDynamicUsername(candidate));
+}
+
+function isWordChar(char) {
+  return /[A-Za-z0-9_]/.test(char ?? "");
+}
+
+// Dynamic usernames are literals bounded by non-word characters. The scan still
+// uses git grep -F; this filter only drops substring hits such as "box" inside
+// "sandbox". Private and tracked tokens do not use this filter.
+function hasWordBoundaryMatch(text, token) {
+  const haystack = String(text);
+  const needle = String(token);
+  if (!needle) return false;
+  const lowerHaystack = haystack.toLowerCase();
+  const lowerNeedle = needle.toLowerCase();
+  let from = 0;
+  while (from <= lowerHaystack.length - lowerNeedle.length) {
+    const index = lowerHaystack.indexOf(lowerNeedle, from);
+    if (index < 0) return false;
+    const before = index > 0 ? haystack[index - 1] : "";
+    const afterIndex = index + needle.length;
+    const after = afterIndex < haystack.length ? haystack[afterIndex] : "";
+    if (!isWordChar(before) && !isWordChar(after)) return true;
+    from = index + 1;
+  }
+  return false;
+}
+
+function keepWordBoundaryLines(stdout, token) {
+  return stdout
+    .split("\n")
+    .filter((line) => line.trim() && hasWordBoundaryMatch(line, token))
+    .join("\n");
 }
 
 function readForbiddenTokensFile(tokensFile) {
@@ -118,9 +169,25 @@ function resolveForbiddenTokens(tokensFiles, env = process.env, osModule = os) {
   ]);
 }
 
+function resolveForbiddenTokenScan(tokensFiles, env = process.env, osModule = os) {
+  const files = Array.isArray(tokensFiles) ? tokensFiles : [tokensFiles];
+  const fileTokens = uniqueNonEmpty(
+    files.filter(Boolean).flatMap((file) => readForbiddenTokensFile(file)),
+  );
+  const literalKeys = new Set(fileTokens.map((token) => token.toLowerCase()));
+  const wordBoundaryTokens = resolveDynamicForbiddenTokens(env, osModule)
+    .filter((token) => !literalKeys.has(token.toLowerCase()));
+
+  return {
+    tokens: uniqueNonEmpty([...wordBoundaryTokens, ...fileTokens]),
+    wordBoundaryTokens,
+  };
+}
+
 function runForbiddenTokenCheck({
   repoRoot,
   tokens,
+  wordBoundaryTokens = [],
   grep = gitGrepToken,
   log = console.log,
   error = console.error,
@@ -130,11 +197,14 @@ function runForbiddenTokenCheck({
     return 0;
   }
 
+  const boundaryKeys = new Set(wordBoundaryTokens.map((token) => token.toLowerCase()));
   let found = false;
   let broken = false;
 
   for (const token of tokens) {
-    const { status, stdout } = grep({ token, repoRoot });
+    const result = grep({ token, repoRoot });
+    const status = result.status;
+    let stdout = result.stdout ?? "";
 
     // Fail closed. A scan that did not run is not a scan that found nothing --
     // conflating the two is what made this check unable to fail for the whole
@@ -145,6 +215,10 @@ function runForbiddenTokenCheck({
         `ERROR: forbidden-token scan did not run (git exited ${status === null ? "abnormally" : status}).`,
       );
       continue;
+    }
+
+    if (status === 0 && stdout.trim() && boundaryKeys.has(token.toLowerCase())) {
+      stdout = keepWordBoundaryLines(stdout, token);
     }
 
     if (status === 0 && stdout.trim()) {
@@ -211,14 +285,20 @@ function resolveRepoPaths(exec = execSync) {
 
 function runCli() {
   const { repoRoot, tokensFiles } = resolveRepoPaths();
-  const tokens = resolveForbiddenTokens(tokensFiles);
-  process.exit(runForbiddenTokenCheck({ repoRoot, tokens }));
+  const scan = resolveForbiddenTokenScan(tokensFiles);
+  process.exit(runForbiddenTokenCheck({
+    repoRoot,
+    tokens: scan.tokens,
+    wordBoundaryTokens: scan.wordBoundaryTokens,
+  }));
 }
 
 module.exports = {
   gitGrepToken,
+  hasWordBoundaryMatch,
   readForbiddenTokensFile,
   resolveDynamicForbiddenTokens,
+  resolveForbiddenTokenScan,
   resolveForbiddenTokens,
   resolveRepoPaths,
   runCli,
