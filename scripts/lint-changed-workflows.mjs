@@ -262,7 +262,7 @@ export function runActionlint(files, {
   const resolved = resolveActionlintCommand();
   const binary = command ?? resolved.command;
   const maySkip = skipWhenMissing ?? (command === undefined && resolved.skipWhenMissing);
-  const result = spawn(binary, ["-oneline", "-color", "never", ...files], {
+  const result = spawn(binary, ["-oneline", "-no-color", ...files], {
     cwd: repoRoot,
     encoding: "utf8",
     stdio: ["ignore", "pipe", "pipe"],

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -54,6 +54,30 @@ function withRepo(files, fn) {
     rmSync(repoRoot, { recursive: true, force: true });
   }
 }
+
+const ACTIONLINT_MISSING_SKIP = "actionlint not installed on this host; no downloads allowed";
+
+function existingActionlintBinary() {
+  const configured = typeof process.env.PAPERCLIP_ACTIONLINT_BIN === "string"
+    ? process.env.PAPERCLIP_ACTIONLINT_BIN.trim()
+    : "";
+  if (configured) {
+    return existsSync(configured) ? configured : null;
+  }
+  const probed = spawnSync("sh", ["-c", "command -v actionlint"], {
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+    windowsHide: true,
+  });
+  if (!probed.error && probed.status === 0) {
+    const found = (probed.stdout ?? "").trim();
+    if (found) return found;
+  }
+  return null;
+}
+
+const ACTIONLINT_BIN = existingActionlintBinary();
+
 
 test("parseWorkflowLintCli requires repeated --file values", () => {
   assert.deepEqual(parseWorkflowLintCli(["--file", ".github/workflows/docker.yml"]), [
@@ -301,7 +325,7 @@ test("lintChangedWorkflows runs actionlint then the docker IMAGE proof", () => {
       spawn: (command, args, options) => {
         commands.push(command);
         if (command === "actionlint") {
-          assert.deepEqual(args, ["-oneline", "-color", "never", ".github/workflows/docker.yml"]);
+          assert.deepEqual(args, ["-oneline", "-no-color", ".github/workflows/docker.yml"]);
           assert.equal(options.shell, false);
           return { status: 0, stdout: "", stderr: "" };
         }
@@ -343,4 +367,93 @@ test("lintChangedWorkflows skips a missing actionlint and still proves the docke
     assert.match(output, /GHCR image name is lowercase/);
     assert.doesNotMatch(output, /actionlint passed/);
   });
+});
+
+test("runActionlint argv uses -oneline and -no-color and appends files", () => {
+  let argv;
+  const files = [".github/workflows/docker.yml", ".github/workflows/pr.yml"];
+  runActionlint(files, {
+    repoRoot: "/tmp",
+    command: "actionlint",
+    skipWhenMissing: false,
+    spawn: (_command, args) => {
+      argv = args;
+      return { status: 0, stdout: "", stderr: "" };
+    },
+  });
+  assert.deepEqual(argv, ["-oneline", "-no-color", ...files]);
+  assert.ok(!argv.includes("never"));
+  assert.ok(!argv.includes("-color"));
+  assert.equal(argv[0], "-oneline");
+  assert.equal(argv[1], "-no-color");
+  assert.deepEqual(argv.slice(2), files);
+});
+
+const VALID_WORKFLOW = `name: Valid
+on: push
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo ok
+`;
+
+const INVALID_WORKFLOW = `name: Invalid
+on: push
+jobs:
+  test: [
+`;
+
+test("runActionlint passes a valid workflow with the real binary", {
+  skip: ACTIONLINT_BIN ? false : ACTIONLINT_MISSING_SKIP,
+}, () => {
+  withRepo({ ".github/workflows/valid.yml": VALID_WORKFLOW }, (repoRoot) => {
+    const result = runActionlint([".github/workflows/valid.yml"], {
+      repoRoot,
+      command: ACTIONLINT_BIN,
+      skipWhenMissing: false,
+    });
+    assert.deepEqual(result, { skipped: false });
+  });
+});
+
+test("runActionlint fails an invalid workflow with the real binary", {
+  skip: ACTIONLINT_BIN ? false : ACTIONLINT_MISSING_SKIP,
+}, () => {
+  withRepo({ ".github/workflows/invalid.yml": INVALID_WORKFLOW }, (repoRoot) => {
+    assert.throws(
+      () => runActionlint([".github/workflows/invalid.yml"], {
+        repoRoot,
+        command: ACTIONLINT_BIN,
+        skipWhenMissing: false,
+      }),
+      (error) => (
+        error instanceof WorkflowLintError
+        && /actionlint failed with exit/.test(error.message)
+      ),
+    );
+  });
+});
+
+test("runActionlint fails closed when the configured binary is missing", () => {
+  const missing = path.join(
+    os.tmpdir(),
+    "paperclip-no-such-actionlint",
+    "actionlint-missing-binary",
+  );
+  assert.equal(existsSync(missing), false);
+  assert.throws(
+    () => runActionlint([".github/workflows/docker.yml"], {
+      repoRoot: "/tmp",
+      command: missing,
+      skipWhenMissing: false,
+    }),
+    (error) => (
+      error instanceof WorkflowLintError
+      && error.exitCode === 2
+      && error.message.includes(`actionlint was not found at ${missing}`)
+      && /does not download actionlint/.test(error.message)
+      && !/https?:\/\//.test(error.message)
+    ),
+  );
 });
