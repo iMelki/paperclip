@@ -252,7 +252,9 @@ jobs:
         run: pnpm run typecheck:build-gaps
 
       - name: Verify release registry test coverage
-        run: pnpm run test:release-registry
+        run: |
+          pnpm run test:release-registry
+          node --test scripts/check-forbidden-tokens-core.test.mjs
 
   general_tests:
     name: General tests (${{ matrix.group_label }})
