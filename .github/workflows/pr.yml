@@ -4,6 +4,7 @@ on:
   pull_request:
     branches:
       - master
+      - dev
       - agent/codex/129-upstream-host-integration
 
 concurrency:
