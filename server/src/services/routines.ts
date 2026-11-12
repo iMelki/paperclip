@@ -1,5 +1,5 @@
 import crypto from "node:crypto";
-import { and, asc, desc, eq, gt, inArray, isNotNull, isNull, lte, ne, not, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gt, inArray, isNotNull, isNull, lte, ne, not, or, sql, type SQL } from "drizzle-orm";
 import { isBuiltInBundleActorUserId, resolveEligibleCompanyActorUserId, resolveStoredResponsibleUserId, userHasActiveCompanyAccess, userRowExists } from "./company-actor-user.js";
 import type { Db } from "@paperclipai/db";
 import {
@@ -16,6 +16,8 @@ import {
   folders,
   goals,
   heartbeatRuns,
+  heartbeatRunEvents,
+  agentWakeupRequests,
   issueInboxArchives,
   issues,
   pluginManagedResources,
@@ -58,6 +60,7 @@ import {
   syncRoutineVariablesWithTemplate,
 } from "@paperclipai/shared";
 import { trackRoutineRun } from "@paperclipai/shared/telemetry";
+import { isUniqueViolation } from "../db-errors.js";
 import { conflict, forbidden, notFound, unauthorized, unprocessable } from "../errors.js";
 import { logger } from "../middleware/logger.js";
 import { getTelemetryClient } from "../telemetry.js";
@@ -68,7 +71,7 @@ import { visibleIssueCondition } from "./issue-visibility.js";
 import { secretService } from "./secrets.js";
 import { getSecretProvider } from "../secrets/provider-registry.js";
 import { parseCron, validateCron } from "./cron.js";
-import { heartbeatService } from "./heartbeat.js";
+import { heartbeatService, publishHeartbeatRunStatus, DEFERRED_WAKE_CONTEXT_KEY } from "./heartbeat.js";
 import {
   instanceSettingsService,
   isTruthyRuntimeEnvValue,
@@ -664,7 +667,14 @@ function mapRoutineDescriptionDocument(row: {
 export function routineService(
   db: Db,
   deps: {
-    heartbeat?: IssueAssignmentWakeupDeps;
+    heartbeat?: IssueAssignmentWakeupDeps & {
+      cancelRun?: (
+        runId: string,
+        reason?: string,
+        options?: { discardIssueWork?: boolean },
+      ) => Promise<unknown>;
+      resumeQueuedRuns?: (options?: { agentIds?: string[] }) => Promise<unknown>;
+    };
     pluginWorkerManager?: PluginWorkerManager;
     runtimeEnv?: Record<string, string | undefined>;
   } = {},
@@ -1561,6 +1571,116 @@ export function routineService(
       .then((rows) => rows[0]?.issues ?? null);
   }
 
+  // Same key columns and WHERE as issues_open_routine_execution_uq in
+  // packages/db/src/migrations/0062_routine_run_dispatch_fingerprint.sql.
+  // Plugin origins, hidden rows, missing origin/run identities and terminal
+  // statuses are outside the partial index. Legacy "default" is a distinct
+  // indexed key, not an exclusion from the SQL predicate.
+  async function findIndexedOpenExecutionIssue(
+    routine: typeof routines.$inferSelect,
+    executor: Db = db,
+    dispatchFingerprint?: string | null,
+    origin?: { kind: string; id: string | null },
+  ) {
+    const originKind = origin?.kind ?? "routine_execution";
+    const originId = origin?.id ?? routine.id;
+    if (originKind !== "routine_execution" || !originId || !dispatchFingerprint) return null;
+    return executor
+      .select()
+      .from(issues)
+      .where(
+        and(
+          eq(issues.companyId, routine.companyId),
+          eq(issues.originKind, "routine_execution"),
+          isNotNull(issues.originId),
+          eq(issues.originId, originId),
+          eq(issues.originFingerprint, dispatchFingerprint),
+          isNull(issues.hiddenAt),
+          isNotNull(issues.executionRunId),
+          inArray(issues.status, ["backlog", "todo", "in_progress", "in_review", "blocked"]),
+        ),
+      )
+      .orderBy(desc(issues.updatedAt), desc(issues.createdAt))
+      .limit(1)
+      .then((rows) => rows[0] ?? null);
+  }
+
+  // Only never-admitted queued work may be discarded under this lock. A
+  // running row, including one waiting for onSpawn with no PID, retains custody.
+  // Match heartbeat readNonEmptyString exactly: test ECMAScript trim whitespace
+  // for emptiness, but preserve the original nonempty string as the issue key.
+  const issueKeyWhitespace = "\u0009\u000a\u000b\u000c\u000d\u0020\u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000\ufeff";
+  function nonEmptyJsonIssueKey(value: SQL) {
+    return sql<string | null>`case when jsonb_typeof(${value}) = 'string'
+      and btrim(${value} #>> '{}', ${issueKeyWhitespace}) <> ''
+      then ${value} #>> '{}' else null end`;
+  }
+
+  async function discardQueuedExecutionIssue(companyId: string, issueId: string, executor: Db) {
+    return executor.transaction(async (atomicTx) => {
+      const tx = atomicTx as unknown as Db;
+      const issue = await tx.select().from(issues)
+        .where(and(eq(issues.companyId, companyId), eq(issues.id, issueId)))
+        .for("update").then((rows) => rows[0] ?? null);
+      if (!issue) return { agentIds: [] as string[], cancelledRuns: [] as Array<typeof heartbeatRuns.$inferSelect> };
+      const linkedTarget = or(
+        sql`coalesce(
+          ${nonEmptyJsonIssueKey(sql`${heartbeatRuns.contextSnapshot} -> 'issueId'`)},
+          ${nonEmptyJsonIssueKey(sql`${heartbeatRuns.contextSnapshot} -> 'taskId'`)}
+        ) = ${issueId}`,
+        issue.executionRunId ? eq(heartbeatRuns.id, issue.executionRunId) : sql`false`,
+        issue.checkoutRunId ? eq(heartbeatRuns.id, issue.checkoutRunId) : sql`false`,
+      );
+      const targets = await tx.select().from(heartbeatRuns).where(and(
+        eq(heartbeatRuns.companyId, companyId), inArray(heartbeatRuns.status, LIVE_HEARTBEAT_RUN_STATUSES), linkedTarget,
+      )).orderBy(asc(heartbeatRuns.id)).for("update");
+      const ambiguous = targets.filter((run) => run.status === "running"
+        || run.processPid !== null || run.processGroupId !== null || run.processStartedAt !== null
+        || run.nativeSessionId !== null || run.runnerInstanceId !== null || run.nativePhase !== null || run.externalRunId !== null);
+      if (ambiguous.length > 0) {
+        throw conflict("Routine execution issue has an admitted or runtime-owned heartbeat run; the issue was retained", {
+          runIds: ambiguous.map((run) => run.id),
+        });
+      }
+      const at = new Date();
+      const reason = "Cancelled because the routine execution issue was discarded";
+      const cancelledRuns: Array<typeof heartbeatRuns.$inferSelect> = [];
+      for (const target of targets) {
+        const cancelled = await tx.update(heartbeatRuns).set({
+          status: "cancelled", finishedAt: at, error: reason, errorCode: "cancelled", updatedAt: at,
+        }).where(and(eq(heartbeatRuns.companyId, companyId), eq(heartbeatRuns.id, target.id),
+          inArray(heartbeatRuns.status, ["queued", "scheduled_retry"])))
+          .returning().then((rows) => rows[0] ?? null);
+        if (!cancelled) throw conflict("Routine execution heartbeat changed before queued discard; the issue was retained");
+        cancelledRuns.push(cancelled);
+        if (cancelled.wakeupRequestId) {
+          await tx.update(agentWakeupRequests).set({ status: "cancelled", finishedAt: at, error: reason, updatedAt: at })
+            .where(and(eq(agentWakeupRequests.companyId, companyId), eq(agentWakeupRequests.id, cancelled.wakeupRequestId)));
+        }
+        const sequence = await tx.select({ value: sql<number | null>`max(${heartbeatRunEvents.seq})` }).from(heartbeatRunEvents)
+          .where(eq(heartbeatRunEvents.runId, cancelled.id)).then((rows) => Number(rows[0]?.value ?? 0) + 1);
+        await tx.insert(heartbeatRunEvents).values({ companyId, runId: cancelled.id, agentId: cancelled.agentId, seq: sequence,
+          eventType: "lifecycle", stream: "system", level: "warn", message: reason });
+      }
+      const cancelledWakes = await tx.update(agentWakeupRequests).set({
+        status: "cancelled", finishedAt: at, error: reason, updatedAt: at,
+      }).where(and(eq(agentWakeupRequests.companyId, companyId),
+        inArray(agentWakeupRequests.status, ["queued", "claimed", "deferred_issue_execution"]),
+        sql`coalesce(
+          ${nonEmptyJsonIssueKey(sql`${agentWakeupRequests.payload} -> 'issueId'`)},
+          ${nonEmptyJsonIssueKey(sql`${agentWakeupRequests.payload} -> ${DEFERRED_WAKE_CONTEXT_KEY} -> 'issueId'`)},
+          ${nonEmptyJsonIssueKey(sql`${agentWakeupRequests.payload} -> ${DEFERRED_WAKE_CONTEXT_KEY} -> 'taskId'`)}
+        ) = ${issueId}`))
+        .returning({ agentId: agentWakeupRequests.agentId });
+      const deleted = await tx.delete(issues).where(and(eq(issues.companyId, companyId), eq(issues.id, issueId),
+        sql`not exists (select 1 from ${heartbeatRuns} where ${heartbeatRuns.companyId} = ${companyId}
+          and ${inArray(heartbeatRuns.status, LIVE_HEARTBEAT_RUN_STATUSES)} and ${linkedTarget})`))
+        .returning({ id: issues.id });
+      if (deleted.length !== 1) throw conflict("Routine execution issue changed before discard; the issue was retained");
+      return { agentIds: [...new Set([...targets.map((run) => run.agentId), ...cancelledWakes.map((wake) => wake.agentId)])], cancelledRuns };
+    });
+  }
+
   async function finalizeRun(runId: string, patch: Partial<typeof routineRuns.$inferInsert>, executor: Db = db) {
     return executor
       .update(routineRuns)
@@ -1775,11 +1895,17 @@ export function routineService(
       title,
       description,
     });
+    const agentsToResumeAfterCommit = new Set<string>();
+    const discardedRunsAfterCommit = new Map<string, typeof heartbeatRuns.$inferSelect>();
     const run = await db.transaction(async (tx) => {
       const txDb = tx as unknown as Db;
       await tx.execute(
         sql`select id from ${routines} where ${routines.id} = ${input.routine.id} and ${routines.companyId} = ${input.routine.companyId} for update`,
       );
+      // The issue insert runs on its own connection, so the row lock above does
+      // not cover that insert. Hold the execution key until this transaction
+      // ends, which is after the insert and the wakeup that binds the run.
+      await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`routine-execution:${input.routine.companyId}:${issueOriginKind}:${issueOriginId}:${dispatchFingerprint}`}, 0))`);
 
       if (input.idempotencyKey) {
         const existing = await txDb
@@ -1873,37 +1999,51 @@ export function routineService(
           ? nextCronTickInTimeZone(input.trigger.cronExpression, input.trigger.timezone, triggeredAt)
           : undefined;
 
+      const executionOrigin = { kind: issueOriginKind, id: issueOriginId };
+      const reuseOpenExecution = async (activeIssue: typeof issues.$inferSelect) => {
+        const status = input.routine.concurrencyPolicy === "skip_if_active" ? "skipped" : "coalesced";
+        if (manualRunnerUserId) {
+          await touchIssueForUserInbox(txDb, {
+            companyId: input.routine.companyId,
+            issueId: activeIssue.id,
+            userId: manualRunnerUserId,
+            touchedAt: triggeredAt,
+          });
+        }
+        const updated = await finalizeRun(createdRun.id, {
+          status,
+          linkedIssueId: activeIssue.id,
+          coalescedIntoRunId: activeIssue.originRunId,
+          completedAt: triggeredAt,
+        }, txDb);
+        await updateRoutineTouchedState({
+          routineId: input.routine.id,
+          triggerId: input.trigger?.id ?? null,
+          triggeredAt,
+          status,
+          issueId: activeIssue.id,
+          nextRunAt,
+        }, txDb);
+        return updated ?? createdRun;
+      };
+
       let createdIssue: Awaited<ReturnType<typeof issueSvc.create>> | null = null;
       try {
-        const activeIssue = await findLiveExecutionIssue(input.routine, txDb, dispatchFingerprint, {
-          kind: issueOriginKind,
-          id: issueOriginId,
-        });
-        if (activeIssue && input.routine.concurrencyPolicy !== "always_enqueue") {
-          const status = input.routine.concurrencyPolicy === "skip_if_active" ? "skipped" : "coalesced";
-          if (manualRunnerUserId) {
-            await touchIssueForUserInbox(txDb, {
-              companyId: input.routine.companyId,
-              issueId: activeIssue.id,
-              userId: manualRunnerUserId,
-              touchedAt: triggeredAt,
-            });
-          }
-          const updated = await finalizeRun(createdRun.id, {
-            status,
-            linkedIssueId: activeIssue.id,
-            coalescedIntoRunId: activeIssue.originRunId,
-            completedAt: triggeredAt,
-          }, txDb);
-          await updateRoutineTouchedState({
-            routineId: input.routine.id,
-            triggerId: input.trigger?.id ?? null,
-            triggeredAt,
-            status,
-            issueId: activeIssue.id,
-            nextRunAt,
-          }, txDb);
-          return updated ?? createdRun;
+        const indexedIssue = await findIndexedOpenExecutionIssue(
+          input.routine,
+          txDb,
+          dispatchFingerprint,
+          executionOrigin,
+        );
+        const liveIssue = await findLiveExecutionIssue(input.routine, txDb, dispatchFingerprint, executionOrigin);
+        // always_enqueue still queues behind a live run. It reuses only an
+        // indexed row whose run is gone: that row holds the unique key, so a new
+        // issue could never claim its own run and would fail at the claim step.
+        const activeIssue = input.routine.concurrencyPolicy === "always_enqueue"
+          ? (liveIssue ? null : indexedIssue)
+          : indexedIssue ?? liveIssue;
+        if (activeIssue) {
+          return reuseOpenExecution(activeIssue);
         }
 
         try {
@@ -1930,59 +2070,41 @@ export function routineService(
             executionWorkspacePreference: input.executionWorkspacePreference ?? null,
             executionWorkspaceSettings: input.executionWorkspaceSettings ?? null,
           });
+          // Keep the dispatch lock until the issue is linked to a queued heartbeat run.
+          await queueIssueAssignmentWakeup({
+            heartbeat,
+            issue: createdIssue,
+            reason: "issue_assigned",
+            mutation: "create",
+            contextSource: "routine.dispatch",
+            requestedByActorType: input.source === "schedule" ? "system" : undefined,
+            rethrowOnError: true,
+          });
         } catch (error) {
-          const isOpenExecutionConflict =
-            !!error &&
-            typeof error === "object" &&
-            "code" in error &&
-            (error as { code?: string }).code === "23505" &&
-            "constraint" in error &&
-            (error as { constraint?: string }).constraint === "issues_open_routine_execution_uq";
-          if (!isOpenExecutionConflict || input.routine.concurrencyPolicy === "always_enqueue") {
+          if (!isUniqueViolation(error, "issues_open_routine_execution_uq")) {
             throw error;
           }
-
-          const existingIssue = await findLiveExecutionIssue(input.routine, txDb, dispatchFingerprint, {
-            kind: issueOriginKind,
-            id: issueOriginId,
-          });
-          if (!existingIssue) throw error;
-          const status = input.routine.concurrencyPolicy === "skip_if_active" ? "skipped" : "coalesced";
-          if (manualRunnerUserId) {
-            await touchIssueForUserInbox(txDb, {
-              companyId: input.routine.companyId,
-              issueId: existingIssue.id,
-              userId: manualRunnerUserId,
-              touchedAt: triggeredAt,
-            });
+          // The index rejected a second open execution. Drop the loser and
+          // return the row that already holds the key. Do this for every
+          // concurrency policy: the index is the hard rule.
+          if (createdIssue) {
+            const discarded = await discardQueuedExecutionIssue(input.routine.companyId, createdIssue.id, txDb);
+            for (const agentId of discarded.agentIds) agentsToResumeAfterCommit.add(agentId);
+            for (const row of discarded.cancelledRuns) discardedRunsAfterCommit.set(row.id, row);
+            createdIssue = null;
           }
-          const updated = await finalizeRun(createdRun.id, {
-            status,
-            linkedIssueId: existingIssue.id,
-            coalescedIntoRunId: existingIssue.originRunId,
-            completedAt: triggeredAt,
-          }, txDb);
-          await updateRoutineTouchedState({
-            routineId: input.routine.id,
-            triggerId: input.trigger?.id ?? null,
-            triggeredAt,
-            status,
-            issueId: existingIssue.id,
-            nextRunAt,
-          }, txDb);
-          return updated ?? createdRun;
+          const existingIssue = await findIndexedOpenExecutionIssue(
+            input.routine,
+            txDb,
+            dispatchFingerprint,
+            executionOrigin,
+          ) ?? await findLiveExecutionIssue(input.routine, txDb, dispatchFingerprint, executionOrigin);
+          if (!existingIssue) throw error;
+          return reuseOpenExecution(existingIssue);
         }
-
-        // Keep the dispatch lock until the issue is linked to a queued heartbeat run.
-        await queueIssueAssignmentWakeup({
-          heartbeat,
-          issue: createdIssue,
-          reason: "issue_assigned",
-          mutation: "create",
-          contextSource: "routine.dispatch",
-          requestedByActorType: input.source === "schedule" ? "system" : undefined,
-          rethrowOnError: true,
-        });
+        if (!createdIssue) {
+          throw new Error("Routine execution issue was not created");
+        }
         const updated = await finalizeRun(createdRun.id, {
           status: "issue_created",
           linkedIssueId: createdIssue.id,
@@ -1997,10 +2119,22 @@ export function routineService(
         }, txDb);
         return updated ?? createdRun;
       } catch (error) {
+        let discardFailure: string | null = null;
         if (createdIssue) {
-          await txDb.delete(issues).where(eq(issues.id, createdIssue.id));
+          try {
+            const discarded = await discardQueuedExecutionIssue(input.routine.companyId, createdIssue.id, txDb);
+            for (const agentId of discarded.agentIds) agentsToResumeAfterCommit.add(agentId);
+            for (const row of discarded.cancelledRuns) discardedRunsAfterCommit.set(row.id, row);
+            createdIssue = null;
+          } catch (cleanupError) {
+            // Keep the issue while a run may still be using it.
+            discardFailure = cleanupError instanceof Error ? cleanupError.message : String(cleanupError);
+          }
         }
-        const failureReason = error instanceof Error ? error.message : String(error);
+        const failureReason = [
+          error instanceof Error ? error.message : String(error),
+          discardFailure ? `The execution issue was kept: ${discardFailure}` : null,
+        ].filter(Boolean).join(". ");
         const failed = await finalizeRun(createdRun.id, {
           status: "failed",
           failureReason,
@@ -2016,6 +2150,22 @@ export function routineService(
         return failed ?? createdRun;
       }
     });
+
+    for (const row of discardedRunsAfterCommit.values()) {
+      try { publishHeartbeatRunStatus(row); } catch (err) {
+        logger.warn({ err, runId: row.id }, "failed to publish committed routine discard status");
+      }
+    }
+    if (agentsToResumeAfterCommit.size > 0 && heartbeat.resumeQueuedRuns) {
+      const agentIds = [...agentsToResumeAfterCommit];
+      try {
+        await heartbeat.resumeQueuedRuns({ agentIds });
+      } catch (err) {
+        // The cleanup already committed. Leave normal scheduler recovery in
+        // charge of a later resume instead of retrying the discarded work.
+        logger.warn({ err, agentIds }, "failed to resume agent queues after routine issue cleanup");
+      }
+    }
 
     if (input.source === "schedule" || input.source === "webhook") {
       const actorId = input.source === "schedule" ? "routine-scheduler" : "routine-webhook";

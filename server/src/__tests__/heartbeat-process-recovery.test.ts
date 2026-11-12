@@ -50,6 +50,8 @@ import {
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
 import { runningProcesses } from "../adapters/index.ts";
+import { isUniqueViolation } from "../db-errors.js";
+import * as liveEvents from "../services/live-events.js";
 const mockTelemetryClient = vi.hoisted(() => ({ track: vi.fn() }));
 const mockTrackAgentFirstHeartbeat = vi.hoisted(() => vi.fn());
 const mockTerminateLocalService = vi.hoisted(() => vi.fn());
@@ -4980,6 +4982,269 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
       expect(runningProcesses.has(runId)).toBe(false);
     } finally {
       updateSpy.mockRestore();
+    }
+  });
+
+  it("cancelling a run for a discarded issue does not start assignment recovery", async () => {
+    const { agentId, runId, issueId } = await seedRunFixture({
+      agentStatus: "idle",
+      includeIssue: true,
+    });
+    const heartbeat = heartbeatService(db);
+
+    const cancelled = await heartbeat.cancelRun(runId, "Cancelled because the routine execution issue was discarded", {
+      discardIssueWork: true,
+    });
+
+    expect(cancelled?.status).toBe("cancelled");
+    const runs = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.agentId, agentId));
+    expect(runs).toHaveLength(1);
+    const issue = await db.select().from(issues).where(eq(issues.id, issueId)).then((rows) => rows[0]!);
+    expect(issue.executionRunId).toBeNull();
+  });
+
+  it("defers discarded-issue queues until both target runs are cancelled and resumes unrelated work explicitly", async () => {
+    const { companyId, agentId, runId, issueId } = await seedRunFixture({ agentStatus: "idle", includeIssue: true });
+    const queuedTargetRunId = randomUUID();
+    const unrelatedRunId = randomUUID();
+    const executedRunIds: string[] = [];
+    mockAdapterExecute.mockClear();
+    mockAdapterExecute.mockImplementation(async (rawInput?: unknown) => {
+      executedRunIds.push((rawInput as { runId: string }).runId);
+      return { exitCode: 0, signal: null, timedOut: false, errorMessage: null,
+        summary: "Completed unrelated mock work.", provider: "test", model: "test-model" };
+    });
+    await db.insert(heartbeatRuns).values([
+      { id: queuedTargetRunId, companyId, agentId, invocationSource: "assignment", status: "queued", contextSnapshot: { issueId } },
+      { id: unrelatedRunId, companyId, agentId, invocationSource: "on_demand", status: "queued", contextSnapshot: {} },
+    ]);
+    const heartbeat = heartbeatService(db);
+    try {
+      await heartbeat.cancelRun(runId, "Discard target fixture", { discardIssueWork: true });
+      // The old cancellation path claims the second target here, before its
+      // owner can cancel the rest of the batch or commit the issue deletion.
+      expect((await heartbeat.getRun(queuedTargetRunId))?.status).toBe("queued");
+      expect((await heartbeat.getRun(unrelatedRunId))?.status).toBe("queued");
+      expect(mockAdapterExecute).not.toHaveBeenCalled();
+      await heartbeat.cancelRun(queuedTargetRunId, "Discard target fixture", { discardIssueWork: true });
+      expect((await heartbeat.getRun(runId))?.status).toBe("cancelled");
+      expect((await heartbeat.getRun(queuedTargetRunId))?.status).toBe("cancelled");
+      expect(mockAdapterExecute).not.toHaveBeenCalled();
+      await db.transaction(async (tx) => {
+        await tx.delete(issues).where(and(eq(issues.companyId, companyId), eq(issues.id, issueId)));
+      });
+      expect(await db.select({ id: issues.id }).from(issues).where(eq(issues.id, issueId))).toEqual([]);
+      await heartbeat.resumeQueuedRuns({ agentIds: [agentId] });
+      await waitForRunToSettle(heartbeat, unrelatedRunId, 5_000);
+      await heartbeat.drainActiveRunExecutions();
+      expect(executedRunIds).toEqual([unrelatedRunId]);
+      expect((await heartbeat.getRun(unrelatedRunId))?.status).toBe("succeeded");
+    } finally {
+      // Negative execution must also leave this private fixture drained. Pause
+      // only its own agent before cancelling any accidentally-started target.
+      await db.update(agents).set({ status: "paused" }).where(eq(agents.id, agentId));
+      for (const id of [runId, queuedTargetRunId, unrelatedRunId]) {
+        await heartbeat.cancelRun(id, "Discard fixture cleanup", { discardIssueWork: true });
+      }
+      await heartbeat.drainActiveRunExecutions();
+    }
+  });
+
+  it("targets queue resume without starting other agents and keeps the default resume route", async () => {
+    const first = await seedRunFixture({ agentStatus: "idle", runStatus: "queued", includeIssue: false });
+    const second = await seedRunFixture({ agentStatus: "idle", runStatus: "queued", includeIssue: false });
+    const heartbeat = heartbeatService(db);
+    mockAdapterExecute.mockClear();
+    try {
+      await heartbeat.resumeQueuedRuns({ agentIds: [] });
+      expect((await heartbeat.getRun(first.runId))?.status).toBe("queued");
+      expect((await heartbeat.getRun(second.runId))?.status).toBe("queued");
+      expect(mockAdapterExecute).not.toHaveBeenCalled();
+      await heartbeat.resumeQueuedRuns({ agentIds: [first.agentId, first.agentId] });
+      await waitForRunToSettle(heartbeat, first.runId, 5_000);
+      await heartbeat.drainActiveRunExecutions();
+      expect((await heartbeat.getRun(first.runId))?.status).toBe("succeeded");
+      expect((await heartbeat.getRun(second.runId))?.status).toBe("queued");
+      expect(mockAdapterExecute).toHaveBeenCalledTimes(1);
+      await heartbeat.resumeQueuedRuns();
+      await waitForRunToSettle(heartbeat, second.runId, 5_000);
+      await heartbeat.drainActiveRunExecutions();
+      expect((await heartbeat.getRun(second.runId))?.status).toBe("succeeded");
+      expect(mockAdapterExecute).toHaveBeenCalledTimes(2);
+    } finally {
+      for (const fixture of [first, second]) {
+        await db.update(agents).set({ status: "paused" }).where(eq(agents.id, fixture.agentId));
+        await heartbeat.cancelRun(fixture.runId, "Targeted resume fixture cleanup", { discardIssueWork: true });
+      }
+      await heartbeat.drainActiveRunExecutions();
+    }
+  });
+
+  it.each(["issueId", "taskId"] as const)("rolls back a real execution-key claim conflict for %s before publishing or starting an adapter", async (contextKey) => {
+    const { companyId, agentId, runId, wakeupRequestId, issueId } = await seedRunFixture({ agentStatus: "idle", runStatus: "queued", includeIssue: true });
+    await db.update(heartbeatRuns).set({ contextSnapshot: { [contextKey]: issueId } }).where(eq(heartbeatRuns.id, runId));
+    const originId = randomUUID();
+    const holderRunId = randomUUID();
+    const holderIssueId = randomUUID();
+    await db.update(issues).set({ executionRunId: null, checkoutRunId: null,
+      originKind: "routine_execution", originId, originFingerprint: "atomic-claim-fixture" }).where(eq(issues.id, issueId));
+    await db.update(agentWakeupRequests).set({ status: "queued", claimedAt: null }).where(eq(agentWakeupRequests.id, wakeupRequestId));
+    await db.insert(heartbeatRuns).values({ id: holderRunId, companyId, agentId, invocationSource: "assignment", status: "failed" });
+    await db.insert(issues).values({ id: holderIssueId, companyId, title: "Occupied execution key", status: "todo",
+      assigneeAgentId: agentId, originKind: "routine_execution", originId, originFingerprint: "atomic-claim-fixture", executionRunId: holderRunId });
+    const heartbeat = heartbeatService(db);
+    const statusSpy = vi.spyOn(liveEvents, "publishLiveEvent");
+    mockAdapterExecute.mockClear();
+    mockAdapterExecute.mockImplementation(async () => {
+      await db.update(issues).set({ status: "done" }).where(eq(issues.id, issueId));
+      return { exitCode: 0, signal: null, timedOut: false, errorMessage: null,
+        summary: "Finished atomic claim fixture.", provider: "test", model: "test-model" };
+    });
+    try {
+      await expect(heartbeat.resumeQueuedRuns({ agentIds: [agentId] })).rejects.toSatisfy(
+        (error: unknown) => isUniqueViolation(error, "issues_open_routine_execution_uq"),
+      );
+      expect((await heartbeat.getRun(runId))?.status).toBe("queued");
+      const wake = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, wakeupRequestId)).then((rows) => rows[0]!);
+      expect(wake.status).toBe("queued");
+      expect(wake.claimedAt).toBeNull();
+      expect(mockAdapterExecute).not.toHaveBeenCalled();
+      expect(statusSpy.mock.calls.filter(([event]) => {
+        const value = event as { type: string; payload?: { runId?: unknown } };
+        return value.type === "heartbeat.run.status" && value.payload?.runId === runId;
+      })).toHaveLength(0);
+      await db.delete(issues).where(eq(issues.id, holderIssueId));
+      await heartbeat.resumeQueuedRuns({ agentIds: [agentId] });
+      await waitForRunToSettle(heartbeat, runId, 5_000);
+      await heartbeat.drainActiveRunExecutions();
+      expect((await heartbeat.getRun(runId))?.status).toBe("succeeded");
+      expect(mockAdapterExecute).toHaveBeenCalledTimes(1);
+    } finally {
+      await db.update(agents).set({ status: "paused" }).where(eq(agents.id, agentId));
+      await heartbeat.cancelRun(runId, "Atomic claim fixture cleanup", { discardIssueWork: true });
+      await heartbeat.drainActiveRunExecutions();
+      statusSpy.mockRestore();
+    }
+  }, 15_000);
+
+  it("does not publish or start a queued run while another live run owns its issue despite spare agent capacity", async () => {
+    const { companyId, agentId, runId, wakeupRequestId, issueId } = await seedRunFixture({ agentStatus: "idle", runStatus: "queued", includeIssue: true });
+    const holderId = randomUUID();
+    await db.update(agents).set({ runtimeConfig: { heartbeat: { maxConcurrentRuns: 2 } } }).where(eq(agents.id, agentId));
+    await db.insert(heartbeatRuns).values({ id: holderId, companyId, agentId, invocationSource: "assignment", status: "running", contextSnapshot: { issueId } });
+    await db.update(issues).set({ executionRunId: holderId }).where(eq(issues.id, issueId));
+    await db.update(agentWakeupRequests).set({ status: "queued", claimedAt: null }).where(eq(agentWakeupRequests.id, wakeupRequestId));
+    const heartbeat = heartbeatService(db);
+    const events = vi.spyOn(liveEvents, "publishLiveEvent");
+    mockAdapterExecute.mockClear();
+    try {
+      await heartbeat.resumeQueuedRuns({ agentIds: [agentId] });
+      expect((await heartbeat.getRun(runId))?.status).toBe("queued");
+      expect((await heartbeat.getRun(holderId))?.status).toBe("running");
+      expect(mockAdapterExecute).not.toHaveBeenCalled();
+      expect(events.mock.calls.filter(([event]) => {
+        const value = event as { type: string; payload?: { runId?: unknown } };
+        return value.type === "heartbeat.run.status" && value.payload?.runId === runId;
+      })).toHaveLength(0);
+    } finally {
+      await db.update(agents).set({ status: "paused" }).where(eq(agents.id, agentId));
+      for (const id of [runId, holderId]) await heartbeat.cancelRun(id, "Owned live-owner fixture cleanup", { discardIssueWork: true });
+      await heartbeat.drainActiveRunExecutions();
+      events.mockRestore();
+    }
+  });
+
+  it("resolves a queued claimant's fallback actor through its open transaction executor", async () => {
+    const { agentId, runId, issueId } = await seedRunFixture({ agentStatus: "idle", runStatus: "queued", includeIssue: true });
+    await db.update(heartbeatRuns).set({ responsibleUserId: null, contextSnapshot: { issueId } }).where(eq(heartbeatRuns.id, runId));
+    await db.update(issues).set({ responsibleUserId: null, parentId: null }).where(eq(issues.id, issueId));
+    const heartbeat = heartbeatService(db);
+    const originalSelect = db.select.bind(db);
+    const originalTransaction = db.transaction.bind(db);
+    let transactionOpen = false;
+    let sawTransaction = false;
+    const rootReadsDuringTransaction: unknown[][] = [];
+    const selectSpy = vi.spyOn(db, "select").mockImplementation(((...args: unknown[]) => {
+      if (transactionOpen) rootReadsDuringTransaction.push(args);
+      return Reflect.apply(originalSelect, db, args);
+    }) as typeof db.select);
+    const transactionSpy = vi.spyOn(db, "transaction").mockImplementation(((callback, config) => originalTransaction(async (tx) => {
+      transactionOpen = true;
+      sawTransaction = true;
+      try { return await callback(tx); } finally { transactionOpen = false; }
+    }, config)) as typeof db.transaction);
+    mockAdapterExecute.mockClear();
+    mockAdapterExecute.mockImplementation(async () => {
+      await db.update(issues).set({ status: "done" }).where(eq(issues.id, issueId));
+      return { exitCode: 0, signal: null, timedOut: false, errorMessage: null,
+        summary: "Completed transaction actor fixture.", provider: "test", model: "test-model" };
+    });
+    try {
+      await heartbeat.resumeQueuedRuns({ agentIds: [agentId] });
+      await waitForRunToSettle(heartbeat, runId, 5_000);
+      await heartbeat.drainActiveRunExecutions();
+      expect(sawTransaction).toBe(true);
+      expect(rootReadsDuringTransaction).toEqual([]);
+      expect((await heartbeat.getRun(runId))?.responsibleUserId).toBe("responsible-user");
+      expect((await heartbeat.getRun(runId))?.status).toBe("succeeded");
+      expect(mockAdapterExecute).toHaveBeenCalledTimes(1);
+    } finally {
+      transactionSpy.mockRestore();
+      selectSpy.mockRestore();
+      await db.update(agents).set({ status: "paused" }).where(eq(agents.id, agentId));
+      await heartbeat.cancelRun(runId, "Owned actor executor fixture cleanup", { discardIssueWork: true });
+      await heartbeat.drainActiveRunExecutions();
+    }
+  });
+
+  it("starts an earlier committed claim when a later queued claimant hits the real execution-key constraint", async () => {
+    const { companyId, agentId, runId, issueId } = await seedRunFixture({ agentStatus: "idle", runStatus: "queued", includeIssue: true });
+    const collisionRunId = randomUUID();
+    const collisionIssueId = randomUUID();
+    const holderRunId = randomUUID();
+    const holderIssueId = randomUUID();
+    const originId = randomUUID();
+    await db.update(agents).set({ runtimeConfig: { heartbeat: { maxConcurrentRuns: 2 } } }).where(eq(agents.id, agentId));
+    await db.update(heartbeatRuns).set({ createdAt: new Date("2026-03-19T00:00:00.000Z") }).where(eq(heartbeatRuns.id, runId));
+    await db.insert(heartbeatRuns).values([
+      { id: holderRunId, companyId, agentId, invocationSource: "assignment", status: "failed" },
+      { id: collisionRunId, companyId, agentId, invocationSource: "assignment", status: "queued",
+        contextSnapshot: { issueId: collisionIssueId }, createdAt: new Date("2026-03-19T00:00:01.000Z") },
+    ]);
+    await db.insert(issues).values([
+      { id: collisionIssueId, companyId, title: "Queued collision fixture", status: "in_progress", assigneeAgentId: agentId,
+        responsibleUserId: "responsible-user", originKind: "routine_execution", originId, originFingerprint: "batch-claim" },
+      { id: holderIssueId, companyId, title: "Occupied batch execution key", status: "todo", assigneeAgentId: agentId,
+        originKind: "routine_execution", originId, originFingerprint: "batch-claim", executionRunId: holderRunId },
+    ]);
+    const heartbeat = heartbeatService(db);
+    const events = vi.spyOn(liveEvents, "publishLiveEvent");
+    const executed: string[] = [];
+    mockAdapterExecute.mockClear();
+    mockAdapterExecute.mockImplementation(async (input?: unknown) => {
+      executed.push((input as { runId: string }).runId);
+      await db.update(issues).set({ status: "done" }).where(eq(issues.id, issueId));
+      return { exitCode: 0, signal: null, timedOut: false, errorMessage: null,
+        summary: "Completed earlier batch claim.", provider: "test", model: "test-model" };
+    });
+    try {
+      await expect(heartbeat.resumeQueuedRuns({ agentIds: [agentId] })).rejects.toSatisfy(
+        (error: unknown) => isUniqueViolation(error, "issues_open_routine_execution_uq"),
+      );
+      await waitForRunToSettle(heartbeat, runId, 5_000);
+      await heartbeat.drainActiveRunExecutions();
+      expect((await heartbeat.getRun(runId))?.status).toBe("succeeded");
+      expect((await heartbeat.getRun(collisionRunId))?.status).toBe("queued");
+      expect(executed).toEqual([runId]);
+      expect(events.mock.calls.filter(([event]) => {
+        const value = event as { type: string; payload?: { runId?: unknown } };
+        return value.type === "heartbeat.run.status" && value.payload?.runId === collisionRunId;
+      })).toHaveLength(0);
+    } finally {
+      await db.update(agents).set({ status: "paused" }).where(eq(agents.id, agentId));
+      for (const id of [runId, collisionRunId]) await heartbeat.cancelRun(id, "Owned batch fixture cleanup", { discardIssueWork: true });
+      await heartbeat.drainActiveRunExecutions();
+      events.mockRestore();
     }
   });
 
