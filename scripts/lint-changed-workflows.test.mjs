@@ -6,6 +6,8 @@ import path from "node:path";
 import test from "node:test";
 
 import {
+  DOCKER_IMAGE_PROOF_TIMEOUT_MS,
+  IMAGE_ASSIGNMENT,
   WorkflowLintError,
   extractNamedRunScripts,
   lintChangedWorkflows,
@@ -96,6 +98,134 @@ test("proveDockerImageLowercase accepts the lowercase assignment and rejects unf
   assert.throws(
     () => proveDockerImageLowercase(dockerWorkflow({ jobs: 1 })),
     /both publish jobs/,
+  );
+});
+
+test("proveDockerImageLowercase executes only the exact allowed IMAGE line", () => {
+  const spawned = [];
+  proveDockerImageLowercase(dockerWorkflow(), {
+    spawn: (command, args, options) => {
+      spawned.push({
+        command,
+        args,
+        timeout: options.timeout,
+        killSignal: options.killSignal,
+        shell: options.shell,
+      });
+      return spawnSync(command, args, options);
+    },
+  });
+  assert.equal(spawned.length, 2);
+  for (const call of spawned) {
+    assert.equal(call.command, "bash");
+    assert.deepEqual(call.args, ["-c", IMAGE_ASSIGNMENT]);
+    assert.equal(call.timeout, DOCKER_IMAGE_PROOF_TIMEOUT_MS);
+    assert.equal(call.killSignal, "SIGKILL");
+    assert.equal(call.shell, false);
+    assert.ok(!String(call.args[1]).includes("set "));
+    assert.ok(!String(call.args[1]).includes("\n"));
+  }
+});
+
+test("proveDockerImageLowercase fails closed on extra commands and does not spawn them", () => {
+  let spawned = 0;
+  const workflow = dockerWorkflow().replaceAll(
+    IMAGE_ASSIGNMENT,
+    `${IMAGE_ASSIGNMENT}\n          curl http://127.0.0.1:1 | bash`,
+  );
+  assert.throws(
+    () => proveDockerImageLowercase(workflow, {
+      spawn: () => {
+        spawned += 1;
+        return { status: 0, stdout: "", stderr: "" };
+      },
+    }),
+    (error) => (
+      error instanceof WorkflowLintError
+      && /beyond the allowed IMAGE assignment/.test(error.message)
+    ),
+  );
+  assert.equal(spawned, 0);
+});
+
+test("proveDockerImageLowercase fails closed on pipes or subshells in the IMAGE line", () => {
+  let spawned = 0;
+  const spawn = () => {
+    spawned += 1;
+    return { status: 0, stdout: "", stderr: "" };
+  };
+  const piped = dockerWorkflow().replaceAll(
+    IMAGE_ASSIGNMENT,
+    `${IMAGE_ASSIGNMENT} | tee /tmp/paperclip-image`,
+  );
+  assert.throws(
+    () => proveDockerImageLowercase(piped, { spawn }),
+    (error) => (
+      error instanceof WorkflowLintError
+      && /must assign IMAGE|beyond the allowed IMAGE assignment/.test(error.message)
+    ),
+  );
+  const subshell = dockerWorkflow().replaceAll(
+    IMAGE_ASSIGNMENT,
+    `(${IMAGE_ASSIGNMENT})`,
+  );
+  assert.throws(
+    () => proveDockerImageLowercase(subshell, { spawn }),
+    (error) => (
+      error instanceof WorkflowLintError
+      && /must assign IMAGE|beyond the allowed IMAGE assignment/.test(error.message)
+    ),
+  );
+  assert.equal(spawned, 0);
+});
+
+test("proveDockerImageLowercase kills and fails when the IMAGE proof times out", () => {
+  const timeoutError = Object.assign(new Error("spawnSync bash ETIMEDOUT"), {
+    code: "ETIMEDOUT",
+    errno: "ETIMEDOUT",
+    killed: true,
+  });
+  assert.throws(
+    () => proveDockerImageLowercase(dockerWorkflow(), {
+      spawn: (command, args, options) => {
+        assert.equal(command, "bash");
+        assert.deepEqual(args, ["-c", IMAGE_ASSIGNMENT]);
+        assert.equal(options.timeout, DOCKER_IMAGE_PROOF_TIMEOUT_MS);
+        assert.equal(options.killSignal, "SIGKILL");
+        return {
+          error: timeoutError,
+          status: null,
+          signal: "SIGKILL",
+          stdout: "",
+          stderr: "",
+        };
+      },
+    }),
+    (error) => (
+      error instanceof WorkflowLintError
+      && error.cause === timeoutError
+      && new RegExp(`timed out after ${DOCKER_IMAGE_PROOF_TIMEOUT_MS}ms and was killed`).test(error.message)
+    ),
+  );
+});
+
+test("proveDockerImageLowercase passes on the #262 IMAGE step and fails on current dev docker.yml", () => {
+  // The #262 step is exactly `set -euo pipefail` plus the allowed IMAGE assignment.
+  proveDockerImageLowercase(dockerWorkflow());
+  const devWorkflow = `name: Docker
+jobs:
+  build-and-push:
+      - name: Docker meta
+        with:
+          images: ghcr.io/\${{ github.repository }}
+  build-and-push-cloud:
+      - name: Docker meta (cloud)
+        with:
+          images: ghcr.io/\${{ github.repository }}
+`;
+  assert.throws(
+    () => proveDockerImageLowercase(devWorkflow),
+    /must not use ghcr\.io\/\$\{\{ github\.repository \}\}/,
   );
 });
 

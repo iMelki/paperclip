@@ -20,7 +20,9 @@ const WORKFLOW_FILE_PATTERN = /^\.github\/workflows\/[^/]+\.ya?ml$/i;
 const DOCKER_WORKFLOW = ".github/workflows/docker.yml";
 const GHCR_IMAGE_STEP = "Set GHCR image name";
 const UNFOLDED_REPOSITORY_IMAGE = "ghcr.io/${{ github.repository }}";
-const IMAGE_ASSIGNMENT = 'echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"';
+export const IMAGE_ASSIGNMENT = 'echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"';
+const ALLOWED_SHELL_OPTIONS = "set -euo pipefail";
+export const DOCKER_IMAGE_PROOF_TIMEOUT_MS = 10_000;
 const MIXED_CASE_REPOSITORY = "iMelki/PaperClip";
 const EXPECTED_IMAGE = "ghcr.io/imelki/paperclip";
 
@@ -140,10 +142,37 @@ export function extractNamedRunScripts(workflow, stepName) {
   return scripts;
 }
 
+function exactAllowedImageAssignment(script, index) {
+  const lines = script.split("\n").filter((line) => line.trim() !== "");
+  const imageLines = [];
+  const unexpected = [];
+  for (const line of lines) {
+    if (line === IMAGE_ASSIGNMENT) {
+      imageLines.push(line);
+    } else if (line === ALLOWED_SHELL_OPTIONS) {
+      continue;
+    } else {
+      unexpected.push(line);
+    }
+  }
+  if (imageLines.length === 0) {
+    throw new WorkflowLintError(
+      `${GHCR_IMAGE_STEP} #${index + 1} must assign IMAGE with \${GITHUB_REPOSITORY,,}`,
+    );
+  }
+  if (unexpected.length > 0 || imageLines.length !== 1) {
+    throw new WorkflowLintError(
+      `${GHCR_IMAGE_STEP} #${index + 1} contains commands beyond the allowed IMAGE assignment`,
+    );
+  }
+  return imageLines[0];
+}
+
 export function proveDockerImageLowercase(workflow, {
   spawn = spawnSync,
   repository = MIXED_CASE_REPOSITORY,
   expectedImage = EXPECTED_IMAGE,
+  timeoutMs = DOCKER_IMAGE_PROOF_TIMEOUT_MS,
 } = {}) {
   if (workflow.includes(UNFOLDED_REPOSITORY_IMAGE)) {
     throw new WorkflowLintError(
@@ -157,16 +186,14 @@ export function proveDockerImageLowercase(workflow, {
     );
   }
   for (const [index, script] of scripts.entries()) {
-    if (!script.includes(IMAGE_ASSIGNMENT)) {
-      throw new WorkflowLintError(
-        `${GHCR_IMAGE_STEP} #${index + 1} must assign IMAGE with \${GITHUB_REPOSITORY,,}`,
-      );
-    }
+    // Fail closed on anything beyond the allowed lines, then run only the
+    // exact IMAGE assignment — never the rest of the extracted run block.
+    const imageLine = exactAllowedImageAssignment(script, index);
     const workDir = mkdtempSync(path.join(tmpdir(), "paperclip-docker-image-"));
     const envFile = path.join(workDir, "github.env");
     try {
       writeFileSync(envFile, "");
-      const result = spawn("bash", ["-c", script], {
+      const result = spawn("bash", ["-c", imageLine], {
         cwd: workDir,
         env: {
           PATH: process.env.PATH,
@@ -177,14 +204,27 @@ export function proveDockerImageLowercase(workflow, {
         stdio: ["ignore", "pipe", "pipe"],
         windowsHide: true,
         shell: false,
+        timeout: timeoutMs,
+        killSignal: "SIGKILL",
       });
       if (result.error) {
+        const timedOut =
+          result.error.code === "ETIMEDOUT" ||
+          result.error.errno === "ETIMEDOUT" ||
+          /timed out/i.test(result.error.message ?? "");
         throw new WorkflowLintError(
-          `${GHCR_IMAGE_STEP} #${index + 1} could not start bash: ${result.error.message}`,
+          timedOut
+            ? `${GHCR_IMAGE_STEP} #${index + 1} timed out after ${timeoutMs}ms and was killed`
+            : `${GHCR_IMAGE_STEP} #${index + 1} could not start bash: ${result.error.message}`,
           { cause: result.error },
         );
       }
       if (result.status !== 0) {
+        if (result.status == null && result.signal) {
+          throw new WorkflowLintError(
+            `${GHCR_IMAGE_STEP} #${index + 1} timed out after ${timeoutMs}ms and was killed`,
+          );
+        }
         const stderr = (result.stderr ?? "").trim();
         throw new WorkflowLintError(
           `${GHCR_IMAGE_STEP} #${index + 1} exited ${result.status ?? "unknown"}${stderr ? `: ${stderr}` : ""}`,

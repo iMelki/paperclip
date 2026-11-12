@@ -435,3 +435,22 @@ test("new named coordinator and existing-reference tests are selected without a 
     assert.deepEqual(unknown.hostedCiFiles, []);
   });
 });
+
+test("selects the declared lint-changed-workflows node suite", () => {
+  withFixture(({ repoRoot, trackedFiles, write }) => {
+    write("scripts/lint-changed-workflows.mjs", "export const lint = true;\n");
+    write("scripts/lint-changed-workflows.test.mjs", "test('lint', () => {});\n");
+    write("scripts/unrelated.test.mjs", "test('other', () => {});\n");
+    const result = selectPrePushTests({
+      repoRoot,
+      changedFiles: ["scripts/lint-changed-workflows.mjs"],
+      trackedFiles,
+    });
+    assert.deepEqual(result.nodeTestFiles, ["scripts/lint-changed-workflows.test.mjs"]);
+    assert.deepEqual(result.coverage[0].declaredTests, [
+      "scripts/lint-changed-workflows.test.mjs",
+    ]);
+    assert.deepEqual(result.coverage[0].sourceFile, "scripts/lint-changed-workflows.mjs");
+    assert.deepEqual(result.selectionErrors, []);
+  });
+});
