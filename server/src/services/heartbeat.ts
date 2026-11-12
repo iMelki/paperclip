@@ -9273,12 +9273,16 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     wakeupRequestId: string | null | undefined,
     status: string,
     patch?: Partial<typeof agentWakeupRequests.$inferInsert>,
+    fromStatuses?: string[],
   ) {
     if (!wakeupRequestId) return;
     await db
       .update(agentWakeupRequests)
       .set({ status, ...patch, updatedAt: new Date() })
-      .where(eq(agentWakeupRequests.id, wakeupRequestId));
+      .where(and(
+        eq(agentWakeupRequests.id, wakeupRequestId),
+        fromStatuses ? inArray(agentWakeupRequests.status, fromStatuses) : undefined,
+      ));
   }
 
   async function addContinuationExhaustedCommentOnce(input: {
@@ -12648,7 +12652,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
   ) {
     const now = new Date();
     const reason = "Cancelled because the agent reached a per-day heartbeat budget cap before adapter invocation";
-    const cancelled = await setRunStatus(run.id, "cancelled", {
+    const cancellation = await setRunStatusFromLive(run.id, "cancelled", ["queued"], {
       finishedAt: now,
       error: reason,
       errorCode: dailyCapBlock.reason,
@@ -12663,12 +12667,13 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         timeoutFired: false,
       },
     });
-    if (!cancelled) return null;
+    if (!cancellation.updated) return null;
+    const cancelled = cancellation.run;
 
     await setWakeupStatus(run.wakeupRequestId, "skipped", {
       finishedAt: now,
       error: reason,
-    });
+    }, ["queued", "claimed", "deferred_issue_execution"]);
 
     await appendRunEvent(cancelled, await nextRunEventSeq(cancelled.id), {
       eventType: "lifecycle",
@@ -12967,7 +12972,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     const now = new Date();
     const reason =
       "Cancelled because issue dependencies are still blocked; Paperclip will wake the assignee when blockers resolve";
-    const cancelled = await setRunStatus(run.id, "cancelled", {
+    const cancellation = await setRunStatusFromLive(run.id, "cancelled", ["queued"], {
       finishedAt: now,
       error: reason,
       errorCode: "issue_dependencies_blocked",
@@ -12980,12 +12985,13 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         timeoutFired: false,
       },
     });
-    if (!cancelled) return null;
+    if (!cancellation.updated) return null;
+    const cancelled = cancellation.run;
 
     await setWakeupStatus(run.wakeupRequestId, "skipped", {
       finishedAt: now,
       error: reason,
-    });
+    }, ["queued", "claimed", "deferred_issue_execution"]);
 
     await db
       .update(issues)
@@ -13205,7 +13211,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     staleness: Extract<QueuedRunStaleness, { stale: true }>,
   ) {
     const now = new Date();
-    const cancelled = await setRunStatus(run.id, "cancelled", {
+    const cancellation = await setRunStatusFromLive(run.id, "cancelled", ["queued"], {
       finishedAt: now,
       error: staleness.reason,
       errorCode: staleness.errorCode,
@@ -13218,12 +13224,13 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         timeoutFired: false,
       },
     });
-    if (!cancelled) return null;
+    if (!cancellation.updated) return null;
+    const cancelled = cancellation.run;
 
     await setWakeupStatus(run.wakeupRequestId, "skipped", {
       finishedAt: now,
       error: staleness.reason,
-    });
+    }, ["queued", "claimed", "deferred_issue_execution"]);
 
     await db
       .update(issues)

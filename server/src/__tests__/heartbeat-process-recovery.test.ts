@@ -23,6 +23,7 @@ import {
   documentAnnotationComments,
   documentAnnotationThreads,
   createDb,
+  effectiveDatabasePoolMax,
   documentRevisions,
   documents,
   environmentLeases,
@@ -5232,8 +5233,10 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     const transactionSpy = vi.spyOn(db, "transaction").mockImplementation(((callback, config) => originalTransaction(async (tx) => {
       transactionOpen = true;
       sawTransaction = true;
+      // Capture before spyOn installs its replacement; binding tx.select afterward would bind the spy itself.
+      const originalTransactionSelect = tx.select.bind(tx);
       const transactionSelectSpy = vi.spyOn(tx, "select").mockImplementation(
-        observeActorSelect(tx.select.bind(tx), false) as typeof tx.select,
+        observeActorSelect(originalTransactionSelect, false) as typeof tx.select,
       );
       try { return await callback(tx); } finally {
         transactionSelectSpy.mockRestore();
@@ -5265,6 +5268,89 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
       await heartbeat.drainActiveRunExecutions();
     }
   });
+
+
+  it("preserves a terminal wake written after queued cancellation commits but before its blocked wake update", async () => {
+    expect(effectiveDatabasePoolMax()).toBeGreaterThanOrEqual(3);
+    const missingIssueId = randomUUID();
+    const { companyId, agentId, runId, wakeupRequestId } = await seedRunFixture({
+      agentStatus: "idle", runStatus: "queued", includeIssue: false,
+      contextSnapshot: { issueId: missingIssueId },
+    });
+    await db.update(agentWakeupRequests).set({ status: "queued", claimedAt: null })
+      .where(eq(agentWakeupRequests.id, wakeupRequestId));
+    const heartbeat = heartbeatService(db);
+    mockAdapterExecute.mockClear();
+    let releaseWakeHolder!: () => void;
+    const wakeHolderRelease = new Promise<void>((resolve) => { releaseWakeHolder = resolve; });
+    let holder: Promise<unknown> | null = null;
+    let resume: Promise<unknown> | null = null;
+    let holderFailure: unknown;
+    let resumeFailure: unknown;
+    let holderWitness: { pid: number; rowCount: number } | null = null;
+    const terminalReason = "Cancelled by the owned terminal-wake fixture";
+    try {
+      holder = db.transaction(async (tx) => {
+        const locked = await tx.execute(sql`select id from ${agentWakeupRequests}
+          where ${agentWakeupRequests.companyId} = ${companyId}
+            and ${agentWakeupRequests.id} = ${wakeupRequestId} for update`);
+        const rows = locked as unknown as Array<{ id: string }>;
+        expect(rows).toHaveLength(1);
+        expect(rows[0]?.id).toBe(wakeupRequestId);
+        const identity = await tx.execute(sql`select pg_backend_pid()::int as pid`);
+        const pid = Number((identity as unknown as Array<{ pid: number }>)[0]?.pid ?? 0);
+        expect(Number.isInteger(pid) && pid > 0).toBe(true);
+        holderWitness = { pid, rowCount: rows.length };
+        await wakeHolderRelease;
+        // The queued-run CAS has already committed. This independent owner now
+        // gives the wake its terminal outcome before the waiting update resumes.
+        await tx.update(agentWakeupRequests).set({
+          status: "cancelled", error: terminalReason, finishedAt: new Date(), updatedAt: new Date(),
+        }).where(and(eq(agentWakeupRequests.companyId, companyId), eq(agentWakeupRequests.id, wakeupRequestId)));
+      });
+      void holder.catch((error) => { holderFailure = error; });
+      const observedHolder = await waitForValue<{ pid: number; rowCount: number }>(async () => {
+        if (holderFailure) throw holderFailure;
+        return holderWitness;
+      });
+      expect(observedHolder?.rowCount).toBe(1);
+      expect(observedHolder?.pid).toBeGreaterThan(0);
+      resume = heartbeat.resumeQueuedRuns({ agentIds: [agentId] });
+      void resume.catch((error) => { resumeFailure = error; });
+      const blockedCancellation = await waitForValue(async () => {
+        if (holderFailure) throw holderFailure;
+        if (resumeFailure) throw resumeFailure;
+        const waiting = await db.execute(sql`select count(*)::int as count from pg_stat_activity
+          where datname = current_database() and pid <> pg_backend_pid()
+            and ${observedHolder!.pid} = any(pg_blocking_pids(pid))`);
+        const waiterCount = Number((waiting as unknown as Array<{ count: number }>)[0]?.count ?? 0);
+        if (waiterCount < 1) return null;
+        const run = await db.select({ status: heartbeatRuns.status, errorCode: heartbeatRuns.errorCode })
+          .from(heartbeatRuns).where(eq(heartbeatRuns.id, runId)).then((rows) => rows[0] ?? null);
+        return run?.status === "cancelled" ? { waiterCount, run } : null;
+      }, 5_000);
+      expect(blockedCancellation?.waiterCount).toBeGreaterThanOrEqual(1);
+      expect(blockedCancellation?.run).toEqual({ status: "cancelled", errorCode: "issue_not_found" });
+      const beforeRelease = await db.select().from(agentWakeupRequests)
+        .where(eq(agentWakeupRequests.id, wakeupRequestId)).then((rows) => rows[0] ?? null);
+      expect(beforeRelease?.status).toBe("queued");
+      expect(mockAdapterExecute).not.toHaveBeenCalled();
+      releaseWakeHolder();
+      await Promise.all([holder, resume]);
+      const wake = await db.select().from(agentWakeupRequests)
+        .where(eq(agentWakeupRequests.id, wakeupRequestId)).then((rows) => rows[0] ?? null);
+      expect(wake?.status).toBe("cancelled");
+      expect(wake?.error).toBe(terminalReason);
+      expect(wake?.finishedAt).toBeTruthy();
+      expect((await heartbeat.getRun(runId))?.status).toBe("cancelled");
+      expect(mockAdapterExecute).not.toHaveBeenCalled();
+    } finally {
+      releaseWakeHolder();
+      await Promise.allSettled([holder, resume].filter((value): value is Promise<unknown> => value !== null));
+      await db.update(agents).set({ status: "paused" }).where(eq(agents.id, agentId));
+      await heartbeat.drainActiveRunExecutions();
+    }
+  }, 15_000);
 
   it("starts an earlier committed claim when a later queued claimant hits the real execution-key constraint", async () => {
     const { companyId, agentId, runId, issueId } = await seedRunFixture({ agentStatus: "idle", runStatus: "queued", includeIssue: true });
