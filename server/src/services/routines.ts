@@ -1,5 +1,6 @@
 import crypto from "node:crypto";
 import { and, asc, desc, eq, gt, inArray, isNotNull, isNull, lte, ne, not, or, sql } from "drizzle-orm";
+import { isBuiltInBundleActorUserId, resolveEligibleCompanyActorUserId, resolveStoredResponsibleUserId, userHasActiveCompanyAccess, userRowExists } from "./company-actor-user.js";
 import type { Db } from "@paperclipai/db";
 import {
   agents,
@@ -172,7 +173,13 @@ async function resolveRoutineResponsibleUserId(db: Db, companyId: string, actorU
   return resolveCompanyDefaultResponsibleUserId(db, companyId);
 }
 
-type Actor = { agentId?: string | null; userId?: string | null; runId?: string | null };
+type Actor = {
+  agentId?: string | null;
+  userId?: string | null;
+  runId?: string | null;
+  /** Built-in provisioning may store no responsible user. It must not invent one. */
+  allowUnresolvedResponsibleUser?: boolean;
+};
 type RoutineRow = typeof routines.$inferSelect;
 type RoutineTriggerRow = typeof routineTriggers.$inferSelect;
 
@@ -1452,7 +1459,9 @@ export function routineService(
           ? "skipped_paused"
           : input.reason === "no_external_activity"
             ? "skipped_no_activity"
-            : "skipped_worktree_execution_cutoff",
+            : input.reason === "no_eligible_actor"
+              ? "skipped_no_eligible_actor"
+              : "skipped_worktree_execution_cutoff",
         nextRunAt: input.nextRunAt,
       }, txDb);
       return createdRun;
@@ -1816,8 +1825,31 @@ export function routineService(
               return row?.responsibleUserId ?? snapshot?.routine.responsibleUserId ?? null;
             })
         : null;
-      const responsibleUserId =
+      const storedResponsibleUserId =
         manualRunnerUserId ?? latestRevisionResponsibleUserId ?? input.routine.responsibleUserId ?? null;
+      let responsibleUserId: string | null = storedResponsibleUserId;
+      if (input.routine.originKind === "built_in_agent_bundle") {
+        // A manual runner keeps their own attribution. For a scheduled or
+        // webhook run the stored user (latest revision, then the routine) must
+        // still be a member who can write; otherwise a validated company actor
+        // replaces it, so a deleted or revoked revision user cannot fail the run.
+        const storedUsable = Boolean(
+          !manualRunnerUserId
+          && storedResponsibleUserId
+          && !isBuiltInBundleActorUserId(storedResponsibleUserId)
+          && await userRowExists(txDb, storedResponsibleUserId)
+          && await userHasActiveCompanyAccess(txDb, input.routine.companyId, storedResponsibleUserId),
+        );
+        responsibleUserId = manualRunnerUserId || storedUsable
+          ? await resolveStoredResponsibleUserId(txDb, input.routine.companyId, storedResponsibleUserId)
+          : await resolveEligibleCompanyActorUserId(txDb, input.routine.companyId);
+      }
+      if (input.routine.originKind === "built_in_agent_bundle" && !responsibleUserId) {
+        throw unprocessable(
+          "Built-in routine has no eligible company user and will not run. Set PAPERCLIP_BUILT_IN_ACTOR_USER_ID to an existing member, or add an active company owner.",
+          { code: "built_in_actor_unresolved", companyId: input.routine.companyId },
+        );
+      }
       const [createdRun] = await txDb
         .insert(routineRuns)
         .values({
@@ -2182,8 +2214,10 @@ export function routineService(
       );
       assertRoutineVariableDefinitions(variables);
       const status = normalizeDraftRoutineStatus(input.status, input.assigneeAgentId);
-      const responsibleUserId = await resolveRoutineResponsibleUserId(db, companyId, actor.userId, input.parentIssueId ?? null);
-      if (!responsibleUserId) {
+      const responsibleUserId = actor.allowUnresolvedResponsibleUser
+        ? actor.userId ?? null
+        : await resolveRoutineResponsibleUserId(db, companyId, actor.userId, input.parentIssueId ?? null);
+      if (!responsibleUserId && !actor.allowUnresolvedResponsibleUser) {
         throw unprocessable("Routine requires a responsible user");
       }
       const createdRoutine = await db.transaction(async (tx) => {
@@ -2280,13 +2314,15 @@ export function routineService(
       if (enabledScheduleTriggers) {
         assertScheduleCompatibleVariables(nextVariables);
       }
-      const responsibleUserId = await resolveRoutineResponsibleUserId(
-        db,
-        existing.companyId,
-        actor.userId,
-        patch.parentIssueId === undefined ? existing.parentIssueId : patch.parentIssueId,
-      );
-      if (!responsibleUserId) {
+      const responsibleUserId = actor.allowUnresolvedResponsibleUser
+        ? actor.userId ?? null
+        : await resolveRoutineResponsibleUserId(
+          db,
+          existing.companyId,
+          actor.userId,
+          patch.parentIssueId === undefined ? existing.parentIssueId : patch.parentIssueId,
+        );
+      if (!responsibleUserId && !actor.allowUnresolvedResponsibleUser) {
         throw unprocessable("Routine requires a responsible user");
       }
       const updatedRoutine = await db.transaction(async (tx) => {
@@ -2322,7 +2358,9 @@ export function routineService(
           activityGateScope: patch.activityGateScope ?? locked.activityGateScope,
           variables: nextVariables,
           env: nextEnv,
-          responsibleUserId: locked.responsibleUserId ?? responsibleUserId,
+          responsibleUserId: actor.allowUnresolvedResponsibleUser
+            ? responsibleUserId
+            : locked.responsibleUserId ?? responsibleUserId,
           updatedByAgentId: actor.agentId ?? null,
           updatedByUserId: actor.userId ?? null,
         };
@@ -3151,9 +3189,34 @@ export function routineService(
           continue;
         }
 
+        let routineForRun = row.routine;
+        if (row.routine.originKind === "built_in_agent_bundle") {
+          const storedUserId = row.routine.responsibleUserId;
+          const storedCanRun = Boolean(
+            storedUserId
+            && !isBuiltInBundleActorUserId(storedUserId)
+            && await userRowExists(db, storedUserId)
+            && await userHasActiveCompanyAccess(db, row.routine.companyId, storedUserId),
+          );
+          if (!storedCanRun) {
+            const eligibleUserId = await resolveEligibleCompanyActorUserId(db, row.routine.companyId);
+            if (!eligibleUserId) {
+              await recordSuppressedAutomaticRun({
+                routine: row.routine,
+                trigger: row.trigger,
+                source: "schedule",
+                reason: "no_eligible_actor",
+                nextRunAt: claimedNextRunAt,
+              });
+              continue;
+            }
+            routineForRun = { ...row.routine, responsibleUserId: eligibleUserId };
+          }
+        }
+
         for (let i = 0; i < runCount; i += 1) {
           await dispatchRoutineRun({
-            routine: row.routine,
+            routine: routineForRun,
             trigger: row.trigger,
             source: "schedule",
             nextRunAtOverride: claimedNextRunAt,

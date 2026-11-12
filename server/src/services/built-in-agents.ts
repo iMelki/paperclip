@@ -18,6 +18,7 @@ import {
   withBuiltInAgentMarker,
 } from "./built-in-agent-metadata.js";
 import { companySkillService } from "./company-skills.js";
+import { isBuiltInBundleActorUserId, resolveEligibleCompanyActorUserId, userHasActiveCompanyAccess, userRowExists } from "./company-actor-user.js";
 import { routineService } from "./routines.js";
 import { accessService } from "./access.js";
 import { listAdapterModels } from "../adapters/registry.js";
@@ -1364,7 +1365,16 @@ export function builtInAgentService(db: Db) {
 
   async function createOrResetRoutine(agent: Agent, definition: BuiltInAgentDefinition, existing: Routine | null, mode: "reconcile" | "reset") {
     const routine = definition.bundle!.routine;
-    const actor = { agentId: null, userId: "built-in-bundles" };
+    const eligibleUserId = await resolveEligibleCompanyActorUserId(db, agent.companyId);
+    const storedUserId = existing?.responsibleUserId ?? null;
+    const storedCanStay = Boolean(
+      storedUserId
+      && !isBuiltInBundleActorUserId(storedUserId)
+      && await userRowExists(db, storedUserId)
+      && await userHasActiveCompanyAccess(db, agent.companyId, storedUserId),
+    );
+    const actorUserId = storedCanStay ? storedUserId : eligibleUserId;
+    const actor = { agentId: null, userId: actorUserId, allowUnresolvedResponsibleUser: true };
     const nextRoutine = existing
       ? await routineSvc.update(existing.id, {
         title: routine.title,

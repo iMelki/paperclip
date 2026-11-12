@@ -410,7 +410,9 @@ export function pluginJobStore(db: Db) {
         .from(plugins)
         .where(eq(plugins.id, pluginId));
       const declaration = rows[0]?.manifestJson?.jobs?.find((job) => job.jobKey === jobKey);
-      return declaration?.scope === "company" ? "company" : "instance";
+      return declaration?.scope === "company" || declaration?.dispatchScope === "company"
+        ? "company"
+        : "instance";
     },
 
     /**

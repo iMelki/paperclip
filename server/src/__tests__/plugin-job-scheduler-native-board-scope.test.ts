@@ -185,3 +185,20 @@ describe("native GitHub board job authorization", () => {
   });
 
 });
+
+
+describe("missing host scope is never inferred from a native grant", () => {
+  it("keeps a missing host scope blocked and stores the six-hour backoff", async () => {
+    const ctx = setup({ grantedCompanyIds: ["company-authorized"], authorizedCompanyIds: [] });
+    const before = Date.now();
+    await ctx.scheduler.tick();
+    expect(ctx.workerManager.setProactiveCompanyScopes).not.toHaveBeenCalled();
+    expect(ctx.nativeRun).not.toHaveBeenCalled();
+    expect(ctx.workerManager.call).not.toHaveBeenCalled();
+    expect(ctx.createRun.mock.calls.every(([input]) => input.companyId == null)).toBe(true);
+    expect(ctx.jobStore.updateRunTimestamps).toHaveBeenCalledTimes(1);
+    const next = vi.mocked(ctx.jobStore.updateRunTimestamps).mock.calls[0]![2] as Date;
+    expect(next.getTime()).toBeGreaterThanOrEqual(before + 6 * 60 * 60 * 1000);
+    expect(next.getTime()).toBeLessThanOrEqual(Date.now() + 6 * 60 * 60 * 1000);
+  });
+});

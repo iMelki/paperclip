@@ -95,6 +95,24 @@ export interface PluginJobSchedulerOptions {
   nativeGitHubProjectBoard?: GitHubProjectBoardSchedulerBridge;
 }
 
+/** Company-scoped job has no host-authorized company and must not run unscoped. */
+export class PluginJobMissingAuthorizedCompaniesError extends Error {
+  readonly remediation: string;
+
+  constructor(pluginId: string, jobKey: string) {
+    const remediation =
+      "Save the plugin configuration for the intended company. Native board jobs also require their separate explicit company grant; configuration alone does not grant import authority.";
+    super(
+      `Plugin "${pluginId}" job "${jobKey}" is missing its authorized companies. Company job has no host-configured companies; nothing dispatched. ${remediation}`,
+    );
+    this.name = "PluginJobMissingAuthorizedCompaniesError";
+    this.remediation = remediation;
+  }
+}
+
+/** Delay before a company-scoped job with no authorized company is tried again. */
+export const MISSING_COMPANY_GRANT_BACKOFF_MS = 6 * 60 * 60 * 1000;
+
 /**
  * Options for a manual job trigger.
  */
@@ -486,12 +504,22 @@ export function createPluginJobScheduler(
   /** Errors thrown while inserting run records: the store is suspect, so no diagnostic row is attempted. */
   const runRecordFailures = new WeakSet<object>();
 
+  /** Stored configuration cannot reinstall an absent runtime authorization. */
+  async function requireCompanyScopes(job: typeof pluginJobs.$inferSelect): Promise<void> {
+    const companyScoped = isNativeGitHubBoardJobKey(job.jobKey)
+      || await jobStore.getJobDeclarationScope(job.pluginId, job.jobKey) === "company";
+    if (companyScoped && [...workerManager.getProactiveCompanyScopes(job.pluginId)].length === 0) {
+      throw new PluginJobMissingAuthorizedCompaniesError(job.pluginId, job.jobKey);
+    }
+  }
+
   async function prepareRuns(
     job: typeof pluginJobs.$inferSelect,
     trigger: "schedule" | "manual" | "retry",
     owner: symbol,
     companyId?: string,
   ): Promise<ScopedPluginJobRun[]> {
+    await requireCompanyScopes(job);
     const plan = await resolveDispatchPlan(job);
     const companies = selectPluginJobCompanies(plan, trigger, companyId);
     const runs: ScopedPluginJobRun[] = [];
@@ -601,6 +629,7 @@ export function createPluginJobScheduler(
     const owner = claimJob(jobId, pluginId);
     let runs: ScopedPluginJobRun[] = [];
     const startedAt = Date.now();
+    let scheduleDelayed = false;
 
     try {
       runs = await prepareRuns(job, "schedule", owner);
@@ -615,6 +644,18 @@ export function createPluginJobScheduler(
         { runIds: runs.map((run) => run.id), durationMs, err: errorMessage },
         "job execution failed",
       );
+
+      // A missing host scope gets a bounded backoff, never an unscoped execution.
+      if (err instanceof PluginJobMissingAuthorizedCompaniesError
+        && jobOwners.get(jobId) === owner && !unregisteredPlugins.has(pluginId)) {
+        try {
+          await jobStore.updateRunTimestamps(job.id, job.lastRunAt ?? new Date(),
+            new Date(Date.now() + MISSING_COMPANY_GRANT_BACKOFF_MS));
+          scheduleDelayed = true;
+        } catch {
+          jobLog.error({ jobId }, "failed to delay a job missing authorized companies");
+        }
+      }
 
       // Record the failure
       if (jobOwners.get(jobId) === owner) {
@@ -644,7 +685,7 @@ export function createPluginJobScheduler(
 
       // Advance on success/failure only while this batch still owned the job.
       try {
-        if (stillOwned) await advanceSchedulePointer(job);
+        if (stillOwned && !scheduleDelayed) await advanceSchedulePointer(job);
       } catch (err) {
         jobLog.error(
           { err: err instanceof Error ? err.message : String(err) },

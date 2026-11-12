@@ -14,8 +14,8 @@ function makeJob() {
     jobKey: "sync.github-issues",
     schedule: "*/5 * * * *",
     status: "active" as const,
-    lastRunAt: null,
-    nextRunAt: new Date(Date.now() - 1_000),
+    lastRunAt: null as Date | null,
+    nextRunAt: new Date(Date.now() - 1_000) as Date | null,
     createdAt: new Date(),
     updatedAt: new Date(),
   };
@@ -71,6 +71,7 @@ function setup(opts: {
   return {
     scheduler,
     job,
+    jobStore,
     createRun,
     completeRun,
     markRunning,
@@ -120,6 +121,74 @@ describe("plugin job scheduler company scope", () => {
     expect(params).toHaveLength(1);
     expect(params[0]).not.toHaveProperty("companyId");
     expect(params[0]!.job).not.toHaveProperty("companyId");
+  });
+
+  it("does not run a company-scoped job that is missing its authorized companies and delays the next attempt", async () => {
+    const ctx = setup({ scope: "company", companyIds: [] });
+    const before = Date.now();
+    await ctx.scheduler.tick();
+
+    // The strict planner keeps one failed instance diagnostic, never a tenant execution.
+    expect(ctx.createRun).toHaveBeenCalledTimes(1);
+    expect(ctx.createRun.mock.calls[0]?.[0]).not.toHaveProperty("companyId");
+    expect(ctx.completeRun).toHaveBeenCalledWith("run-1", expect.objectContaining({ status: "failed" }));
+    expect(ctx.call).not.toHaveBeenCalled();
+    const stamp = ctx.jobStore.updateRunTimestamps as ReturnType<typeof vi.fn>;
+    expect(stamp).toHaveBeenCalledTimes(1);
+    const nextRunAt = stamp.mock.calls[0]?.[2] as Date;
+    expect(nextRunAt.getTime()).toBeGreaterThan(before + 60 * 60 * 1000);
+  });
+
+  it("still advances the schedule when the missing-companies backoff write fails", async () => {
+    const ctx = setup({ scope: "company", companyIds: [] });
+    const stamp = ctx.jobStore.updateRunTimestamps as ReturnType<typeof vi.fn>;
+    stamp.mockRejectedValueOnce(new Error("db unavailable"));
+    const before = Date.now();
+    await ctx.scheduler.tick();
+
+    // The backoff write failed, so the normal schedule advance runs instead of
+    // leaving the job overdue for the next tick.
+    expect(stamp).toHaveBeenCalledTimes(2);
+    const advancedTo = stamp.mock.calls[1]?.[2] as Date;
+    expect(advancedTo.getTime()).toBeLessThan(before + 60 * 60 * 1000);
+  });
+
+  it("waits for explicit settings application and the due time before company dispatch", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      const ctx = setup({ scope: "company", companyIds: [] });
+      let authorized: string[] = [];
+      const setScopes = vi.fn((_pluginId: string, ids: readonly string[]) => { authorized = [...ids]; });
+      vi.mocked(ctx.jobStore.updateRunTimestamps).mockImplementation(async (_id, last, next) => {
+        ctx.job.lastRunAt = last;
+        ctx.job.nextRunAt = next;
+      });
+      const scheduler = (await import("../services/plugin-job-scheduler.js")).createPluginJobScheduler({
+        db: { select: () => ({ from: () => ({ where: async () =>
+          ctx.job.nextRunAt && ctx.job.nextRunAt.getTime() <= Date.now() ? [ctx.job] : []
+        }) }) } as never,
+        jobStore: ctx.jobStore,
+        workerManager: { isRunning: () => true, getProactiveCompanyScopes: () => [...authorized],
+          setProactiveCompanyScopes: setScopes, call: ctx.call } as never,
+        jobTimeoutMs: 1_000,
+      });
+      const before = Date.now();
+      await scheduler.tick();
+      expect(setScopes).not.toHaveBeenCalled();
+      expect(ctx.call).not.toHaveBeenCalled();
+      expect(ctx.createRun.mock.calls.every(([input]) => input.companyId == null)).toBe(true);
+      const retryAt = ctx.job.nextRunAt!;
+      expect(retryAt.getTime()).toBeGreaterThanOrEqual(before + 6 * 60 * 60 * 1000);
+      // Only the existing explicit settings/loader flow installs authorization.
+      setScopes(ctx.job.pluginId, ["company-a"]);
+      await scheduler.tick();
+      expect(ctx.call).not.toHaveBeenCalled();
+      vi.setSystemTime(retryAt.getTime() + 1);
+      await scheduler.tick();
+      expect(ctx.createRun).toHaveBeenCalledWith(expect.objectContaining({ companyId: "company-a" }));
+      expect(ctx.call).toHaveBeenCalledTimes(1);
+      expect(setScopes).toHaveBeenCalledTimes(1);
+    } finally { vi.useRealTimers(); }
   });
 
   it("records each company's run separately when one company's run fails, and still runs the others", async () => {
