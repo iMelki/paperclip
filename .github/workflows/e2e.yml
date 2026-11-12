@@ -17,7 +17,6 @@ jobs:
     timeout-minutes: 30
     env:
       PAPERCLIP_E2E_SKIP_LLM: ${{ inputs.skip_llm && 'true' || 'false' }}
-      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
       PAPERCLIP_PLAYWRIGHT_CHANNEL: chrome
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -37,8 +36,16 @@ jobs:
       - run: pnpm build
       - run: google-chrome --version
 
-      - name: Run e2e tests
+      - name: Run e2e tests without provider credentials
+        if: ${{ inputs.skip_llm }}
         env:
+          PAPERCLIP_PLAYWRIGHT_CHANNEL: "chrome"
+        run: pnpm run test:e2e
+
+      - name: Run e2e tests with explicit LLM opt-in
+        if: ${{ !inputs.skip_llm }}
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           PAPERCLIP_PLAYWRIGHT_CHANNEL: "chrome"
         run: pnpm run test:e2e
 

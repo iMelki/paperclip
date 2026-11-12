@@ -87,3 +87,59 @@ test('every allowlist entry matches a real checkout whose job runs git push', ()
     assert.match(jobBody, /git push/, `${key} no longer runs git push; drop it from the allowlist`);
   }
 });
+
+// Manual E2E keeps its existing opt-in provider behavior, but installation,
+// build and the default skip-LLM step must not receive the provider key.
+// These are structural regression checks for this workflow, not a YAML parser
+// or proof of runner isolation / provider availability.
+function manualE2EStep(text, name) {
+  const marker = '      - name: ' + name + '\n';
+  assert.equal(text.split(marker).length - 1, 1, 'expected one ' + name + ' step');
+  const start = text.indexOf(marker);
+  const rest = text.slice(start + marker.length);
+  const next = rest.search(/^      - /m);
+  return marker + (next === -1 ? rest : rest.slice(0, next));
+}
+
+function assertManualE2ESecretBoundary(text) {
+  assert.match(text, /^  workflow_dispatch:\n    inputs:\n      skip_llm:\n        description: [^\n]+\n        type: boolean\n        default: true$/m);
+  const defaultStep = manualE2EStep(text, 'Run e2e tests without provider credentials');
+  const optInStep = manualE2EStep(text, 'Run e2e tests with explicit LLM opt-in');
+  assert.match(defaultStep, /^        if: \$\{\{ inputs\.skip_llm \}\}$/m);
+  assert.match(optInStep, /^        if: \$\{\{ !inputs\.skip_llm \}\}$/m);
+  for (const step of [defaultStep, optInStep]) {
+    assert.match(step, /^        run: pnpm run test:e2e$/m);
+    assert.match(step, /^          PAPERCLIP_PLAYWRIGHT_CHANNEL: "chrome"$/m);
+  }
+  assert.match(optInStep, /^        env:\n          ANTHROPIC_API_KEY: \$\{\{ secrets\.ANTHROPIC_API_KEY \}\}$/m);
+  assert.doesNotMatch(text.replace(optInStep, ''), /ANTHROPIC_API_KEY/);
+  assert.equal((text.match(/secrets\.ANTHROPIC_API_KEY/g) ?? []).length, 1);
+  // The input remains the job's existing skip flag; this change only narrows
+  // secret delivery, and does not claim every test consumes that flag.
+  assert.match(text, /^      PAPERCLIP_E2E_SKIP_LLM: \$\{\{ inputs\.skip_llm && 'true' \|\| 'false' \}\}$/m);
+}
+
+const manualE2EWorkflow = all.find(({ file }) => file === 'e2e.yml').text;
+
+test('manual E2E provides the provider key only to the explicit LLM opt-in step', () => {
+  assertManualE2ESecretBoundary(manualE2EWorkflow);
+});
+
+const e2eBoundaryRegressions = [
+  ['default opt-in', '        default: true', '        default: false'],
+  ['job-level key', '    env:\n', '    env:\n      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}\n'],
+  ['setup-step key', '      - run: pnpm build', '      - run: pnpm build\n        env:\n          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}'],
+  ['default-step key', '      - name: Run e2e tests without provider credentials\n        if: ${{ inputs.skip_llm }}\n        env:\n', '      - name: Run e2e tests without provider credentials\n        if: ${{ inputs.skip_llm }}\n        env:\n          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}\n'],
+  ['unguarded opt-in', '        if: ${{ !inputs.skip_llm }}\n', ''],
+  ['always opt-in', '        if: ${{ !inputs.skip_llm }}', '        if: ${{ always() }}'],
+  ['reversed default', '        if: ${{ inputs.skip_llm }}', '        if: ${{ !inputs.skip_llm }}'],
+  ['removed opt-in command', '          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}\n          PAPERCLIP_PLAYWRIGHT_CHANNEL: "chrome"\n        run: pnpm run test:e2e', '          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}\n          PAPERCLIP_PLAYWRIGHT_CHANNEL: "chrome"\n        run: echo skipped'],
+];
+
+for (const [label, before, after] of e2eBoundaryRegressions) {
+  test('manual E2E secret boundary rejects ' + label, () => {
+    const broken = manualE2EWorkflow.replace(before, after);
+    assert.notEqual(broken, manualE2EWorkflow, 'negative fixture must change actual workflow');
+    assert.throws(() => assertManualE2ESecretBoundary(broken), assert.AssertionError);
+  });
+}
