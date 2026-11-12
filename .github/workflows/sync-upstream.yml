@@ -1,39 +1,128 @@
 name: Sync from Upstream
 
+# Dispatch only. The weekly schedule was removed: it ran on a GitHub-hosted
+# runner, and the rf-paperclip box runner refuses schedule events (pc-guard).
+# All 25 runs on record (since May) failed. The latest retained log is the
+# HTTP 409 conflict path from repos.mergeUpstream. This job still updates
+# fork master when GitHub can merge cleanly. On 409 it opens a draft pull
+# request into dev and the job succeeds. The only trigger is workflow_dispatch.
 on:
-  schedule:
-    # Every Monday at 04:00 UTC
-    - cron: '0 4 * * 1'
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
+  pull-requests: write
 
 jobs:
   sync:
     name: Sync fork master with paperclipai/paperclip
-    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [rf-paperclip]
+    # The rf-slot job-started hook runs inside this job and its wait counts toward
+    # timeout-minutes: up to 15 min (RF_MEM_WAIT 900s) for free memory plus up to
+    # 30 min (RF_SLOT_TIMEOUT 1800s) for one of the 2 box-wide slots, so 45 min
+    # of hook budget plus 10 min of work.
+    timeout-minutes: 55
     permissions:
       contents: write
+      pull-requests: write
 
     steps:
-      - name: Merge upstream into fork master
-        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+      - name: Merge upstream or open a reconcile pull request
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.1.0
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
+            const upstreamOwner = 'paperclipai';
+            const upstreamRepo = 'paperclip';
+            const upstreamBranch = 'master';
+            const syncBase = 'dev';
+
+            function statusOf(err) {
+              if (!err) return undefined;
+              if (typeof err.status === 'number') return err.status;
+              if (err.response && typeof err.response.status === 'number') return err.response.status;
+              return undefined;
+            }
+
+            function errorText(err) {
+              const parts = [err && err.message, err && err.response && err.response.data && err.response.data.message];
+              return parts.filter(Boolean).join(' ');
+            }
+
             try {
               await github.rest.repos.mergeUpstream({
                 owner: context.repo.owner,
-                repo:  context.repo.repo,
+                repo: context.repo.repo,
                 branch: 'master',
               });
-              core.info('Upstream sync complete — fork master is up to date.');
+              core.info('Upstream sync complete. Fork master is up to date.');
+              return;
             } catch (err) {
-              if (err.status === 409) {
-                core.warning('Merge conflict detected. Manual reconciliation required.');
-                core.setFailed('Upstream sync skipped due to conflict — reconcile manually.');
-              } else {
-                throw err;
+              if (statusOf(err) !== 409) throw err;
+              core.warning('Merge conflict detected. Opening a draft reconcile pull request into dev.');
+            }
+
+            const upstreamRef = await github.rest.git.getRef({
+              owner: upstreamOwner,
+              repo: upstreamRepo,
+              ref: `heads/${upstreamBranch}`,
+            });
+            const sha = upstreamRef.data.object.sha;
+            const day = new Date().toISOString().slice(0, 10).split('-').join('');
+            const branch = `sync/upstream-${day}-${sha.slice(0, 7)}`;
+
+            const openPulls = await github.paginate(github.rest.pulls.list, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              base: syncBase,
+              per_page: 100,
+            });
+            const already = openPulls.find((pr) => pr.head.sha === sha && String(pr.head.ref).startsWith('sync/upstream-'));
+            if (already) {
+              core.notice(`Reconcile pull request already open: ${already.html_url}`);
+              return;
+            }
+
+            try {
+              await github.rest.git.createRef({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                ref: `refs/heads/${branch}`,
+                sha,
+              });
+            } catch (err) {
+              if (!(statusOf(err) === 422 && /Reference already exists/i.test(errorText(err)))) throw err;
+              core.info(`Branch ${branch} already exists.`);
+            }
+
+            const body = [
+              'GitHub could not merge paperclipai/paperclip master into fork master (HTTP 409).',
+              '',
+              'This draft points at the upstream tip. Resolve the conflict on a reconcile branch, then review that branch into dev.',
+              'Promote dev to master through the normal promotion path.',
+              '',
+              `Upstream: paperclipai/paperclip@${sha}`,
+              '',
+              '- CTO (grok-bot-cto)',
+            ].join('\n');
+
+            try {
+              const pr = await github.rest.pulls.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title: `Sync upstream master (${sha.slice(0, 7)})`,
+                head: branch,
+                base: syncBase,
+                draft: true,
+                body,
+              });
+              core.notice(`Opened draft reconcile pull request: ${pr.data.html_url}`);
+            } catch (err) {
+              if (statusOf(err) === 422 && /already exists/i.test(errorText(err))) {
+                core.notice(`A pull request for ${branch} is already open.`);
+                return;
               }
+              throw err;
             }
