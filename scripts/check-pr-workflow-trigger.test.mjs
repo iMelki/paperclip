@@ -9,7 +9,7 @@ import { validatePrWorkflowTrigger } from "./check-pr-workflow-trigger.mjs";
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const realWorkflow = readFileSync(path.join(repoRoot, ".github/workflows/pr.yml"), "utf8");
 
-test("the real PR workflow preserves non-dev targets without a push event", () => {
+test("the real PR workflow preserves master, dev, and the upstream integration target without a push event", () => {
   assert.deepEqual(validatePrWorkflowTrigger(realWorkflow), []);
 });
 
@@ -32,8 +32,14 @@ test("removing master fails for the exact missing-branch reason", () => {
   assert.deepEqual(validatePrWorkflowTrigger(broken), ["pull_request.branches is missing master"]);
 });
 
-test("dev and wildcard branch targets fail closed instead of launching hosted jobs", () => {
-  for (const target of ["dev", "*", "**"]) {
+test("removing dev fails for the exact missing-branch reason", () => {
+  const broken = realWorkflow.replace(/^\s{6}- dev\s*$/m, "");
+  assert.notEqual(broken, realWorkflow, "negative fixture must remove dev");
+  assert.deepEqual(validatePrWorkflowTrigger(broken), ["pull_request.branches is missing dev"]);
+});
+
+test("wildcard branch targets fail closed instead of launching hosted jobs", () => {
+  for (const target of ["*", "**"]) {
     const broken = realWorkflow.replace(/^    branches:\s*$/m, `    branches:\n      - ${target}`);
     assert.notEqual(broken, realWorkflow, "negative fixture must add a forbidden target");
     assert.ok(validatePrWorkflowTrigger(broken).includes(
