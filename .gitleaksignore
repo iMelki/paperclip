@@ -106,3 +106,10 @@ server/src/__tests__/server-startup-feedback-export.test.ts:generic-api-key:635
 server/src/__tests__/decisions-service.test.ts:generic-api-key:50
 # RFC 6455 sample Sec-WebSocket-Key nonce in a runner handshake test (upstream commit).
 9964b034bbff24e700c8eccf5a8b1fc3daa44bf2:packages/paperclip-runner/src/control-plane/durable-prp-control-plane.test.ts:generic-api-key:170
+
+# Test fixtures from b2955e09. The signing value is a repeating hex placeholder
+# assigned in a unit test. The JWT is a reject-case fixture whose signature is
+# the literal sentinel and whose payload has no iss, aud, or exp. Exact
+# fingerprints only.
+b2955e09997d535c8123558d0e773b59a7ec8221:server/src/__tests__/decisions-service.test.ts:generic-api-key:54
+b2955e09997d535c8123558d0e773b59a7ec8221:server/src/__tests__/remote-mcp-headers.test.ts:jwt:202
