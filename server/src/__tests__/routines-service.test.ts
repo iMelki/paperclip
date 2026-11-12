@@ -11,6 +11,7 @@ import {
   companySecrets,
   companySecretVersions,
   createDb,
+  effectiveDatabasePoolMax,
   documentRevisions,
   documents,
   executionWorkspaces,
@@ -2588,19 +2589,46 @@ describeEmbeddedPostgres("routine service live-execution coalescing", () => {
     }
   }
 
-  async function waitForIssueLockWaiters(minimum: number) {
+  async function waitForIssueLockWaiters(minimum: number, holder: { pid: number; rowCount: number }) {
     const deadline = Date.now() + 5_000;
+    let diagnostics: unknown = null;
     while (Date.now() < deadline) {
-      const rows = await db.execute(sql`select count(*)::int as count from pg_stat_activity
-        where datname = current_database() and pid <> pg_backend_pid() and state = 'active'
-          and cardinality(pg_blocking_pids(pid)) > 0 and query ilike '%"issues"%for update%'`);
-      if (Number((rows as unknown as Array<{ count: number }>)[0]?.count ?? 0) >= minimum) return;
+      // Drizzle's long select may be truncated in pg_stat_activity.query.
+      // Follow real blocker chains, including soft blocking behind the first
+      // waiter, rather than inferring a lock from query text.
+      const rows = await db.execute(sql`with recursive wait_edges as (
+        select activity.pid as origin, blocker.pid as blocker,
+          array[activity.pid, blocker.pid] as visited, 1 as depth
+        from pg_stat_activity activity
+        cross join lateral unnest(pg_blocking_pids(activity.pid)) as blocker(pid)
+        where activity.datname = current_database() and activity.pid <> pg_backend_pid()
+          and activity.pid <> ${holder.pid}
+        union all
+        select edge.origin, blocker.pid, edge.visited || blocker.pid, edge.depth + 1
+        from wait_edges edge
+        cross join lateral unnest(pg_blocking_pids(edge.blocker)) as blocker(pid)
+        where edge.depth < 16 and not (blocker.pid = any(edge.visited))
+      )
+      select (select count(distinct origin)::int from wait_edges where blocker = ${holder.pid}) as count,
+        current_setting('track_activity_query_size') as query_limit,
+        (select jsonb_agg(jsonb_build_object(
+          'pid', pid, 'blockers', pg_blocking_pids(pid), 'queryLength', length(query),
+          'state', state, 'waitEventType', wait_event_type, 'waitEvent', wait_event
+        )) from pg_stat_activity where datname = current_database() and pid <> pg_backend_pid()) as activity`);
+      const sample = (rows as unknown as Array<{ count: number; query_limit: string; activity: unknown }>)[0];
+      diagnostics = { holder, observedWaiters: Number(sample?.count ?? 0),
+        trackActivityQuerySize: sample?.query_limit, activity: sample?.activity,
+        effectivePoolMax: effectiveDatabasePoolMax() };
+      if (Number(sample?.count ?? 0) >= minimum) return;
       await new Promise((resolve) => setTimeout(resolve, 20));
     }
-    throw new Error("Expected private issue-row lock waiters were not observed");
+    throw new Error("Expected private issue-row lock waiters were not observed: " + JSON.stringify(diagnostics));
   }
 
   it("serializes independent queued admission behind atomic discard and resumes only unrelated work", async () => {
+    // Outer routine transaction, holder, claimant and monitor each need a backend.
+    expect(effectiveDatabasePoolMax()).toBeGreaterThanOrEqual(4);
+    const holderWitness = { pid: 0, rowCount: 0 };
     let issueId: string | null = null;
     const targetIds = [randomUUID(), randomUUID()];
     const wakeIds = [randomUUID(), randomUUID()];
@@ -2630,7 +2658,14 @@ describeEmbeddedPostgres("routine service live-execution coalescing", () => {
           { id: unrelatedId, companyId: issue.companyId, agentId, invocationSource: "on_demand", status: "queued", contextSnapshot: {} },
         ]);
         holder = db.transaction(async (tx) => {
-          await tx.execute(sql`select id from ${issues} where ${issues.companyId} = ${issue.companyId} and ${issues.id} = ${issueId} for update`);
+          const locked = await tx.execute(sql`select id from ${issues} where ${issues.companyId} = ${issue.companyId} and ${issues.id} = ${issueId} for update`);
+          const lockedRows = locked as unknown as Array<{ id: string }>;
+          holderWitness.rowCount = lockedRows.length;
+          expect(lockedRows).toHaveLength(1);
+          expect(lockedRows[0]?.id).toBe(issueId);
+          const identity = await tx.execute(sql`select pg_backend_pid()::int as pid`);
+          holderWitness.pid = Number((identity as unknown as Array<{ pid: number }>)[0]?.pid ?? 0);
+          expect(Number.isInteger(holderWitness.pid) && holderWitness.pid > 0).toBe(true);
           markHeld();
           await holdRelease;
         });
@@ -2652,10 +2687,14 @@ describeEmbeddedPostgres("routine service live-execution coalescing", () => {
       pending = fixture.svc.runRoutine(fixture.routine.id, { source: "manual" });
       await waitForRoutineFixtureBarrier(held, "routine reaching the issue-row holder", pending);
       if (holdFailure) throw holdFailure;
-      await waitForIssueLockWaiters(1); // The actual routine discard is first in the lock queue.
+      await waitForIssueLockWaiters(1, holderWitness); // The actual routine discard is first in the lock queue.
       claim = claimant.resumeQueuedRuns({ agentIds: [fixture.agentId] });
       void claim.catch(() => {}); // Promise.all below still propagates failure after the owned lock is released.
-      await waitForIssueLockWaiters(2); // Independent claim also waits; no timing-only assertion.
+      await waitForIssueLockWaiters(2, holderWitness); // Independent claim also waits; no timing-only assertion.
+      const blockedTargets = await db.select({ id: heartbeatRuns.id, status: heartbeatRuns.status })
+        .from(heartbeatRuns).where(inArray(heartbeatRuns.id, targetIds));
+      expect(blockedTargets).toHaveLength(2);
+      expect(blockedTargets.map((row) => row.status)).toEqual(["queued", "queued"]);
       expect(observations).toEqual([]);
       releaseHold();
       await Promise.all([pending, claim, holder]);

@@ -16,6 +16,7 @@ import {
   companySecretBindings,
   companySecrets,
   companySkills,
+  companyMemberships,
   companies,
   costEvents,
   documentAnnotationAnchorSnapshots,
@@ -2404,43 +2405,85 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     });
     const heartbeat = heartbeatService(db);
 
-    const result = await heartbeat.reapOrphanedRuns();
-    expect(result.reaped).toBe(1);
-    expect(result.runIds).toEqual([runId]);
-
-    expect(await waitForPidExit(orphan.descendantPid, 2_000)).toBe(true);
-
-    const runs = await db
-      .select()
-      .from(heartbeatRuns)
-      .where(eq(heartbeatRuns.agentId, agentId));
-    expect(runs).toHaveLength(2);
-
-    const failedRun = runs.find((row) => row.id === runId);
-    expect(failedRun?.status).toBe("failed");
-    expect(failedRun?.errorCode).toBe("process_lost");
-    expect(failedRun?.error).toContain("descendant process group");
-    expect(failedRun?.resultJson).toMatchObject({
-      stopReason: UNMANAGED_BACKGROUND_TASK_STOP_REASON,
-      unmanagedBackgroundTask: {
-        kind: "orphaned_process_group_cleanup",
-        stopped: true,
-        stopReason: UNMANAGED_BACKGROUND_TASK_STOP_REASON,
-        reason: UNMANAGED_BACKGROUND_TASK_LIVENESS_REASON,
-        processPid: orphan.processPid,
-        processGroupId: orphan.processGroupId,
-      },
+    let releaseRetry!: () => void;
+    const retryReleased = new Promise<void>((resolve) => { releaseRetry = resolve; });
+    let retryAdapterRunId: string | null = null;
+    const retrySummary = "Completed the owned orphan-group retry fixture.";
+    mockAdapterExecute.mockImplementation(async (input?: unknown) => {
+      retryAdapterRunId = (input as { runId: string }).runId;
+      let retryTimer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        await Promise.race([retryReleased, new Promise<never>((_, reject) => {
+          retryTimer = setTimeout(() => reject(new Error("Owned orphan retry fixture was not released")), 5_000);
+        })]);
+      } finally {
+        if (retryTimer) clearTimeout(retryTimer);
+      }
+      // Give this successful fixture a durable disposition before normal finish
+      // handoff logic runs, so only its one owned retry needs to be drained.
+      await db.update(issues).set({ status: "done" }).where(eq(issues.id, issueId));
+      return { exitCode: 0, signal: null, timedOut: false, errorMessage: null,
+        summary: retrySummary, provider: "test", model: "test-model" };
     });
 
-    const retryRun = runs.find((row) => row.id !== runId);
-    expect(["queued", "running"]).toContain(retryRun?.status);
+    try {
+      const result = await heartbeat.reapOrphanedRuns();
+      expect(result.reaped).toBe(1);
+      expect(result.runIds).toEqual([runId]);
 
-    const issue = await db
-      .select()
-      .from(issues)
-      .where(eq(issues.id, issueId))
-      .then((rows) => rows[0] ?? null);
-    expect(issue?.executionRunId).toBe(retryRun?.id ?? null);
+      expect(await waitForPidExit(orphan.descendantPid, 2_000)).toBe(true);
+
+      const runs = await db
+        .select()
+        .from(heartbeatRuns)
+        .where(eq(heartbeatRuns.agentId, agentId));
+      expect(runs).toHaveLength(2);
+
+      const failedRun = runs.find((row) => row.id === runId);
+      expect(failedRun?.status).toBe("failed");
+      expect(failedRun?.errorCode).toBe("process_lost");
+      expect(failedRun?.error).toContain("descendant process group");
+      expect(failedRun?.resultJson).toMatchObject({
+        stopReason: UNMANAGED_BACKGROUND_TASK_STOP_REASON,
+        unmanagedBackgroundTask: {
+          kind: "orphaned_process_group_cleanup",
+          stopped: true,
+          stopReason: UNMANAGED_BACKGROUND_TASK_STOP_REASON,
+          reason: UNMANAGED_BACKGROUND_TASK_LIVENESS_REASON,
+          processPid: orphan.processPid,
+          processGroupId: orphan.processGroupId,
+        },
+      });
+
+      const retryRun = runs.find((row) => row.id !== runId);
+      expect(["queued", "running"]).toContain(retryRun?.status);
+
+      const issue = await db
+        .select()
+        .from(issues)
+        .where(eq(issues.id, issueId))
+        .then((rows) => rows[0] ?? null);
+      expect(issue?.executionRunId).toBe(retryRun?.id ?? null);
+      const enteredRetry = await waitForValue(async () => retryAdapterRunId);
+      expect(enteredRetry).toBe(retryRun?.id);
+      releaseRetry();
+      const completedRetry = await waitForRunToSettle(heartbeat, enteredRetry!, 5_000);
+      await heartbeat.drainActiveRunExecutions();
+      expect(completedRetry?.id).toBe(retryRun?.id);
+      expect(completedRetry?.status).toBe("succeeded");
+      expect(completedRetry?.exitCode).toBe(0);
+      const persistedRetry = await db.select().from(heartbeatRuns)
+        .where(eq(heartbeatRuns.id, enteredRetry!)).then((rows) => rows[0] ?? null);
+      expect(persistedRetry?.id).toBe(retryRun?.id);
+      expect(persistedRetry?.resultJson).toMatchObject({ summary: retrySummary });
+      expect(mockAdapterExecute.mock.calls.filter(([input]) =>
+        (input as { runId?: string } | undefined)?.runId === retryRun?.id,
+      )).toHaveLength(1);
+    } finally {
+      await db.update(agents).set({ status: "paused" }).where(eq(agents.id, agentId));
+      releaseRetry();
+      await heartbeat.drainActiveRunExecutions();
+    }
   });
 
   it.skipIf(process.platform === "win32")("does not kill a reused process group whose recorded leader is already dead", async () => {
@@ -5162,16 +5205,40 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     const originalSelect = db.select.bind(db);
     const originalTransaction = db.transaction.bind(db);
     let transactionOpen = false;
+    let observingAdmission = true;
     let sawTransaction = false;
-    const rootReadsDuringTransaction: unknown[][] = [];
-    const selectSpy = vi.spyOn(db, "select").mockImplementation(((...args: unknown[]) => {
-      if (transactionOpen) rootReadsDuringTransaction.push(args);
-      return Reflect.apply(originalSelect, db, args);
-    }) as typeof db.select);
+    const actorTables = new Map<unknown, string>([
+      [companies, "companies"], [issues, "issues"],
+      [companyMemberships, "companyMemberships"], [authUsers, "authUsers"],
+    ]);
+    const rootActorReadsDuringClaim: string[] = [];
+    const transactionActorReadsDuringClaim: string[] = [];
+    const observeActorSelect = (select: typeof db.select, root: boolean) => ((...args: unknown[]) => {
+      const builder = Reflect.apply(select, db, args);
+      return new Proxy(builder, {
+        get(target, key, receiver) {
+          if (key !== "from") return Reflect.get(target, key, receiver);
+          return (table: unknown, ...fromArgs: unknown[]) => {
+            const actorTable = actorTables.get(table);
+            if (observingAdmission && transactionOpen && actorTable) {
+              (root ? rootActorReadsDuringClaim : transactionActorReadsDuringClaim).push(actorTable);
+            }
+            return Reflect.apply(target.from, target, [table, ...fromArgs]);
+          };
+        },
+      });
+    }) as typeof db.select;
+    const selectSpy = vi.spyOn(db, "select").mockImplementation(observeActorSelect(originalSelect, true));
     const transactionSpy = vi.spyOn(db, "transaction").mockImplementation(((callback, config) => originalTransaction(async (tx) => {
       transactionOpen = true;
       sawTransaction = true;
-      try { return await callback(tx); } finally { transactionOpen = false; }
+      const transactionSelectSpy = vi.spyOn(tx, "select").mockImplementation(
+        observeActorSelect(tx.select.bind(tx), false) as typeof tx.select,
+      );
+      try { return await callback(tx); } finally {
+        transactionSelectSpy.mockRestore();
+        transactionOpen = false;
+      }
     }, config)) as typeof db.transaction);
     mockAdapterExecute.mockClear();
     mockAdapterExecute.mockImplementation(async () => {
@@ -5181,10 +5248,12 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     });
     try {
       await heartbeat.resumeQueuedRuns({ agentIds: [agentId] });
+      observingAdmission = false; // Claim and fallback resolution have committed before test polling begins.
       await waitForRunToSettle(heartbeat, runId, 5_000);
       await heartbeat.drainActiveRunExecutions();
       expect(sawTransaction).toBe(true);
-      expect(rootReadsDuringTransaction).toEqual([]);
+      expect(rootActorReadsDuringClaim).toEqual([]);
+      expect(transactionActorReadsDuringClaim).toContain("companies");
       expect((await heartbeat.getRun(runId))?.responsibleUserId).toBe("responsible-user");
       expect((await heartbeat.getRun(runId))?.status).toBe("succeeded");
       expect(mockAdapterExecute).toHaveBeenCalledTimes(1);
