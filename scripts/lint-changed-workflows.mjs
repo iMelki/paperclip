@@ -1,12 +1,12 @@
 #!/usr/bin/env node
 
 import { spawnSync } from "node:child_process";
-import { lstatSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { lstatSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import process from "node:process";
 
 import { isMainModule } from "./is-main-module.mjs";
+import { createEphemeralDir, ephemeralChildEnv } from "./lib/ephemeral-scratch.mjs";
 
 export class WorkflowLintError extends Error {
   constructor(message, { cause, exitCode = 1 } = {}) {
@@ -95,7 +95,12 @@ function readRunScalar(lines, runIndex) {
   if (!declaration) return null;
   const indent = declaration[1].length;
   const value = declaration[2];
-  if (!/^[>|][+-]?$/.test(value)) return value;
+  // YAML folds > blocks into spaces; treating their source lines as separate
+  // shell commands would prove a different script than the workflow executes.
+  if (/^>[+-]?$/.test(value)) {
+    throw new WorkflowLintError("folded run scalars are not supported for the IMAGE assignment proof; use |");
+  }
+  if (!/^[|][+-]?$/.test(value)) return value;
   const commandLines = [];
   const bodyIndent = indent + 2;
   for (let index = runIndex + 1; index < lines.length; index += 1) {
@@ -112,20 +117,21 @@ function readRunScalar(lines, runIndex) {
   return commandLines.join("\n");
 }
 
-export function extractNamedRunScripts(workflow, stepName) {
+export function extractNamedRunScripts(workflow, stepName, requiredStepIndent = null) {
   const lines = workflow.replaceAll("\r\n", "\n").split("\n");
   const scripts = [];
   for (let index = 0; index < lines.length; index += 1) {
     const nameMatch = lines[index].match(/^(\s+)-\s+name:\s+(.+?)\s*$/);
     if (!nameMatch || nameMatch[2] !== stepName) continue;
     const stepIndent = nameMatch[1].length;
+    if (requiredStepIndent !== null && stepIndent !== requiredStepIndent) continue;
     let runIndex = -1;
     for (let cursor = index + 1; cursor < lines.length; cursor += 1) {
       const line = lines[cursor];
       if (line.trim() === "" || line.trimStart().startsWith("#")) continue;
       const indent = (line.match(/^ */) ?? [""])[0].length;
       if (indent <= stepIndent) break;
-      if (/^\s+run:\s*/.test(line)) {
+      if (/^\s+run:\s*/.test(line) && (requiredStepIndent === null || indent === stepIndent + 2)) {
         runIndex = cursor;
         break;
       }
@@ -168,6 +174,95 @@ function exactAllowedImageAssignment(script, index) {
   return imageLines[0];
 }
 
+// This proof accepts block-style jobs and steps. Unsupported flow, alias,
+// tag or multiline-quoted structure fails closed; actionlint remains separate.
+function workflowStructure(workflow) {
+  const lines = workflow.replaceAll("\r\n", "\n").split("\n");
+  let scalarIndent = null;
+  const structural = lines.map((line) => {
+    if (line.trim() === "" || line.trimStart().startsWith("#")) return "";
+    const indent = (line.match(/^ */) ?? [""])[0].length;
+    if (scalarIndent !== null) {
+      if (indent > scalarIndent) return "";
+      scalarIndent = null;
+    }
+    if (/^\s*\t/.test(line) || /^\s*["']/.test(line)) {
+      throw new WorkflowLintError("docker.yml has unsupported YAML structure for both publish jobs");
+    }
+    const mapping = line.match(/^\s*(?:-\s+)?[A-Za-z_][A-Za-z0-9_-]*:\s*(.*)$/);
+    const list = line.match(/^\s*-\s+(.*)$/);
+    const value = mapping?.[1] ?? list?.[1] ?? "";
+    if (/^[\[{&*!]/.test(value)) {
+      throw new WorkflowLintError("docker.yml has unsupported flow or alias structure for both publish jobs");
+    }
+    if (/^["']/.test(value)) {
+      const quote = value[0];
+      let closed = -1;
+      for (let cursor = 1; cursor < value.length; cursor += 1) {
+        if (quote === '"' && value[cursor] === "\\") { cursor += 1; continue; }
+        if (value[cursor] !== quote) continue;
+        if (quote === "'" && value[cursor + 1] === "'") { cursor += 1; continue; }
+        closed = cursor;
+        break;
+      }
+      if (closed < 0 || !/^\s*(?:#.*)?$/.test(value.slice(closed + 1))) {
+        throw new WorkflowLintError("docker.yml has unsupported quoted structure for both publish jobs");
+      }
+    }
+    if (/^[|>]/.test(value)) {
+      if (!/^[|>](?:[1-9][+-]?|[+-][1-9]?)?\s*(?:#.*)?$/.test(value)) {
+        throw new WorkflowLintError("docker.yml has unsupported scalar structure for both publish jobs");
+      }
+      scalarIndent = indent;
+    }
+    return line;
+  });
+  return { lines, structural };
+}
+
+function extractPublishJobSteps(workflow, jobName) {
+  const { lines, structural } = workflowStructure(workflow);
+  const jobsHeaders = structural.flatMap((line, index) =>
+    /^jobs:\s*(?:#.*)?$/.test(line) ? [index] : []);
+  if (jobsHeaders.length !== 1) {
+    throw new WorkflowLintError("docker.yml must have one jobs block for both publish jobs");
+  }
+  const jobs = [];
+  let jobsEnd = lines.length;
+  for (let index = jobsHeaders[0] + 1; index < lines.length; index += 1) {
+    const line = structural[index];
+    if (!line) continue;
+    if (/^\S/.test(line)) { jobsEnd = index; break; }
+    const match = line.match(/^ {2}([A-Za-z_][A-Za-z0-9_-]*):\s*(?:#.*)?$/);
+    if (match) jobs.push({ name: match[1], index });
+  }
+  const matches = jobs.filter((job) => job.name === jobName);
+  if (matches.length !== 1) {
+    throw new WorkflowLintError(
+      "docker.yml must define both publish jobs exactly once; " + jobName + " found " + matches.length,
+    );
+  }
+  const start = matches[0].index;
+  const end = jobs.find((job) => job.index > start)?.index ?? jobsEnd;
+  const steps = [];
+  for (let index = start + 1; index < end; index += 1) {
+    if (/^ {4}steps:\s*(?:#.*)?$/.test(structural[index])) steps.push(index);
+  }
+  if (steps.length !== 1) {
+    throw new WorkflowLintError(
+      "docker.yml must define block-style steps in both publish jobs; " + jobName,
+    );
+  }
+  let stepsEnd = end;
+  for (let index = steps[0] + 1; index < end; index += 1) {
+    if (structural[index] && (structural[index].match(/^ */) ?? [""])[0].length <= 4) {
+      stepsEnd = index;
+      break;
+    }
+  }
+  return lines.slice(steps[0], stepsEnd).join("\n");
+}
+
 export function proveDockerImageLowercase(workflow, {
   spawn = spawnSync,
   repository = MIXED_CASE_REPOSITORY,
@@ -179,17 +274,20 @@ export function proveDockerImageLowercase(workflow, {
       "docker.yml must not use ghcr.io/${{ github.repository }}; GHCR paths must be lowercase",
     );
   }
-  const scripts = extractNamedRunScripts(workflow, GHCR_IMAGE_STEP);
-  if (scripts.length < 2) {
-    throw new WorkflowLintError(
-      `docker.yml must define ${GHCR_IMAGE_STEP} in both publish jobs; found ${scripts.length}`,
-    );
-  }
+  const scripts = ["build-and-push", "build-and-push-cloud"].map((jobName) => {
+    const scripts = extractNamedRunScripts(extractPublishJobSteps(workflow, jobName), GHCR_IMAGE_STEP, 6);
+    if (scripts.length !== 1) {
+      throw new WorkflowLintError(
+        `docker.yml must define ${GHCR_IMAGE_STEP} exactly once in both publish jobs; ${jobName} found ${scripts.length}`,
+      );
+    }
+    return scripts[0];
+  });
   for (const [index, script] of scripts.entries()) {
     // Fail closed on anything beyond the allowed lines, then run only the
     // exact IMAGE assignment — never the rest of the extracted run block.
     const imageLine = exactAllowedImageAssignment(script, index);
-    const workDir = mkdtempSync(path.join(tmpdir(), "paperclip-docker-image-"));
+    const workDir = createEphemeralDir({ owner: "paperclip", purpose: "workflowimage" });
     const envFile = path.join(workDir, "github.env");
     try {
       writeFileSync(envFile, "");
@@ -197,6 +295,7 @@ export function proveDockerImageLowercase(workflow, {
         cwd: workDir,
         env: {
           PATH: process.env.PATH,
+          ...ephemeralChildEnv(workDir),
           GITHUB_REPOSITORY: repository,
           GITHUB_ENV: envFile,
         },
@@ -238,7 +337,7 @@ export function proveDockerImageLowercase(workflow, {
         );
       }
     } finally {
-      rmSync(workDir, { recursive: true, force: true });
+      // Retain this invocation’s bounded scratch evidence; no permanent deletion.
     }
   }
 }
@@ -249,7 +348,7 @@ export function resolveActionlintCommand(env = process.env) {
     ? env.PAPERCLIP_ACTIONLINT_BIN.trim()
     : "";
   if (configured) return { command: configured, skipWhenMissing: false };
-  return { command: "actionlint", skipWhenMissing: true };
+  return { command: "actionlint", skipWhenMissing: false };
 }
 
 export function runActionlint(files, {

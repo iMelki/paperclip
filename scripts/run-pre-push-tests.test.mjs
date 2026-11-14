@@ -1,14 +1,17 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, realpathSync, renameSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 import test from "node:test";
+import { createEphemeralDir } from "./lib/ephemeral-scratch.mjs";
 import { fileURLToPath } from "node:url";
 
 import {
   PrePushIntegrityError,
+  TEST_CHILD_MAX_BUFFER,
+  TEST_CHILD_TIMEOUT_MS,
   assertAdvertisedDevAncestor,
   assertPushMatchesWorkingTree,
   executeTestPlan,
@@ -29,6 +32,7 @@ const runnerScript = path.join(repoRoot, "scripts", "run-pre-push-tests.mjs");
 function runScratchGit(scratchRoot, args) {
   const result = spawnSync("git", args, {
     cwd: scratchRoot,
+    stdio: ["ignore", "pipe", "pipe"],
     encoding: "utf8",
     windowsHide: true,
     shell: false,
@@ -111,7 +115,7 @@ test("an existing topic ref uses authoritative dev as its exact test baseline", 
 });
 
 test("a real Git rename reports both deleted and added paths", () => {
-  const createdRoot = mkdtempSync(path.join(os.tmpdir(), "paperclip-pre-push-rename-"));
+  const createdRoot = createEphemeralDir({ owner: "paperclip", purpose: "renametest" });
   const scratchRoot = realpathSync(createdRoot);
   try {
     runScratchGit(scratchRoot, ["init"]);
@@ -144,7 +148,7 @@ test("a real Git rename reports both deleted and added paths", () => {
     });
     assert.deepEqual(changed, ["server/src/new.ts", "server/src/old.ts"]);
   } finally {
-    rmSync(createdRoot, { recursive: true, force: true });
+    // Preserve the fixture for the existing scratch custodian.
   }
 });
 
@@ -253,6 +257,7 @@ test("explicit dry-run paths can bind selection to the current HEAD tree", () =>
 test("planner CLI rejects an option-shaped required value before reading Git state", () => {
   const result = spawnSync(process.execPath, [runnerScript, "--repo-root", "--dry-run"], {
     cwd: repoRoot,
+    stdio: ["ignore", "pipe", "pipe"],
     encoding: "utf8",
     windowsHide: true,
     shell: false,
@@ -272,7 +277,7 @@ test("the changed-file dry-run CLI reads current HEAD tracking data", () => {
       "--changed-file",
       "scripts/run-pre-push-tests.test.mjs",
     ],
-    { cwd: repoRoot, encoding: "utf8", windowsHide: true, shell: false },
+    { cwd: repoRoot, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], windowsHide: true, shell: false },
   );
   assert.equal(result.status, 0, result.stderr);
   const plan = JSON.parse(result.stdout);
@@ -474,6 +479,44 @@ test("Node suites run before exact Vitest suites with literal argv", () => {
   ]);
   assert.ok(calls.every(({ command }) => command === process.execPath));
   assert.ok(calls.every(({ options }) => options.shell === false));
+  assert.ok(calls.every(({ options }) => options.windowsHide === true));
+  assert.ok(calls.every(({ options }) => options.timeout === TEST_CHILD_TIMEOUT_MS));
+  assert.ok(calls.every(({ options }) => options.maxBuffer === TEST_CHILD_MAX_BUFFER));
+  assert.ok(calls.every(({ options }) => options.killSignal === "SIGKILL"));
+  for (const { options } of calls) assert.deepEqual(options.stdio, ["ignore", "pipe", "pipe"]);
+});
+
+for (const code of ["ENOENT", "ETIMEDOUT", "ENOBUFS"]) {
+  test(`test child fails closed on ${code} and preserves both captured streams`, () => {
+    const messages = [];
+    const errors = [];
+    const status = executeTestPlan({
+      selection: baseSelection({ nodeTestFiles: ["scripts/probe.test.mjs"] }),
+      targetRefs: ["refs/heads/topic"],
+    }, {
+      spawn: () => ({ status: null, stdout: "partial stdout", stderr: "partial stderr",
+        error: Object.assign(new Error("synthetic child failure"), { code }) }),
+      log: value => messages.push(value), error: value => errors.push(value),
+    });
+    assert.equal(status, 2);
+    assert.ok(messages.includes("partial stdout"));
+    assert.ok(errors.includes("partial stderr"));
+    assert.match(errors.join("\n"), new RegExp(code));
+  });
+}
+
+test("successful test child forwards stdout and stderr without changing its result", () => {
+  const messages = []; const errors = [];
+  const status = executeTestPlan({
+    selection: baseSelection({ nodeTestFiles: ["scripts/probe.test.mjs"] }),
+    targetRefs: ["refs/heads/topic"],
+  }, {
+    spawn: () => ({ status: 0, stdout: "passed output", stderr: "warning output" }),
+    log: value => messages.push(value), error: value => errors.push(value),
+  });
+  assert.equal(status, 0);
+  assert.ok(messages.includes("passed output"));
+  assert.ok(errors.includes("warning output"));
 });
 
 test("workflow-only topic-branch plans run the local workflow lint and skip unit suites", () => {

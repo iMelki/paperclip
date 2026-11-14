@@ -19,6 +19,8 @@ const OID_PATTERN = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i;
 const SAFE_REMOTE_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const PROTECTED_REFS = new Set(["refs/heads/dev", "refs/heads/master"]);
 const WORKFLOW_FILE_PATTERN = /^\.github\/workflows\/[^/]+\.ya?ml$/i;
+export const TEST_CHILD_TIMEOUT_MS = 10 * 60 * 1000;
+export const TEST_CHILD_MAX_BUFFER = 8 * 1024 * 1024;
 
 export class PrePushIntegrityError extends Error {
   constructor(message, { cause, exitCode } = {}) {
@@ -89,6 +91,7 @@ export function runGit(
 ) {
   const result = spawn("git", args, {
     cwd: repoRoot,
+    stdio: ["ignore", "pipe", "pipe"],
     encoding,
     killSignal: "SIGKILL",
     maxBuffer,
@@ -299,12 +302,19 @@ function runChild(
   log(`Running ${label}...`);
   const result = spawn(process.execPath, args, {
     cwd,
-    stdio: "inherit",
+    stdio: ["ignore", "pipe", "pipe"],
+    encoding: "utf8",
+    timeout: TEST_CHILD_TIMEOUT_MS,
+    maxBuffer: TEST_CHILD_MAX_BUFFER,
+    killSignal: "SIGKILL",
     windowsHide: true,
     shell: false,
   });
+  // spawnSync drains both bounded pipes; preserve captured diagnostics even on failure.
+  if (result.stdout) log(result.stdout);
+  if (result.stderr) error(result.stderr);
   if (result.error) {
-    error(`ERROR: ${label} could not start: ${result.error.message}`);
+    error(`ERROR: ${label} did not complete (${result.error.code ?? "spawn error"}): ${result.error.message}`);
     return 2;
   }
   if (result.status !== 0) {
@@ -342,7 +352,7 @@ export function executeTestPlan(
   // Workflow-only topic-branch pushes have no hosted PR admission on dev
   // (#257). Lint those files locally, including a docker.yml IMAGE
   // lowercase proof, so the admitted local lane is not a no-op.
-  // A missing default actionlint is a skip. This step does not download it.
+  // A missing default actionlint fails closed. This step does not download it.
   const workflowFiles = listChangedWorkflowFiles(selection);
   if (workflowFiles.length > 0) {
     const status = runChild(

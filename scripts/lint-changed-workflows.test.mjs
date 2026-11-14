@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import test from "node:test";
+import { createEphemeralDir, ephemeralChildEnv } from "./lib/ephemeral-scratch.mjs";
 
 import {
   DOCKER_IMAGE_PROOF_TIMEOUT_MS,
@@ -31,18 +33,22 @@ function dockerWorkflow({ jobs = 2, lowercase = true, unfolded = false } = {}) {
   const images = unfolded
     ? "ghcr.io/${{ github.repository }}"
     : "${{ env.IMAGE }}";
-  const steps = Array.from({ length: jobs }, () => step).join("");
-  return `name: Docker
-jobs:
-  build-and-push:
-${steps}      - name: Docker meta
+  const publishJobs = Array.from({ length: jobs }, (_, index) => {
+    const name = index === 0 ? "build-and-push" : "build-and-push-cloud";
+    return `  ${name}:
+    steps:
+${step}      - name: Docker meta
         with:
           images: ${images}
 `;
+  }).join("");
+  return `name: Docker
+jobs:
+${publishJobs}`;
 }
 
 function withRepo(files, fn) {
-  const repoRoot = mkdtempSync(path.join(os.tmpdir(), "paperclip-workflow-lint-"));
+  const repoRoot = createEphemeralDir({ owner: "paperclip", purpose: "workflowtest" });
   try {
     for (const [relative, contents] of Object.entries(files)) {
       const absolute = path.join(repoRoot, relative);
@@ -51,7 +57,7 @@ function withRepo(files, fn) {
     }
     return fn(repoRoot);
   } finally {
-    rmSync(repoRoot, { recursive: true, force: true });
+    // Retain the synthetic fixture for inspection; no permanent deletion.
   }
 }
 
@@ -253,14 +259,14 @@ jobs:
   );
 });
 
-test("resolveActionlintCommand skips only when PAPERCLIP_ACTIONLINT_BIN is unset", () => {
+test("resolveActionlintCommand requires a checker on PATH or an explicit path", () => {
   assert.deepEqual(resolveActionlintCommand({}), {
     command: "actionlint",
-    skipWhenMissing: true,
+    skipWhenMissing: false,
   });
   assert.deepEqual(resolveActionlintCommand({ PAPERCLIP_ACTIONLINT_BIN: "  " }), {
     command: "actionlint",
-    skipWhenMissing: true,
+    skipWhenMissing: false,
   });
   assert.deepEqual(resolveActionlintCommand({ PAPERCLIP_ACTIONLINT_BIN: "/opt/actionlint" }), {
     command: "/opt/actionlint",
@@ -268,18 +274,11 @@ test("resolveActionlintCommand skips only when PAPERCLIP_ACTIONLINT_BIN is unset
   });
 });
 
-test("runActionlint skips a missing default binary and fails closed otherwise", () => {
-  const logs = [];
-  const skipped = runActionlint([".github/workflows/docker.yml"], {
+test("runActionlint fails closed for missing default and configured binaries", () => {
+  assert.throws(() => runActionlint([".github/workflows/pr.yml"], {
     repoRoot: "/tmp",
-    command: "actionlint",
-    skipWhenMissing: true,
-    log: (message) => logs.push(message),
     spawn: () => ({ error: Object.assign(new Error("not found"), { code: "ENOENT" }) }),
-  });
-  assert.deepEqual(skipped, { skipped: true });
-  assert.match(logs.join("\n"), /SKIP: actionlint is not on PATH and PAPERCLIP_ACTIONLINT_BIN is unset/);
-  assert.match(logs.join("\n"), /does not download actionlint/);
+  }), error => error instanceof WorkflowLintError && error.exitCode === 2 && /actionlint was not found/.test(error.message));
 
   assert.throws(
     () => runActionlint([".github/workflows/docker.yml"], {
@@ -457,3 +456,130 @@ test("runActionlint fails closed when the configured binary is missing", () => {
     ),
   );
 });
+
+function dockerJobsWithImageCounts(entries) {
+  return "name: Docker\njobs:\n" + entries.map(([name, count]) =>
+    `  ${name}:\n    steps:\n${count ? IMAGE_STEP.repeat(count) : "      - run: echo inert\n"}`
+  ).join("");
+}
+
+for (const [name, entries] of [
+  ["two assignments in standard and none in cloud", [["build-and-push", 2], ["build-and-push-cloud", 0]]],
+  ["none in standard and two in cloud", [["build-and-push", 0], ["build-and-push-cloud", 2]]],
+  ["unrelated job cannot cover the cloud job", [["build-and-push", 1], ["build-and-push-cloud", 0], ["unrelated", 1]]],
+  ["duplicate assignment even when both jobs are present", [["build-and-push", 2], ["build-and-push-cloud", 1]]],
+  ["duplicate publish job key", [["build-and-push", 1], ["build-and-push-cloud", 1], ["build-and-push", 0]]],
+]) {
+  test(`per-job proof rejects ${name} before any shell execution`, () => {
+    let spawned = 0;
+    assert.throws(() => proveDockerImageLowercase(dockerJobsWithImageCounts(entries), {
+      spawn: (...args) => {
+        spawned += 1;
+        return spawnSync(...args);
+      },
+    }), /both publish jobs/);
+    assert.equal(spawned, 0);
+  });
+}
+
+test("per-job proof accepts one assignment in each publish job with CRLF", () => {
+  proveDockerImageLowercase(
+    dockerJobsWithImageCounts([["build-and-push", 1], ["build-and-push-cloud", 1]])
+      .replaceAll("\n", "\r\n"),
+  );
+});
+
+function workflowWithScalarDecoys({ nested = false, actual = false } = {}) {
+  const decoy = nested
+    ? "      - name: Inert\n        env:\n          DECOY: |\n            - name: Set GHCR image name\n              run: " + IMAGE_ASSIGNMENT + "\n        run: echo inert\n"
+    : "    env:\n      DECOY: |\n        - name: Set GHCR image name\n          run: " + IMAGE_ASSIGNMENT + "\n";
+  return "name: Docker\njobs:\n" + ["build-and-push", "build-and-push-cloud"].map((job) =>
+    "  " + job + ":\n"
+    + (nested ? "    steps:\n" + decoy : decoy + "    steps:\n")
+    + (actual ? IMAGE_STEP : nested ? "" : "      - run: echo inert\n")
+  ).join("");
+}
+
+for (const nested of [false, true]) {
+  test("scalar decoys cannot stand in for IMAGE steps: " + (nested ? "step env" : "job env"), () => {
+    let spawned = 0;
+    assert.throws(() => proveDockerImageLowercase(workflowWithScalarDecoys({ nested }), {
+      spawn: (...args) => { spawned += 1; return spawnSync(...args); },
+    }), /both publish jobs/);
+    assert.equal(spawned, 0);
+  });
+}
+
+test("scalar decoys are ignored when each real job has its own IMAGE step", () => {
+  proveDockerImageLowercase(workflowWithScalarDecoys({ actual: true }));
+});
+
+function workflowWithNamedStepRunDecoy({ validRun = false } = {}) {
+  return "name: Docker\njobs:\n" + ["build-and-push", "build-and-push-cloud"].map((job) =>
+    "  " + job + ":\n    steps:\n      - name: Set GHCR image name\n"
+    + "        env:\n          DECOY: |\n            run: " + (validRun ? "echo inert" : IMAGE_ASSIGNMENT) + "\n"
+    + "        run: " + (validRun ? IMAGE_ASSIGNMENT : "echo inert") + "\n"
+  ).join("");
+}
+
+test("direct run property ignores an env scalar that contains a fake IMAGE run", () => {
+  let spawned = 0;
+  assert.throws(() => proveDockerImageLowercase(workflowWithNamedStepRunDecoy(), {
+    spawn: (...args) => { spawned += 1; return spawnSync(...args); },
+  }), /must assign IMAGE with/);
+  assert.equal(spawned, 0);
+});
+
+test("direct run property accepts the real IMAGE run despite an env run decoy", () => {
+  proveDockerImageLowercase(workflowWithNamedStepRunDecoy({ validRun: true }));
+});
+
+
+const workflowLintCli = new URL("./lint-changed-workflows.mjs", import.meta.url);
+function runCliForTest(repoRoot, file, checker) {
+  const env = { ...process.env };
+  for (const key of Object.keys(env)) if (key.toLowerCase() === "path" || key.toLowerCase() === "paperclip_actionlint_bin") delete env[key];
+  env.PATH = repoRoot;
+  Object.assign(env, ephemeralChildEnv(repoRoot));
+  if (checker) env.PAPERCLIP_ACTIONLINT_BIN = checker;
+  return spawnSync(process.execPath, [fileURLToPath(workflowLintCli), "--file", file], {
+    cwd: repoRoot, env, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], windowsHide: true, timeout: 15000,
+  });
+}
+test("CLI rejects missing default PATH checker for a non-Docker workflow", () => {
+  withRepo({ ".github/workflows/valid.yml": VALID_WORKFLOW }, repoRoot => {
+    const result = runCliForTest(repoRoot, ".github/workflows/valid.yml");
+    assert.equal(result.status, 2);
+    assert.match(result.stderr, /actionlint was not found/);
+  });
+});
+test("CLI validates good and rejects invalid workflow with real checker", { skip: ACTIONLINT_BIN ? false : ACTIONLINT_MISSING_SKIP }, () => {
+  withRepo({ ".github/workflows/valid.yml": VALID_WORKFLOW, ".github/workflows/invalid.yml": INVALID_WORKFLOW }, repoRoot => {
+    const good = runCliForTest(repoRoot, ".github/workflows/valid.yml", ACTIONLINT_BIN);
+    const bad = runCliForTest(repoRoot, ".github/workflows/invalid.yml", ACTIONLINT_BIN);
+    assert.equal(good.status, 0);
+    assert.notEqual(bad.status, 0);
+    assert.match(bad.stderr, /actionlint failed with exit/);
+  });
+});
+
+for (const style of [">", ">-", ">+"]) {
+  test(`folded IMAGE scalar ${style} is rejected before any Bash launch`, () => {
+    let spawned = 0;
+    const workflow = dockerWorkflow().replaceAll("run: |", `run: ${style}`);
+    assert.throws(() => proveDockerImageLowercase(workflow, {
+      spawn: () => { spawned += 1; return { status: 0, stdout: "", stderr: "" }; },
+    }), /folded run scalars are not supported/);
+    assert.equal(spawned, 0);
+  });
+}
+
+for (const style of ["|", "|-", "|+"]) {
+  test(`literal IMAGE scalar ${style} retains the allowed assignment proof`, () => {
+    let spawned = 0;
+    proveDockerImageLowercase(dockerWorkflow().replaceAll("run: |", `run: ${style}`), {
+      spawn: (...args) => { spawned += 1; return spawnSync(...args); },
+    });
+    assert.equal(spawned, 2);
+  });
+}
