@@ -13,6 +13,7 @@ import {
 } from "./git-push-scan-integrity.mjs";
 import { isMainModule } from "./is-main-module.mjs";
 import { selectPrePushTests } from "./pre-push-test-selection.mjs";
+import { resolveGitLocalEnvironmentVariableNames, sanitizeGitLocalEnvironment } from "./git-local-env.mjs";
 
 const ZERO_OID_PATTERN = /^0{40}(?:0{24})?$/;
 const OID_PATTERN = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i;
@@ -297,11 +298,12 @@ export function resolveOutgoingChangedFiles({
 function runChild(
   label,
   args,
-  { spawn = spawnSync, log = console.log, error = console.error, cwd = process.cwd() } = {},
+  { spawn = spawnSync, log = console.log, error = console.error, cwd = process.cwd(), env = process.env } = {},
 ) {
   log(`Running ${label}...`);
   const result = spawn(process.execPath, args, {
     cwd,
+    env,
     stdio: ["ignore", "pipe", "pipe"],
     encoding: "utf8",
     timeout: TEST_CHILD_TIMEOUT_MS,
@@ -326,7 +328,8 @@ function runChild(
 
 export function executeTestPlan(
   { selection, targetRefs },
-  { spawn = spawnSync, log = console.log, error = console.error, repoRoot = process.cwd() } = {},
+  { spawn = spawnSync, log = console.log, error = console.error, repoRoot = process.cwd(),
+    env = process.env, resolveGitEnv = resolveGitLocalEnvironmentVariableNames } = {},
 ) {
   if (selection.selectionErrors.length > 0) {
     error("ERROR: deterministic pre-push test selection failed closed:");
@@ -349,6 +352,16 @@ export function executeTestPlan(
     selection.hostedCiFiles.forEach((file) => log(`  CI: ${file}`));
   }
 
+  // Only test/lint children lose hook-local repository bindings. The parent
+  // planner and outgoing scans retain their original authoritative Git context.
+  let childEnv;
+  try {
+    childEnv = sanitizeGitLocalEnvironment(env, resolveGitEnv({ env }));
+  } catch (failure) {
+    error(`ERROR: cannot isolate test Git environment: ${failure.message}`);
+    return 2;
+  }
+
   // Workflow-only topic-branch pushes have no hosted PR admission on dev
   // (#257). Lint those files locally, including a docker.yml IMAGE
   // lowercase proof, so the admitted local lane is not a no-op.
@@ -361,7 +374,7 @@ export function executeTestPlan(
         path.join(repoRoot, "scripts/lint-changed-workflows.mjs"),
         ...workflowFiles.flatMap((file) => ["--file", file]),
       ],
-      { spawn, log, error, cwd: repoRoot },
+      { spawn, log, error, cwd: repoRoot, env: childEnv },
     );
     if (status !== 0) return status;
   }
@@ -370,7 +383,7 @@ export function executeTestPlan(
     const status = runChild(
       `exact Node test suites (${selection.nodeTestFiles.length})`,
       ["--test", ...selection.nodeTestFiles],
-      { spawn, log, error, cwd: repoRoot },
+      { spawn, log, error, cwd: repoRoot, env: childEnv },
     );
     if (status !== 0) return status;
   }
@@ -379,7 +392,7 @@ export function executeTestPlan(
     const status = runChild(
       `exact Vitest suites (${selection.vitestFiles.length})`,
       [path.join(repoRoot, "scripts/run-vitest-stable.mjs"), "--files", ...selection.vitestFiles],
-      { spawn, log, error, cwd: repoRoot },
+      { spawn, log, error, cwd: repoRoot, env: childEnv },
     );
     if (status !== 0) return status;
   }

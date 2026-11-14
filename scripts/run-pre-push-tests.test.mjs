@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, realpathSync, renameSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
@@ -36,6 +36,9 @@ function runScratchGit(scratchRoot, args) {
     encoding: "utf8",
     windowsHide: true,
     shell: false,
+    timeout: 15000,
+    maxBuffer: 1024 * 1024,
+    killSignal: "SIGKILL",
   });
   assert.equal(result.status, 0, `${args.join(" ")}: ${result.stderr}`);
   return result.stdout.trim();
@@ -580,4 +583,78 @@ test("listChangedWorkflowFiles unions changed and hosted paths and ignores non-w
     [".github/workflows/docker.yml", ".github/workflows/pr.yml"],
   );
   assert.deepEqual(listChangedWorkflowFiles(baseSelection()), []);
+});
+
+test("hook-shaped test children preserve caller Git metadata and use only their own scratch repository", () => {
+  const root = realpathSync(createEphemeralDir({ owner: "paperclip", purpose: "hookenvtest" }));
+  const sentinel = path.join(root, "caller");
+  const foreign = path.join(root, "scratch");
+  mkdirSync(sentinel);
+  mkdirSync(foreign);
+  runScratchGit(sentinel, ["init", "-q", "-b", "sentinel"]);
+  runScratchGit(sentinel, ["config", "user.name", "Synthetic Sentinel"]);
+  runScratchGit(sentinel, ["config", "user.email", "sentinel@example.invalid"]);
+  writeFileSync(path.join(sentinel, "README.md"), "caller must remain unchanged\n");
+  runScratchGit(sentinel, ["add", "README.md"]);
+  runScratchGit(sentinel, ["commit", "-qm", "synthetic sentinel"]);
+  const metadata = ["HEAD", "index", "config", "refs/heads/sentinel"];
+  const before = metadata.map((name) => readFileSync(path.join(sentinel, ".git", name)));
+  const poisoned = { GIT_DIR: path.join(sentinel, ".git"), GIT_COMMON_DIR: path.join(sentinel, ".git"),
+    GIT_WORK_TREE: sentinel, GIT_INDEX_FILE: path.join(sentinel, ".git", "index"), GIT_PREFIX: "sentinel/",
+    GIT_CONFIG_PARAMETERS: "'user.name'='Hook sentinel'", GIT_CONFIG_COUNT: "1",
+    GIT_CONFIG_KEY_0: "core.bare", GIT_CONFIG_VALUE_0: "true" };
+  const probe = path.join(root, "isolation.test.mjs");
+  writeFileSync(probe, `import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
+import { writeFileSync } from 'node:fs';
+const keys = ${JSON.stringify(Object.keys(poisoned))};
+for (const key of keys) assert.equal(process.env[key], undefined, 'inherited hook context: ' + key);
+const cwd = ${JSON.stringify(foreign)};
+const git = (...args) => {
+  const r = spawnSync('git', args, { cwd, encoding:'utf8', windowsHide:true, shell:false,
+    stdio:['ignore','pipe','pipe'], timeout:15000, killSignal:'SIGKILL', maxBuffer:1048576 });
+  assert.ifError(r.error); assert.equal(r.status, 0, r.stderr); return r.stdout.trim();
+};
+git('init','-q'); git('config','user.name','Synthetic Child');
+git('config','user.email','child@example.invalid');
+writeFileSync(cwd + '/child.txt', 'synthetic only'); git('add','child.txt');
+git('commit','-qm','isolated child');
+assert.equal(git('rev-parse','--show-toplevel').replaceAll('\\\\','/').toLowerCase(), cwd.replaceAll('\\\\','/').toLowerCase());
+`);
+  const previous = Object.fromEntries(Object.keys(poisoned).map((key) => [key, process.env[key]]));
+  const errors = [];
+  let result;
+  try {
+    Object.assign(process.env, poisoned);
+    result = executeTestPlan({ selection: baseSelection({ nodeTestFiles: [probe] }),
+      targetRefs: ["refs/heads/topic"] }, { repoRoot, log: (message) => errors.push(message), error: (message) => errors.push(message),
+      spawn: (command, args, options) => {
+        // Nested node:test otherwise suppresses a new --test runner. Keep the
+        // production Git environment intact; remove only this test marker.
+        const childEnv = { ...(options.env ?? process.env) };
+        delete childEnv.NODE_TEST_CONTEXT;
+        return spawnSync(command, args, { ...options, env: childEnv });
+      },
+    });
+  } finally {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key]; else process.env[key] = value;
+    }
+  }
+  metadata.forEach((name, index) => assert.deepEqual(readFileSync(path.join(sentinel, ".git", name)), before[index], name));
+  assert.equal(result, 0, errors.join("\n"));
+  assert.equal(readFileSync(path.join(foreign, "child.txt"), "utf8"), "synthetic only");
+});
+
+test("failed Git environment enumeration refuses test execution", () => {
+  let spawned = false;
+  const errors = [];
+  const status = executeTestPlan({ selection: baseSelection({ nodeTestFiles: ["probe.test.mjs"] }),
+    targetRefs: ["refs/heads/topic"] }, {
+    resolveGitEnv: () => { throw new Error("synthetic enumeration failure"); },
+    spawn: () => { spawned = true; return { status: 0 }; }, log: () => {}, error: (message) => errors.push(message),
+  });
+  assert.equal(status, 2);
+  assert.equal(spawned, false);
+  assert.match(errors.join("\n"), /cannot isolate test Git environment: synthetic enumeration failure/);
 });
