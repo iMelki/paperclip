@@ -15,7 +15,7 @@ test("release workflow delegates stable and canary verification to the reusable 
 
   assert.match(
     releaseWorkflow,
-    /verify_canary:\n\s+if: github\.event_name == 'push'\n\s+uses: \.\/\.github\/workflows\/release-verify\.yml\n\s+with:\n\s+ref: \$\{\{ github\.sha \}\}/,
+    /verify_canary:\n\s+if: github\.event_name == 'push' \|\| \(github\.event_name == 'workflow_dispatch' && inputs\.channel == 'canary'\)\n\s+uses: \.\/\.github\/workflows\/release-verify\.yml\n\s+with:\n\s+ref: \$\{\{ github\.sha \}\}/,
   );
   // The stable lane is gated on the stable channel since the nightly lane
   // was added; a `needs:` line (for example a preflight job) may sit between
@@ -27,6 +27,14 @@ test("release workflow delegates stable and canary verification to the reusable 
     /verify_stable:\n\s+if: github\.event_name == 'workflow_dispatch' && inputs\.channel == 'stable'\n(?:\s+needs: [^\n]+\n)?\s+uses: \.\/\.github\/workflows\/release-verify\.yml\n\s+with:\n\s+ref: \$\{\{ needs\.preflight_stable\.outputs\.sha \}\}/,
   );
   assert.doesNotMatch(releaseWorkflow, /verify_(?:canary|stable):[\s\S]*?pnpm test:run(?:\n|$)/);
+  assert.match(
+    releaseWorkflow,
+    /publish_canary:\n[\s\S]*?if: github\.event_name == 'workflow_dispatch' && inputs\.channel == 'canary'/,
+  );
+  assert.doesNotMatch(
+    releaseWorkflow,
+    /publish_canary:\n\s+if: github\.event_name == 'push'/,
+  );
 });
 
 test("onboard smoke container binds beyond loopback so the mapped port is reachable", () => {

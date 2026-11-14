@@ -27,8 +27,12 @@ concurrency:
 
 jobs:
   build-and-push:
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
+    # Post-merge default-branch builds (push to master, or a manual dispatch
+    # on master) run on the isolated box image-build runner (label box-img).
+    # Release tag (v*) builds stay on the GitHub-hosted runner.
+    if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && (github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/tags/nightly/v') || startsWith(github.ref, 'refs/tags/beta/v'))
+    runs-on: ${{ github.ref == 'refs/heads/master' && fromJSON('["self-hosted","box-img"]') || 'ubuntu-latest' }}
+    timeout-minutes: ${{ github.ref == 'refs/heads/master' && 120 || 60 }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -105,6 +109,7 @@ jobs:
           echo "Using refreshed pnpm-lock.yaml in the Docker build context."
 
       - name: Free runner disk
+        if: runner.environment == 'github-hosted'
         run: |
           set -euo pipefail
           echo "Disk before cleanup:"
@@ -126,6 +131,7 @@ jobs:
 
           echo "Disk after cleanup:"
           df -h
+
 
       - name: Login to GitHub Container Registry
         uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4
@@ -230,8 +236,12 @@ jobs:
   # separate runner, so this one carries its own copy of the prep steps
   # (checkout through schema labels) — the accepted cost of that isolation.
   build-and-push-cloud:
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
+    # Post-merge default-branch builds (push to master, or a manual dispatch
+    # on master) run on the isolated box image-build runner (label box-img).
+    # Release tag (v*) builds stay on the GitHub-hosted runner.
+    if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && (github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/tags/nightly/v') || startsWith(github.ref, 'refs/tags/beta/v'))
+    runs-on: ${{ github.ref == 'refs/heads/master' && fromJSON('["self-hosted","box-img"]') || 'ubuntu-latest' }}
+    timeout-minutes: ${{ github.ref == 'refs/heads/master' && 120 || 60 }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -308,6 +318,7 @@ jobs:
           echo "Using refreshed pnpm-lock.yaml in the Docker build context."
 
       - name: Free runner disk
+        if: runner.environment == 'github-hosted'
         run: |
           set -euo pipefail
           echo "Disk before cleanup:"
@@ -329,6 +340,7 @@ jobs:
 
           echo "Disk after cleanup:"
           df -h
+
 
       - name: Login to GitHub Container Registry
         uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4

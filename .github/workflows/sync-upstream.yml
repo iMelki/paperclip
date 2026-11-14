@@ -1,39 +1,120 @@
 name: Sync from Upstream
 
+# Dispatch only. The weekly schedule was removed: it ran on a GitHub-hosted
+# runner, and the rf-paperclip box runner refuses schedule events (pc-guard).
+# Upstream changes enter dev through a draft pull request, then normal promotion.
+# This workflow never updates fork master directly.
 on:
-  schedule:
-    # Every Monday at 04:00 UTC
-    - cron: '0 4 * * 1'
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
+  pull-requests: write
 
 jobs:
   sync:
-    name: Sync fork master with paperclipai/paperclip
-    runs-on: ubuntu-latest
+    name: Prepare upstream draft into dev
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: [rf-paperclip]
+    # The rf-slot job-started hook runs inside this job and its wait counts toward
+    # timeout-minutes: up to 15 min (RF_MEM_WAIT 900s) for free memory plus up to
+    # 30 min (RF_SLOT_TIMEOUT 1800s) for one of the 2 box-wide slots, so 45 min
+    # of hook budget plus 10 min of work.
+    timeout-minutes: 55
     permissions:
       contents: write
+      pull-requests: write
 
     steps:
-      - name: Merge upstream into fork master
-        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+      - name: Open a verified upstream reconcile pull request
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.1.0
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
-            try {
-              await github.rest.repos.mergeUpstream({
-                owner: context.repo.owner,
-                repo:  context.repo.repo,
-                branch: 'master',
+            const upstreamOwner = 'paperclipai';
+            const upstreamRepo = 'paperclip';
+            const upstreamBranch = 'master';
+            const syncBase = 'dev';
+            const { owner, repo } = context.repo;
+            const repository = `${owner}/${repo}`;
+
+            function statusOf(err) {
+              return typeof err?.status === 'number' ? err.status : err?.response?.status;
+            }
+            function errorText(err) {
+              return [err?.message, err?.response?.data?.message].filter(Boolean).join(' ');
+            }
+            const upstreamRef = await github.rest.git.getRef({
+              owner: upstreamOwner, repo: upstreamRepo, ref: `heads/${upstreamBranch}`,
+            });
+            const sha = upstreamRef?.data?.object?.sha;
+            if (!/^[0-9a-f]{40}$/.test(sha ?? '')) throw new Error('Invalid upstream commit identity.');
+            const day = new Date().toISOString().slice(0, 10).replaceAll('-', '');
+            const proposedBranch = `sync/upstream-${day}-${sha.slice(0, 7)}`;
+
+            async function verifyBranch(branch) {
+              if (!/^sync\/upstream-\d{8}-[0-9a-f]{7}$/.test(branch)) {
+                throw new Error('Invalid reconcile branch identity.');
+              }
+              const ref = await github.rest.git.getRef({ owner, repo, ref: `heads/${branch}` });
+              if (ref?.data?.object?.sha !== sha) {
+                throw new Error('Reconcile branch no longer points to the intended upstream commit.');
+              }
+            }
+            async function findExisting(branch) {
+              const pulls = await github.paginate(github.rest.pulls.list, {
+                owner, repo, state: 'open', base: syncBase, per_page: 100,
               });
-              core.info('Upstream sync complete — fork master is up to date.');
+              if (!Array.isArray(pulls)) throw new Error('Incomplete reconcile pull request inventory.');
+              const matches = pulls.filter((pr) => pr.state === 'open' && pr.base?.ref === syncBase &&
+                pr.head?.repo?.full_name === repository && pr.head?.sha === sha &&
+                /^sync\/upstream-\d{8}-[0-9a-f]{7}$/.test(pr.head.ref));
+              if (matches.length > 1) throw new Error('Multiple reconcile pull requests require operator investigation.');
+              if (branch && matches.length && matches[0].head.ref !== branch) return undefined;
+              if (matches.length && matches[0].draft !== true) {
+                throw new Error('Existing reconcile pull request is not a draft; operator review required.');
+              }
+              return matches[0];
+            }
+            const already = await findExisting();
+            if (already) {
+              await verifyBranch(already.head.ref);
+              core.notice(`Reconcile pull request already open: ${already.html_url}`);
+              return;
+            }
+            try {
+              await github.rest.git.createRef({ owner, repo, ref: `refs/heads/${proposedBranch}`, sha });
             } catch (err) {
-              if (err.status === 409) {
-                core.warning('Merge conflict detected. Manual reconciliation required.');
-                core.setFailed('Upstream sync skipped due to conflict — reconcile manually.');
-              } else {
+              if (!(statusOf(err) === 422 && /Reference already exists/i.test(errorText(err)))) throw err;
+            }
+            // Both successful creation and an existing-ref response require the same readback.
+            await verifyBranch(proposedBranch);
+            const body = [
+              'Review the upstream master tip into dev before normal promotion to master.',
+              '',
+              'This draft does not update fork master. Resolve conflicts on the reconcile branch.',
+              '',
+              `Upstream: paperclipai/paperclip@${sha}`,
+            ].join('\n');
+            try {
+              const pr = await github.rest.pulls.create({
+                owner, repo, title: `Sync upstream master (${sha.slice(0, 7)})`,
+                head: proposedBranch, base: syncBase, draft: true, body,
+              });
+              if (pr?.data?.head?.sha !== sha || pr?.data?.head?.repo?.full_name !== repository ||
+                  pr?.data?.head?.ref !== proposedBranch || pr?.data?.base?.ref !== syncBase ||
+                  pr?.data?.draft !== true || pr?.data?.state !== 'open') {
+                throw new Error('Created reconcile pull request identity requires operator investigation.');
+              }
+              core.notice(`Opened draft reconcile pull request: ${pr.data.html_url}`);
+            } catch (err) {
+              if (statusOf(err) === 422 && /No commits between/i.test(errorText(err))) {
+                core.warning('No pull request created; reconcile branch retained without cleanup.');
                 throw err;
               }
+              if (!(statusOf(err) === 422 && /already exists/i.test(errorText(err)))) throw err;
+              await verifyBranch(proposedBranch);
+              const existing = await findExisting(proposedBranch);
+              if (!existing) throw new Error('Existing pull request was not independently verified.');
+              core.notice(`Reconcile pull request already open: ${existing.html_url}`);
             }

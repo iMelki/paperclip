@@ -1,0 +1,4 @@
+# Existing private runner label; keep unknown runner labels rejected.
+self-hosted-runner:
+  labels:
+    - rf-paperclip

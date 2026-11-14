@@ -17,6 +17,7 @@ on:
           - stable
           - beta
           - nightly
+          - canary
         default: stable
       source_ref:
         description: (stable) Commit SHA, branch, or tag to publish as stable
@@ -67,14 +68,20 @@ env:
   NPM_PUBLISH_VERIFY_DELAY_SECONDS: "10"
 
 jobs:
+  # Push to master runs verification only. Publishing a canary is
+  # workflow_dispatch only (channel: canary), matching the master hotfix
+  # 063fc8b4, so a merge to master does not publish npm packages.
   verify_canary:
-    if: github.event_name == 'push'
+    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.channel == 'canary')
     uses: ./.github/workflows/release-verify.yml
     with:
       ref: ${{ github.sha }}
 
   publish_canary:
-    if: github.event_name == 'push'
+    # Stays on GitHub-hosted: npm trusted publishing (OIDC) is not supported
+    # on self-hosted runners. workflow_dispatch only (channel: canary): it
+    # never runs on push.
+    if: github.event_name == 'workflow_dispatch' && inputs.channel == 'canary'
     needs: verify_canary
     runs-on: ubuntu-latest
     timeout-minutes: 90
