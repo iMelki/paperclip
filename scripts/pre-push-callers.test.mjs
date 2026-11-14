@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
-import { chmodSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
-import os from "node:os";
+import { chmodSync, readFileSync, writeFileSync } from "node:fs";
+import { createEphemeralDir } from "./lib/ephemeral-scratch.mjs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import test from "node:test";
@@ -12,7 +12,7 @@ const shCaller = path.join(repoRoot, "scripts/pre-push-check.sh");
 
 function commandAvailable(command) {
   const args = command === "sh" ? ["-c", "exit 0"] : ["--version"];
-  const result = spawnSync(command, args, { windowsHide: true, shell: false });
+  const result = spawnSync(command, args, { stdio: ["ignore", "pipe", "pipe"], timeout: 15000, maxBuffer: 1024 * 1024, killSignal: "SIGKILL", windowsHide: true, shell: false });
   return !result.error && result.status === 0;
 }
 
@@ -23,16 +23,12 @@ const shCommand = [
     : null,
 ].filter(Boolean).find(commandAvailable);
 
-function assertNoTemporaryGateArtifacts(root, logName) {
+function assertRetainedGateArtifacts(root, logName, update) {
   assert.match(readFileSync(path.join(root, logName), "utf8"), /Paperclip/);
-  const temporaryArtifacts = readdirSync(root).filter(
-    (entry) => entry === `${logName}.updates` || entry.startsWith(`${logName}.step-`),
-  );
-  assert.deepEqual(temporaryArtifacts, []);
+  assert.equal(readFileSync(path.join(root, `${logName}.updates`), "utf8"), update);
 }
-
 function withFakeTools(body) {
-  const root = mkdtempSync(path.join(os.tmpdir(), "paperclip-prepush-callers-"));
+  const root = createEphemeralDir({ owner: "paperclip", purpose: "prepushcaller" });
   try {
     const nodeSh = path.join(root, "node");
     const pnpmSh = path.join(root, "pnpm");
@@ -75,7 +71,7 @@ function withFakeTools(body) {
     writeFileSync(path.join(root, "pnpm.cmd"), "@echo off\r\nexit /b 0\r\n");
     return body(root);
   } finally {
-    rmSync(root, { recursive: true, force: true });
+    // Retain the fixture and diagnostics for inspection.
   }
 }
 
@@ -133,7 +129,7 @@ test("PowerShell caller invokes the no-push gate, propagates failures, and passe
     const invoke = (fakeExits, label) => {
       const logName = `${label}.log`;
       let commandArgs = [
-        "-NoProfile",
+        "-NoProfile", "-NonInteractive",
         "-File",
         psCaller,
         "-RemoteName",
@@ -156,7 +152,7 @@ test("PowerShell caller invokes the no-push gate, propagates failures, and passe
             "",
           ].join("\n"),
         );
-        commandArgs = ["-NoProfile", "-File", wrapper];
+        commandArgs = ["-NoProfile", "-NonInteractive", "-File", wrapper];
       }
       const result = spawnSync(
         "pwsh",
@@ -166,11 +162,11 @@ test("PowerShell caller invokes the no-push gate, propagates failures, and passe
           encoding: "utf8",
           env: fakeEnvironment(fakeBin, fakeExits),
           input: update,
-          windowsHide: true,
+          timeout: 15000, maxBuffer: 1024 * 1024, killSignal: "SIGKILL", windowsHide: true,
           shell: false,
         },
       );
-      assertNoTemporaryGateArtifacts(fakeBin, logName);
+      assertRetainedGateArtifacts(fakeBin, logName, update);
       return result;
     };
     const noPushFailure = invoke(
@@ -198,13 +194,13 @@ test("PowerShell caller invokes the no-push gate, propagates failures, and passe
 
     const missingLocation = spawnSync(
       "pwsh",
-      ["-NoProfile", "-File", psCaller, "-RemoteName", "origin"],
+      ["-NoProfile", "-NonInteractive", "-File", psCaller, "-RemoteName", "origin"],
       {
         cwd: repoRoot,
         encoding: "utf8",
         env: fakeEnvironment(fakeBin),
         input: update,
-        windowsHide: true,
+        timeout: 15000, maxBuffer: 1024 * 1024, killSignal: "SIGKILL", windowsHide: true,
         shell: false,
       },
     );
@@ -226,10 +222,10 @@ test("POSIX caller invokes the no-push gate, propagates failures, and passes aft
         encoding: "utf8",
         env: fakeEnvironment(fakeBin, { ...fakeExits, logPath }),
         input: update,
-        windowsHide: true,
+        timeout: 15000, maxBuffer: 1024 * 1024, killSignal: "SIGKILL", windowsHide: true,
         shell: false,
       });
-      assertNoTemporaryGateArtifacts(fakeBin, logName);
+      assertRetainedGateArtifacts(fakeBin, logName, update);
       return result;
     };
     const noPushFailure = invoke({ noPushExit: 17 }, "sh-no-push-fail");
@@ -258,7 +254,7 @@ test("POSIX caller invokes the no-push gate, propagates failures, and passes aft
       encoding: "utf8",
       env: fakeEnvironment(fakeBin),
       input: update,
-      windowsHide: true,
+      timeout: 15000, maxBuffer: 1024 * 1024, killSignal: "SIGKILL", windowsHide: true,
       shell: false,
     });
     assert.notEqual(missingLocation.status, 0);

@@ -183,8 +183,33 @@ test("secret scanner CLI rejects an option-shaped required value", () => {
   const result = spawnSync(
     process.execPath,
     [scannerScript, "--updates-file", "--repo-root"],
-    { cwd: repoRoot, encoding: "utf8", windowsHide: true, shell: false },
+    { cwd: repoRoot, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"],
+      timeout: 15000, maxBuffer: 1024 * 1024, killSignal: "SIGKILL", windowsHide: true, shell: false },
   );
   assert.equal(result.status, 2);
   assert.match(result.stderr, /--updates-file requires a value/);
+});
+
+test("outgoing scanner bounds captured children and retains failure diagnostics", () => {
+  const scans = [{ localRef: "HEAD", remoteRef: "refs/heads/topic", args: ["--range", `${A}..${B}`] }];
+  for (const code of ["ETIMEDOUT", "ENOBUFS"]) {
+    const output = [];
+    const errors = [];
+    const status = executePrePushSecretScans(scans, {
+      spawn: (_command, _args, options) => {
+        assert.deepEqual(options.stdio, ["ignore", "pipe", "pipe"]);
+        assert.equal(options.windowsHide, true);
+        assert.equal(options.shell, false);
+        assert.equal(options.timeout, 130000);
+        assert.equal(options.maxBuffer, 8 * 1024 * 1024);
+        assert.equal(options.killSignal, "SIGKILL");
+        return { error: Object.assign(new Error(code), { code }), stdout: "partial out", stderr: "partial err" };
+      },
+      log: (message) => output.push(message), error: (message) => errors.push(message),
+    });
+    assert.equal(status, 2);
+    assert.ok(output.includes("partial out"));
+    assert.ok(errors.includes("partial err"));
+    assert.ok(errors.some((message) => message.includes(code)));
+  }
 });

@@ -1,9 +1,7 @@
 import assert from "node:assert/strict";
 import {
   mkdirSync,
-  mkdtempSync,
   realpathSync,
-  rmSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
@@ -11,6 +9,7 @@ import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 import test from "node:test";
+import { createEphemeralDir } from "./lib/ephemeral-scratch.mjs";
 
 import {
   TestSelectionIntegrityError,
@@ -21,7 +20,7 @@ import {
 } from "./pre-push-test-selection.mjs";
 
 function withFixture(run) {
-  const temporaryRoot = mkdtempSync(path.join(os.tmpdir(), "paperclip-pre-push-selector-"));
+  const temporaryRoot = createEphemeralDir({ owner: "paperclip", purpose: "selectortest" });
   const repoRoot = realpathSync(temporaryRoot);
   const trackedFiles = new Set();
   const write = (relativePath, contents = "") => {
@@ -33,7 +32,7 @@ function withFixture(run) {
   try {
     return run({ repoRoot, trackedFiles, write });
   } finally {
-    rmSync(temporaryRoot, { recursive: true, force: true });
+    // Preserve the fixture for the existing scratch custodian.
   }
 }
 
@@ -414,9 +413,12 @@ test("board integration declarations select their concrete contract suites and r
     trackedFiles.delete(lifecycle);
     const untracked = selectPrePushTests({ repoRoot, trackedFiles, changedFiles: [source] });
     assert.match(untracked.selectionErrors.join("\n"), /selected test is not tracked/);
-    rmSync(path.join(repoRoot, lifecycle));
-    const missing = selectPrePushTests({ repoRoot, trackedFiles, changedFiles: [source] });
-    assert.match(missing.selectionErrors.join("\n"), /declared deterministic test is not a regular file/);
+    withFixture(({ repoRoot: missingRoot, trackedFiles: missingTracked, write: missingWrite }) => {
+      missingWrite(source, "export const dispatch = true;\n");
+      missingWrite(pure, "export {};\n");
+      const missing = selectPrePushTests({ repoRoot: missingRoot, trackedFiles: missingTracked, changedFiles: [source] });
+      assert.match(missing.selectionErrors.join("\n"), /declared deterministic test is not a regular file/);
+    });
   });
 });
 
@@ -433,5 +435,24 @@ test("new named coordinator and existing-reference tests are selected without a 
     const unknown = selectPrePushTests({ repoRoot, trackedFiles, changedFiles: ["server/src/services/future-unmapped-feature.ts"] });
     assert.match(unknown.selectionErrors.join("\n"), /lacks a deterministic sibling or declared test/);
     assert.deepEqual(unknown.hostedCiFiles, []);
+  });
+});
+
+test("selects the declared lint-changed-workflows node suite", () => {
+  withFixture(({ repoRoot, trackedFiles, write }) => {
+    write("scripts/lint-changed-workflows.mjs", "export const lint = true;\n");
+    write("scripts/lint-changed-workflows.test.mjs", "test('lint', () => {});\n");
+    write("scripts/unrelated.test.mjs", "test('other', () => {});\n");
+    const result = selectPrePushTests({
+      repoRoot,
+      changedFiles: ["scripts/lint-changed-workflows.mjs"],
+      trackedFiles,
+    });
+    assert.deepEqual(result.nodeTestFiles, ["scripts/lint-changed-workflows.test.mjs"]);
+    assert.deepEqual(result.coverage[0].declaredTests, [
+      "scripts/lint-changed-workflows.test.mjs",
+    ]);
+    assert.deepEqual(result.coverage[0].sourceFile, "scripts/lint-changed-workflows.mjs");
+    assert.deepEqual(result.selectionErrors, []);
   });
 });

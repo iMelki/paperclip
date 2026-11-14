@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
-import { tmpdir } from "node:os";
+import { createEphemeralDir } from "./lib/ephemeral-scratch.mjs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
@@ -11,7 +11,9 @@ const require = createRequire(import.meta.url);
 const core = require("./check-forbidden-tokens-core.cjs");
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
-const git = (cwd, ...args) => execFileSync("git", args, { cwd, encoding: "utf8" });
+const git = (cwd, ...args) => execFileSync("git", args, { cwd, encoding: "utf8",
+  stdio: ["ignore", "pipe", "pipe"], windowsHide: true, timeout: 15000,
+  maxBuffer: 1024 * 1024, killSignal: "SIGKILL" });
 const noUser = {
   userInfo: () => {
     throw new Error("no user");
@@ -59,13 +61,12 @@ test("generic dynamic usernames are not tokens, in any case", () => {
 
 test("a non-generic username of at least 4 characters stays a dynamic token", () => {
   assert.deepEqual(core.resolveDynamicForbiddenTokens({
-    USER: "milky", USERNAME: "pc", LOGNAME: "ubuntu",
-  }, noUser), ["milky"]);
+    USER: "sampleuser", USERNAME: "pc", LOGNAME: "ubuntu",
+  }, noUser), ["sampleuser"]);
 });
 
 test("private and tracked tokens stay substrings when the same spelling is ignored as a username", (t) => {
-  const root = mkdtempSync(path.join(tmpdir(), "forbidden-tokens-literal-"));
-  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const root = createEphemeralDir({ owner: "paperclip", purpose: "forbiddentest" });
   git(root, "init", "-q");
   const privateFile = path.join(root, "private.txt");
   const trackedFile = path.join(root, "tracked.txt");
@@ -90,17 +91,16 @@ test("private and tracked tokens stay substrings when the same spelling is ignor
 });
 
 test("dynamic usernames match whole words and ignore substring hits", (t) => {
-  const root = mkdtempSync(path.join(tmpdir(), "forbidden-tokens-boundary-"));
-  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const root = createEphemeralDir({ owner: "paperclip", purpose: "forbiddentest" });
   git(root, "init", "-q");
   const embedded = path.join(root, "embedded.txt");
   const whole = path.join(root, "whole.txt");
-  writeFileSync(embedded, "sandbox checkbox milkydocs\n");
+  writeFileSync(embedded, "sandbox checkbox sampleuserdocs\n");
   writeFileSync(whole, "clean\n");
   git(root, "add", "embedded.txt", "whole.txt");
-  const env = { USER: "milky" };
+  const env = { USER: "sampleuser" };
   const scan = core.resolveForbiddenTokenScan([], env, noUser);
-  assert.deepEqual(scan.wordBoundaryTokens, ["milky"]);
+  assert.deepEqual(scan.wordBoundaryTokens, ["sampleuser"]);
   const check = () => core.runForbiddenTokenCheck({
     repoRoot: root,
     tokens: scan.tokens,
@@ -108,10 +108,10 @@ test("dynamic usernames match whole words and ignore substring hits", (t) => {
     log: () => {},
     error: () => {},
   });
-  assert.equal(check(), 0, "milky inside milkydocs must not match");
-  writeFileSync(whole, "the milky host\n");
+  assert.equal(check(), 0, "sampleuser inside sampleuserdocs must not match");
+  writeFileSync(whole, "the sampleuser host\n");
   assert.equal(check(), 1, "a whole-word username must match");
-  writeFileSync(whole, "MILKY-latest\n");
+  writeFileSync(whole, "SAMPLEUSER-latest\n");
   assert.equal(check(), 1, "a hyphen is a word boundary and the match is case-insensitive");
   writeFileSync(whole, "clean\n");
   assert.equal(check(), 0);
@@ -123,8 +123,7 @@ test("dynamic usernames match whole words and ignore substring hits", (t) => {
 });
 
 test("explicit service-account and structural tokens still block real tracked content", (t) => {
-  const root = mkdtempSync(path.join(tmpdir(), "forbidden-tokens-explicit-"));
-  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const root = createEphemeralDir({ owner: "paperclip", purpose: "forbiddentest" });
   git(root, "init", "-q");
   const privateFile = path.join(root, ".git", "hooks", "forbidden-tokens.txt");
   const trackedFile = path.join(root, "structural-patterns.txt");
@@ -203,10 +202,9 @@ test("a dot in a token does not match any character", () => {
 // ---------------------------------------------------------------------------
 test("the private token list is found from inside a linked worktree", (t) => {
   const forbiddenValue = "example-forbidden-name";
-  const root = mkdtempSync(path.join(tmpdir(), "forbidden-tokens-worktree-"));
+  const root = createEphemeralDir({ owner: "paperclip", purpose: "forbiddentest" });
   const mainDir = path.join(root, "main");
   const worktreeDir = path.join(root, "worktree");
-  t.after(() => rmSync(root, { recursive: true, force: true }));
 
   mkdirSync(mainDir);
   git(mainDir, "init", "-q", "-b", "main");
@@ -290,8 +288,7 @@ test("the tracked list is read in addition to the private one", () => {
 
 // Proves the mechanism is live rather than merely present.
 test("patterns are loaded from a tracked list file", (t) => {
-  const dir = mkdtempSync(path.join(tmpdir(), "forbidden-tokens-tracked-"));
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const dir = createEphemeralDir({ owner: "paperclip", purpose: "forbiddentest" });
 
   const trackedFile = path.join(dir, "forbidden-tokens.txt");
   const missingPrivateFile = path.join(dir, "does-not-exist.txt");
@@ -317,4 +314,170 @@ test("the tracked list is excluded from its own scan", () => {
   // "excluded", not "the string was never there".
   const onDisk = readFileSync(path.resolve(repoRoot, "scripts/forbidden-tokens.txt"), "utf8");
   assert.ok(onDisk.includes(selfOnly), "control: the phrase is really in the tracked list");
+});
+
+test("Unicode case folding keeps match and neighbor offsets aligned", () => {
+  assert.equal(core.hasWordBoundaryMatch("İ alpha", "alpha"), true);
+  assert.equal(core.hasWordBoundaryMatch("i\u0307alpha", "İalpha"), true);
+  assert.equal(core.hasWordBoundaryMatch("İalphadocs", "İalpha"), false);
+  assert.equal(core.hasWordBoundaryMatch("xalpha", "alpha"), false);
+  assert.equal(core.hasWordBoundaryMatch("alpha_", "alpha"), false);
+  assert.equal(core.hasWordBoundaryMatch("alpha-latest", "alpha"), true);
+});
+
+test("dynamic filtering requests text while literal and default producer calls retain their contract", () => {
+  const originalArgv = ["grep", "-inF", "--no-color", "--", "alpha", "--", ":!pnpm-lock.yaml", ":!.git", ":!scripts/forbidden-tokens.txt"];
+  for (const dynamic of [true, false]) {
+    let observed;
+    const exit = core.runForbiddenTokenCheck({
+      repoRoot: "/inert-fixture", tokens: ["alpha"], wordBoundaryTokens: dynamic ? ["alpha"] : [],
+      grep: (request) => {
+        assert.equal(request.textOutput, dynamic);
+        const result = core.gitGrepToken({ ...request, exec: (exe, argv) => {
+          assert.equal(exe, "git");
+          observed = Array.from(argv);
+          return dynamic ? "1:alphadocs\n" : "file.txt:1:alphadocs\n";
+        } });
+        assert.equal(Object.hasOwn(result, "textOutput"), dynamic);
+        if (dynamic) assert.equal(result.textOutput, true);
+        return result;
+      }, log: () => {}, error: () => {},
+    });
+    assert.equal(exit, dynamic ? 0 : 1);
+    assert.deepEqual(observed, dynamic ? ["grep", "--text", "-h", "--no-column", "--no-heading", "--no-break", ...originalArgv.slice(1)] : originalArgv);
+  }
+  let defaultArgv;
+  const result = core.gitGrepToken({ token: "alpha", repoRoot: "/inert-fixture", exec: (_exe, argv) => {
+    defaultArgv = Array.from(argv);
+    return "file.txt:1:alpha\n";
+  } });
+  assert.deepEqual(defaultArgv, originalArgv);
+  assert.equal(Object.hasOwn(result, "textOutput"), false);
+});
+
+test("unclassified positive output is never discarded as an embedded dynamic hit", () => {
+  for (const stdout of [
+    "Binary file fixture.bin matches\n",
+    "Binary file notes:1:alphadocs.bin matches\n",
+    "Avis alphadocs.bin\n",
+    "file.txt:1:alphadocs\n",
+    "alphadocs\n",
+  ]) {
+    assert.equal(core.runForbiddenTokenCheck({
+      repoRoot: "/inert-fixture", tokens: ["alpha"], wordBoundaryTokens: ["alpha"],
+      grep: () => ({ status: 0, stdout }), log: () => {}, error: () => {},
+    }), 1, stdout);
+  }
+});
+
+test("empty positive output and failed probes stay unverified", () => {
+  for (const status of [0, 128, null]) {
+    assert.equal(core.runForbiddenTokenCheck({
+      repoRoot: "/inert-fixture", tokens: ["alpha"], wordBoundaryTokens: ["alpha"],
+      grep: () => ({ status, stdout: "" }), log: () => {}, error: () => {},
+    }), 1);
+  }
+});
+
+test("original ASCII boundary policy survives non-ASCII lowercase neighbors", () => {
+  assert.equal(core.hasWordBoundaryMatch("alphaİ", "alpha"), true);
+  assert.equal(core.hasWordBoundaryMatch("Kalpha", "alpha"), true);
+  assert.equal(core.hasWordBoundaryMatch("alphai", "alpha"), false);
+  assert.equal(core.hasWordBoundaryMatch("kalpha", "alpha"), false);
+});
+
+test("original offset mapping handles expansion astral and contextual casing", () => {
+  assert.equal(core.hasWordBoundaryMatch("İ alpha", "alpha"), true);
+  assert.equal(core.hasWordBoundaryMatch("i\u0307alpha", "İalpha"), true);
+  assert.equal(core.hasWordBoundaryMatch("😀alpha", "alpha"), true);
+  assert.equal(core.hasWordBoundaryMatch("𐐀alpha", "𐐨alpha"), true);
+  assert.equal(core.hasWordBoundaryMatch("a𐐀alpha", "𐐨alpha"), false);
+  assert.equal(core.hasWordBoundaryMatch("İ ALPHAΟΣ", "alphaος"), true);
+  assert.equal(core.hasWordBoundaryMatch("xALPHAΟΣ", "alphaος"), false);
+  assert.equal(core.hasWordBoundaryMatch("aaaaaa aaaa", "aaaa"), true);
+});
+
+test("dynamic findings never print matched payload token path or terminal controls", () => {
+  for (const trusted of [true, false]) {
+    const output = [];
+    const payload = "SYNTHETIC_SECRET_MARKER\0\u001b[31m /SYNTHETIC_PRIVATE_PATH alpha\u007f";
+    const exit = core.runForbiddenTokenCheck({
+      repoRoot: "/inert-fixture", tokens: ["alpha"], wordBoundaryTokens: ["alpha"],
+      grep: (request) => trusted
+        ? core.gitGrepToken({ ...request, exec: () => `file.txt:1:${payload}\n` })
+        : { status: 0, stdout: `Binary notice ${payload}\n` },
+      log: (message) => output.push(message), error: (message) => output.push(message),
+    });
+    assert.equal(exit, 1);
+    const joined = output.join("\n");
+    for (const forbidden of ["SYNTHETIC_SECRET_MARKER", "SYNTHETIC_PRIVATE_PATH", "file.txt", "alpha", "\0", "\u001b", "\u007f"]) {
+      assert.equal(joined.includes(forbidden), false);
+    }
+    assert.equal(output.length, 3);
+  }
+});
+
+test("dynamic diagnostics are fixed bounded while literal findings retain output", () => {
+  const dynamicOutput = [];
+  const tokens = ["alpha", "bravo", "charlie"];
+  assert.equal(core.runForbiddenTokenCheck({
+    repoRoot: "/inert-fixture", tokens, wordBoundaryTokens: tokens,
+    grep: (request) => core.gitGrepToken({ ...request, exec: () => `file.txt:1:${request.token}\n`.repeat(20) }),
+    log: (message) => dynamicOutput.push(message), error: (message) => dynamicOutput.push(message),
+  }), 1);
+  assert.equal(dynamicOutput.length, 3);
+  assert.equal(dynamicOutput.filter((message) => message === "  A dynamic forbidden-token finding was detected.").length, 1);
+  for (const token of tokens) assert.equal(dynamicOutput.join("\n").includes(token), false);
+  const literalOutput = [];
+  assert.equal(core.runForbiddenTokenCheck({
+    repoRoot: "/inert-fixture", tokens: ["alpha"],
+    grep: () => ({ status: 0, stdout: "file.txt:1:alphadocs\n" }),
+    log: () => {}, error: (message) => literalOutput.push(message),
+  }), 1);
+  assert.ok(literalOutput.includes("  file.txt:1:alphadocs"));
+});
+
+// Production-shaped regressions use real Git and retained private fixtures.
+function fixture(name, content) {
+  const root = createEphemeralDir({ owner: "paperclip", purpose: "forbiddengit" });
+  git(root, "init");
+  writeFileSync(path.join(root, name), content);
+  git(root, "add", "--", name);
+  return root; // Retained private fixture; no deletion or external remote.
+}
+function scan(root, dynamic = true) {
+  return core.runForbiddenTokenCheck({ repoRoot: root, tokens: ["alpha"],
+    wordBoundaryTokens: dynamic ? ["alpha"] : [], log: () => {}, error: () => {} });
+}
+test("real Git ignores token in filename and embedded dynamic contents", () => {
+  const root = fixture("alpha-file.txt", "alphadocs\n");
+  assert.equal(scan(root), 0);
+  assert.equal(scan(root, false), 1);
+});
+test("real Git catches standalone dynamic token after expanding Unicode case", () => {
+  const root = fixture("unicode.txt", "İ alphadocs\nİ alpha\n");
+  assert.equal(scan(root), 1);
+});
+test("real Git preserves embedded Unicode-prefix nonfinding", () => {
+  const root = fixture("unicode-alpha.txt", "İ alphadocs\n");
+  assert.equal(scan(root), 0);
+});
+test("real Git framing overrides color, column, heading and break config", () => {
+  const root = fixture("alpha-colon.txt", "prefix:alphadocs\n");
+  for (const [key, value] of [["color.grep", "always"], ["grep.column", "true"],
+    ["grep.heading", "true"], ["grep.break", "true"]]) git(root, "config", key, value);
+  const result = core.gitGrepToken({ token: "alpha", repoRoot: root, textOutput: true });
+  assert.equal(result.stdout, "1:prefix:alphadocs\n");
+  assert.equal(scan(root), 0);
+  writeFileSync(path.join(root, "alpha-colon.txt"), "prefix:alpha\n");
+  assert.equal(scan(root), 1);
+});
+test("real Git binary NUL remains blocking instead of being silently filtered", () => {
+  const root = fixture("binary.bin", Buffer.from("prefix\0alpha\0tail\n"));
+  assert.equal(scan(root), 1);
+});
+test("real Git no-match succeeds but missing repository fails closed", () => {
+  const root = fixture("safe.txt", "no forbidden value\n");
+  assert.equal(scan(root), 0);
+  assert.equal(scan(path.join(root, "missing")), 1);
 });

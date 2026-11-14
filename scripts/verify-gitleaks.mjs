@@ -44,11 +44,14 @@ if (process.env.PAPERCLIP_GITLEAKS_BIN_ARGS_JSON) {
   }
 }
 
-function run(commandArgs, stdio = "pipe") {
+function run(commandArgs) {
   return spawnSync(binary, [...binaryPrefix, ...commandArgs], {
     cwd: process.cwd(),
     encoding: "utf8",
-    stdio,
+    stdio: ["ignore", "pipe", "pipe"],
+    timeout: 120_000,
+    maxBuffer: 8 * 1024 * 1024,
+    killSignal: "SIGKILL",
     windowsHide: true,
   });
 }
@@ -85,7 +88,9 @@ if (staged) {
 }
 scanArgs.push(".");
 
-const scanResult = run(scanArgs, "inherit");
+const scanResult = run(scanArgs);
+if (scanResult.stdout) process.stdout.write(scanResult.stdout);
+if (scanResult.stderr) process.stderr.write(scanResult.stderr);
 if (scanResult.error) {
   console.error(`Gitleaks scan could not start: ${scanResult.error.message}`);
   process.exit(3);

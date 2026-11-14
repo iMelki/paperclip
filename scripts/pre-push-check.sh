@@ -48,10 +48,7 @@ UPDATES_FILE="${LOG_FILE}.updates"
 cleanup() {
   CLEANUP_STATUS=$?
   trap - 0 HUP INT TERM
-  rm -f "$UPDATES_FILE" || :
-  if [ -n "${STEP_LOG-}" ]; then
-    rm -f "$STEP_LOG" || :
-  fi
+  # Retain the exact update input and step logs for diagnosis.
   exit "$CLEANUP_STATUS"
 }
 trap cleanup 0
