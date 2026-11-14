@@ -26,7 +26,7 @@ const TRACKED_TOKENS_FILE = "scripts/forbidden-tokens.txt";
  *
  * Passing argv removes the shell from the path entirely, so no quoting applies.
  */
-function gitGrepToken({ token, repoRoot, exec = execFileSync }) {
+function gitGrepToken({ token, repoRoot, exec = execFileSync, textOutput = false }) {
   try {
     const stdout = exec(
       "git",
@@ -46,6 +46,7 @@ function gitGrepToken({ token, repoRoot, exec = execFileSync }) {
       // every commit by matching the line that declares it.
       [
         "grep",
+        ...(textOutput ? ["--text", "-h", "--no-column", "--no-heading", "--no-break"] : []),
         "-inF",
         "--no-color",
         "--",
@@ -58,7 +59,10 @@ function gitGrepToken({ token, repoRoot, exec = execFileSync }) {
       {
         encoding: "utf8",
         cwd: repoRoot,
-        stdio: ["pipe", "pipe", "pipe"],
+        stdio: ["ignore", "pipe", "pipe"],
+        windowsHide: true,
+        timeout: 15000,
+        killSignal: "SIGKILL",
         // A widely-present token can match thousands of lines. Node's default
         // 1 MB stdout buffer overflows with ENOBUFS and no exit status, which the
         // old catch-all also read as "clean" -- the same fail-open shape as the
@@ -67,7 +71,8 @@ function gitGrepToken({ token, repoRoot, exec = execFileSync }) {
         maxBuffer: 64 * 1024 * 1024,
       },
     );
-    return { status: 0, stdout: stdout ?? "" };
+    // Only requested --text output is evidence for dynamic boundary filtering.
+    return { status: 0, stdout: stdout ?? "", ...(textOutput ? { textOutput: true } : {}) };
   } catch (err) {
     // git grep exits 1 for "no matches" -- the only non-zero we may ignore.
     // Anything else (128 bad pathspec, ENOENT, killed) is an error we must not
@@ -126,13 +131,36 @@ function hasWordBoundaryMatch(text, token) {
   if (!needle) return false;
   const lowerHaystack = haystack.toLowerCase();
   const lowerNeedle = needle.toLowerCase();
+  if (!lowerHaystack.includes(lowerNeedle)) return false;
+
+  // Whole-string casing keeps contextual mappings. Map its UTF-16 positions
+  // back to original code-point spans; the ASCII neighbor policy is unchanged.
+  let mappedLength = 0;
+  for (const character of haystack) mappedLength += character.toLowerCase().length;
+  if (mappedLength !== lowerHaystack.length) return true;
+  const startCursor = { originalStart: 0, originalEnd: 0, foldedEnd: 0 };
+  const endCursor = { originalStart: 0, originalEnd: 0, foldedEnd: 0 };
+  const locate = (index, cursor) => {
+    // Each cursor only advances: no repeated prefix lowering or offset arrays.
+    while (cursor.foldedEnd <= index) {
+      if (cursor.originalEnd >= haystack.length) return null;
+      cursor.originalStart = cursor.originalEnd;
+      const point = haystack.codePointAt(cursor.originalStart);
+      cursor.originalEnd += point > 0xffff ? 2 : 1;
+      cursor.foldedEnd += haystack.slice(cursor.originalStart, cursor.originalEnd).toLowerCase().length;
+    }
+    return cursor;
+  };
   let from = 0;
   while (from <= lowerHaystack.length - lowerNeedle.length) {
     const index = lowerHaystack.indexOf(lowerNeedle, from);
     if (index < 0) return false;
-    const before = index > 0 ? haystack[index - 1] : "";
-    const afterIndex = index + needle.length;
-    const after = afterIndex < haystack.length ? haystack[afterIndex] : "";
+    const start = locate(index, startCursor);
+    const end = locate(index + lowerNeedle.length - 1, endCursor);
+    // An uncertain mapping cannot prove that a reported literal is embedded.
+    if (!start || !end) return true;
+    const before = start.originalStart > 0 ? haystack[start.originalStart - 1] : "";
+    const after = end.originalEnd < haystack.length ? haystack[end.originalEnd] : "";
     if (!isWordChar(before) && !isWordChar(after)) return true;
     from = index + 1;
   }
@@ -140,10 +168,17 @@ function hasWordBoundaryMatch(text, token) {
 }
 
 function keepWordBoundaryLines(stdout, token) {
-  return stdout
-    .split("\n")
-    .filter((line) => line.trim() && hasWordBoundaryMatch(line, token))
-    .join("\n");
+  // -h removes filenames; -n leaves decimal line numbers. NUL bytes or
+  // malformed records are ambiguous and must remain blocking.
+  if (stdout.includes("\0")) return stdout;
+  return stdout.split("\n").filter((line) => {
+    if (!line.trim()) return false;
+    const match = /^([1-9][0-9]*):(.*)$/.exec(line);
+    if (!match) return true;
+    const content = match[2];
+    if (!content.toLowerCase().includes(String(token).toLowerCase())) return true;
+    return hasWordBoundaryMatch(content, token);
+  }).join("\n");
 }
 
 function readForbiddenTokensFile(tokensFile) {
@@ -199,10 +234,11 @@ function runForbiddenTokenCheck({
 
   const boundaryKeys = new Set(wordBoundaryTokens.map((token) => token.toLowerCase()));
   let found = false;
+  let dynamicReported = false;
   let broken = false;
 
   for (const token of tokens) {
-    const result = grep({ token, repoRoot });
+    const result = grep({ token, repoRoot, textOutput: boundaryKeys.has(token.toLowerCase()) });
     const status = result.status;
     let stdout = result.stdout ?? "";
 
@@ -217,8 +253,17 @@ function runForbiddenTokenCheck({
       continue;
     }
 
-    if (status === 0 && stdout.trim() && boundaryKeys.has(token.toLowerCase())) {
-      stdout = keepWordBoundaryLines(stdout, token);
+    if (status === 0 && boundaryKeys.has(token.toLowerCase())) {
+      if (!stdout.trim()) {
+        broken = true;
+        error("ERROR: forbidden-token scan returned a positive result without classifiable output.");
+        continue;
+      }
+      // Only the --text producer establishes text-output evidence. Injected
+      // or otherwise unclassified positive output must not be discarded.
+      if (result.textOutput === true) {
+        stdout = keepWordBoundaryLines(stdout, token);
+      }
     }
 
     if (status === 0 && stdout.trim()) {
@@ -226,8 +271,13 @@ function runForbiddenTokenCheck({
         error("ERROR: Forbidden tokens found in tracked files:\n");
       }
       found = true;
-      for (const line of stdout.trim().split("\n")) {
-        error(`  ${line}`);
+      if (boundaryKeys.has(token.toLowerCase())) {
+        if (!dynamicReported) error("  A dynamic forbidden-token finding was detected.");
+        dynamicReported = true;
+      } else {
+        for (const line of stdout.trim().split("\n")) {
+          error(`  ${line}`);
+        }
       }
     }
   }
@@ -267,9 +317,11 @@ function runForbiddenTokenCheck({
  * `.git` from a main checkout and from every linked worktree alike.
  */
 function resolveRepoPaths(exec = execSync) {
-  const repoRoot = exec("git rev-parse --show-toplevel", { encoding: "utf8" }).trim();
+  const options = { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"],
+    windowsHide: true, timeout: 15000, killSignal: "SIGKILL", maxBuffer: 1024 * 1024 };
+  const repoRoot = exec("git rev-parse --show-toplevel", options).trim();
   const gitCommonDir = exec("git rev-parse --git-common-dir", {
-    encoding: "utf8",
+    ...options,
     cwd: repoRoot,
   }).trim();
   const tokensFile = resolve(repoRoot, gitCommonDir, "hooks/forbidden-tokens.txt");
