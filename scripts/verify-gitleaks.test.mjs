@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { readFileSync, writeFileSync } from "node:fs";
+import { createEphemeralDir } from "./lib/ephemeral-scratch.mjs";
 import { join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -9,7 +9,7 @@ import { fileURLToPath } from "node:url";
 const verifier = fileURLToPath(new URL("./verify-gitleaks.mjs", import.meta.url));
 
 function createFakeGitleaks({ version = "8.30.1", scanExit = 0 } = {}) {
-  const root = mkdtempSync(join(tmpdir(), "paperclip-gitleaks-test-"));
+  const root = createEphemeralDir({ owner: "paperclip", purpose: "gitleakstest" });
   const argsLog = join(root, "args.log");
   const shim = join(root, "fake-gitleaks.mjs");
   writeFileSync(
@@ -22,6 +22,8 @@ function createFakeGitleaks({ version = "8.30.1", scanExit = 0 } = {}) {
       "  process.exit(0);",
       "}",
       `appendFileSync(${JSON.stringify(argsLog)}, [command, ...args].join(" ") + "\\n");`,
+      'console.log("synthetic scanner output");',
+      'console.error("synthetic scanner diagnostic");',
       `process.exit(${scanExit});`,
     ].join("\n"),
   );
@@ -39,6 +41,10 @@ function verify(mode, fake) {
       PAPERCLIP_GITLEAKS_BIN: fake.binary,
       PAPERCLIP_GITLEAKS_BIN_ARGS_JSON: JSON.stringify(fake.prefix),
     },
+    stdio: ["ignore", "pipe", "pipe"],
+    timeout: 15000,
+    maxBuffer: 1024 * 1024,
+    killSignal: "SIGKILL",
     windowsHide: true,
   });
 }
@@ -104,4 +110,20 @@ test("distinguishes findings from scanner infrastructure errors", () => {
   const toolError = verify("--history", createFakeGitleaks({ scanExit: 7 }));
   assert.equal(toolError.status, 3);
   assert.match(toolError.stderr, /tool\/runtime error/i);
+});
+
+test("retains scanner output on successful and failed scans", () => {
+  for (const scanExit of [0, 2, 7]) {
+    const result = verify("--staged", createFakeGitleaks({ scanExit }));
+    assert.match(result.stdout, /synthetic scanner output/);
+    assert.match(result.stderr, /synthetic scanner diagnostic/);
+  }
+});
+
+test("fails closed when the scanner executable cannot start", () => {
+  const fake = createFakeGitleaks();
+  fake.binary = join(fake.prefix[0], "missing-executable");
+  const result = verify("--staged", fake);
+  assert.equal(result.status, 3);
+  assert.match(result.stderr, /required but could not be started/);
 });

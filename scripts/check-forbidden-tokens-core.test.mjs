@@ -59,8 +59,8 @@ test("generic dynamic usernames are not tokens, in any case", () => {
 
 test("a non-generic username of at least 4 characters stays a dynamic token", () => {
   assert.deepEqual(core.resolveDynamicForbiddenTokens({
-    USER: "milky", USERNAME: "pc", LOGNAME: "ubuntu",
-  }, noUser), ["milky"]);
+    USER: "sampleuser", USERNAME: "pc", LOGNAME: "ubuntu",
+  }, noUser), ["sampleuser"]);
 });
 
 test("private and tracked tokens stay substrings when the same spelling is ignored as a username", (t) => {
@@ -95,12 +95,12 @@ test("dynamic usernames match whole words and ignore substring hits", (t) => {
   git(root, "init", "-q");
   const embedded = path.join(root, "embedded.txt");
   const whole = path.join(root, "whole.txt");
-  writeFileSync(embedded, "sandbox checkbox milkydocs\n");
+  writeFileSync(embedded, "sandbox checkbox sampleuserdocs\n");
   writeFileSync(whole, "clean\n");
   git(root, "add", "embedded.txt", "whole.txt");
-  const env = { USER: "milky" };
+  const env = { USER: "sampleuser" };
   const scan = core.resolveForbiddenTokenScan([], env, noUser);
-  assert.deepEqual(scan.wordBoundaryTokens, ["milky"]);
+  assert.deepEqual(scan.wordBoundaryTokens, ["sampleuser"]);
   const check = () => core.runForbiddenTokenCheck({
     repoRoot: root,
     tokens: scan.tokens,
@@ -108,10 +108,10 @@ test("dynamic usernames match whole words and ignore substring hits", (t) => {
     log: () => {},
     error: () => {},
   });
-  assert.equal(check(), 0, "milky inside milkydocs must not match");
-  writeFileSync(whole, "the milky host\n");
+  assert.equal(check(), 0, "sampleuser inside sampleuserdocs must not match");
+  writeFileSync(whole, "the sampleuser host\n");
   assert.equal(check(), 1, "a whole-word username must match");
-  writeFileSync(whole, "MILKY-latest\n");
+  writeFileSync(whole, "SAMPLEUSER-latest\n");
   assert.equal(check(), 1, "a hyphen is a word boundary and the match is case-insensitive");
   writeFileSync(whole, "clean\n");
   assert.equal(check(), 0);

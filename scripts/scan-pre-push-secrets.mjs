@@ -79,10 +79,16 @@ export function executePrePushSecretScans(
     log(`Scanning outgoing secrets for ${scan.localRef} -> ${scan.remoteRef}...`);
     const result = spawn(process.execPath, [verifier, ...scan.args], {
       cwd: repoRoot,
-      stdio: "inherit",
+      stdio: ["ignore", "pipe", "pipe"],
+      encoding: "utf8",
+      timeout: 130_000,
+      maxBuffer: 8 * 1024 * 1024,
+      killSignal: "SIGKILL",
       windowsHide: true,
       shell: false,
     });
+    if (result.stdout) log(result.stdout);
+    if (result.stderr) error(result.stderr);
     if (result.error) {
       error(`ERROR: outgoing secret scan could not start: ${result.error.message}`);
       return 2;

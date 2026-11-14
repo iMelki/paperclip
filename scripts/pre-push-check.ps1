@@ -235,6 +235,7 @@ Write-GateLine -Message "PRE-PUSH CHECK PASSED in ${totalMinutes} min" -Color Gr
 exit 0
 } finally {
   if ($updatesPath -and (Test-Path -LiteralPath $updatesPath)) {
-    Remove-Item -LiteralPath $updatesPath -Force -ErrorAction SilentlyContinue
+    # Retain Git input beside its gate log for diagnosis; no permanent cleanup.
+    Write-Verbose "Retained pre-push input: $updatesPath"
   }
 }

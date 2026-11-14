@@ -2,7 +2,7 @@
 set -eu
 
 if command -v pwsh >/dev/null 2>&1; then
-  pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/pre-commit-check.ps1
+  pwsh -NoProfile -NonInteractive -ExecutionPolicy Bypass -File scripts/pre-commit-check.ps1
 else
   sh scripts/pre-commit-check.sh
 fi
