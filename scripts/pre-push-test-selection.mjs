@@ -208,6 +208,10 @@ const DECLARED_SOURCE_TESTS = new Map([
     "scripts/restore-package-after-publish.mjs",
     ["scripts/package-lifecycle.test.mjs"],
   ],
+  [
+    "scripts/lint-changed-workflows.mjs",
+    ["scripts/lint-changed-workflows.test.mjs"],
+  ],
 ]);
 
 export class TestSelectionIntegrityError extends Error {

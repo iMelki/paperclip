@@ -30,7 +30,7 @@ jobs:
     # Post-merge default-branch builds (push to master, or a manual dispatch
     # on master) run on the isolated box image-build runner (label box-img).
     # Release tag (v*) builds stay on the GitHub-hosted runner.
-    if: github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/master'
+    if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && (github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/tags/nightly/v') || startsWith(github.ref, 'refs/tags/beta/v'))
     runs-on: ${{ github.ref == 'refs/heads/master' && fromJSON('["self-hosted","box-img"]') || 'ubuntu-latest' }}
     timeout-minutes: ${{ github.ref == 'refs/heads/master' && 120 || 60 }}
     steps:
@@ -132,13 +132,6 @@ jobs:
           echo "Disk after cleanup:"
           df -h
 
-      - name: Prune old Docker data (box runner)
-        if: runner.environment == 'self-hosted'
-        run: |
-          set -euo pipefail
-          docker system prune -af --filter "until=168h" || true
-          df -h "$HOME"
-          docker system df || true
 
       - name: Login to GitHub Container Registry
         uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4
@@ -164,6 +157,14 @@ jobs:
           echo "last=${last}" >> "$GITHUB_OUTPUT"
           echo "count=${count}" >> "$GITHUB_OUTPUT"
 
+      # GHCR image paths must be lowercase. github.repository keeps the
+      # owner's original case, so compute the name once and reuse it for
+      # metadata tags and the registry build cache.
+      - name: Set GHCR image name
+        run: |
+          set -euo pipefail
+          echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
+
       # Lane tag mapping: master pushes publish `:canary`, nightly/v* tags
       # publish `:nightly`, and only stable v* tags move `:latest` and the
       # versioned tags. `:sha-<short>` is published on every build.
@@ -171,7 +172,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6
         with:
-          images: ghcr.io/${{ github.repository }}
+          images: ${{ env.IMAGE }}
           tags: |
             type=raw,value=canary,enable=${{ github.ref == 'refs/heads/master' }}
             type=raw,value=nightly,enable=${{ startsWith(github.ref, 'refs/tags/nightly/v') }}
@@ -203,8 +204,8 @@ jobs:
           # evict each other, so most builds ran effectively cold. The cache
           # ref lives in ghcr next to the image and is written only by this
           # workflow (docker.yml runs on master/tag pushes, never on PRs).
-          cache-from: type=registry,ref=ghcr.io/${{ github.repository }}:buildcache
-          cache-to: type=registry,ref=ghcr.io/${{ github.repository }}:buildcache,mode=max
+          cache-from: type=registry,ref=${{ env.IMAGE }}:buildcache
+          cache-to: type=registry,ref=${{ env.IMAGE }}:buildcache,mode=max
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
 
@@ -238,7 +239,7 @@ jobs:
     # Post-merge default-branch builds (push to master, or a manual dispatch
     # on master) run on the isolated box image-build runner (label box-img).
     # Release tag (v*) builds stay on the GitHub-hosted runner.
-    if: github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/master'
+    if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && (github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/tags/nightly/v') || startsWith(github.ref, 'refs/tags/beta/v'))
     runs-on: ${{ github.ref == 'refs/heads/master' && fromJSON('["self-hosted","box-img"]') || 'ubuntu-latest' }}
     timeout-minutes: ${{ github.ref == 'refs/heads/master' && 120 || 60 }}
     steps:
@@ -340,13 +341,6 @@ jobs:
           echo "Disk after cleanup:"
           df -h
 
-      - name: Prune old Docker data (box runner)
-        if: runner.environment == 'self-hosted'
-        run: |
-          set -euo pipefail
-          docker system prune -af --filter "until=168h" || true
-          df -h "$HOME"
-          docker system df || true
 
       - name: Login to GitHub Container Registry
         uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4
@@ -372,6 +366,14 @@ jobs:
           echo "last=${last}" >> "$GITHUB_OUTPUT"
           echo "count=${count}" >> "$GITHUB_OUTPUT"
 
+      # GHCR image paths must be lowercase. github.repository keeps the
+      # owner's original case, so compute the name once and reuse it for
+      # metadata tags and the registry build cache.
+      - name: Set GHCR image name
+        run: |
+          set -euo pipefail
+          echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
+
       # Published under the same lane tag set as the self-hosted image, with a
       # `-cloud` suffix (canary-cloud, nightly-cloud, latest-cloud,
       # <version>-cloud, sha-<short>-cloud).
@@ -379,7 +381,7 @@ jobs:
         id: meta-cloud
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6
         with:
-          images: ghcr.io/${{ github.repository }}
+          images: ${{ env.IMAGE }}
           flavor: |
             suffix=-cloud,onlatest=true
           tags: |
@@ -419,8 +421,8 @@ jobs:
           # Registry-backed BuildKit cache, separate ref from the self-hosted
           # job so the two parallel builds never clobber each other's cache
           # manifest (see the rationale on the job above).
-          cache-from: type=registry,ref=ghcr.io/${{ github.repository }}:buildcache-cloud
-          cache-to: type=registry,ref=ghcr.io/${{ github.repository }}:buildcache-cloud,mode=max
+          cache-from: type=registry,ref=${{ env.IMAGE }}:buildcache-cloud
+          cache-to: type=registry,ref=${{ env.IMAGE }}:buildcache-cloud,mode=max
           tags: ${{ steps.meta-cloud.outputs.tags }}
           labels: ${{ steps.meta-cloud.outputs.labels }}
 

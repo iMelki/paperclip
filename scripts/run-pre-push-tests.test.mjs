@@ -1,17 +1,21 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 import test from "node:test";
+import { createEphemeralDir } from "./lib/ephemeral-scratch.mjs";
 import { fileURLToPath } from "node:url";
 
 import {
   PrePushIntegrityError,
+  TEST_CHILD_MAX_BUFFER,
+  TEST_CHILD_TIMEOUT_MS,
   assertAdvertisedDevAncestor,
   assertPushMatchesWorkingTree,
   executeTestPlan,
+  listChangedWorkflowFiles,
   parsePushUpdates,
   readHeadTrackedFiles,
   resolveOutgoingChangedFiles,
@@ -28,9 +32,13 @@ const runnerScript = path.join(repoRoot, "scripts", "run-pre-push-tests.mjs");
 function runScratchGit(scratchRoot, args) {
   const result = spawnSync("git", args, {
     cwd: scratchRoot,
+    stdio: ["ignore", "pipe", "pipe"],
     encoding: "utf8",
     windowsHide: true,
     shell: false,
+    timeout: 15000,
+    maxBuffer: 1024 * 1024,
+    killSignal: "SIGKILL",
   });
   assert.equal(result.status, 0, `${args.join(" ")}: ${result.stderr}`);
   return result.stdout.trim();
@@ -110,7 +118,7 @@ test("an existing topic ref uses authoritative dev as its exact test baseline", 
 });
 
 test("a real Git rename reports both deleted and added paths", () => {
-  const createdRoot = mkdtempSync(path.join(os.tmpdir(), "paperclip-pre-push-rename-"));
+  const createdRoot = createEphemeralDir({ owner: "paperclip", purpose: "renametest" });
   const scratchRoot = realpathSync(createdRoot);
   try {
     runScratchGit(scratchRoot, ["init"]);
@@ -143,7 +151,7 @@ test("a real Git rename reports both deleted and added paths", () => {
     });
     assert.deepEqual(changed, ["server/src/new.ts", "server/src/old.ts"]);
   } finally {
-    rmSync(createdRoot, { recursive: true, force: true });
+    // Preserve the fixture for the existing scratch custodian.
   }
 });
 
@@ -252,6 +260,7 @@ test("explicit dry-run paths can bind selection to the current HEAD tree", () =>
 test("planner CLI rejects an option-shaped required value before reading Git state", () => {
   const result = spawnSync(process.execPath, [runnerScript, "--repo-root", "--dry-run"], {
     cwd: repoRoot,
+    stdio: ["ignore", "pipe", "pipe"],
     encoding: "utf8",
     windowsHide: true,
     shell: false,
@@ -271,7 +280,7 @@ test("the changed-file dry-run CLI reads current HEAD tracking data", () => {
       "--changed-file",
       "scripts/run-pre-push-tests.test.mjs",
     ],
-    { cwd: repoRoot, encoding: "utf8", windowsHide: true, shell: false },
+    { cwd: repoRoot, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], windowsHide: true, shell: false },
   );
   assert.equal(result.status, 0, result.stderr);
   const plan = JSON.parse(result.stdout);
@@ -473,4 +482,179 @@ test("Node suites run before exact Vitest suites with literal argv", () => {
   ]);
   assert.ok(calls.every(({ command }) => command === process.execPath));
   assert.ok(calls.every(({ options }) => options.shell === false));
+  assert.ok(calls.every(({ options }) => options.windowsHide === true));
+  assert.ok(calls.every(({ options }) => options.timeout === TEST_CHILD_TIMEOUT_MS));
+  assert.ok(calls.every(({ options }) => options.maxBuffer === TEST_CHILD_MAX_BUFFER));
+  assert.ok(calls.every(({ options }) => options.killSignal === "SIGKILL"));
+  for (const { options } of calls) assert.deepEqual(options.stdio, ["ignore", "pipe", "pipe"]);
+});
+
+for (const code of ["ENOENT", "ETIMEDOUT", "ENOBUFS"]) {
+  test(`test child fails closed on ${code} and preserves both captured streams`, () => {
+    const messages = [];
+    const errors = [];
+    const status = executeTestPlan({
+      selection: baseSelection({ nodeTestFiles: ["scripts/probe.test.mjs"] }),
+      targetRefs: ["refs/heads/topic"],
+    }, {
+      spawn: () => ({ status: null, stdout: "partial stdout", stderr: "partial stderr",
+        error: Object.assign(new Error("synthetic child failure"), { code }) }),
+      log: value => messages.push(value), error: value => errors.push(value),
+    });
+    assert.equal(status, 2);
+    assert.ok(messages.includes("partial stdout"));
+    assert.ok(errors.includes("partial stderr"));
+    assert.match(errors.join("\n"), new RegExp(code));
+  });
+}
+
+test("successful test child forwards stdout and stderr without changing its result", () => {
+  const messages = []; const errors = [];
+  const status = executeTestPlan({
+    selection: baseSelection({ nodeTestFiles: ["scripts/probe.test.mjs"] }),
+    targetRefs: ["refs/heads/topic"],
+  }, {
+    spawn: () => ({ status: 0, stdout: "passed output", stderr: "warning output" }),
+    log: value => messages.push(value), error: value => errors.push(value),
+  });
+  assert.equal(status, 0);
+  assert.ok(messages.includes("passed output"));
+  assert.ok(errors.includes("warning output"));
+});
+
+test("workflow-only topic-branch plans run the local workflow lint and skip unit suites", () => {
+  const calls = [];
+  const logs = [];
+  const status = executeTestPlan(
+    {
+      selection: baseSelection({
+        changedFiles: [".github/workflows/docker.yml"],
+        hostedCiFiles: [".github/workflows/docker.yml"],
+      }),
+      targetRefs: ["refs/heads/topic"],
+    },
+    {
+      repoRoot: "C:/repo",
+      spawn: (command, args, options) => {
+        calls.push({ command, args, options });
+        return { status: 0 };
+      },
+      log: (message) => logs.push(message),
+      error: () => {},
+    },
+  );
+  assert.equal(status, 0);
+  assert.deepEqual(calls.map(({ args }) => args), [
+    [
+      path.join("C:/repo", "scripts/lint-changed-workflows.mjs"),
+      "--file",
+      ".github/workflows/docker.yml",
+    ],
+  ]);
+  assert.ok(calls.every(({ command }) => command === process.execPath));
+  assert.ok(calls.every(({ options }) => options.shell === false));
+  assert.match(logs.join("\n"), /No local unit suite was selected/);
+});
+
+test("a failed workflow lint rejects the topic-branch plan", () => {
+  const status = executeTestPlan(
+    {
+      selection: baseSelection({
+        hostedCiFiles: [".github/workflows/docker.yml"],
+      }),
+      targetRefs: ["refs/heads/topic"],
+    },
+    {
+      repoRoot: "C:/repo",
+      spawn: () => ({ status: 19 }),
+      log: () => {},
+      error: () => {},
+    },
+  );
+  assert.equal(status, 19);
+});
+
+test("listChangedWorkflowFiles unions changed and hosted paths and ignores non-workflows", () => {
+  assert.deepEqual(
+    listChangedWorkflowFiles({
+      changedFiles: [".github/workflows/docker.yml", "scripts/run-pre-push-tests.mjs"],
+      hostedCiFiles: [".github/workflows/pr.yml", "pnpm-lock.yaml"],
+    }),
+    [".github/workflows/docker.yml", ".github/workflows/pr.yml"],
+  );
+  assert.deepEqual(listChangedWorkflowFiles(baseSelection()), []);
+});
+
+test("hook-shaped test children preserve caller Git metadata and use only their own scratch repository", () => {
+  const root = realpathSync(createEphemeralDir({ owner: "paperclip", purpose: "hookenvtest" }));
+  const sentinel = path.join(root, "caller");
+  const foreign = path.join(root, "scratch");
+  mkdirSync(sentinel);
+  mkdirSync(foreign);
+  runScratchGit(sentinel, ["init", "-q", "-b", "sentinel"]);
+  runScratchGit(sentinel, ["config", "user.name", "Synthetic Sentinel"]);
+  runScratchGit(sentinel, ["config", "user.email", "sentinel@example.invalid"]);
+  writeFileSync(path.join(sentinel, "README.md"), "caller must remain unchanged\n");
+  runScratchGit(sentinel, ["add", "README.md"]);
+  runScratchGit(sentinel, ["commit", "-qm", "synthetic sentinel"]);
+  const metadata = ["HEAD", "index", "config", "refs/heads/sentinel"];
+  const before = metadata.map((name) => readFileSync(path.join(sentinel, ".git", name)));
+  const poisoned = { GIT_DIR: path.join(sentinel, ".git"), GIT_COMMON_DIR: path.join(sentinel, ".git"),
+    GIT_WORK_TREE: sentinel, GIT_INDEX_FILE: path.join(sentinel, ".git", "index"), GIT_PREFIX: "sentinel/",
+    GIT_CONFIG_PARAMETERS: "'user.name'='Hook sentinel'", GIT_CONFIG_COUNT: "1",
+    GIT_CONFIG_KEY_0: "core.bare", GIT_CONFIG_VALUE_0: "true" };
+  const probe = path.join(root, "isolation.test.mjs");
+  writeFileSync(probe, `import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
+import { writeFileSync } from 'node:fs';
+const keys = ${JSON.stringify(Object.keys(poisoned))};
+for (const key of keys) assert.equal(process.env[key], undefined, 'inherited hook context: ' + key);
+const cwd = ${JSON.stringify(foreign)};
+const git = (...args) => {
+  const r = spawnSync('git', args, { cwd, encoding:'utf8', windowsHide:true, shell:false,
+    stdio:['ignore','pipe','pipe'], timeout:15000, killSignal:'SIGKILL', maxBuffer:1048576 });
+  assert.ifError(r.error); assert.equal(r.status, 0, r.stderr); return r.stdout.trim();
+};
+git('init','-q'); git('config','user.name','Synthetic Child');
+git('config','user.email','child@example.invalid');
+writeFileSync(cwd + '/child.txt', 'synthetic only'); git('add','child.txt');
+git('commit','-qm','isolated child');
+assert.equal(git('rev-parse','--show-toplevel').replaceAll('\\\\','/').toLowerCase(), cwd.replaceAll('\\\\','/').toLowerCase());
+`);
+  const previous = Object.fromEntries(Object.keys(poisoned).map((key) => [key, process.env[key]]));
+  const errors = [];
+  let result;
+  try {
+    Object.assign(process.env, poisoned);
+    result = executeTestPlan({ selection: baseSelection({ nodeTestFiles: [probe] }),
+      targetRefs: ["refs/heads/topic"] }, { repoRoot, log: (message) => errors.push(message), error: (message) => errors.push(message),
+      spawn: (command, args, options) => {
+        // Nested node:test otherwise suppresses a new --test runner. Keep the
+        // production Git environment intact; remove only this test marker.
+        const childEnv = { ...(options.env ?? process.env) };
+        delete childEnv.NODE_TEST_CONTEXT;
+        return spawnSync(command, args, { ...options, env: childEnv });
+      },
+    });
+  } finally {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key]; else process.env[key] = value;
+    }
+  }
+  metadata.forEach((name, index) => assert.deepEqual(readFileSync(path.join(sentinel, ".git", name)), before[index], name));
+  assert.equal(result, 0, errors.join("\n"));
+  assert.equal(readFileSync(path.join(foreign, "child.txt"), "utf8"), "synthetic only");
+});
+
+test("failed Git environment enumeration refuses test execution", () => {
+  let spawned = false;
+  const errors = [];
+  const status = executeTestPlan({ selection: baseSelection({ nodeTestFiles: ["probe.test.mjs"] }),
+    targetRefs: ["refs/heads/topic"] }, {
+    resolveGitEnv: () => { throw new Error("synthetic enumeration failure"); },
+    spawn: () => { spawned = true; return { status: 0 }; }, log: () => {}, error: (message) => errors.push(message),
+  });
+  assert.equal(status, 2);
+  assert.equal(spawned, false);
+  assert.match(errors.join("\n"), /cannot isolate test Git environment: synthetic enumeration failure/);
 });

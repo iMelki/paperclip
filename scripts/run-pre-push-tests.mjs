@@ -13,11 +13,15 @@ import {
 } from "./git-push-scan-integrity.mjs";
 import { isMainModule } from "./is-main-module.mjs";
 import { selectPrePushTests } from "./pre-push-test-selection.mjs";
+import { resolveGitLocalEnvironmentVariableNames, sanitizeGitLocalEnvironment } from "./git-local-env.mjs";
 
 const ZERO_OID_PATTERN = /^0{40}(?:0{24})?$/;
 const OID_PATTERN = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i;
 const SAFE_REMOTE_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const PROTECTED_REFS = new Set(["refs/heads/dev", "refs/heads/master"]);
+const WORKFLOW_FILE_PATTERN = /^\.github\/workflows\/[^/]+\.ya?ml$/i;
+export const TEST_CHILD_TIMEOUT_MS = 10 * 60 * 1000;
+export const TEST_CHILD_MAX_BUFFER = 8 * 1024 * 1024;
 
 export class PrePushIntegrityError extends Error {
   constructor(message, { cause, exitCode } = {}) {
@@ -25,6 +29,14 @@ export class PrePushIntegrityError extends Error {
     this.name = "PrePushIntegrityError";
     this.exitCode = exitCode;
   }
+}
+
+export function listChangedWorkflowFiles(selection) {
+  const files = new Set();
+  for (const file of [...(selection.changedFiles ?? []), ...(selection.hostedCiFiles ?? [])]) {
+    if (WORKFLOW_FILE_PATTERN.test(file)) files.add(file);
+  }
+  return [...files].sort();
 }
 
 function validateOid(oid, label) {
@@ -80,6 +92,7 @@ export function runGit(
 ) {
   const result = spawn("git", args, {
     cwd: repoRoot,
+    stdio: ["ignore", "pipe", "pipe"],
     encoding,
     killSignal: "SIGKILL",
     maxBuffer,
@@ -285,17 +298,25 @@ export function resolveOutgoingChangedFiles({
 function runChild(
   label,
   args,
-  { spawn = spawnSync, log = console.log, error = console.error, cwd = process.cwd() } = {},
+  { spawn = spawnSync, log = console.log, error = console.error, cwd = process.cwd(), env = process.env } = {},
 ) {
   log(`Running ${label}...`);
   const result = spawn(process.execPath, args, {
     cwd,
-    stdio: "inherit",
+    env,
+    stdio: ["ignore", "pipe", "pipe"],
+    encoding: "utf8",
+    timeout: TEST_CHILD_TIMEOUT_MS,
+    maxBuffer: TEST_CHILD_MAX_BUFFER,
+    killSignal: "SIGKILL",
     windowsHide: true,
     shell: false,
   });
+  // spawnSync drains both bounded pipes; preserve captured diagnostics even on failure.
+  if (result.stdout) log(result.stdout);
+  if (result.stderr) error(result.stderr);
   if (result.error) {
-    error(`ERROR: ${label} could not start: ${result.error.message}`);
+    error(`ERROR: ${label} did not complete (${result.error.code ?? "spawn error"}): ${result.error.message}`);
     return 2;
   }
   if (result.status !== 0) {
@@ -307,7 +328,8 @@ function runChild(
 
 export function executeTestPlan(
   { selection, targetRefs },
-  { spawn = spawnSync, log = console.log, error = console.error, repoRoot = process.cwd() } = {},
+  { spawn = spawnSync, log = console.log, error = console.error, repoRoot = process.cwd(),
+    env = process.env, resolveGitEnv = resolveGitLocalEnvironmentVariableNames } = {},
 ) {
   if (selection.selectionErrors.length > 0) {
     error("ERROR: deterministic pre-push test selection failed closed:");
@@ -330,11 +352,38 @@ export function executeTestPlan(
     selection.hostedCiFiles.forEach((file) => log(`  CI: ${file}`));
   }
 
+  // Only test/lint children lose hook-local repository bindings. The parent
+  // planner and outgoing scans retain their original authoritative Git context.
+  let childEnv;
+  try {
+    childEnv = sanitizeGitLocalEnvironment(env, resolveGitEnv({ env }));
+  } catch (failure) {
+    error(`ERROR: cannot isolate test Git environment: ${failure.message}`);
+    return 2;
+  }
+
+  // Workflow-only topic-branch pushes have no hosted PR admission on dev
+  // (#257). Lint those files locally, including a docker.yml IMAGE
+  // lowercase proof, so the admitted local lane is not a no-op.
+  // A missing default actionlint fails closed. This step does not download it.
+  const workflowFiles = listChangedWorkflowFiles(selection);
+  if (workflowFiles.length > 0) {
+    const status = runChild(
+      `changed workflow lint (${workflowFiles.length})`,
+      [
+        path.join(repoRoot, "scripts/lint-changed-workflows.mjs"),
+        ...workflowFiles.flatMap((file) => ["--file", file]),
+      ],
+      { spawn, log, error, cwd: repoRoot, env: childEnv },
+    );
+    if (status !== 0) return status;
+  }
+
   if (selection.nodeTestFiles.length > 0) {
     const status = runChild(
       `exact Node test suites (${selection.nodeTestFiles.length})`,
       ["--test", ...selection.nodeTestFiles],
-      { spawn, log, error, cwd: repoRoot },
+      { spawn, log, error, cwd: repoRoot, env: childEnv },
     );
     if (status !== 0) return status;
   }
@@ -343,7 +392,7 @@ export function executeTestPlan(
     const status = runChild(
       `exact Vitest suites (${selection.vitestFiles.length})`,
       [path.join(repoRoot, "scripts/run-vitest-stable.mjs"), "--files", ...selection.vitestFiles],
-      { spawn, log, error, cwd: repoRoot },
+      { spawn, log, error, cwd: repoRoot, env: childEnv },
     );
     if (status !== 0) return status;
   }
