@@ -33,6 +33,95 @@ test("service-account inference preserves actual and near-matching operator name
   ]);
 });
 
+test("dynamic usernames shorter than 4 characters are not tokens", () => {
+  for (const name of ["a", "pc", "bob", "box"]) {
+    assert.deepEqual(
+      core.resolveDynamicForbiddenTokens({ USER: name }, noUser),
+      [],
+      name,
+    );
+  }
+});
+
+test("generic dynamic usernames are not tokens, in any case", () => {
+  for (const name of ["box", "root", "ubuntu", "runner", "user", "admin", "node", "UBUNTU", "Node"]) {
+    assert.deepEqual(
+      core.resolveDynamicForbiddenTokens({ USER: ` ${name} ` }, noUser),
+      [],
+      name,
+    );
+  }
+  assert.deepEqual(
+    core.resolveDynamicForbiddenTokens({}, { userInfo: () => ({ username: "ubuntu" }) }),
+    [],
+  );
+});
+
+test("a non-generic username of at least 4 characters stays a dynamic token", () => {
+  assert.deepEqual(core.resolveDynamicForbiddenTokens({
+    USER: "sampleuser", USERNAME: "pc", LOGNAME: "ubuntu",
+  }, noUser), ["sampleuser"]);
+});
+
+test("private and tracked tokens stay substrings when the same spelling is ignored as a username", (t) => {
+  const root = mkdtempSync(path.join(tmpdir(), "forbidden-tokens-literal-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  git(root, "init", "-q");
+  const privateFile = path.join(root, "private.txt");
+  const trackedFile = path.join(root, "tracked.txt");
+  writeFileSync(privateFile, "box\n");
+  writeFileSync(trackedFile, "ubuntu\n");
+  const scan = core.resolveForbiddenTokenScan([trackedFile, privateFile], { USER: "ubuntu", USERNAME: "box" }, noUser);
+  assert.deepEqual(scan.wordBoundaryTokens, []);
+  assert.deepEqual(scan.tokens, ["ubuntu", "box"]);
+  writeFileSync(path.join(root, "notes.txt"), "sandbox checkbox ubuntu-latest\n");
+  git(root, "add", "notes.txt");
+  assert.equal(
+    core.runForbiddenTokenCheck({
+      repoRoot: root,
+      tokens: scan.tokens,
+      wordBoundaryTokens: scan.wordBoundaryTokens,
+      log: () => {},
+      error: () => {},
+    }),
+    1,
+    "private and tracked spellings must still match inside longer words",
+  );
+});
+
+test("dynamic usernames match whole words and ignore substring hits", (t) => {
+  const root = mkdtempSync(path.join(tmpdir(), "forbidden-tokens-boundary-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  git(root, "init", "-q");
+  const embedded = path.join(root, "embedded.txt");
+  const whole = path.join(root, "whole.txt");
+  writeFileSync(embedded, "sandbox checkbox sampleuserdocs\n");
+  writeFileSync(whole, "clean\n");
+  git(root, "add", "embedded.txt", "whole.txt");
+  const env = { USER: "sampleuser" };
+  const scan = core.resolveForbiddenTokenScan([], env, noUser);
+  assert.deepEqual(scan.wordBoundaryTokens, ["sampleuser"]);
+  const check = () => core.runForbiddenTokenCheck({
+    repoRoot: root,
+    tokens: scan.tokens,
+    wordBoundaryTokens: scan.wordBoundaryTokens,
+    log: () => {},
+    error: () => {},
+  });
+  assert.equal(check(), 0, "sampleuser inside sampleuserdocs must not match");
+  writeFileSync(whole, "the sampleuser host\n");
+  assert.equal(check(), 1, "a whole-word username must match");
+  writeFileSync(whole, "SAMPLEUSER-latest\n");
+  assert.equal(check(), 1, "a hyphen is a word boundary and the match is case-insensitive");
+  writeFileSync(whole, "clean\n");
+  assert.equal(check(), 0);
+
+  assert.equal(core.hasWordBoundaryMatch("sandbox checkbox", "box"), false);
+  assert.equal(core.hasWordBoundaryMatch("a box of parts", "box"), true);
+  assert.equal(core.hasWordBoundaryMatch("Sand pit", "sand"), true);
+  assert.equal(core.hasWordBoundaryMatch("sandbox", "sand"), false);
+});
+
 test("explicit service-account and structural tokens still block real tracked content", (t) => {
   const root = mkdtempSync(path.join(tmpdir(), "forbidden-tokens-explicit-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));

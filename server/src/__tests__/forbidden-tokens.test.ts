@@ -12,13 +12,13 @@ const {
 describe("forbidden token check", () => {
   it("derives username tokens without relying on whoami", () => {
     const tokens = resolveDynamicForbiddenTokens(
-      { USER: "paperclip", LOGNAME: "paperclip", USERNAME: "pc" },
+      { USER: "paperclip", LOGNAME: "ubuntu", USERNAME: "pc" },
       {
-        userInfo: () => ({ username: "paperclip" }),
+        userInfo: () => ({ username: "box" }),
       },
     );
 
-    expect(tokens).toEqual(["paperclip", "pc"]);
+    expect(tokens).toEqual(["paperclip"]);
   });
 
   it("falls back cleanly when user resolution fails", () => {
