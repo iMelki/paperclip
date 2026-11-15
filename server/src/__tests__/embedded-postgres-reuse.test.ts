@@ -326,14 +326,15 @@ describe("embedded PostgreSQL reuse identity", () => {
   it.skipIf(process.platform === "win32")("finds a real process named postgres that references the data directory", async () => {
     // The executable path contains a space. `comm` is still `postgres`; identifying
     // the process from the first space-separated token of `args` would skip it.
-    // The process is this test runner's own `node`, not `sleep`: on hosts where
-    // `sleep` is an applet of a multi-call binary, a symlink named `postgres`
-    // exits at once because the applet name is unknown.
+    // The process is a shell script named `postgres`. Neither of the usual stand-ins works on every
+    // host: a symlinked `sleep` exits at once where it is an applet of a multi-call binary, and a
+    // symlinked `node` reports its main thread name instead of `postgres` as `comm`. The kernel names
+    // a script's process after the script file, so the shell runs under the name `postgres`.
     const binDir = join(mkdtempSync(join(tmpdir(), "pg-bin-")), "My Postgres", "bin");
     mkdirSync(binDir, { recursive: true });
     const bin = join(binDir, "postgres");
-    symlinkSync(process.execPath, bin);
-    const child = spawn(bin, ["-e", "setTimeout(() => {}, 30000)"], { cwd: dataDir, stdio: "ignore" });
+    writeFileSync(bin, "#!/bin/sh\nwhile :; do sleep 1; done\n", { mode: 0o755 });
+    const child = spawn(bin, [], { cwd: dataDir, stdio: "ignore" });
     try {
       await new Promise((r) => setTimeout(r, 300));
       const owners = await listPostgresProcessesForDataDir(dataDir);
