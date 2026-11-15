@@ -13,7 +13,7 @@ results only.
 | Item | Result | Tree tested |
 | --- | --- | --- |
 | 3. Migration 0216 → 0234 on a copy | PASS | `dev` at `8a9c270d8f3dfe03f24bf966022c6077289c5bec` |
-| 3. Restore on the #125 `COPY` path | PASS, 0 row-count mismatches | same |
+| 3. Restore of a `COPY`-format dump through `psql` | PASS, 0 row-count mismatches; the no-`psql` fallback restore in `backup-lib.ts` was not run | same |
 | 2. Runtime start on a migrated, neutralized copy | PASS, with the limits below | same |
 
 ## Scope: which tree this proves
@@ -44,26 +44,26 @@ above is covered.
 
 ## Correction to #252 item 3
 
-The deployed schema level is fork migration **`0215_complete_dragon_lord`**,
-not 0214. The restored backup's migration journal shows 214 of 233 `dev`
-migration files applied, the last one being 0215. The proven range is
+As of the backup (2026-10-20), the deployed schema level was fork migration
+**`0215_complete_dragon_lord`**, not 0214. The restored backup's migration
+journal shows 214 of 233 `dev` migration files applied, the last one being 0215. The proven range is
 therefore **0216 → 0234**.
 
 ## Backup used
 
 | Field | Value |
 | --- | --- |
-| File | `paperclip-20261020-213024.sql.gz` (newest backup found) |
+| File | newest backup found, gzip-compressed SQL dump |
 | Created | 2026-10-20T18:30:24Z, about 21 days before the runs |
 | Size | 14,259,107 bytes compressed, 120,790,827 bytes SQL; `gzip -t` OK |
-| SHA-256 | `237B069A4B748E9AFDC6241B473AC48B3473FE924A9948E3C34907F064913812` (source and copy match) |
+| Integrity | SHA-256 of source and copy matched |
 | Format | Paperclip dump: 85 `COPY ... FROM stdin` blocks, 157,584 data rows |
 
 ## Item 3: migration and restore
 
 **Isolated clusters.** Two fresh clusters were created with the repo's own
-embedded Postgres (`@embedded-postgres/windows-x64@18.1.0-beta.16`, the same
-version as the live one), bound to `127.0.0.1` only, with throwaway
+embedded Postgres (`@embedded-postgres/windows-x64@18.1.0-beta.16`, the version
+the repo pins), bound to `127.0.0.1` only, with throwaway
 credentials. The backup was restored with the repo's `runDatabaseRestore`
 (`packages/db/src/backup-lib.ts`). Embedded Postgres ships no `psql`, so a
 PostgreSQL 17 `psql` client was supplied through `PAPERCLIP_PSQL_PATH`.
@@ -80,8 +80,9 @@ and `PAPERCLIP_HOME` in a scratch folder.
   `0234_better_auth_account_issuer` (19 files).
 - After: `inspectMigrations` reports `upToDate`, 233 of 233; the drizzle
   journal went from 286 to 305 rows, all hashes distinct. The journal held more
-  rows (286) than the 214 applied `dev` files before migration; this was
-  observed, not investigated, and does not change the `upToDate` result.
+  rows (286) than the 214 applied `dev` files before migration. The 72-row gap
+  was observed and not explained. After migration `inspectMigrations` reported
+  `upToDate`, but that result does not account for the gap.
 - Public tables went from 174 to 185. The 11 new tables are empty:
   `adapter_auth_sessions`, `company_onboarding_seeds`, `company_transfer_runs`,
   `completion_contracts`, `execution_workspace_runtime_leases`,
@@ -99,7 +100,7 @@ second fresh cluster (16.6 s in the restore function).
 | Check | Result |
 | --- | --- |
 | Source dump, per-table `COPY` row counts | 85 tables, 157,584 rows |
-| Copy B, exact `count(*)` per table | 175 tables (the 174 public tables plus, presumably, the drizzle journal table), 157,584 rows, **0 mismatches**; the 90 tables with no `COPY` block hold 0 rows |
+| Copy B, exact `count(*)` per table | 175 tables (the 174 public tables plus one more that was not identified), 157,584 rows, **0 mismatches**; the 90 tables with no `COPY` block hold 0 rows |
 | Copy A before migration vs copy B | identical per-table count files |
 | Copy B drizzle journal | 286 rows, same last hash as copy A before migration |
 
@@ -213,7 +214,13 @@ instance and were not copied.
 - **Main thread only.** The guard covered the main thread; `worker_threads`
   code would not be covered (none was seen).
 - **Old data.** The backup is about 21 days old, and the live DB itself was not
-  read. Its schema level matches the live checkout's migration files (0215).
+  read, so its current schema level is unverified. The 0215 level is the
+  backup's, as of 2026-10-20.
+- **Not production state.** The runtime proof ran on a neutralized copy: agent
+  configs, secrets and tokens were removed and the scheduler was off. Finding 1
+  shows startup changes state regardless.
+- **Not reproducible from the repo.** The raw logs and scripts are private, so
+  only the counts here can be checked, not re-run from this repository.
 - **Client version.** The restore used a PostgreSQL 17 `psql` against the
   PostgreSQL 18 server.
 - **No live rollback rehearsal.** Item 3 asks only for the pre-migration copy
