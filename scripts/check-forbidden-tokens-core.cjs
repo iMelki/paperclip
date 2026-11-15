@@ -98,32 +98,44 @@ const GENERIC_DYNAMIC_USERNAMES = new Set([
   "user",
   "admin",
   "node",
-  "builder",
-  "worker",
-  "docker",
 ]);
 
-function isIgnoredDynamicUsername(candidate, env = {}) {
-  const value = String(candidate ?? "").trim().toLowerCase();
-  if (value.length < 4) return true;
-  if (GENERIC_DYNAMIC_USERNAMES.has(value)) return true;
-  if (env && typeof env.CHECK_FORBIDDEN_TOKENS_IGNORE_USERNAMES === "string") {
-    const extra = env.CHECK_FORBIDDEN_TOKENS_IGNORE_USERNAMES.split(/[,;\s]+/)
-      .map((s) => s.trim().toLowerCase())
-      .filter(Boolean);
-    if (extra.includes(value)) return true;
-  }
-  return false;
+/**
+ * Per-machine ignore list for dynamic usernames (#265).
+ *
+ * On a shared or generic account, the account name can be an ordinary word in
+ * the repo, and the dynamic token then blocks every push. An operator of that
+ * machine can name the account in this variable. It is deliberately narrow:
+ *   * it removes only DYNAMIC username tokens -- private and tracked lists stay
+ *     in effect, even for the same spelling;
+ *   * matching is exact and case-insensitive -- no wildcards, no prefixes;
+ *   * an empty, whitespace-only, or separator-only value ignores nothing;
+ *   * each run that removes a name prints a count-only warning on stderr, so the
+ *     setting cannot hide. The name itself is never printed.
+ * There is intentionally no switch that disables dynamic usernames globally: it
+ * would turn the guard off for every account on the machine.
+ */
+const IGNORE_USERNAMES_ENV = "CHECK_FORBIDDEN_TOKENS_IGNORE_USERNAMES";
+
+function parseIgnoredUsernames(value) {
+  if (typeof value !== "string") return new Set();
+  return new Set(
+    value.split(/[,;\s]+/).map((name) => name.trim().toLowerCase()).filter(Boolean),
+  );
 }
 
-function resolveDynamicForbiddenTokens(env = process.env, osModule = os) {
-  if (
-    env?.CHECK_FORBIDDEN_TOKENS_SKIP_DYNAMIC === "1" ||
-    env?.CHECK_FORBIDDEN_TOKENS_SKIP_DYNAMIC === "true"
-  ) {
-    return [];
-  }
+function isGenericDynamicUsername(candidate) {
+  const value = String(candidate ?? "").trim().toLowerCase();
+  return value.length < 4 || GENERIC_DYNAMIC_USERNAMES.has(value);
+}
 
+/**
+ * Classify every detected username. Generic names are checked first, so a
+ * generic name that is also in the ignore list does not count as ignored by
+ * the variable (the variable did not change the result for it).
+ * Counts are of distinct case-insensitive names.
+ */
+function classifyDynamicUsernames(env = process.env, osModule = os) {
   const candidates = [env?.USER, env?.LOGNAME, env?.USERNAME];
 
   try {
@@ -132,7 +144,26 @@ function resolveDynamicForbiddenTokens(env = process.env, osModule = os) {
     // Some environments do not expose userInfo; env vars are enough fallback.
   }
 
-  return uniqueNonEmpty(candidates).filter((candidate) => !isIgnoredDynamicUsername(candidate, env));
+  const ignoreList = parseIgnoredUsernames(env?.[IGNORE_USERNAMES_ENV]);
+  const tokens = [];
+  const generic = new Set();
+  const ignored = new Set();
+  for (const candidate of uniqueNonEmpty(candidates)) {
+    const key = candidate.toLowerCase();
+    if (isGenericDynamicUsername(key)) {
+      generic.add(key);
+    } else if (ignoreList.has(key)) {
+      ignored.add(key);
+    } else {
+      tokens.push(candidate);
+    }
+  }
+
+  return { tokens, genericCount: generic.size, ignoredCount: ignored.size };
+}
+
+function resolveDynamicForbiddenTokens(env = process.env, osModule = os) {
+  return classifyDynamicUsernames(env, osModule).tokens;
 }
 
 function isWordChar(char) {
@@ -227,13 +258,22 @@ function resolveForbiddenTokenScan(tokensFiles, env = process.env, osModule = os
     files.filter(Boolean).flatMap((file) => readForbiddenTokensFile(file)),
   );
   const literalKeys = new Set(fileTokens.map((token) => token.toLowerCase()));
-  const wordBoundaryTokens = resolveDynamicForbiddenTokens(env, osModule)
+  const dynamic = classifyDynamicUsernames(env, osModule);
+  const wordBoundaryTokens = dynamic.tokens
     .filter((token) => !literalKeys.has(token.toLowerCase()));
 
   return {
     tokens: uniqueNonEmpty([...wordBoundaryTokens, ...fileTokens]),
     wordBoundaryTokens,
+    genericUsernameCount: dynamic.genericCount,
+    ignoredUsernameCount: dynamic.ignoredCount,
   };
+}
+
+function ignoredUsernamesWarning(count) {
+  const noun = count === 1 ? "username" : "usernames";
+  return `WARNING: ${count} dynamic ${noun} ignored via ${IGNORE_USERNAMES_ENV} `
+    + "(per-machine setting for shared/generic accounts only)";
 }
 
 function runForbiddenTokenCheck({
@@ -243,9 +283,25 @@ function runForbiddenTokenCheck({
   grep = gitGrepToken,
   log = console.log,
   error = console.error,
+  genericUsernameCount = 0,
+  ignoredUsernameCount = 0,
 }) {
+  // Count only, never the name: the name is the value this check protects.
+  if (ignoredUsernameCount > 0) {
+    error(ignoredUsernamesWarning(ignoredUsernameCount));
+  }
+
   if (tokens.length === 0) {
-    log("  ℹ  Forbidden tokens list is empty — skipping check.");
+    if (genericUsernameCount + ignoredUsernameCount > 0) {
+      // Not "the list is empty": a username was detected and then filtered out.
+      error(
+        "  ℹ  Nothing was scanned: every detected username was filtered out "
+          + `(generic account names: ${genericUsernameCount}; ${IGNORE_USERNAMES_ENV}: `
+          + `${ignoredUsernameCount}), and the private and tracked lists have no patterns.`,
+      );
+    } else {
+      log("  ℹ  Forbidden tokens list is empty — skipping check.");
+    }
     return 0;
   }
 
@@ -352,13 +408,22 @@ function resolveRepoPaths(exec = execSync) {
   };
 }
 
-function runCli(env = process.env) {
+function runCli(env = process.env, {
+  osModule = os,
+  exit = process.exit,
+  log = console.log,
+  error = console.error,
+} = {}) {
   const { repoRoot, tokensFiles } = resolveRepoPaths();
-  const scan = resolveForbiddenTokenScan(tokensFiles, env);
-  process.exit(runForbiddenTokenCheck({
+  const scan = resolveForbiddenTokenScan(tokensFiles, env, osModule);
+  return exit(runForbiddenTokenCheck({
     repoRoot,
     tokens: scan.tokens,
     wordBoundaryTokens: scan.wordBoundaryTokens,
+    genericUsernameCount: scan.genericUsernameCount,
+    ignoredUsernameCount: scan.ignoredUsernameCount,
+    log,
+    error,
   }));
 }
 
