@@ -1,10 +1,12 @@
 # Copy-DB migration, restore and runtime proofs — issue #252
 
-This records the proofs for #252 item 2 (exact-head runtime qualification)
-and item 3 (isolated migration proof and `COPY`-path restore). Both runs used
-a **copy** of a production DB backup in an isolated Postgres cluster. Neither run
-connected to the live DB, started or stopped the live server, or read the live
-data folder. The only live-side action was one read-only copy of a backup file.
+This records the proofs for #252 item 2 (runtime start on a copy, bound to the
+tree named below, not to the current head) and item 3 (isolated migration proof
+and restore of a `COPY`-format dump through `psql`). Both runs used a **copy**
+of a production DB backup in an isolated Postgres cluster. Neither run
+connected to the live DB or started or stopped the live server. The only
+live-side actions were locating the newest backup file and making one read-only
+copy of it.
 
 Raw logs, scripts and per-table count files were kept privately because they
 contain host paths and record identifiers. This file holds the counts and
@@ -46,8 +48,10 @@ above is covered.
 
 As of the backup (2026-10-20), the deployed schema level was fork migration
 **`0215_complete_dragon_lord`**, not 0214. The restored backup's migration
-journal shows 214 of 233 `dev` migration files applied, the last one being 0215. The proven range is
-therefore **0216 → 0234**.
+journal shows 214 of 233 `dev` migration files applied, the last one being 0215
+(subject to the unexplained journal gap noted below). The proven range is
+therefore **0216 → 0234**. The live DB was not read, so its level today is
+unverified.
 
 ## Backup used
 
@@ -193,9 +197,10 @@ instance and were not copied.
 1. **Startup rewrites built-in agent configs.** `reconcileBuiltInAgentsOnStartup`
    rewrote `adapter_config` on the `codex_local` and `claude_local` built-in
    agents (new instructions bundle, paths, `model` and `paperclipSkillSync`
-   keys). They stayed paused, with heartbeat and wake-on-demand off. A live
-   start does this on every boot, so neutralizing those two agents in the DB
-   does not survive a restart.
+   keys). They stayed paused, with heartbeat and wake-on-demand off. This was
+   observed on a copy whose `adapter_config` had been emptied, so it may be a
+   no-op on populated live configs. It does mean that neutralizing those two
+   agents in the DB does not survive a start.
 2. **The server needs a plugin-sdk build first.** Without it the server exits
    with `ERR_MODULE_NOT_FOUND` for `@paperclipai/plugin-sdk/dist`. `pnpm dev`
    already builds it; a direct `tsx src/index.ts` start does not.
@@ -205,6 +210,9 @@ instance and were not copied.
 
 ## Limits
 
+- **Unexplained journal gap and unidentified table.** The migration journal held
+  72 more rows than applied `dev` files, and the exact count found 175 tables
+  against 174 public ones. Neither was investigated.
 - **Disabled scheduler only.** The scheduler-on path was not exercised: the
   orphan reaper, `resumeQueuedRuns`, routine and status-card ticks, and tool
   health sweeps. After `8a9c270d`, #247 and #257 changed both the scheduler-on
