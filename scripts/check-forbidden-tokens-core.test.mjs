@@ -59,6 +59,284 @@ test("generic dynamic usernames are not tokens, in any case", () => {
   );
 });
 
+// ---------------------------------------------------------------------------
+// CHECK_FORBIDDEN_TOKENS_IGNORE_USERNAMES (#265).
+//
+// A per-machine ignore list for shared or generic accounts. It must stay narrow
+// (dynamic tokens only, exact names), loud (count-only warning), and must never
+// echo the ignored name. There is no global switch that turns dynamic usernames off.
+// ---------------------------------------------------------------------------
+const IGNORE_VAR = "CHECK_FORBIDDEN_TOKENS_IGNORE_USERNAMES";
+const WARNING_ONE = `WARNING: 1 dynamic username ignored via ${IGNORE_VAR} `
+  + "(per-machine setting for shared/generic accounts only)";
+
+function captureCheck(options) {
+  const out = [];
+  const err = [];
+  const exit = core.runForbiddenTokenCheck({
+    ...options, log: (message) => out.push(message), error: (message) => err.push(message),
+  });
+  return { exit, out, err, all: [...out, ...err].join("\n") };
+}
+
+test("CHECK_FORBIDDEN_TOKENS_IGNORE_USERNAMES ignores custom dynamic usernames", () => {
+  assert.deepEqual(
+    core.resolveDynamicForbiddenTokens(
+      {
+        USER: "paperclip",
+        USERNAME: "my-ci-box",
+        LOGNAME: "real-operator",
+        [IGNORE_VAR]: "paperclip, my-ci-box",
+      },
+      noUser,
+    ),
+    ["real-operator"],
+  );
+});
+
+test("the ignore list matches exact names case-insensitively, with no wildcards or prefixes", () => {
+  const env = (value) => ({ USER: "sampleuser", [IGNORE_VAR]: value });
+  for (const value of ["SampleUser", "SAMPLEUSER", " sampleuser ", "other;sampleuser"]) {
+    assert.deepEqual(core.resolveDynamicForbiddenTokens(env(value), noUser), [], value);
+  }
+  for (const value of ["sample", "sample*", "*", "sampleuser*", "sampleusers", "ampleuser", ".*"]) {
+    assert.deepEqual(core.resolveDynamicForbiddenTokens(env(value), noUser), ["sampleuser"], value);
+  }
+  // Unicode lookalikes are different names. No normalization (NFKC folds the
+  // fullwidth form to ASCII), no homoglyph folding, no zero-width stripping.
+  const lookalikes = [
+    "\uFF53\uFF41\uFF4D\uFF50\uFF4C\uFF45\uFF55\uFF53\uFF45\uFF52", // fullwidth
+    "s\u0430mpleuser", // Cyrillic small a
+    "sampl\u0435us\u0435r", // Cyrillic small ie
+    "sample\u200Buser", // zero-width space inside
+    "\u200Bsampleuser", // zero-width space before
+    "sampleuser\u200B", // zero-width space after
+  ];
+  for (const value of lookalikes) {
+    assert.deepEqual(core.resolveDynamicForbiddenTokens(env(value), noUser), ["sampleuser"], JSON.stringify(value));
+    // The other direction: a lookalike account name is not ignored by the ASCII spelling.
+    assert.deepEqual(
+      core.resolveDynamicForbiddenTokens({ USER: value, [IGNORE_VAR]: "sampleuser" }, noUser),
+      [value],
+      JSON.stringify(value),
+    );
+  }
+});
+
+test("empty, whitespace-only and separator-only ignore values ignore nothing", () => {
+  for (const value of ["", "   ", "\t\n", ",", ";", " , ; ", ",,;;", "\t,\n;"]) {
+    const env = { USER: "sampleuser", [IGNORE_VAR]: value };
+    assert.deepEqual(core.resolveDynamicForbiddenTokens(env, noUser), ["sampleuser"], JSON.stringify(value));
+    const scan = core.resolveForbiddenTokenScan([], env, noUser);
+    assert.deepEqual(scan.wordBoundaryTokens, ["sampleuser"], JSON.stringify(value));
+    assert.equal(scan.ignoredUsernameCount, 0, JSON.stringify(value));
+    const run = captureCheck({
+      repoRoot: "/inert-fixture", ...scan, grep: () => ({ status: 1, stdout: "" }),
+    });
+    assert.equal(run.exit, 0);
+    assert.equal(run.all.includes("WARNING"), false, JSON.stringify(value));
+  }
+});
+
+test("the removed global skip switch no longer disables dynamic usernames", () => {
+  for (const value of ["1", "true"]) {
+    assert.deepEqual(
+      core.resolveDynamicForbiddenTokens(
+        { USER: "sampleuser", CHECK_FORBIDDEN_TOKENS_SKIP_DYNAMIC: value },
+        { userInfo: () => ({ username: "anotheruser" }) },
+      ),
+      ["sampleuser", "anotheruser"],
+    );
+    const scan = core.resolveForbiddenTokenScan(
+      [], { USER: "sampleuser", CHECK_FORBIDDEN_TOKENS_SKIP_DYNAMIC: value }, noUser,
+    );
+    assert.deepEqual(scan.wordBoundaryTokens, ["sampleuser"], value);
+    assert.deepEqual(scan.tokens, ["sampleuser"], value);
+  }
+});
+
+test("builder, worker and docker are not generic account names", () => {
+  // No citation in #265 or in a documented CI/container account; a shared
+  // account with one of these names uses the per-machine ignore list instead.
+  for (const name of ["builder", "worker", "docker"]) {
+    assert.deepEqual(core.resolveDynamicForbiddenTokens({ USER: name }, noUser), [name], name);
+  }
+});
+
+test("an ignored username prints a count-only warning that never contains the name", () => {
+  const env = { USER: "sampleuser", LOGNAME: "SampleUser", [IGNORE_VAR]: "sampleuser" };
+  const scan = core.resolveForbiddenTokenScan([], env, { userInfo: () => ({ username: "sampleuser" }) });
+  // Three detections of one name, in two casings, count as one name.
+  assert.equal(scan.ignoredUsernameCount, 1);
+  const run = captureCheck({ repoRoot: "/inert-fixture", ...scan, grep: () => ({ status: 1, stdout: "" }) });
+  assert.ok(run.err.includes(WARNING_ONE), "the warning goes to stderr");
+  assert.equal(run.out.some((message) => message.includes("WARNING")), false, "the warning is not on stdout");
+  assert.equal(run.all.toLowerCase().includes("sampleuser"), false, "the ignored name is never printed");
+
+  const two = core.resolveForbiddenTokenScan([], {
+    USER: "sampleuser", USERNAME: "otheraccount", [IGNORE_VAR]: "otheraccount sampleuser",
+  }, noUser);
+  assert.equal(two.ignoredUsernameCount, 2);
+  const runTwo = captureCheck({ repoRoot: "/inert-fixture", ...two, grep: () => ({ status: 1, stdout: "" }) });
+  assert.ok(runTwo.err.includes(`WARNING: 2 dynamic usernames ignored via ${IGNORE_VAR} `
+    + "(per-machine setting for shared/generic accounts only)"));
+  for (const name of ["sampleuser", "otheraccount"]) {
+    assert.equal(runTwo.all.toLowerCase().includes(name), false, name);
+  }
+});
+
+test("a generic name in the ignore list does not trigger the warning", () => {
+  const scan = core.resolveForbiddenTokenScan([], { USER: "ubuntu", [IGNORE_VAR]: "ubuntu" }, noUser);
+  assert.equal(scan.ignoredUsernameCount, 0);
+  assert.equal(scan.genericUsernameCount, 1);
+});
+
+test("an empty scan caused by filtered usernames never says the list is empty", () => {
+  for (const [env, generic, ignored] of [
+    [{ USER: "sampleuser", [IGNORE_VAR]: "sampleuser" }, 0, 1],
+    [{ USER: "ubuntu" }, 1, 0],
+    [{ USER: "ubuntu", LOGNAME: "sampleuser", [IGNORE_VAR]: "sampleuser" }, 1, 1],
+    [{ USER: "pc" }, 1, 0],
+  ]) {
+    const scan = core.resolveForbiddenTokenScan([], env, noUser);
+    assert.deepEqual(scan.tokens, []);
+    assert.equal(scan.genericUsernameCount, generic);
+    assert.equal(scan.ignoredUsernameCount, ignored);
+    let grepCalls = 0;
+    const run = captureCheck({ repoRoot: "/inert-fixture", ...scan, grep: () => { grepCalls += 1; return { status: 1, stdout: "" }; } });
+    assert.equal(run.exit, 0);
+    assert.equal(grepCalls, 0);
+    assert.equal(/list is empty/i.test(run.all), false, JSON.stringify(env));
+    assert.ok(run.err.includes(
+      "  ℹ  Nothing was scanned: every detected username was filtered out "
+        + `(generic or short account names: ${generic}; ${IGNORE_VAR}: ${ignored}), `
+        + "and the private and tracked lists have no patterns.",
+    ));
+    assert.equal(run.all.toLowerCase().includes("sampleuser"), false);
+  }
+
+  // With no username detected and no list entries, "empty" is still the truth.
+  const none = core.resolveForbiddenTokenScan([], {}, noUser);
+  const run = captureCheck({ repoRoot: "/inert-fixture", ...none });
+  assert.equal(run.exit, 0);
+  assert.deepEqual(run.out, ["  ℹ  Forbidden tokens list is empty — skipping check."]);
+  assert.deepEqual(run.err, []);
+});
+
+test("the ignore list drops only dynamic tokens; private and tracked tokens stay in effect", () => {
+  const root = createEphemeralDir({ owner: "paperclip", purpose: "forbiddentest" });
+  git(root, "init", "-q");
+  const privateFile = path.join(root, ".git", "hooks", "forbidden-tokens.txt");
+  const trackedFile = path.join(root, "structural-patterns.txt");
+  mkdirSync(path.dirname(privateFile), { recursive: true });
+  writeFileSync(privateFile, "synthetic-private-pattern\n");
+  writeFileSync(trackedFile, "synthetic-tracked-pattern\n");
+  const env = { USER: "sampleuser", [IGNORE_VAR]: "sampleuser" };
+  const scan = core.resolveForbiddenTokenScan([trackedFile, privateFile], env, noUser);
+  assert.deepEqual(scan.wordBoundaryTokens, []);
+  assert.deepEqual(scan.tokens, ["synthetic-tracked-pattern", "synthetic-private-pattern"]);
+  assert.equal(scan.ignoredUsernameCount, 1);
+
+  const content = path.join(root, "notes.md");
+  const check = () => captureCheck({ repoRoot: root, ...scan });
+  writeFileSync(content, "the sampleuser host\n");
+  git(root, "add", "notes.md");
+  let run = check();
+  assert.equal(run.exit, 0, "the ignored dynamic username no longer blocks");
+  assert.ok(run.err.includes(WARNING_ONE));
+  writeFileSync(content, "synthetic-private-pattern\n");
+  run = check();
+  assert.equal(run.exit, 1, "the private pattern still blocks");
+  assert.ok(run.err.includes(WARNING_ONE), "the warning is printed on a blocked run too");
+  writeFileSync(content, "synthetic-tracked-pattern\n");
+  assert.equal(check().exit, 1, "the tracked pattern still blocks");
+
+  // The same spelling in the private list stays a literal substring token.
+  writeFileSync(privateFile, "sampleuser\n");
+  const sameSpelling = core.resolveForbiddenTokenScan([trackedFile, privateFile], env, noUser);
+  assert.deepEqual(sameSpelling.tokens, ["synthetic-tracked-pattern", "sampleuser"]);
+  writeFileSync(content, "sampleuserdocs\n");
+  assert.equal(captureCheck({ repoRoot: root, ...sameSpelling }).exit, 1,
+    "an explicit private spelling is not weakened by the ignore list");
+});
+
+test("runCli passes its env through; the guard fires when the variable is unset", () => {
+  const root = createEphemeralDir({ owner: "paperclip", purpose: "forbiddentest" });
+  git(root, "init", "-q");
+  writeFileSync(path.join(root, "notes.md"), "the sampleuser host\n");
+  git(root, "add", "notes.md");
+
+  // Captures the injected log and error AND the process-wide console and stream
+  // writers, so a stray console.* or stream write anywhere in the CLI path is seen.
+  const runFrom = (env) => {
+    const previous = process.cwd();
+    const out = [];
+    const err = [];
+    const stray = [];
+    const saved = {
+      log: console.log,
+      error: console.error,
+      warn: console.warn,
+      info: console.info,
+      stderrWrite: process.stderr.write,
+      stdoutWrite: process.stdout.write,
+    };
+    const record = (...args) => {
+      stray.push(args.map(String).join(" "));
+      return true;
+    };
+    try {
+      process.chdir(root);
+      console.log = record;
+      console.error = record;
+      console.warn = record;
+      console.info = record;
+      process.stderr.write = record;
+      process.stdout.write = record;
+      const exit = core.runCli(env, {
+        osModule: noUser,
+        exit: (code) => code,
+        log: (message) => out.push(message),
+        error: (message) => err.push(message),
+      });
+      return { exit, out, err, stray, all: [...out, ...err, ...stray].join("\n") };
+    } finally {
+      console.log = saved.log;
+      console.error = saved.error;
+      console.warn = saved.warn;
+      console.info = saved.info;
+      process.stderr.write = saved.stderrWrite;
+      process.stdout.write = saved.stdoutWrite;
+      process.chdir(previous);
+    }
+  };
+
+  const unset = runFrom({ USER: "sampleuser" });
+  assert.equal(unset.exit, 1, "with the variable unset the dynamic username blocks");
+  assert.equal(unset.all.includes("WARNING"), false);
+
+  const ignored = runFrom({ USER: "sampleuser", [IGNORE_VAR]: "sampleuser" });
+  assert.equal(ignored.exit, 0, "runCli must read the ignore list from the env it was given");
+  assert.ok(ignored.err.includes(WARNING_ONE));
+  assert.deepEqual(ignored.stray, [], "the CLI path writes only through the injected log and error");
+  assert.equal(ignored.all.toLowerCase().includes("sampleuser"), false,
+    "the ignored name never reaches any output channel");
+
+  const otherName = runFrom({ USER: "sampleuser", [IGNORE_VAR]: "someoneelse" });
+  assert.equal(otherName.exit, 1, "an unrelated name in the list does not weaken the guard");
+
+  // The removed global skip must not come back at the scan or CLI layer either.
+  for (const value of ["1", "true"]) {
+    const skip = runFrom({ USER: "sampleuser", CHECK_FORBIDDEN_TOKENS_SKIP_DYNAMIC: value });
+    assert.equal(skip.exit, 1, `CHECK_FORBIDDEN_TOKENS_SKIP_DYNAMIC=${value} must not disable the guard`);
+  }
+
+  // A dynamic finding is reported without the name, on every channel.
+  for (const run of [unset, otherName]) {
+    assert.equal(run.all.toLowerCase().includes("sampleuser"), false);
+  }
+});
+
 test("a non-generic username of at least 4 characters stays a dynamic token", () => {
   assert.deepEqual(core.resolveDynamicForbiddenTokens({
     USER: "sampleuser", USERNAME: "pc", LOGNAME: "ubuntu",

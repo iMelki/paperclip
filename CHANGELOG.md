@@ -20,6 +20,20 @@ All notable changes to this repository should be recorded here.
 
 ## Unreleased
 
+- **[Refs #265]** `check:tokens` accepts a per-machine ignore list for dynamic
+  usernames: `CHECK_FORBIDDEN_TOKENS_IGNORE_USERNAMES`. Use it only on a shared
+  or generic account whose name is an ordinary word in the repo. Without it, the
+  pre-push check fails on every file that contains that word. The value is a list
+  of exact account names, separated by commas, semicolons or whitespace. Matching
+  is case-insensitive. Wildcards and prefixes are not supported. An empty,
+  whitespace-only or separator-only value ignores nothing. A listed name is not
+  used as a dynamic token. The private and tracked lists stay in effect, also for
+  the same spelling. Each run that ignores a name prints a warning on stderr with
+  the count only, never the name. There is no switch that turns off dynamic
+  usernames for all accounts. When every detected username is filtered out and no
+  list has patterns, the check now says that nothing was scanned, not that the
+  list is empty.
+
 - **[#129, candidate only]** Integrate upstream `v2026.831.1` with the fork's
   deployed migration history, company-scoped contracts, and Windows process
   ownership safeguards. Add regression proof for the restored Git Bash fallback

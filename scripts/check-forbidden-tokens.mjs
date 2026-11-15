@@ -13,6 +13,12 @@
  * user, admin, and node, are not dynamic tokens. Private and tracked lists
  * stay literal substrings. If username detection fails, the check degrades
  * gracefully.
+ *
+ * CHECK_FORBIDDEN_TOKENS_IGNORE_USERNAMES is a per-machine setting for shared or
+ * generic accounts only (#265). It holds exact account names (comma, semicolon,
+ * or whitespace separated; case-insensitive; no wildcards). A listed name is not
+ * used as a dynamic token. Private and tracked lists are not affected. Each run
+ * that ignores a name prints a count-only warning on stderr.
  */
 
 import { resolve } from "node:path";

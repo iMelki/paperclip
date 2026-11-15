@@ -139,7 +139,12 @@ The pre-commit hook is scoped to your staged change so it stays in the seconds-t
 - **Unit tests** run only the suites whose module graph reaches a staged file
   (`vitest --related`). A staged file no suite imports runs no tests and passes.
 - **Forbidden tokens, Gitleaks, and React Doctor are unscoped and unchanged** — those gates
-  still see every commit.
+  still see every commit. The forbidden-token check also uses the local account name as a
+  token. `CHECK_FORBIDDEN_TOKENS_IGNORE_USERNAMES` is a per-machine setting for shared or
+  generic accounts only. Set it in that machine's environment when the account name is an
+  ordinary word in the repo. Do not commit it to a hook, a script or CI configuration. It
+  removes only the listed exact names from the dynamic tokens. The private and tracked
+  lists stay in effect, and each run that ignores a name prints a count-only warning on stderr.
 
 #### Where push verification happens
 
