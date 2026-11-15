@@ -1,5 +1,5 @@
-import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { execFileSync, spawn } from "node:child_process";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -337,7 +337,24 @@ describe("embedded PostgreSQL reuse identity", () => {
     try {
       await new Promise((r) => setTimeout(r, 300));
       const owners = await listPostgresProcessesForDataDir(dataDir);
-      expect(owners?.some((owner) => owner.pid === child.pid && owner.command.includes("My Postgres"))).toBe(true);
+      const found = owners?.some((owner) => owner.pid === child.pid && owner.command.includes("My Postgres"));
+      // Shown only when the lookup misses, so a host-specific failure says what the host reports.
+      const hostView = () => {
+        const read = (read: () => string) => {
+          try {
+            return read().trim();
+          } catch (error) {
+            return `unavailable (${(error as NodeJS.ErrnoException).code ?? "error"})`;
+          }
+        };
+        return [
+          `child pid ${child.pid}, data dir ${dataDir}`,
+          `owners: ${JSON.stringify(owners)}`,
+          `ps comm/args: ${read(() => execFileSync("ps", ["-p", String(child.pid), "-o", "pid=,comm=,args="], { encoding: "utf8" }))}`,
+          `cwd: ${read(() => readlinkSync(`/proc/${child.pid}/cwd`))}`,
+        ].join("\n");
+      };
+      expect(found, found ? undefined : hostView()).toBe(true);
       expect((await listPostgresProcessesForDataDir(clusterDir("other-pg-")))?.length ?? 0).toBe(0);
     } finally {
       child.kill();
