@@ -683,8 +683,9 @@ async function resolveBuiltInAgentCommand(input: {
   agent: string;
   packageRootDir: string;
   executionTargetIsRemote: boolean;
+  onWarning?: (message: string) => void;
 }): Promise<BuiltInAgentCommand | null> {
-  const { agent, packageRootDir, executionTargetIsRemote } = input;
+  const { agent, packageRootDir, executionTargetIsRemote, onWarning } = input;
   if (agent === "gemini") {
     return { command: "gemini --acp", shellCommand: "gemini --acp" };
   }
@@ -705,8 +706,13 @@ async function resolveBuiltInAgentCommand(input: {
     try {
       const requireFromAdapter = createRequire(path.join(packageRootDir, "package.json"));
       entrypoint = requireFromAdapter.resolve("@agentclientprotocol/codex-acp/dist/index.js");
-    } catch {
-      // Not resolvable from this package: use the ancestor bin lookup below.
+    } catch (error) {
+      // Not resolvable from this package: use the ancestor bin lookup below, which can show a console window.
+      onWarning?.(
+        `[paperclip] Could not resolve the pinned codex-acp entrypoint from ${packageRootDir} (${
+          (error as { message?: unknown } | null)?.message ?? String(error)
+        }); falling back to the codex-acp command, which can open a console window on Windows.\n`,
+      );
     }
     if (entrypoint) {
       const command = `"${process.execPath}" "${entrypoint}"`;
@@ -1895,6 +1901,7 @@ async function buildRuntime(input: {
     agent: acpxAgent,
     packageRootDir: input.engine.packageRootDir,
     executionTargetIsRemote,
+    onWarning: (message) => void input.ctx.onLog("stderr", message),
   });
   let agentCommand = configuredCommand || builtInCommand?.command || null;
   let agentCommandShell = configuredCommand || builtInCommand?.shellCommand || "";

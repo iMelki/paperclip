@@ -1,8 +1,8 @@
 diff --git a/dist/index.js b/dist/index.js
-index 87213c3..3bb2c86 100644
+index 87213c3..731c21d
 --- a/dist/index.js
 +++ b/dist/index.js
-@@ -27266,14 +27266,45 @@ var Logger = class {
+@@ -27266,14 +27266,61 @@ var Logger = class {
  var logger = new Logger();
  
  // src/CodexJsonRpcConnection.ts
@@ -11,22 +11,30 @@ index 87213c3..3bb2c86 100644
 +  const nativeFs = requireCodex("node:fs");
 +  const nativePath = requireCodex("node:path");
 +  let executable = codexPath;
-+  if (!executable) {
-+    const bundledCodexPath = requireCodex.resolve("@openai/codex/bin/codex.js");
-+    const target = process.arch === "x64" ? "x86_64-pc-windows-msvc" : process.arch === "arm64" ? "aarch64-pc-windows-msvc" : null;
-+    if (!target) throw new Error("Unsupported Windows Codex architecture");
-+    const platformPackage = process.arch === "x64" ? "@openai/codex-win32-x64" : "@openai/codex-win32-arm64";
-+    let vendorRoot;
-+    try {
-+      const platformJson = createRequire(bundledCodexPath).resolve(platformPackage + "/package.json");
-+      vendorRoot = nativePath.join(nativePath.dirname(platformJson), "vendor");
-+    } catch {
-+      vendorRoot = nativePath.resolve(nativePath.dirname(bundledCodexPath), "..", "vendor");
++  if (executable) {
++    if (!nativePath.isAbsolute(executable) || nativePath.extname(executable).toLowerCase() !== ".exe") {
++      logger.log("[paperclip] CODEX_PATH is not an absolute native .exe path; using the shell launcher with a hidden window");
++      return null;
 +    }
-+    executable = nativePath.join(vendorRoot, target, "bin", "codex.exe");
-+  }
-+  if (!nativePath.isAbsolute(executable) || nativePath.extname(executable).toLowerCase() !== ".exe") {
-+    throw new Error("Windows CODEX_PATH must be an absolute native .exe path; shell shims are refused");
++  } else {
++    try {
++      const bundledCodexPath = requireCodex.resolve("@openai/codex/bin/codex.js");
++      const target = process.arch === "x64" ? "x86_64-pc-windows-msvc" : process.arch === "arm64" ? "aarch64-pc-windows-msvc" : null;
++      if (!target) throw new Error("Unsupported Windows Codex architecture");
++      const platformPackage = process.arch === "x64" ? "@openai/codex-win32-x64" : "@openai/codex-win32-arm64";
++      let vendorRoot;
++      try {
++        const platformJson = createRequire(bundledCodexPath).resolve(platformPackage + "/package.json");
++        vendorRoot = nativePath.join(nativePath.dirname(platformJson), "vendor");
++      } catch {
++        vendorRoot = nativePath.resolve(nativePath.dirname(bundledCodexPath), "..", "vendor");
++      }
++      executable = nativePath.join(vendorRoot, target, "bin", "codex.exe");
++      nativeFs.statSync(executable);
++    } catch (error) {
++      logger.log("[paperclip] Bundled native codex.exe was not found (" + (error && error.message ? error.message : String(error)) + "); using the Node launcher with a hidden window");
++      return null;
++    }
 +  }
 +  const realExecutable = nativeFs.realpathSync(executable);
 +  if (nativePath.extname(realExecutable).toLowerCase() !== ".exe" || !nativeFs.statSync(realExecutable).isFile()) {
@@ -41,7 +49,15 @@ index 87213c3..3bb2c86 100644
 -  if (codexPath) {
 -    codex = process.platform === "win32" ? spawn(`"${codexPath}" app-server`, { shell: true, env: spawnEnv }) : spawn(codexPath, ["app-server"], { env: spawnEnv });
 +  if (process.platform === "win32") {
-+    codex = spawn(resolveWindowsCodexExecutable(codexPath), ["app-server"], options);
++    const nativeExecutable = resolveWindowsCodexExecutable(codexPath);
++    if (nativeExecutable) {
++      codex = spawn(nativeExecutable, ["app-server"], options);
++    } else if (codexPath) {
++      codex = spawn(`"${codexPath}" app-server`, { shell: true, windowsHide: true, env: spawnEnv });
++    } else {
++      const bundledCodexPath = createRequire(import.meta.url).resolve("@openai/codex/bin/codex.js");
++      codex = spawn(process.execPath, [bundledCodexPath, "app-server"], options);
++    }
 +  } else if (codexPath) {
 +    codex = spawn(codexPath, ["app-server"], options);
    } else {
