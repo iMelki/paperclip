@@ -33,6 +33,7 @@ function fixture(platform = "win32", arch = "x64") {
   let realTarget: string | undefined;
   let targetIsFile = true;
   let bundledExeMissing = false;
+  let codexJsMissing = false;
   const requireFixture = Object.assign((name: string) => {
     if (name === "node:path") return path.win32;
     if (name === "node:fs") return {
@@ -44,7 +45,10 @@ function fixture(platform = "win32", arch = "x64") {
     };
     throw new Error(`Unexpected fixture module: ${name}`);
   }, { resolve: (name: string) => {
-    if (name === "@openai/codex/bin/codex.js") return bundled;
+    if (name === "@openai/codex/bin/codex.js") {
+      if (codexJsMissing) throw new Error("Cannot find module '@openai/codex/bin/codex.js'");
+      return bundled;
+    }
     if (/^@openai\/codex-win32-(x64|arm64)\/package\.json$/.test(name)) return platformPackage;
     throw new Error(`Unexpected fixture resolution: ${name}`);
   } });
@@ -69,7 +73,7 @@ function fixture(platform = "win32", arch = "x64") {
     createJSONRPCWriter: (stream: unknown) => stream,
     rpc: { createMessageConnection: () => ({ listen() {}, dispose() {} }) },
   }) as { startCodexConnection(codexPath?: string, env?: Record<string, string>): unknown };
-  return { ...factory, calls, logs, children, setRealTarget: (value: string) => { realTarget = value; }, setTargetIsFile: (value: boolean) => { targetIsFile = value; }, setBundledExeMissing: (value: boolean) => { bundledExeMissing = value; } };
+  return { ...factory, calls, logs, children, setRealTarget: (value: string) => { realTarget = value; }, setTargetIsFile: (value: boolean) => { targetIsFile = value; }, setBundledExeMissing: (value: boolean) => { bundledExeMissing = value; }, setCodexJsMissing: (value: boolean) => { codexJsMissing = value; } };
 }
 
 describe("pinned Codex ACP Windows launch patch", () => {
@@ -136,6 +140,14 @@ describe("pinned Codex ACP Windows launch patch", () => {
     expect(run.logs.some((line) => /Bundled native codex\.exe was not found/.test(line))).toBe(true);
   });
 
+  it("does not claim a Node-launcher fallback when the bundled codex.js cannot be resolved", () => {
+    const run = fixture();
+    run.setCodexJsMissing(true);
+    expect(() => run.startCodexConnection()).toThrow(/Cannot find module/);
+    expect(run.calls).toHaveLength(0);
+    expect(run.logs.some((line) => /using the Node launcher/.test(line))).toBe(false);
+  });
+
   it("selects the existing arm64 platform package and falls back to the Node launcher on an unsupported architecture", () => {
     const arm = fixture("win32", "arm64");
     arm.startCodexConnection();
@@ -170,7 +182,7 @@ describe("pinned Codex ACP Windows launch patch", () => {
 });
 
 describe("Paperclip Windows builtin ACP selection", () => {
-  async function select(agent: string, platform: string, remote = false, entrypoint = "C:\\pinned package\\codex-acp\\dist\\index.js", node = "C:\\Program Files\\node\\node.exe", warnings: string[] = []) {
+  async function select(agent: string, platform: string, remote = false, entrypoint = "C:\\pinned package\\codex-acp\\dist\\index.js", node = "C:\\Program Files\\node\\node.exe", warnings: string[] = [], onWarning?: (message: string) => unknown) {
     const source = fs.readFileSync(process.env.PAPERCLIP_ACPX_COMMAND_SOURCE ?? path.join(sourceDir, "acpx-engine/execute.ts"), "utf8");
     const begin = source.indexOf("async function resolveBuiltInAgentCommand(");
     const end = source.indexOf("const execFileAsync", begin);
@@ -183,7 +195,7 @@ describe("Paperclip Windows builtin ACP selection", () => {
       shellQuote: (value: string) => `'${value.replaceAll("'", `'\\''`)}'`,
       findAncestorBin: async () => "C:\\existing\\agent.cmd",
     }) as (input: unknown) => Promise<{ command: string; shellCommand: string }>;
-    return resolve({ agent, packageRootDir: "C:\\adapter", executionTargetIsRemote: remote, onWarning: (message: string) => warnings.push(message) });
+    return resolve({ agent, packageRootDir: "C:\\adapter", executionTargetIsRemote: remote, onWarning: onWarning ?? ((message: string) => { warnings.push(message); }) });
   }
 
   it("bypasses the Windows Codex batch shim with exact Node and pinned JS arguments", async () => {
@@ -214,6 +226,22 @@ describe("Paperclip Windows builtin ACP selection", () => {
     expect(warnings).toHaveLength(1);
     expect(warnings[0]).toMatch(/Could not resolve the pinned codex-acp entrypoint from C:\\adapter \(MODULE_NOT_FOUND\)/);
     expect(warnings[0]).toMatch(/console window/);
+  });
+
+  it("still selects the fallback when the warning sink rejects or throws, with no unhandled rejection", async () => {
+    const unhandled: unknown[] = [];
+    const record = (reason: unknown) => { unhandled.push(reason); };
+    process.on("unhandledRejection", record);
+    try {
+      const rejected = await select("codex", "win32", false, "", undefined, [], () => Promise.reject(new Error("log sink down")));
+      expect(rejected.command).toBe("C:\\existing\\agent.cmd");
+      const thrown = await select("codex", "win32", false, "", undefined, [], () => { throw new Error("log sink threw"); });
+      expect(thrown.command).toBe("C:\\existing\\agent.cmd");
+      await new Promise((done) => setTimeout(done, 20));
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off("unhandledRejection", record);
+    }
   });
 
   it("preserves remote, non-Windows and other-provider selection", async () => {

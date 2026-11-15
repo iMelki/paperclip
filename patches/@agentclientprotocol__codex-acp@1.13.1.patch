@@ -1,5 +1,5 @@
 diff --git a/dist/index.js b/dist/index.js
-index 87213c3..731c21d
+index 87213c3..4e9f93b
 --- a/dist/index.js
 +++ b/dist/index.js
 @@ -27266,14 +27266,61 @@ var Logger = class {
@@ -17,8 +17,8 @@ index 87213c3..731c21d
 +      return null;
 +    }
 +  } else {
++    const bundledCodexPath = requireCodex.resolve("@openai/codex/bin/codex.js");
 +    try {
-+      const bundledCodexPath = requireCodex.resolve("@openai/codex/bin/codex.js");
 +      const target = process.arch === "x64" ? "x86_64-pc-windows-msvc" : process.arch === "arm64" ? "aarch64-pc-windows-msvc" : null;
 +      if (!target) throw new Error("Unsupported Windows Codex architecture");
 +      const platformPackage = process.arch === "x64" ? "@openai/codex-win32-x64" : "@openai/codex-win32-arm64";
