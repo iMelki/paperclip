@@ -46,7 +46,7 @@ test("dynamic usernames shorter than 4 characters are not tokens", () => {
 });
 
 test("generic dynamic usernames are not tokens, in any case", () => {
-  for (const name of ["box", "root", "ubuntu", "runner", "user", "admin", "node", "UBUNTU", "Node"]) {
+  for (const name of ["box", "root", "ubuntu", "runner", "user", "admin", "node", "UBUNTU", "Node", "builder", "worker", "docker"]) {
     assert.deepEqual(
       core.resolveDynamicForbiddenTokens({ USER: ` ${name} ` }, noUser),
       [],
@@ -56,6 +56,33 @@ test("generic dynamic usernames are not tokens, in any case", () => {
   assert.deepEqual(
     core.resolveDynamicForbiddenTokens({}, { userInfo: () => ({ username: "ubuntu" }) }),
     [],
+  );
+});
+
+test("CHECK_FORBIDDEN_TOKENS_SKIP_DYNAMIC skips dynamic username tokens", () => {
+  for (const value of ["1", "true"]) {
+    assert.deepEqual(
+      core.resolveDynamicForbiddenTokens(
+        { USER: "sampleuser", CHECK_FORBIDDEN_TOKENS_SKIP_DYNAMIC: value },
+        { userInfo: () => ({ username: "anotheruser" }) },
+      ),
+      [],
+    );
+  }
+});
+
+test("CHECK_FORBIDDEN_TOKENS_IGNORE_USERNAMES ignores custom dynamic usernames", () => {
+  assert.deepEqual(
+    core.resolveDynamicForbiddenTokens(
+      {
+        USER: "paperclip",
+        USERNAME: "my-ci-box",
+        LOGNAME: "real-operator",
+        CHECK_FORBIDDEN_TOKENS_IGNORE_USERNAMES: "paperclip, my-ci-box",
+      },
+      noUser,
+    ),
+    ["real-operator"],
   );
 });
 
@@ -277,10 +304,11 @@ test("the tracked list is read in addition to the private one", () => {
   try {
     process.chdir(repoRoot);
     const paths = core.resolveRepoPaths();
+    const normalizePath = (p) => (process.platform === "win32" ? path.resolve(p).toLowerCase() : path.resolve(p));
 
-    assert.equal(paths.trackedTokensFile, path.resolve(repoRoot, "scripts/forbidden-tokens.txt"));
+    assert.equal(normalizePath(paths.trackedTokensFile), normalizePath(path.resolve(repoRoot, "scripts/forbidden-tokens.txt")));
     assert.ok(existsSync(paths.trackedTokensFile), "the tracked list must ship in the repo");
-    assert.deepEqual(paths.tokensFiles, [paths.trackedTokensFile, paths.tokensFile]);
+    assert.deepEqual(paths.tokensFiles.map(normalizePath), [normalizePath(paths.trackedTokensFile), normalizePath(paths.tokensFile)]);
   } finally {
     process.chdir(previous);
   }

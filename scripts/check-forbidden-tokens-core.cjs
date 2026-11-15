@@ -98,16 +98,33 @@ const GENERIC_DYNAMIC_USERNAMES = new Set([
   "user",
   "admin",
   "node",
+  "builder",
+  "worker",
+  "docker",
 ]);
 
-function isIgnoredDynamicUsername(candidate) {
+function isIgnoredDynamicUsername(candidate, env = {}) {
   const value = String(candidate ?? "").trim().toLowerCase();
   if (value.length < 4) return true;
-  return GENERIC_DYNAMIC_USERNAMES.has(value);
+  if (GENERIC_DYNAMIC_USERNAMES.has(value)) return true;
+  if (env && typeof env.CHECK_FORBIDDEN_TOKENS_IGNORE_USERNAMES === "string") {
+    const extra = env.CHECK_FORBIDDEN_TOKENS_IGNORE_USERNAMES.split(/[,;\s]+/)
+      .map((s) => s.trim().toLowerCase())
+      .filter(Boolean);
+    if (extra.includes(value)) return true;
+  }
+  return false;
 }
 
 function resolveDynamicForbiddenTokens(env = process.env, osModule = os) {
-  const candidates = [env.USER, env.LOGNAME, env.USERNAME];
+  if (
+    env?.CHECK_FORBIDDEN_TOKENS_SKIP_DYNAMIC === "1" ||
+    env?.CHECK_FORBIDDEN_TOKENS_SKIP_DYNAMIC === "true"
+  ) {
+    return [];
+  }
+
+  const candidates = [env?.USER, env?.LOGNAME, env?.USERNAME];
 
   try {
     candidates.push(osModule.userInfo().username);
@@ -115,7 +132,7 @@ function resolveDynamicForbiddenTokens(env = process.env, osModule = os) {
     // Some environments do not expose userInfo; env vars are enough fallback.
   }
 
-  return uniqueNonEmpty(candidates).filter((candidate) => !isIgnoredDynamicUsername(candidate));
+  return uniqueNonEmpty(candidates).filter((candidate) => !isIgnoredDynamicUsername(candidate, env));
 }
 
 function isWordChar(char) {
@@ -335,9 +352,9 @@ function resolveRepoPaths(exec = execSync) {
   };
 }
 
-function runCli() {
+function runCli(env = process.env) {
   const { repoRoot, tokensFiles } = resolveRepoPaths();
-  const scan = resolveForbiddenTokenScan(tokensFiles);
+  const scan = resolveForbiddenTokenScan(tokensFiles, env);
   process.exit(runForbiddenTokenCheck({
     repoRoot,
     tokens: scan.tokens,
