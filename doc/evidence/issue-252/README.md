@@ -26,7 +26,8 @@ here is still current. Other code on these paths **did** change after
 - **Server startup** (#247, #257). `server/src/index.ts` now runs its sweeps
   through a bounded sweep scheduler. This reaches the scheduler-off path too:
   with the scheduler disabled, startup still schedules the environment-lease
-  cleanup sweep, which now goes through the new `trackBoundedSweep`.
+  cleanup sweep and the external-object refresh sweep, which now go through the
+  new `trackBoundedSweep`.
   `server/src/app.ts` adds a GitHub project-board scheduler bridge and a new
   plugin job dispatch plan.
 - **Database package** (#257). `packages/db/src/backup-lib.ts` changed the
@@ -88,7 +89,7 @@ and `PAPERCLIP_HOME` in a scratch folder.
   `native_run_results`, `status_decision_effects`, `status_decisions`,
   `work_assessments`.
 - No table that existed before the migration was dropped. (Within the range,
-  0217 creates `claude_setup_token_sessions` and 0229 drops it again.) No
+  0225 creates `claude_setup_token_sessions` and 0229 drops it again.) No
   existing table's row count changed, apart from the drizzle journal. Spot reads before and after: companies 2, issues 628,
   agents 19.
 
