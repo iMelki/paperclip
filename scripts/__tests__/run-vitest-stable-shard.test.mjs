@@ -102,6 +102,13 @@ test("the unsharded general-server lane transports exclusions outside Windows ar
   );
 });
 
+test("the runner points TEMP, TMP, and TMPDIR at one per-invocation root", () => {
+  const source = readFileSync(script, "utf8");
+  const runVitestBody = source.slice(source.indexOf("function runVitest("));
+  assert.match(runVitestBody, /\.\.\.ephemeralChildEnv\(path\.join\(testRoot, "t"\)\)/);
+  assert.doesNotMatch(runVitestBody.slice(0, 1500), /TMPDIR:/, "TMPDIR must not be set on its own");
+});
+
 test("shard flags are rejected for the workspaces-b group", () => {
   const result = dryRun(["--mode", "general", "--group", "general-workspaces-b", "--shard-index", "0", "--shard-count", "3"]);
   assert.notEqual(result.status, 0, "workspaces-b must not accept shard flags");

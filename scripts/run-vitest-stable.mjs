@@ -8,6 +8,7 @@ import {
   sanitizeGitLocalEnvironment,
 } from "./git-local-env.mjs";
 import { loadShardDurations, selectGeneralServerShard } from "./general-server-shard.mjs";
+import { ephemeralChildEnv } from "./lib/ephemeral-scratch.mjs";
 import { forEachExactVitestFile, runVitestDirect } from "./run-vitest-direct.mjs";
 
 const repoRoot = process.cwd();
@@ -376,7 +377,8 @@ function runVitest(args, label, { serverExcludes = [], subcommand = "run" } = {}
     PAPERCLIP_INSTANCE_ID: `vt-${process.pid}-${invocationIndex}`,
     PAPERCLIP_ENV_LIVE_SSH_NO_AUTO_FIXTURE:
       process.env.PAPERCLIP_ENV_LIVE_SSH_NO_AUTO_FIXTURE ?? "true",
-    TMPDIR: path.join(testRoot, "t"),
+    // TEMP and TMP matter on Windows, where Node ignores TMPDIR (#56).
+    ...ephemeralChildEnv(path.join(testRoot, "t")),
   }, gitLocalEnvironmentVariableNames);
   delete env.PAPERCLIP_VITEST_EXCLUDE_FILE;
   mkdirSync(env.PAPERCLIP_HOME, { recursive: true });
