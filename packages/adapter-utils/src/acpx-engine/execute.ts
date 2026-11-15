@@ -701,10 +701,17 @@ async function resolveBuiltInAgentCommand(input: {
   if (agent === "codex" && process.platform === "win32") {
     // Bypass the batch shim: ACPX starts this exact Node executable with the
     // pinned package entrypoint as an argument, without cmd.exe in the chain.
-    const requireFromAdapter = createRequire(path.join(packageRootDir, "package.json"));
-    const entrypoint = requireFromAdapter.resolve("@agentclientprotocol/codex-acp/dist/index.js");
-    const command = `"${process.execPath}" "${entrypoint}"`;
-    return { command, shellCommand: command };
+    let entrypoint: string | null = null;
+    try {
+      const requireFromAdapter = createRequire(path.join(packageRootDir, "package.json"));
+      entrypoint = requireFromAdapter.resolve("@agentclientprotocol/codex-acp/dist/index.js");
+    } catch {
+      // Not resolvable from this package: use the ancestor bin lookup below.
+    }
+    if (entrypoint) {
+      const command = `"${process.execPath}" "${entrypoint}"`;
+      return { command, shellCommand: command };
+    }
   }
   const resolved = (await findAncestorBin(packageRootDir, binName)) ?? binName;
   return { command: resolved, shellCommand: shellQuote(resolved) };

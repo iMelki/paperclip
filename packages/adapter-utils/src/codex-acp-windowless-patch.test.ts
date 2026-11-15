@@ -16,7 +16,11 @@ const dependencyRequire = createRequire(distributionPath);
 const { applyPatch } = dependencyRequire("diff") as { applyPatch(source: string, patch: string): string | false };
 const original = fs.readFileSync(distributionPath, "utf8");
 const patch = fs.readFileSync(path.join(repository, "patches/@agentclientprotocol__codex-acp@1.13.1.patch"), "utf8");
-const patched = process.env.PAPERCLIP_CODEX_PATCH_PROOF_BEFORE === "1" ? original : applyPatch(original, patch);
+// pnpm applies the pinned patch at install time, so a normal checkout already
+// holds the patched file. An unpatched file (an install that skipped patches)
+// gets the patch applied here, which also proves the hunk still matches.
+const alreadyPatched = original.includes("function resolveWindowsCodexExecutable(");
+const patched = process.env.PAPERCLIP_CODEX_PATCH_PROOF_BEFORE === "1" || alreadyPatched ? original : applyPatch(original, patch);
 if (patched === false) throw new Error("The pinned Codex ACP patch does not apply to the installed distribution");
 const proposed: string = patched;
 
@@ -63,6 +67,11 @@ function fixture(platform = "win32", arch = "x64") {
 }
 
 describe("pinned Codex ACP Windows launch patch", () => {
+  it.skipIf(process.env.PAPERCLIP_CODEX_PATCH_PROOF_BEFORE === "1")("is applied to the installed distribution or applies to it cleanly", () => {
+    expect(proposed).toContain("function resolveWindowsCodexExecutable(");
+    expect(proposed).toContain("windowsHide: true");
+  });
+
   it("launches the bundled native exe directly with bounded protocol pipes and no shell", () => {
     const run = fixture();
     const env = { SAFE: "preserved", PATH: "C:\\approved" };
@@ -144,7 +153,7 @@ describe("Paperclip Windows builtin ACP selection", () => {
     const resolve = vm.runInNewContext(executable + "\nresolveBuiltInAgentCommand", {
       process: { platform, execPath: node },
       path: path.win32,
-      createRequire: () => ({ resolve: () => entrypoint }),
+      createRequire: () => ({ resolve: () => { if (!entrypoint) throw new Error("MODULE_NOT_FOUND"); return entrypoint; } }),
       shellQuote: (value: string) => `'${value.replaceAll("'", `'\\''`)}'`,
       findAncestorBin: async () => "C:\\existing\\agent.cmd",
     }) as (input: unknown) => Promise<{ command: string; shellCommand: string }>;
@@ -171,6 +180,10 @@ describe("Paperclip Windows builtin ACP selection", () => {
     if (begin < 0 || end < 0) throw new Error("The installed ACPX parser function closure is missing");
     const parse = vm.runInNewContext(source.slice(begin, end) + "\nsplitCommandLine", { process: { platform: "win32" } }) as (input: string) => { command: string; args: string[] };
     expect(parse(selected.command)).toEqual({ command: node, args: [entrypoint] });
+  });
+
+  it("falls back to the existing bin lookup when the pinned entrypoint cannot be resolved", async () => {
+    expect((await select("codex", "win32", false, "")).command).toBe("C:\\existing\\agent.cmd");
   });
 
   it("preserves remote, non-Windows and other-provider selection", async () => {
