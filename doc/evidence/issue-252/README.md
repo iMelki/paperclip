@@ -128,13 +128,17 @@ add files. Use the command, not this list, as the complete set.
   restore in `backup-lib.ts` (taken when `psql` is missing or fails) now
   streams through exactly this code. Neither proof ran against the patched
   driver.
-- The root `package.json` and `pnpm-lock.yaml` also change install-time
-  tooling: a `typescript-compiler-api` dev dependency (`npm:typescript@5.9.3`,
-  adding `typescript@5.9.3` to the lockfile), `@cursor/sdk` pinned to `1.2.0`
-  and `vitest` added in `packages/adapters/cursor-cloud`, `picomatch` 4.0.3 to
-  4.0.7 and `tinyglobby` 0.2.15 to 0.2.17. These are build and dev tooling,
-  likely without runtime effect; the proofs ran `pnpm install
-  --frozen-lockfile`, so a covered-by note must still account for them.
+- The root `package.json` and `pnpm-lock.yaml` also change what installs:
+  - build and dev tooling: a `typescript-compiler-api` dev dependency
+    (`npm:typescript@5.9.3`, adding `typescript@5.9.3` to the lockfile),
+    `vitest` added in `packages/adapters/cursor-cloud`, `picomatch` 4.0.3 to
+    4.0.7 and `tinyglobby` 0.2.15 to 0.2.17, likely without runtime effect;
+  - `@cursor/sdk`, a runtime dependency of `packages/adapters/cursor-cloud`,
+    whose range changes from `^1.0.28` to exactly `1.2.0`. Both trees' lockfiles
+    already resolve `1.2.0(zod@4.4.3)`, so the installed version is unchanged.
+
+  The proofs ran `pnpm install --frozen-lockfile`, so a covered-by note must
+  still account for these.
 - `scripts/cli-bundled-npm-dependencies.mjs` and
   `scripts/prepare-bundled-package.mjs` (#257). They add `postgres` to the
   bundled CLI dependencies and require the patched driver when packing; this
