@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -330,12 +330,27 @@ describe("embedded PostgreSQL reuse identity", () => {
     const binDir = join(mkdtempSync(join(tmpdir(), "pg-bin-")), "My Postgres", "bin");
     mkdirSync(binDir, { recursive: true });
     const bin = join(binDir, "postgres");
-    symlinkSync(sleepBin, bin);
-    const child = spawn(bin, ["30"], { cwd: dataDir, stdio: "ignore" });
+    // Copy rather than symlink: on Linux `/proc/<pid>/comm` (what `ps -o comm=`
+    // reads) is the executed binary's own name, so a symlink to `sleep` reports
+    // `sleep` and the process is never matched as postgres (#271).
     try {
-      await new Promise((r) => setTimeout(r, 300));
-      const owners = await listPostgresProcessesForDataDir(dataDir);
-      expect(owners?.some((owner) => owner.pid === child.pid && owner.command.includes("My Postgres"))).toBe(true);
+      copyFileSync(sleepBin, bin);
+      chmodSync(bin, 0o755);
+    } catch {
+      symlinkSync(sleepBin, bin);
+    }
+    const child = spawn(bin, ["30"], { cwd: dataDir, stdio: "ignore" });
+    const isOurs = (owner: { pid: number; command: string }) =>
+      owner.pid === child.pid && owner.command.includes("My Postgres");
+    try {
+      // Poll instead of one fixed sleep: a loaded runner can take longer than
+      // 300 ms to show the new process in the process list.
+      let owners = await listPostgresProcessesForDataDir(dataDir);
+      for (let waited = 0; !owners?.some(isOurs) && waited < 3000; waited += 100) {
+        await new Promise((r) => setTimeout(r, 100));
+        owners = await listPostgresProcessesForDataDir(dataDir);
+      }
+      expect(owners?.some(isOurs)).toBe(true);
       expect((await listPostgresProcessesForDataDir(clusterDir("other-pg-")))?.length ?? 0).toBe(0);
     } finally {
       child.kill();
