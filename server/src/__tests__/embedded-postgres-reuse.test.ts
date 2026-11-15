@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -330,11 +330,21 @@ describe("embedded PostgreSQL reuse identity", () => {
     const binDir = join(mkdtempSync(join(tmpdir(), "pg-bin-")), "My Postgres", "bin");
     mkdirSync(binDir, { recursive: true });
     const bin = join(binDir, "postgres");
-    symlinkSync(sleepBin, bin);
+    try {
+      copyFileSync(sleepBin, bin);
+    } catch {
+      symlinkSync(sleepBin, bin);
+    }
     const child = spawn(bin, ["30"], { cwd: dataDir, stdio: "ignore" });
     try {
-      await new Promise((r) => setTimeout(r, 300));
-      const owners = await listPostgresProcessesForDataDir(dataDir);
+      let owners: PostgresProcess[] | null = null;
+      for (let i = 0; i < 30; i++) {
+        owners = await listPostgresProcessesForDataDir(dataDir);
+        if (owners?.some((owner) => owner.pid === child.pid && owner.command.includes("My Postgres"))) {
+          break;
+        }
+        await new Promise((r) => setTimeout(r, 100));
+      }
       expect(owners?.some((owner) => owner.pid === child.pid && owner.command.includes("My Postgres"))).toBe(true);
       expect((await listPostgresProcessesForDataDir(clusterDir("other-pg-")))?.length ?? 0).toBe(0);
     } finally {
