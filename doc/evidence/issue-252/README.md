@@ -2,7 +2,7 @@
 
 This records the proofs for #252 item 2 (exact-head runtime qualification)
 and item 3 (isolated migration proof and `COPY`-path restore). Both runs used
-a **copy** of a Factory DB backup in an isolated Postgres cluster. Neither run
+a **copy** of a production DB backup in an isolated Postgres cluster. Neither run
 connected to the live DB, started or stopped the live server, or read the live
 data folder. The only live-side action was one read-only copy of a backup file.
 
@@ -53,7 +53,7 @@ therefore **0216 → 0234**.
 
 | Field | Value |
 | --- | --- |
-| File | `paperclip-20261020-213024.sql.gz` (newest Factory backup found) |
+| File | `paperclip-20261020-213024.sql.gz` (newest backup found) |
 | Created | 2026-10-20T18:30:24Z, about 21 days before the runs |
 | Size | 14,259,107 bytes compressed, 120,790,827 bytes SQL; `gzip -t` OK |
 | SHA-256 | `237B069A4B748E9AFDC6241B473AC48B3473FE924A9948E3C34907F064913812` (source and copy match) |
@@ -224,4 +224,4 @@ instance and were not copied.
 Both Postgres clusters were stopped with `pg_ctl stop -m fast`. Every process
 the lanes started was stopped after a PID and start-time check; the ports were
 free afterwards. The cluster data folders and the backup copies, which held
-full copies of Factory data, were moved to the Recycle Bin and checked absent.
+full copies of production data, were moved to the Recycle Bin and checked absent.
