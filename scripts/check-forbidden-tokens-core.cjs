@@ -130,9 +130,10 @@ function isGenericDynamicUsername(candidate) {
 }
 
 /**
- * Classify every detected username. Generic names are checked first, so a
- * generic name that is also in the ignore list does not count as ignored by
- * the variable (the variable did not change the result for it).
+ * Classify every detected username. Generic names (the fixed list, plus any
+ * name shorter than 4 characters) are checked first, so a generic name that is
+ * also in the ignore list does not count as ignored by the variable (the
+ * variable did not change the result for it).
  * Counts are of distinct case-insensitive names.
  */
 function classifyDynamicUsernames(env = process.env, osModule = os) {
@@ -296,7 +297,7 @@ function runForbiddenTokenCheck({
       // Not "the list is empty": a username was detected and then filtered out.
       error(
         "  ℹ  Nothing was scanned: every detected username was filtered out "
-          + `(generic account names: ${genericUsernameCount}; ${IGNORE_USERNAMES_ENV}: `
+          + `(generic or short account names: ${genericUsernameCount}; ${IGNORE_USERNAMES_ENV}: `
           + `${ignoredUsernameCount}), and the private and tracked lists have no patterns.`,
       );
     } else {

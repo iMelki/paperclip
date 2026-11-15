@@ -144,7 +144,7 @@ The pre-commit hook is scoped to your staged change so it stays in the seconds-t
   generic accounts only. Set it in that machine's environment when the account name is an
   ordinary word in the repo. Do not commit it to a hook, a script or CI configuration. It
   removes only the listed exact names from the dynamic tokens. The private and tracked
-  lists stay in effect, and each run prints a count-only warning on stderr.
+  lists stay in effect, and each run that ignores a name prints a count-only warning on stderr.
 
 #### Where push verification happens
 
