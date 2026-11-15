@@ -8,8 +8,8 @@ import {
   sanitizeGitLocalEnvironment,
 } from "./git-local-env.mjs";
 import { loadShardDurations, selectGeneralServerShard } from "./general-server-shard.mjs";
+import { ephemeralChildEnv } from "./lib/ephemeral-scratch.mjs";
 import { forEachExactVitestFile, runVitestDirect } from "./run-vitest-direct.mjs";
-import { createVitestScratchEnvironment } from "./vitest-scratch-env.mjs";
 
 const repoRoot = process.cwd();
 const gitLocalEnvironmentVariableNames = resolveGitLocalEnvironmentVariableNames({ cwd: repoRoot });
@@ -370,14 +370,19 @@ function runVitest(args, label, { serverExcludes = [], subcommand = "run" } = {}
   const tempRootParent = process.platform === "win32" ? os.tmpdir() : "/tmp";
   const testRoot = mkdtempSync(path.join(tempRootParent, `pcvt-${process.pid}-${invocationIndex}-`));
   // Keep per-run paths compact so Unix socket fixtures stay under macOS path limits.
-  const env = sanitizeGitLocalEnvironment(createVitestScratchEnvironment({
-    baseEnv: process.env,
-    testRoot,
-    invocationId: `vt-${process.pid}-${invocationIndex}`,
-  }), gitLocalEnvironmentVariableNames);
+  const env = sanitizeGitLocalEnvironment({
+    ...process.env,
+    NODE_ENV: "test",
+    PAPERCLIP_HOME: path.join(testRoot, "h"),
+    PAPERCLIP_INSTANCE_ID: `vt-${process.pid}-${invocationIndex}`,
+    PAPERCLIP_ENV_LIVE_SSH_NO_AUTO_FIXTURE:
+      process.env.PAPERCLIP_ENV_LIVE_SSH_NO_AUTO_FIXTURE ?? "true",
+    // TEMP and TMP matter on Windows, where Node ignores TMPDIR (#56).
+    ...ephemeralChildEnv(path.join(testRoot, "t")),
+  }, gitLocalEnvironmentVariableNames);
   delete env.PAPERCLIP_VITEST_EXCLUDE_FILE;
   mkdirSync(env.PAPERCLIP_HOME, { recursive: true });
-  mkdirSync(env.TEMP, { recursive: true });
+  mkdirSync(env.TMPDIR, { recursive: true });
   if (serverExcludes.length > 0) {
     const excludeFile = path.join(testRoot, "server-excludes.json");
     writeFileSync(excludeFile, `${JSON.stringify(serverExcludes)}\n`, "utf8");
