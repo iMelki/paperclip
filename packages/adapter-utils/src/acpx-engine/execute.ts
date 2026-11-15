@@ -6,6 +6,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { createHash, randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
+import { createRequire } from "node:module";
 import type {
   AdapterBillingType,
   AdapterExecutionContext,
@@ -682,8 +683,18 @@ async function resolveBuiltInAgentCommand(input: {
   agent: string;
   packageRootDir: string;
   executionTargetIsRemote: boolean;
+  onWarning?: (message: string) => unknown;
 }): Promise<BuiltInAgentCommand | null> {
   const { agent, packageRootDir, executionTargetIsRemote } = input;
+  // A warning is best effort: a failing or rejecting log sink must not change
+  // which command is selected or leave an unhandled rejection behind.
+  const onWarning = (message: string) => {
+    try {
+      void Promise.resolve(input.onWarning?.(message)).catch(() => undefined);
+    } catch {
+      // Dropped on purpose.
+    }
+  };
   if (agent === "gemini") {
     return { command: "gemini --acp", shellCommand: "gemini --acp" };
   }
@@ -696,6 +707,26 @@ async function resolveBuiltInAgentCommand(input: {
   if (!binName) return null;
   if (executionTargetIsRemote) {
     return { command: binName, shellCommand: binName };
+  }
+  if (agent === "codex" && process.platform === "win32") {
+    // Bypass the batch shim: ACPX starts this exact Node executable with the
+    // pinned package entrypoint as an argument, without cmd.exe in the chain.
+    let entrypoint: string | null = null;
+    try {
+      const requireFromAdapter = createRequire(path.join(packageRootDir, "package.json"));
+      entrypoint = requireFromAdapter.resolve("@agentclientprotocol/codex-acp/dist/index.js");
+    } catch (error) {
+      // Not resolvable from this package: use the ancestor bin lookup below, which can show a console window.
+      onWarning(
+        `[paperclip] Could not resolve the pinned codex-acp entrypoint from ${packageRootDir} (${
+          (error as { message?: unknown } | null)?.message ?? String(error)
+        }); falling back to the codex-acp command, which can open a console window on Windows.\n`,
+      );
+    }
+    if (entrypoint) {
+      const command = `"${process.execPath}" "${entrypoint}"`;
+      return { command, shellCommand: command };
+    }
   }
   const resolved = (await findAncestorBin(packageRootDir, binName)) ?? binName;
   return { command: resolved, shellCommand: shellQuote(resolved) };
@@ -1879,6 +1910,7 @@ async function buildRuntime(input: {
     agent: acpxAgent,
     packageRootDir: input.engine.packageRootDir,
     executionTargetIsRemote,
+    onWarning: (message) => input.ctx.onLog("stderr", message),
   });
   let agentCommand = configuredCommand || builtInCommand?.command || null;
   let agentCommandShell = configuredCommand || builtInCommand?.shellCommand || "";

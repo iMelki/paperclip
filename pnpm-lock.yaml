@@ -11,6 +11,9 @@ overrides:
   react-dom: ^19.2.8
 
 patchedDependencies:
+  '@agentclientprotocol/codex-acp@1.13.1':
+    hash: n67welczkapjzf6jp4m452azae
+    path: patches/@agentclientprotocol__codex-acp@1.13.1.patch
   acpx@0.12.0:
     hash: ae3a3qz4d26wxkaqdiebydfjji
     path: patches/acpx@0.12.0.patch
@@ -165,7 +168,7 @@ importers:
     dependencies:
       '@agentclientprotocol/codex-acp':
         specifier: ^1.6.2
-        version: 1.13.1
+        version: 1.13.1(patch_hash=n67welczkapjzf6jp4m452azae)
       '@paperclipai/adapter-utils':
         specifier: workspace:*
         version: link:../../adapter-utils
@@ -8043,7 +8046,7 @@ snapshots:
       - '@anthropic-ai/sdk'
       - '@modelcontextprotocol/sdk'
 
-  '@agentclientprotocol/codex-acp@1.13.1':
+  '@agentclientprotocol/codex-acp@1.13.1(patch_hash=n67welczkapjzf6jp4m452azae)':
     dependencies:
       '@agentclientprotocol/sdk': 1.9.0(zod@4.4.3)
       '@openai/codex': 0.156.1
