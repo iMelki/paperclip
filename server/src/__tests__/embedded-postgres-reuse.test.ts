@@ -326,12 +326,14 @@ describe("embedded PostgreSQL reuse identity", () => {
   it.skipIf(process.platform === "win32")("finds a real process named postgres that references the data directory", async () => {
     // The executable path contains a space. `comm` is still `postgres`; identifying
     // the process from the first space-separated token of `args` would skip it.
-    const sleepBin = existsSync("/bin/sleep") ? "/bin/sleep" : "/usr/bin/sleep";
+    // The process is this test runner's own `node`, not `sleep`: on hosts where
+    // `sleep` is an applet of a multi-call binary, a symlink named `postgres`
+    // exits at once because the applet name is unknown.
     const binDir = join(mkdtempSync(join(tmpdir(), "pg-bin-")), "My Postgres", "bin");
     mkdirSync(binDir, { recursive: true });
     const bin = join(binDir, "postgres");
-    symlinkSync(sleepBin, bin);
-    const child = spawn(bin, ["30"], { cwd: dataDir, stdio: "ignore" });
+    symlinkSync(process.execPath, bin);
+    const child = spawn(bin, ["-e", "setTimeout(() => {}, 30000)"], { cwd: dataDir, stdio: "ignore" });
     try {
       await new Promise((r) => setTimeout(r, 300));
       const owners = await listPostgresProcessesForDataDir(dataDir);
