@@ -15,7 +15,7 @@ results only.
 | Item | Result | Tree tested |
 | --- | --- | --- |
 | 3. Migration 0216 → 0234 on a copy | PASS | `dev` at `8a9c270d8f3dfe03f24bf966022c6077289c5bec` |
-| 3. Restore of a `COPY`-format dump through `psql` | PASS, 0 row-count mismatches; the no-`psql` fallback restore in `backup-lib.ts` was not run | same |
+| 3. Restore of a `COPY`-format dump through `psql` | PASS, 0 row-count mismatches; the `psql`-failure fallback restore in `backup-lib.ts` was not run | same |
 | 2. Runtime start on a migrated, neutralized copy | PASS, with the limits below | same |
 
 ## Scope: which tree this proves
@@ -29,10 +29,12 @@ change after `8a9c270d`.
 `8a9c270d`, run:
 
 ```sh
-git diff --stat 8a9c270d <head>
+git diff --name-status 8a9c270d <head>
+git diff --shortstat 8a9c270d <head>
 ```
 
-Run it with no path filter. Changes outside `server/` and `packages/` also
+Run it with no path filter; `--name-status` prints full paths (`--stat`
+shortens long ones to `.../`). Changes outside `server/` and `packages/` also
 reach these paths: patched dependencies (`patches/`), the root `package.json`
 and `pnpm-lock.yaml` (the proofs ran `pnpm install --frozen-lockfile`), and
 the packaging scripts under `scripts/`. Each listed file on the startup,
@@ -100,9 +102,11 @@ add files. Use the command, not this list, as the complete set.
 
 ### Migration, backup and restore path (`packages/db`, #257)
 
-- `backup-lib.ts`. The fallback restore used when no `psql` is available now
-  streams each `COPY` block through the `COPY` protocol. The proof restored
-  through `psql`, so this code did not run.
+- `backup-lib.ts`. The fallback restore now streams each `COPY` block through
+  the `COPY` protocol. `runDatabaseRestore` falls back whenever
+  `restoreWithPsql` throws (no `psql`, or a `psql` that fails part way) and the
+  dump has statement breakpoints. The proof restored through `psql` without a
+  failure, so this code did not run.
 - `migration-runtime.ts` and the new `embedded-postgres-lock.ts`. These change
   how the migration runner adopts and locks an embedded Postgres. The proof used
   an external `DATABASE_URL`, so this code did not run. A live update of an
@@ -111,6 +115,7 @@ add files. Use the command, not this list, as the complete set.
   `POSTGRES_JS_DEFAULT_POOL_MAX`. The migration and journal code is unchanged.
 - `package.json`. Adds `postgres` to `bundleDependencies`. This changes the
   packed `@paperclipai/db` package. The proofs ran from a source checkout.
+- `test-embedded-postgres.ts`. Test helper only.
 
 ### Outside `server/` and `packages/` (install and restore path)
 
@@ -120,13 +125,20 @@ add files. Use the command, not this list, as the complete set.
   which `packages/db` uses for migrations and `runDatabaseRestore`: how a
   COPY FROM STDIN stream ends or fails (`CopyInResponse`/`CopyBothResponse`,
   `ErrorResponse`), plus a `settleFinal()` call in `errored()`. The fallback
-  restore in `backup-lib.ts` (no `psql`) now streams through exactly this code.
-  Neither proof ran against the patched driver.
+  restore in `backup-lib.ts` (taken when `psql` is missing or fails) now
+  streams through exactly this code. Neither proof ran against the patched
+  driver.
+- The root `package.json` and `pnpm-lock.yaml` also change install-time
+  tooling: a `typescript-compiler-api` dev dependency (`npm:typescript@5.9.3`,
+  adding `typescript@5.9.3` to the lockfile), `@cursor/sdk` pinned to `1.2.0`
+  and `vitest` added in `packages/adapters/cursor-cloud`, `picomatch` 4.0.3 to
+  4.0.7 and `tinyglobby` 0.2.15 to 0.2.17. These are build and dev tooling,
+  likely without runtime effect; the proofs ran `pnpm install
+  --frozen-lockfile`, so a covered-by note must still account for them.
 - `scripts/cli-bundled-npm-dependencies.mjs` and
   `scripts/prepare-bundled-package.mjs` (#257). They add `postgres` to the
   bundled CLI dependencies and require the patched driver when packing; this
   is the reason for the `bundleDependencies` change above.
-- `test-embedded-postgres.ts`. Test helper only.
 
 ### Request path
 
