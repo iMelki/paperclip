@@ -45,7 +45,17 @@ export const VALID_PROVIDERS = [
   "minimax",
   "minimax-cn",
   "kilocode",
+  "custom",
 ] as const;
+
+/**
+ * Providers an explicit adapterConfig may select but that must NOT be adopted
+ * from ~/.hermes/config.yaml detection. "custom" is the Hermes slot that points
+ * at a user-run server through model.base_url; when the host config names it we
+ * keep deferring to Hermes's own resolution (resolvedFrom hermesConfigUnsupported)
+ * exactly as before "custom" became selectable.
+ */
+export const CONFIG_DEFERRED_PROVIDERS = ["custom"] as const;
 
 /**
  * Model-name prefix → provider hint mapping.

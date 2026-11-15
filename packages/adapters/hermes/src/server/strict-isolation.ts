@@ -2,6 +2,7 @@ import * as fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { VALID_PROVIDERS } from "../shared/constants.js";
+import { parseModelFromConfig } from "./detect-model.js";
 
 const PROFILE_ID = /^[a-z0-9][a-z0-9_-]{0,63}$/;
 const PROFILE_MARKERS = ["config.yaml", ".env", "SOUL.md", "profile.yaml", "auth.json", "state.db"];
@@ -10,6 +11,8 @@ const PORTABLE_ENV = ["PATH", "PATHEXT", "SystemRoot", "WINDIR", "COMSPEC", "TEM
 export interface StrictHermesIsolation {
   root: string;
   profile: string;
+  /** Normalized loopback base URL, present only when provider is "custom". */
+  baseUrl?: string;
   paperclipApiUrl: string;
   timeoutSec: number;
   maxTurns: number;
@@ -24,6 +27,34 @@ async function rejectRootAuthFallback(root: string): Promise<void> {
     throw new Error("Strict Hermes isolation could not inspect root auth.json");
   }
   throw new Error("Strict Hermes isolation rejects inherited root auth.json");
+}
+
+/**
+ * The "custom" provider points Hermes at a local server. Only the exact IPv4 loopback host is
+ * accepted: no localhost (resolver-dependent), no ::1, no LAN or public host. Returns a
+ * normalized form (no trailing slash) so the adapter value and the profile config.yaml value
+ * can be compared without caring about cosmetic differences.
+ */
+function normalizeStrictCustomBaseUrl(raw: unknown, source: string): string {
+  const fail = (reason: string): never => {
+    throw new Error(`Strict Hermes isolation provider custom requires a loopback base URL: ${source} ${reason}`);
+  };
+  if (typeof raw !== "string" || !raw || raw !== raw.trim() || /[\s\\]/.test(raw)) {
+    return fail("is missing, empty, or contains whitespace");
+  }
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    return fail("is not a valid URL");
+  }
+  if (!["http:", "https:"].includes(url.protocol)) return fail("must use http or https");
+  if (url.username || url.password) return fail("must not carry credentials");
+  if (url.search || url.hash || raw.includes("?") || raw.includes("#")) {
+    return fail("must not carry a query string or fragment");
+  }
+  if (url.hostname !== "127.0.0.1") return fail("must use host 127.0.0.1");
+  return `${url.origin}${url.pathname.replace(/\/+$/, "")}`;
 }
 
 /** A source-level launch boundary, not proof of Hermes's effective credential resolution. */
@@ -72,6 +103,9 @@ export async function resolveStrictHermesIsolation(
       !(VALID_PROVIDERS as readonly string[]).includes(config.provider)) {
     throw new Error("Strict Hermes isolation requires explicit model and provider");
   }
+  const customBaseUrl = config.provider === "custom"
+    ? normalizeStrictCustomBaseUrl(config.baseUrl, "adapter config baseUrl")
+    : undefined;
   const timeoutSec = config.timeoutSec;
   const maxTurns = config.maxTurnsPerRun;
   if (!Number.isInteger(timeoutSec) || (timeoutSec as number) < 1 || (timeoutSec as number) > 900 ||
@@ -116,6 +150,7 @@ export async function resolveStrictHermesIsolation(
     if (info?.isFile()) identified = true;
   }
   if (!identified) throw new Error("Strict Hermes isolation requires an existing named profile");
+  if (customBaseUrl !== undefined) await requireProfileBaseUrl(profileDir, customBaseUrl);
 
   const env: Record<string, string> = {};
   for (const key of PORTABLE_ENV) {
@@ -130,7 +165,29 @@ export async function resolveStrictHermesIsolation(
   env.XDG_DATA_HOME = path.join(root, "xdg-data");
   env.HERMES_HOME = root;
   return {
-    root, profile, paperclipApiUrl: paperclipApiUrl.toString(),
+    root, profile, ...(customBaseUrl !== undefined ? { baseUrl: customBaseUrl } : {}),
+    paperclipApiUrl: paperclipApiUrl.toString(),
     timeoutSec: timeoutSec as number, maxTurns: maxTurns as number, env,
   };
+}
+
+/**
+ * Hermes resolves the "custom" provider endpoint from model.base_url in the profile config.yaml
+ * (the CLI has no base-URL flag), so the adapter value alone would not bind the real endpoint.
+ * Reads only the non-secret model section; api_key is reduced to presence by the shared parser.
+ */
+async function requireProfileBaseUrl(profileDir: string, expected: string): Promise<void> {
+  const configFile = path.join(profileDir, "config.yaml");
+  const info = await fs.lstat(configFile).catch(() => null);
+  if (!info?.isFile()) {
+    throw new Error("Strict Hermes isolation provider custom requires the profile config.yaml to declare model.base_url");
+  }
+  const parsed = parseModelFromConfig(await fs.readFile(configFile, "utf-8"));
+  if (!parsed?.baseUrl) {
+    throw new Error("Strict Hermes isolation provider custom requires the profile config.yaml to declare model.default and model.base_url");
+  }
+  const actual = normalizeStrictCustomBaseUrl(parsed.baseUrl, "profile config.yaml model.base_url");
+  if (actual !== expected) {
+    throw new Error("Strict Hermes isolation provider custom requires the profile config.yaml model.base_url to match the adapter baseUrl");
+  }
 }

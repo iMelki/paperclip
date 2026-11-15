@@ -62,6 +62,21 @@ test("resolveProvider does not fall through to model inference when Hermes confi
   });
 });
 
+test("resolveProvider honors an explicit custom provider but never adopts custom from Hermes config detection", () => {
+  expect(resolveProvider({
+    explicitProvider: "custom",
+    detectedProvider: "openrouter",
+    detectedModel: "oca/gpt-5.4",
+    model: "oca/gpt-5.4",
+  })).toEqual({ provider: "custom", resolvedFrom: "adapterConfig" });
+  expect(resolveProvider({
+    explicitProvider: undefined,
+    detectedProvider: "custom",
+    detectedModel: "oca/gpt-5.4",
+    model: "oca/gpt-5.4",
+  }).provider).toBe("auto");
+});
+
 test("resolveProvider also defers to Hermes runtime when the matching config omits provider but includes runtime signals", () => {
   expect(resolveProvider({
     explicitProvider: undefined,

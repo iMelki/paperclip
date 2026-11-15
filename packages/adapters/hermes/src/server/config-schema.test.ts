@@ -18,6 +18,14 @@ describe("Hermes local adapter config schema", () => {
       .toBe("MiniMax China");
   });
 
+  it("offers custom as a labelled provider and a baseUrl text input for strict custom launches", () => {
+    const fields = new Map(getConfigSchema().fields.map((field) => [field.key, field]));
+    expect(fields.get("provider")?.options?.find((option) => option.value === "custom")?.label)
+      .toBe("Custom");
+    expect(fields.get("provider")).toMatchObject({ default: "auto" });
+    expect(fields.get("baseUrl")?.type).toBe("text");
+  });
+
   it("exposes bounded-run defaults and all strict-isolation inputs without enabling isolation", () => {
     const fields = new Map(getConfigSchema().fields.map((field) => [field.key, field]));
     expect(fields.size).toBe(getConfigSchema().fields.length);
