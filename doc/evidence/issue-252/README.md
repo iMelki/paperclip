@@ -29,19 +29,22 @@ change after `8a9c270d`.
 `8a9c270d`, run:
 
 ```sh
-git diff --stat 8a9c270d <head> -- server packages
+git diff --stat 8a9c270d <head>
 ```
 
-Each listed file on the startup, migration, backup or restore path needs one of
-these:
+Run it with no path filter. Changes outside `server/` and `packages/` also
+reach these paths: patched dependencies (`patches/`), the root `package.json`
+and `pnpm-lock.yaml` (the proofs ran `pnpm install --frozen-lockfile`), and
+the packaging scripts under `scripts/`. Each listed file on the startup,
+migration, backup, restore or install path needs one of these:
 
 - a fresh runtime and migration check at that head; or
 - a reviewed note that says why the proofs below still cover that change.
 
 The list below is the known delta at `edb5daf9`, the commit that added this
-file. At that commit the command lists 155 files (12,493 insertions, 1,040
-deletions). A later head can add files. Use the command, not this list, as the
-complete set.
+file. At that commit the command lists 223 files (16,299 insertions, 1,245
+deletions); 155 of them are under `server/` and `packages/`. A later head can
+add files. Use the command, not this list, as the complete set.
 
 ### Startup, scheduler-off path (item 2 ran this path at `8a9c270d`)
 
@@ -72,15 +75,16 @@ complete set.
   this inserts a paused board job row even when the bridge is disabled. Plugin
   install now reads migration files before its transaction. The proof had no
   ready plugins, so neither path ran.
-- `server/src/services/built-in-agents.ts` (+121; #244, #249), with the new
-  `company-actor-user.ts` and changes in `routines.ts` (#244, #246). This is
+- `server/src/services/built-in-agents.ts` (116 insertions, 5 deletions; #244,
+  #249), with the new `company-actor-user.ts` and changes in `routines.ts`
+  (#244, #246). This is
   `reconcileBuiltInAgentsOnStartup`. Finding 1 and Finding 3 were observed at
   `8a9c270d`; see the notes there.
 - `server/src/services/question-response-delivery.ts` (#255). This is the
   startup sweep listed under item 2. Its wake behaviour changed; see the note
   there.
-- `server/src/services/heartbeat.ts` (+467; #244, #245, #246, #247, #250). The
-  wake path that the question-response sweep calls now replaces the
+- `server/src/services/heartbeat.ts` (299 insertions, 168 deletions; #244,
+  #245, #246, #247, #250). The wake path that the question-response sweep calls now replaces the
   `built-in-bundles` responsible user with an eligible company member. The claim
   of a queued run now runs in one transaction. ACPX provider-quota holds now
   suppress timer wakes, missing-comment retries and recovery wakes. The proof
@@ -107,6 +111,21 @@ complete set.
   `POSTGRES_JS_DEFAULT_POOL_MAX`. The migration and journal code is unchanged.
 - `package.json`. Adds `postgres` to `bundleDependencies`. This changes the
   packed `@paperclipai/db` package. The proofs ran from a source checkout.
+
+### Outside `server/` and `packages/` (install and restore path)
+
+- `patches/postgres@3.4.9.patch` (new, #257), registered in the root
+  `package.json` `pnpm.patchedDependencies` and pinned by hash in
+  `pnpm-lock.yaml`. It patches the `postgres` driver's `src/connection.js`,
+  which `packages/db` uses for migrations and `runDatabaseRestore`: how a
+  COPY FROM STDIN stream ends or fails (`CopyInResponse`/`CopyBothResponse`,
+  `ErrorResponse`), plus a `settleFinal()` call in `errored()`. The fallback
+  restore in `backup-lib.ts` (no `psql`) now streams through exactly this code.
+  Neither proof ran against the patched driver.
+- `scripts/cli-bundled-npm-dependencies.mjs` and
+  `scripts/prepare-bundled-package.mjs` (#257). They add `postgres` to the
+  bundled CLI dependencies and require the patched driver when packing; this
+  is the reason for the `bundleDependencies` change above.
 - `test-embedded-postgres.ts`. Test helper only.
 
 ### Request path
@@ -300,7 +319,7 @@ instance and were not copied.
    agents in the DB does not survive a start.
 
    **Changed after the tested tree.** This was observed at `8a9c270d`.
-   `built-in-agents.ts` changed after it (+121 lines). At `edb5daf9`:
+   `built-in-agents.ts` changed after it (116 insertions, 5 deletions). At `edb5daf9`:
 
    - Startup still calls `ensure` for each existing bundled agent (`provision`
      when the company requires board approval for new agents). When the
