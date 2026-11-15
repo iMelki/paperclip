@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { execSync, spawn } from "node:child_process";
 import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
@@ -326,17 +326,41 @@ describe("embedded PostgreSQL reuse identity", () => {
   it.skipIf(process.platform === "win32")("finds a real process named postgres that references the data directory", async () => {
     // The executable path contains a space. `comm` is still `postgres`; identifying
     // the process from the first space-separated token of `args` would skip it.
-    const sleepBin = existsSync("/bin/sleep") ? "/bin/sleep" : "/usr/bin/sleep";
     const binDir = join(mkdtempSync(join(tmpdir(), "pg-bin-")), "My Postgres", "bin");
     mkdirSync(binDir, { recursive: true });
     const bin = join(binDir, "postgres");
+    let compiled = false;
     try {
-      copyFileSync(sleepBin, bin);
-      chmodSync(bin, 0o755);
+      execSync(`gcc -O2 -x c - -o "${bin}"`, {
+        input: "#include <unistd.h>\nint main(int argc, char **argv) { pause(); return 0; }\n",
+        timeout: 5000,
+        stdio: ["pipe", "ignore", "ignore"],
+      });
+      compiled = true;
     } catch {
-      symlinkSync(sleepBin, bin);
+      try {
+        execSync(`clang -O2 -x c - -o "${bin}"`, {
+          input: "#include <unistd.h>\nint main(int argc, char **argv) { pause(); return 0; }\n",
+          timeout: 5000,
+          stdio: ["pipe", "ignore", "ignore"],
+        });
+        compiled = true;
+      } catch {}
     }
-    const child = spawn(bin, ["30"], { cwd: dataDir, stdio: "ignore" });
+    if (!compiled) {
+      const sleepBin = existsSync("/bin/sleep") ? "/bin/sleep" : "/usr/bin/sleep";
+      try {
+        copyFileSync(sleepBin, bin);
+        chmodSync(bin, 0o755);
+      } catch {
+        symlinkSync(sleepBin, bin);
+      }
+    }
+    const child = spawn(bin, ["30"], { cwd: dataDir, stdio: ["ignore", "pipe", "pipe"] });
+    let childStdout = "";
+    let childStderr = "";
+    child.stdout?.on("data", (d) => { childStdout += d; });
+    child.stderr?.on("data", (d) => { childStderr += d; });
     child.on("error", (err) => {
       console.error("[embedded-postgres-reuse.test.ts] child spawn error:", err);
     });
@@ -354,6 +378,8 @@ describe("embedded PostgreSQL reuse identity", () => {
           childPid: child.pid,
           childKilled: child.killed,
           childExitCode: child.exitCode,
+          childStdout,
+          childStderr,
           owners,
           dataDir,
         });
