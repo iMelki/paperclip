@@ -19,11 +19,27 @@ results only.
 ## Scope: which tree this proves
 
 Both proofs are bound to `8a9c270d`, which was the tip of `dev` on 2026-11-10.
-Since then `dev` gained no new migration files, so the migration proof also
-covers the current migration set. The server startup code **did** change:
-#247 and #257 reworked the scheduler sweeps in `server/src/index.ts` and
-`server/src/app.ts`. A live update from a later head needs either a fresh
-runtime check at that head or a reviewed note that the startup delta is covered.
+Since then `dev` gained no new migration files, so the set of migrations proven
+here is still current. Other code on these paths **did** change after
+`8a9c270d`:
+
+- **Server startup** (#247, #257). `server/src/index.ts` now runs its sweeps
+  through a bounded sweep scheduler. This reaches the scheduler-off path too:
+  with the scheduler disabled, startup still schedules the environment-lease
+  cleanup sweep, which now goes through the new `trackBoundedSweep`.
+  `server/src/app.ts` adds a GitHub project-board scheduler bridge and a new
+  plugin job dispatch plan.
+- **Database package** (#257). `packages/db/src/backup-lib.ts` changed the
+  fallback `COPY` restore used when no `psql` is available, and
+  `migration-runtime.ts` plus the new `embedded-postgres-lock.ts` changed how
+  the migration runner adopts and locks an embedded Postgres. The proofs below
+  did not run either path: the restore went through `psql`, and the migration
+  used an external `DATABASE_URL`. A live update of an embedded instance does
+  run the new runner code.
+
+A live update from a later head therefore needs either a fresh runtime and
+migration check at that head, or a reviewed note that explains why each change
+above is covered.
 
 ## Correction to #252 item 3
 
@@ -62,15 +78,18 @@ and `PAPERCLIP_HOME` in a scratch folder.
 - Applied: `0216_onboarding_first_task_unique` through
   `0234_better_auth_account_issuer` (19 files).
 - After: `inspectMigrations` reports `upToDate`, 233 of 233; the drizzle
-  journal went from 286 to 305 rows, all hashes distinct.
+  journal went from 286 to 305 rows, all hashes distinct. The journal held more
+  rows (286) than the 214 applied `dev` files before migration; this was
+  observed, not investigated, and does not change the `upToDate` result.
 - Public tables went from 174 to 185. The 11 new tables are empty:
   `adapter_auth_sessions`, `company_onboarding_seeds`, `company_transfer_runs`,
   `completion_contracts`, `execution_workspace_runtime_leases`,
   `issue_question_response_deliveries`, `native_run_finalizations`,
   `native_run_results`, `status_decision_effects`, `status_decisions`,
   `work_assessments`.
-- No table was dropped. No existing table's row count changed, apart from the
-  drizzle journal. Spot reads before and after: companies 2, issues 628,
+- No table that existed before the migration was dropped. (Within the range,
+  0217 creates `claude_setup_token_sessions` and 0229 drops it again.) No
+  existing table's row count changed, apart from the drizzle journal. Spot reads before and after: companies 2, issues 628,
   agents 19.
 
 **Restore proof** (copy B): the same pre-migration backup was restored into a
@@ -79,7 +98,7 @@ second fresh cluster (16.6 s in the restore function).
 | Check | Result |
 | --- | --- |
 | Source dump, per-table `COPY` row counts | 85 tables, 157,584 rows |
-| Copy B, exact `count(*)` per table | 175 tables, 157,584 rows, **0 mismatches**; the 90 tables with no `COPY` block hold 0 rows |
+| Copy B, exact `count(*)` per table | 175 tables (the 174 public tables plus, presumably, the drizzle journal table), 157,584 rows, **0 mismatches**; the 90 tables with no `COPY` block hold 0 rows |
 | Copy A before migration vs copy B | identical per-table count files |
 | Copy B drizzle journal | 286 rows, same last hash as copy A before migration |
 
@@ -186,8 +205,8 @@ instance and were not copied.
 
 - **Disabled scheduler only.** The scheduler-on path was not exercised: the
   orphan reaper, `resumeQueuedRuns`, routine and status-card ticks, and tool
-  health sweeps. That path is also where #247 and #257 changed code after
-  `8a9c270d`.
+  health sweeps. After `8a9c270d`, #247 and #257 changed both the scheduler-on
+  and the scheduler-off startup paths (see "Scope" above).
 - **Not tested:** authenticated mode, the UI, plugin loading (no ready plugins)
   and graceful shutdown. The server was killed after an identity check.
 - **Main thread only.** The guard covered the main thread; `worker_threads`
