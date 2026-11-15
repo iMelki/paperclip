@@ -1,5 +1,5 @@
-import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { execSync, spawn } from "node:child_process";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -326,15 +326,64 @@ describe("embedded PostgreSQL reuse identity", () => {
   it.skipIf(process.platform === "win32")("finds a real process named postgres that references the data directory", async () => {
     // The executable path contains a space. `comm` is still `postgres`; identifying
     // the process from the first space-separated token of `args` would skip it.
-    const sleepBin = existsSync("/bin/sleep") ? "/bin/sleep" : "/usr/bin/sleep";
     const binDir = join(mkdtempSync(join(tmpdir(), "pg-bin-")), "My Postgres", "bin");
     mkdirSync(binDir, { recursive: true });
     const bin = join(binDir, "postgres");
-    symlinkSync(sleepBin, bin);
-    const child = spawn(bin, ["30"], { cwd: dataDir, stdio: "ignore" });
+    let compiled = false;
     try {
-      await new Promise((r) => setTimeout(r, 300));
-      const owners = await listPostgresProcessesForDataDir(dataDir);
+      execSync(`gcc -O2 -x c - -o "${bin}"`, {
+        input: "#include <unistd.h>\nint main(int argc, char **argv) { pause(); return 0; }\n",
+        timeout: 5000,
+        stdio: ["pipe", "ignore", "ignore"],
+      });
+      compiled = true;
+    } catch {
+      try {
+        execSync(`clang -O2 -x c - -o "${bin}"`, {
+          input: "#include <unistd.h>\nint main(int argc, char **argv) { pause(); return 0; }\n",
+          timeout: 5000,
+          stdio: ["pipe", "ignore", "ignore"],
+        });
+        compiled = true;
+      } catch {}
+    }
+    if (!compiled) {
+      const sleepBin = existsSync("/bin/sleep") ? "/bin/sleep" : "/usr/bin/sleep";
+      try {
+        copyFileSync(sleepBin, bin);
+        chmodSync(bin, 0o755);
+      } catch {
+        symlinkSync(sleepBin, bin);
+      }
+    }
+    const child = spawn(bin, ["30"], { cwd: dataDir, stdio: ["ignore", "pipe", "pipe"] });
+    let childStdout = "";
+    let childStderr = "";
+    child.stdout?.on("data", (d) => { childStdout += d; });
+    child.stderr?.on("data", (d) => { childStderr += d; });
+    child.on("error", (err) => {
+      console.error("[embedded-postgres-reuse.test.ts] child spawn error:", err);
+    });
+    try {
+      let owners: PostgresProcess[] | null = null;
+      for (let i = 0; i < 30; i++) {
+        owners = await listPostgresProcessesForDataDir(dataDir);
+        if (owners?.some((owner) => owner.pid === child.pid && owner.command.includes("My Postgres"))) {
+          break;
+        }
+        await new Promise((r) => setTimeout(r, 100));
+      }
+      if (!owners?.some((owner) => owner.pid === child.pid && owner.command.includes("My Postgres"))) {
+        console.error("DIAGNOSTIC FAILURE:", {
+          childPid: child.pid,
+          childKilled: child.killed,
+          childExitCode: child.exitCode,
+          childStdout,
+          childStderr,
+          owners,
+          dataDir,
+        });
+      }
       expect(owners?.some((owner) => owner.pid === child.pid && owner.command.includes("My Postgres"))).toBe(true);
       expect((await listPostgresProcessesForDataDir(clusterDir("other-pg-")))?.length ?? 0).toBe(0);
     } finally {
