@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -332,10 +332,14 @@ describe("embedded PostgreSQL reuse identity", () => {
     const bin = join(binDir, "postgres");
     try {
       copyFileSync(sleepBin, bin);
+      chmodSync(bin, 0o755);
     } catch {
       symlinkSync(sleepBin, bin);
     }
     const child = spawn(bin, ["30"], { cwd: dataDir, stdio: "ignore" });
+    child.on("error", (err) => {
+      console.error("[embedded-postgres-reuse.test.ts] child spawn error:", err);
+    });
     try {
       let owners: PostgresProcess[] | null = null;
       for (let i = 0; i < 30; i++) {
@@ -344,6 +348,15 @@ describe("embedded PostgreSQL reuse identity", () => {
           break;
         }
         await new Promise((r) => setTimeout(r, 100));
+      }
+      if (!owners?.some((owner) => owner.pid === child.pid && owner.command.includes("My Postgres"))) {
+        console.error("DIAGNOSTIC FAILURE:", {
+          childPid: child.pid,
+          childKilled: child.killed,
+          childExitCode: child.exitCode,
+          owners,
+          dataDir,
+        });
       }
       expect(owners?.some((owner) => owner.pid === child.pid && owner.command.includes("My Postgres"))).toBe(true);
       expect((await listPostgresProcessesForDataDir(clusterDir("other-pg-")))?.length ?? 0).toBe(0);
