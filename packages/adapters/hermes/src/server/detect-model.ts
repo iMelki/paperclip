@@ -11,7 +11,7 @@
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { homedir } from "node:os";
-import { MODEL_PREFIX_PROVIDER_HINTS, VALID_PROVIDERS } from "../shared/constants.js";
+import { CONFIG_DEFERRED_PROVIDERS, MODEL_PREFIX_PROVIDER_HINTS, VALID_PROVIDERS } from "../shared/constants.js";
 
 export interface DetectedModel {
   /** Model name from config (e.g. "gpt-5.4", "anthropic/claude-sonnet-4") */
@@ -165,7 +165,8 @@ export function resolveProvider(options: {
     return { provider: explicitProvider, resolvedFrom: "adapterConfig" };
   }
 
-  const supportedProviders = VALID_PROVIDERS as readonly string[];
+  const supportedProviders = (VALID_PROVIDERS as readonly string[])
+    .filter((provider) => !(CONFIG_DEFERRED_PROVIDERS as readonly string[]).includes(provider));
   const configMatchesRequestedModel =
     !!detectedModel &&
     !!model &&

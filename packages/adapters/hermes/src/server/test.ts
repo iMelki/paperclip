@@ -15,7 +15,13 @@ import { execFile } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { promisify } from "node:util";
 
-import { HERMES_CLI, DEFAULT_MODEL, ADAPTER_TYPE, VALID_PROVIDERS } from "../shared/constants.js";
+import {
+  HERMES_CLI,
+  DEFAULT_MODEL,
+  ADAPTER_TYPE,
+  VALID_PROVIDERS,
+  CONFIG_DEFERRED_PROVIDERS,
+} from "../shared/constants.js";
 import { detectModel, resolveProvider, inferProviderFromModel } from "./detect-model.js";
 import { resolveHermesCommand } from "./execute.js";
 import { resolveStrictHermesIsolation } from "./strict-isolation.js";
@@ -197,7 +203,8 @@ async function checkApiKeys(
 
   const requestedModel = asString(config.model);
 
-  const supportedProviders = VALID_PROVIDERS as readonly string[];
+  const supportedProviders = (VALID_PROVIDERS as readonly string[])
+    .filter((provider) => !(CONFIG_DEFERRED_PROVIDERS as readonly string[]).includes(provider));
   const modelMatchesRequested =
     !!detectedConfig?.model &&
     (!requestedModel || detectedConfig.model.toLowerCase() === requestedModel.toLowerCase());
