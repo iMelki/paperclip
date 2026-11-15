@@ -22,27 +22,116 @@ results only.
 
 Both proofs are bound to `8a9c270d`, which was the tip of `dev` on 2026-11-10.
 Since then `dev` gained no new migration files, so the set of migrations proven
-here is still current. Other code on these paths **did** change after
-`8a9c270d`:
+here is still current. Other code on the paths these proofs rely on **did**
+change after `8a9c270d`.
 
-- **Server startup** (#247, #257). `server/src/index.ts` now runs its sweeps
-  through a bounded sweep scheduler. This reaches the scheduler-off path too:
-  with the scheduler disabled, startup still schedules the environment-lease
-  cleanup sweep and the external-object refresh sweep, which now go through the
-  new `trackBoundedSweep`.
-  `server/src/app.ts` adds a GitHub project-board scheduler bridge and a new
-  plugin job dispatch plan.
-- **Database package** (#257). `packages/db/src/backup-lib.ts` changed the
-  fallback `COPY` restore used when no `psql` is available, and
-  `migration-runtime.ts` plus the new `embedded-postgres-lock.ts` changed how
-  the migration runner adopts and locks an embedded Postgres. The proofs below
-  did not run either path: the restore went through `psql`, and the migration
-  used an external `DATABASE_URL`. A live update of an embedded instance does
-  run the new runner code.
+**Rule for a later head.** Before a live update from a head later than
+`8a9c270d`, run:
 
-A live update from a later head therefore needs either a fresh runtime and
-migration check at that head, or a reviewed note that explains why each change
-above is covered.
+```sh
+git diff --stat 8a9c270d <head> -- server packages
+```
+
+Each listed file on the startup, migration, backup or restore path needs one of
+these:
+
+- a fresh runtime and migration check at that head; or
+- a reviewed note that says why the proofs below still cover that change.
+
+The list below is the known delta at `edb5daf9`, the commit that added this
+file. At that commit the command lists 155 files (12,493 insertions, 1,040
+deletions). A later head can add files. Use the command, not this list, as the
+complete set.
+
+### Startup, scheduler-off path (item 2 ran this path at `8a9c270d`)
+
+- `server/src/index.ts` (#247, #257). Startup sweeps now go through a bounded
+  sweep scheduler (new `server/src/services/heartbeat-scheduler-sweeps.ts`). Its
+  concurrency comes from the new `effectiveDatabasePoolMax()` in
+  `packages/db/src/client.ts`, exported from `packages/db/src/index.ts`. With
+  the scheduler disabled, startup still schedules the environment-lease cleanup
+  sweep and the external-object refresh sweep, which now go through the new
+  `trackBoundedSweep`. Shutdown now sets the stop flag before the systemd
+  notification.
+- `server/src/config.ts` (#257). New `nativeGitHubProjectSchedulingEnabled`, set
+  only by `PAPERCLIP_GITHUB_PROJECT_SCHEDULER_ENABLED=true`. It is off by
+  default. The proof did not set it.
+- `server/src/app.ts` (#257). Adds the GitHub project-board scheduler bridge
+  (new `plugin-github-project-board-scheduler-bridge.ts`) and a plugin job
+  dispatch plan (new `plugin-job-scope.ts`). Shutdown now stops the plugin job
+  scheduler, the job coordinator and the bridge.
+- `server/src/services/plugin-job-scheduler.ts`, with `plugin-job-batch.ts`
+  (new), `plugin-job-store.ts` and `plugin-job-coordinator.ts` (#244, #257).
+  `createApp` starts the plugin job scheduler whatever
+  `HEARTBEAT_SCHEDULER_ENABLED` is. Its tick reads active, due `plugin_jobs`
+  rows. The dispatch and run code was rewritten. The proof paused all plugin
+  jobs, so the new dispatch code was not run.
+- `server/src/services/plugin-loader.ts` and `plugin-database.ts`, with the new
+  `short-transaction.ts` (#247, #257). Plugin load now reconciles job
+  declarations through the bridge. For a ready GitHub project importer plugin,
+  this inserts a paused board job row even when the bridge is disabled. Plugin
+  install now reads migration files before its transaction. The proof had no
+  ready plugins, so neither path ran.
+- `server/src/services/built-in-agents.ts` (+121; #244, #249), with the new
+  `company-actor-user.ts` and changes in `routines.ts` (#244, #246). This is
+  `reconcileBuiltInAgentsOnStartup`. Finding 1 and Finding 3 were observed at
+  `8a9c270d`; see the notes there.
+- `server/src/services/question-response-delivery.ts` (#255). This is the
+  startup sweep listed under item 2. Its wake behaviour changed; see the note
+  there.
+- `server/src/services/heartbeat.ts` (+467; #244, #245, #246, #247, #250). The
+  wake path that the question-response sweep calls now replaces the
+  `built-in-bundles` responsible user with an eligible company member. The claim
+  of a queued run now runs in one transaction. ACPX provider-quota holds now
+  suppress timer wakes, missing-comment retries and recovery wakes. The proof
+  had 0 pending deliveries and 0 new wakeups, so it did not run this code.
+
+### Scheduler-on path (not run at either tree)
+
+- `server/src/services/heartbeat.ts` (queued-run claim, `resumeQueuedRuns`,
+  `tickTimers`), `recovery/service.ts`, the new
+  `recovery/acpx-provider-quota.ts`, `decision-retention.ts`, `routines.ts`
+  (scheduled triggers) and `tool-access.ts` (with the new
+  `tool-connection-mutation-lock.ts`).
+
+### Migration, backup and restore path (`packages/db`, #257)
+
+- `backup-lib.ts`. The fallback restore used when no `psql` is available now
+  streams each `COPY` block through the `COPY` protocol. The proof restored
+  through `psql`, so this code did not run.
+- `migration-runtime.ts` and the new `embedded-postgres-lock.ts`. These change
+  how the migration runner adopts and locks an embedded Postgres. The proof used
+  an external `DATABASE_URL`, so this code did not run. A live update of an
+  embedded instance does run it.
+- `client.ts` (#247). Adds only `effectiveDatabasePoolMax()` and
+  `POSTGRES_JS_DEFAULT_POOL_MAX`. The migration and journal code is unchanged.
+- `package.json`. Adds `postgres` to `bundleDependencies`. This changes the
+  packed `@paperclipai/db` package. The proofs ran from a source checkout.
+- `test-embedded-postgres.ts`. Test helper only.
+
+### Request path
+
+- `server/src/middleware/auth.ts` (#244). Agent JWT and agent API key requests
+  now replace the `built-in-bundles` responsible user with an eligible company
+  member. The proof made only board reads in `local_trusted` mode, so this code
+  did not run.
+- `server/src/middleware/redact-sensitive.ts` (#217). HTTP log redaction now
+  matches more key forms. It does not change response bodies.
+
+### Outside these paths
+
+These changed but are not on the startup, migration, backup or restore path:
+
+- `workspace-runtime.ts` (#256). The change is in the reuse of a running service
+  during a run or a workspace control action. It is not in
+  `reconcilePersistedRuntimeServicesOnStartup`.
+- adapter execution and timeouts: `packages/adapters/*`,
+  `packages/adapter-utils/*` and `server/src/adapters/*`;
+- GitHub project board and OAuth services and routes, `issues.ts`,
+  `plugin-imported-issues.ts` and other `server/src/routes/*` files;
+- `packages/shared` (a telemetry event and plugin types; telemetry was disabled
+  in the proof), `packages/plugins/sdk/src/testing.ts` and a runner-core test;
+- test files.
 
 ## Correction to #252 item 3
 
@@ -104,7 +193,7 @@ second fresh cluster (16.6 s in the restore function).
 | Check | Result |
 | --- | --- |
 | Source dump, per-table `COPY` row counts | 85 tables, 157,584 rows |
-| Copy B, exact `count(*)` per table | 175 tables (the 174 public tables plus one more that was not identified), 157,584 rows, **0 mismatches**; the 90 tables with no `COPY` block hold 0 rows |
+| Copy B, exact `count(*)` per table | 175 tables (the 174 public tables plus one more, likely the drizzle journal; see "Limits"), 157,584 rows, **0 mismatches**; the 90 tables with no `COPY` block hold 0 rows |
 | Copy A before migration vs copy B | identical per-table count files |
 | Copy B drizzle journal | 286 rows, same last hash as copy A before migration |
 
@@ -116,7 +205,15 @@ The first lane did not start the server. Reading `server/src/index.ts` showed
 startup work that runs even with `HEARTBEAT_SCHEDULER_ENABLED=false`:
 
 - the question-response delivery sweep, which calls `heartbeat.wakeup`
-  (`wakeOnDemand` defaults to true when absent);
+  (`wakeOnDemand` defaults to true when absent). This is the behaviour at
+  `8a9c270d`, where the wake did not check the continuation policy. At
+  `edb5daf9`, when the sweep cannot steer the answer into a running native
+  turn, it wakes the assignee only when the interaction's
+  `continuationPolicy` is `wake_assignee`. For any other policy it records the
+  delivery as `delivered` with error code
+  `question_response_continuation_disabled` and does not wake. The sweep now
+  also orders pending rows by `updatedAt`, then `createdAt`. The proof did not
+  run this code: it failed every pending delivery before the start;
 - the environment-lease `pending_cleanup` sweep, which runs provider teardown;
 - `reconcilePersistedRuntimeServicesOnStartup`,
   `reconcileCodexLocalManagedHomesOnStartup` and
@@ -201,6 +298,28 @@ instance and were not copied.
    observed on a copy whose `adapter_config` had been emptied, so it may be a
    no-op on populated live configs. It does mean that neutralizing those two
    agents in the DB does not survive a start.
+
+   **Changed after the tested tree.** This was observed at `8a9c270d`.
+   `built-in-agents.ts` changed after it (+121 lines). At `edb5daf9`:
+
+   - Startup still calls `ensure` for each existing bundled agent (`provision`
+     when the company requires board approval for new agents). When the
+     stored `adapter_config` is complete, `ensure` keeps it, as it did at
+     `8a9c270d`.
+   - When the stored config is not complete and the adapter type stays the
+     same, `ensure` now merges the default config onto the stored one. At
+     `8a9c270d` it replaced the stored one. It writes `adapter_config` only
+     when the result is not effectively equal to the stored config. The
+     comparison normalizes the `paperclipSkillSync` value (entry order, and
+     plain keys against `{ key, versionId: null }`).
+   - Bundled skill sync now skips the write when the effective skill set does
+     not change. At `8a9c270d` it always wrote.
+
+   So on populated live configs, startup now writes less often than at
+   `8a9c270d`. On an emptied config like the one tested, the defaults still
+   differ from `{}`, so a rewrite is still expected. This was not run at
+   `edb5daf9`. Do not rely on this finding at a later head without a check at
+   that head.
 2. **The server needs a plugin-sdk build first.** Without it the server exits
    with `ERR_MODULE_NOT_FOUND` for `@paperclipai/plugin-sdk/dist`. `pnpm dev`
    already builds it; a direct `tsx src/index.ts` start does not.
@@ -208,15 +327,34 @@ instance and were not copied.
    (routines stayed paused), 8 permission grants and 1 membership for the
    `local-board` principal.
 
+   **Changed after the tested tree.** At `edb5daf9`, when startup creates or
+   resets a built-in routine, the actor is no longer the fixed
+   `built-in-bundles` user. It is the routine's stored responsible user if that
+   user exists and has active, write-capable company access. If not, it is an
+   eligible company member, resolved by the new `company-actor-user.ts`. If
+   no member is eligible, the routine is written with no responsible user.
+   At `8a9c270d` a created routine got `built-in-bundles` as its responsible
+   user, and an update kept the stored value. The written responsible user can
+   therefore differ. This was not run at `edb5daf9`.
+
 ## Limits
 
 - **Unexplained journal gap and unidentified table.** The migration journal held
   72 more rows than applied `dev` files, and the exact count found 175 tables
-  against 174 public ones. Neither was investigated.
+  against 174 public ones. Neither was investigated. The 175th table is likely
+  the drizzle migration journal, `drizzle.__drizzle_migrations`. The migration
+  runner creates it in the `drizzle` schema when no journal exists
+  (`ensureMigrationJournalTable` in `packages/db/src/client.ts`). The repo's
+  backup code dumps every non-system schema, not only `public`. Copy B was
+  built only by the restore and held a 286-row journal, so the journal was in
+  the dump. This is likely, not verified: this record does not name the 175
+  tables, and the private count files were not re-read for this note.
 - **Disabled scheduler only.** The scheduler-on path was not exercised: the
   orphan reaper, `resumeQueuedRuns`, routine and status-card ticks, and tool
   health sweeps. After `8a9c270d`, #247 and #257 changed both the scheduler-on
-  and the scheduler-off startup paths (see "Scope" above).
+  and the scheduler-off startup paths, and other changes reached the
+  built-in agent reconcile and the question-response sweep (see "Scope"
+  above).
 - **Not tested:** authenticated mode, the UI, plugin loading (no ready plugins)
   and graceful shutdown. The server was killed after an identity check.
 - **Main thread only.** The guard covered the main thread; `worker_threads`
