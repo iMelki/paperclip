@@ -3444,6 +3444,7 @@ export async function runChildProcess(
           env: childEnv,
           detached: process.platform !== "win32",
           shell: false,
+          windowsHide: true,
           windowsVerbatimArguments: target.windowsVerbatimArguments,
           stdio: [opts.stdin != null ? "pipe" : "ignore", "pipe", "pipe"],
         }) as ChildProcessWithEvents;
