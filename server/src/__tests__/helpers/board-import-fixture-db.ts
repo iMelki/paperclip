@@ -276,7 +276,9 @@ async function startNativeWindowsBoardImportFixtureDatabase(): Promise<BoardImpo
     stage.startRequested = true;
     stage.service = launchFixtureCommand(fixtureRoot, artifactDir, dataDir, childEnv, "postgres-service",
       binaries.postgres, ["-D", dataDir, "-h", "127.0.0.1", "-p", String(port),
-        "-c", "unix_socket_directories=", "-c", "logging_collector=off"], 180_000, [0], true);
+        // Throwaway fixture cluster only: durable writes made the 7-10 s shutdown checkpoint fail teardown (iMelki/paperclip#284).
+        "-c", "unix_socket_directories=", "-c", "logging_collector=off", "-c", "fsync=off",
+        "-c", "full_page_writes=off", "-c", "synchronous_commit=off"], 180_000, [0], true);
     await waitForFixtureReady(stage.service, dataDir, port);
     fs.writeFileSync(path.join(artifactDir, "readiness.json"), JSON.stringify({
       pid: stage.service.pid, dataDir, port, basis: "owned_postmaster_pid_ready", observedAt: new Date().toISOString(),
