@@ -54,6 +54,9 @@ import {
   resolveProvider,
 } from "./detect-model.js";
 import { reconcileHermesPaperclipSkills, resolveHermesOperationalSkillPreload } from "./skills.js";
+import {
+  computeRunUsage, readHermesSessionUsage, readUsageBaseline, toUsageBaseline, type HermesSessionUsage,
+} from "./usage.js";
 import { resolveStrictHermesIsolation } from "./strict-isolation.js";
 
 // ---------------------------------------------------------------------------
@@ -616,6 +619,25 @@ export async function execute(
     await ctx.onLog("stdout", `[hermes] Session: ${parsed.sessionId}\n`);
   }
 
+  // ── Usage from Hermes' own session record (best effort) ─────────────────
+  // Hermes prints no token counts or cost in a chat run, so without this Paperclip budgets never move.
+  let sessionUsage: HermesSessionUsage | null = null;
+  if (parsed.sessionId) {
+    sessionUsage = await readHermesSessionUsage({
+      command: hermesCmd,
+      argsPrefix: strictIsolation ? ["--profile", strictIsolation.profile] : [],
+      env,
+      inheritEnv: !strictIsolation,
+      cwd,
+      runId: ctx.runId,
+      sessionId: parsed.sessionId,
+      timeoutSec: 180,
+    });
+    if (!sessionUsage) {
+      await ctx.onLog("stdout", "[hermes] Usage unavailable: the session record could not be read\n");
+    }
+  }
+
   // ── Build result ───────────────────────────────────────────────────────
   const executionResult: AdapterExecutionResult = {
     exitCode: result.exitCode,
@@ -639,6 +661,26 @@ export async function execute(
     executionResult.costUsd = parsed.costUsd;
   }
 
+  // The session record is authoritative: the model that actually answered, the billing provider, the
+  // tokens, and a cost only when Hermes could price the model. A resumed session is cumulative, so
+  // report this run's share against the baseline kept in the session parameters.
+  let runUsage: ReturnType<typeof computeRunUsage> | null = null;
+  if (sessionUsage) {
+    runUsage = computeRunUsage(
+      sessionUsage,
+      readUsageBaseline(ctx.runtime?.sessionParams),
+      canResumeSession ? prevSessionId ?? null : null,
+    );
+    executionResult.usage = runUsage.usage;
+    executionResult.usageBasis = runUsage.usageBasis;
+    if (runUsage.costUsd !== null) {
+      executionResult.costUsd = runUsage.costUsd;
+      executionResult.billingType = "metered_api";
+    }
+    if (sessionUsage.model) executionResult.model = sessionUsage.model;
+    if (sessionUsage.provider) executionResult.biller = sessionUsage.provider;
+  }
+
   // Summary from agent response
   if (parsed.response) {
     executionResult.summary = parsed.response.slice(0, 2000);
@@ -648,13 +690,18 @@ export async function execute(
   executionResult.resultJson = {
     result: parsed.response || "",
     session_id: parsed.sessionId || null,
-    usage: parsed.usage || null,
-    cost_usd: parsed.costUsd ?? null,
+    usage: runUsage?.usage ?? parsed.usage ?? null,
+    cost_usd: runUsage?.costUsd ?? parsed.costUsd ?? null,
+    cost_status: sessionUsage?.costStatus ?? null,
+    served_model: sessionUsage?.model ?? null,
   };
 
   // Store session ID for next run
   if (persistSession && parsed.sessionId) {
-    executionResult.sessionParams = { sessionId: parsed.sessionId };
+    executionResult.sessionParams = {
+      sessionId: parsed.sessionId,
+      ...(sessionUsage ? { usageBaseline: toUsageBaseline(sessionUsage) } : {}),
+    };
     executionResult.sessionDisplayId = parsed.sessionId.slice(0, 16);
   }
 

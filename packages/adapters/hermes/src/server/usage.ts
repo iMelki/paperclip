@@ -1,0 +1,176 @@
+/**
+ * Usage reporting for hermes_local.
+ *
+ * Hermes does not print token counts or cost in a chat run, so the adapter used to report none and
+ * Paperclip budgets could never trip. Hermes keeps them in its session store; `hermes sessions
+ * export --session-id <id> --format jsonl <file>` writes one record per session with the model, the
+ * billing provider, token counts and a cost with a status ("actual", "estimated" or "unknown").
+ * The adapter reads that record after the run. A resumed session is cumulative, so the adapter keeps
+ * a baseline in its session parameters and reports only this run's share.
+ */
+import * as fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import { runChildProcess } from "@paperclipai/adapter-utils/server-utils";
+import type { UsageSummary } from "@paperclipai/adapter-utils";
+
+export interface HermesSessionUsage {
+  sessionId: string;
+  model: string | null;
+  provider: string | null;
+  inputTokens: number;
+  outputTokens: number;
+  cachedInputTokens: number;
+  /** Known cost in USD, or null when Hermes cannot price the model (status "unknown"). */
+  costUsd: number | null;
+  costStatus: string | null;
+}
+
+/** What the previous run of the same session had already used; stored in the session parameters. */
+export interface HermesUsageBaseline {
+  sessionId: string;
+  inputTokens: number;
+  outputTokens: number;
+  cachedInputTokens: number;
+  costUsd: number | null;
+}
+
+export interface HermesRunUsage {
+  usage: UsageSummary;
+  usageBasis: "per_run" | "session_cumulative";
+  costUsd: number | null;
+}
+
+const asNumber = (value: unknown): number => {
+  const n = typeof value === "number" ? value : typeof value === "string" && value.trim() ? Number(value) : NaN;
+  return Number.isFinite(n) && n >= 0 ? n : 0;
+};
+const asText = (value: unknown): string | null =>
+  typeof value === "string" && value.trim() ? value.trim() : null;
+
+/** Reads the first session record of a `sessions export --format jsonl` file; null when unusable. */
+export function parseHermesSessionExport(text: string): HermesSessionUsage | null {
+  const line = text.split(/\r?\n/).find((candidate) => candidate.trim().startsWith("{"));
+  if (!line) return null;
+  let record: Record<string, unknown>;
+  try {
+    record = JSON.parse(line) as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+  const sessionId = asText(record.id);
+  if (!sessionId) return null;
+  const costStatus = asText(record.cost_status);
+  let costUsd: number | null = null;
+  if (costStatus === "actual" && record.actual_cost_usd !== "" && record.actual_cost_usd != null) {
+    costUsd = asNumber(record.actual_cost_usd);
+  } else if (costStatus === "estimated") {
+    costUsd = asNumber(record.estimated_cost_usd);
+  }
+  return {
+    sessionId,
+    model: asText(record.model),
+    provider: asText(record.billing_provider),
+    inputTokens: asNumber(record.input_tokens),
+    outputTokens: asNumber(record.output_tokens),
+    cachedInputTokens: asNumber(record.cache_read_tokens),
+    costUsd,
+    costStatus,
+  };
+}
+
+export function readUsageBaseline(sessionParams: unknown): HermesUsageBaseline | null {
+  if (typeof sessionParams !== "object" || sessionParams === null) return null;
+  const raw = (sessionParams as Record<string, unknown>).usageBaseline;
+  if (typeof raw !== "object" || raw === null) return null;
+  const record = raw as Record<string, unknown>;
+  const sessionId = asText(record.sessionId);
+  if (!sessionId) return null;
+  return {
+    sessionId,
+    inputTokens: asNumber(record.inputTokens),
+    outputTokens: asNumber(record.outputTokens),
+    cachedInputTokens: asNumber(record.cachedInputTokens),
+    costUsd: typeof record.costUsd === "number" && Number.isFinite(record.costUsd) ? record.costUsd : null,
+  };
+}
+
+export function toUsageBaseline(current: HermesSessionUsage): HermesUsageBaseline {
+  return {
+    sessionId: current.sessionId,
+    inputTokens: current.inputTokens,
+    outputTokens: current.outputTokens,
+    cachedInputTokens: current.cachedInputTokens,
+    costUsd: current.costUsd,
+  };
+}
+
+/**
+ * This run's share of the session totals. A fresh session counts in full. A resumed session with a
+ * matching baseline reports the difference. A resumed session without one reports the cumulative
+ * tokens, marked as such so the server takes the delta, and no cost (it cannot be split safely).
+ */
+export function computeRunUsage(
+  current: HermesSessionUsage,
+  previous: HermesUsageBaseline | null,
+  resumedSessionId: string | null,
+): HermesRunUsage {
+  const totals: UsageSummary = {
+    inputTokens: current.inputTokens,
+    outputTokens: current.outputTokens,
+    cachedInputTokens: current.cachedInputTokens,
+  };
+  if (!resumedSessionId) return { usage: totals, usageBasis: "per_run", costUsd: current.costUsd };
+  if (previous && previous.sessionId === current.sessionId) {
+    const share = (now: number, before: number) => Math.max(0, now - before);
+    return {
+      usage: {
+        inputTokens: share(current.inputTokens, previous.inputTokens),
+        outputTokens: share(current.outputTokens, previous.outputTokens),
+        cachedInputTokens: share(current.cachedInputTokens, previous.cachedInputTokens),
+      },
+      usageBasis: "per_run",
+      costUsd: current.costUsd !== null && previous.costUsd !== null
+        ? Math.max(0, current.costUsd - previous.costUsd) : null,
+    };
+  }
+  return { usage: totals, usageBasis: "session_cumulative", costUsd: null };
+}
+
+export interface ReadSessionUsageOptions {
+  command: string;
+  /** Arguments that precede the subcommand, e.g. ["--profile", "name"] in strict isolation. */
+  argsPrefix: string[];
+  env: Record<string, string>;
+  inheritEnv: boolean;
+  cwd: string;
+  runId: string;
+  sessionId: string;
+  timeoutSec: number;
+}
+
+/** Runs `sessions export` for one session and parses it. Never throws: usage is best effort. */
+export async function readHermesSessionUsage(options: ReadSessionUsageOptions): Promise<HermesSessionUsage | null> {
+  let dir: string | null = null;
+  try {
+    dir = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-hermes-usage-"));
+    const file = path.join(dir, "session.jsonl");
+    const result = await runChildProcess(`${options.runId}:usage`, options.command, [
+      ...options.argsPrefix, "sessions", "export", "--session-id", options.sessionId, "--format", "jsonl", file,
+    ], {
+      cwd: options.cwd,
+      env: options.env,
+      inheritEnv: options.inheritEnv,
+      timeoutSec: options.timeoutSec,
+      graceSec: 5,
+      onLog: async () => undefined,
+    });
+    if (result.exitCode !== 0 || result.timedOut) return null;
+    const parsed = parseHermesSessionExport(await fs.readFile(file, "utf8"));
+    return parsed && parsed.sessionId === options.sessionId ? parsed : null;
+  } catch {
+    return null;
+  } finally {
+    if (dir) await fs.rm(dir, { recursive: true, force: true }).catch(() => undefined);
+  }
+}
