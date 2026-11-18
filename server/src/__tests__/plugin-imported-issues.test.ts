@@ -199,6 +199,46 @@ describe("native board import transaction and readback", () => {
     await expect(setup.service.readTask(setup.context, { githubIssueNodeId: setup.input.githubIssueNodeId })).rejects.toThrow();
   });
 
+  it("quarantines one drifted import: it is named, stays excluded, others keep syncing, nothing is overwritten (#281)", async () => {
+    const setup = await seed();
+    const clean = await importItem(setup);
+    const secondInput = intent(setup.companyId, setup.projectId, {
+      githubIssueNodeId: "I_fixture_node_2", boardItemId: "PVTI_item_2",
+      task: { ...setup.input.task, githubIssueNodeId: "I_fixture_node_2", title: "Second fixture",
+        sourceUrl: "https://github.com/example/fixture/issues/2" },
+    });
+    const drifted = await importItem(setup, secondInput);
+    // A board user clears the parent of the second task (an allowed board action), as in the observed case.
+    await db.update(issues).set({ parentId: null }).where(eq(issues.id, drifted.task.id));
+    const before = (await nativeTasks(setup.companyId)).find(row => row.id === drifted.task.id);
+    const stateBefore = await nativeState(setup.companyId);
+
+    const result = await setup.service.getExcludedSources({ companyId: setup.companyId, actor: { type: "system" } });
+    expect(result.sourceUrls).toEqual([clean.task.sourceUrl, drifted.task.sourceUrl].sort());
+    expect(result.quarantined).toEqual([
+      { taskId: drifted.task.id, sourceUrl: drifted.task.sourceUrl, fields: ["parentId"] },
+    ]);
+    expect(await nativeState(setup.companyId)).toEqual(stateBefore); // the exclusion read writes nothing
+    expect((await nativeTasks(setup.companyId)).find(row => row.id === drifted.task.id)).toEqual(before);
+
+    // Negative proof: the guard still refuses to touch the drifted task, and now names it.
+    const named = new RegExp(`${drifted.task.id}.*parentId`);
+    await expect(setup.service.readTask(setup.context, { githubIssueNodeId: "I_fixture_node_2" })).rejects.toThrow(named);
+    await expect(setup.service.commit(setup.context, { intent: secondInput })).rejects.toThrow(named);
+    expect((await setup.service.readTask(setup.context, { githubIssueNodeId: setup.input.githubIssueNodeId }))?.id)
+      .toBe(clean.task.id);
+    expect((await nativeTasks(setup.companyId)).find(row => row.id === drifted.task.id)).toEqual(before);
+  });
+
+  it("does not quarantine ambiguity: a journal with two native rows still holds sync (#281)", async () => {
+    const setup = await seed();
+    const first = await importItem(setup);
+    await db.insert(issues).values({ companyId: setup.companyId, projectId: setup.projectId, title: "Duplicate origin",
+      originKind: boardImportOrigins(setup.pluginKey).task, originId: setup.input.githubIssueNodeId,
+      originFingerprint: first.task.sourceUrl });
+    await expect(setup.service.getExcludedSources({ companyId: setup.companyId, actor: { type: "system" } })).rejects.toThrow();
+  });
+
   it("rejects legacy native or entity URL mappings before minting another task", async () => {
     for (const mode of ["native", "entity"] as const) {
       const setup = await seed();
