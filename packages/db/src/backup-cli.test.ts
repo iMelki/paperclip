@@ -197,6 +197,72 @@ describe("preserve-all native backup policy", () => {
     expect(plain.args[0]).toBe("--dbname=postgres://u@h/db?sslmode=require");
   });
 
+  it.each([
+    ["%20", "postgres://u:pw@h/db?application_name=a%20b&password=q&sslmode=require", "postgres://u@h/db?application_name=a%20b&sslmode=require"],
+    ["+ stays a literal plus", "postgres://u:pw@h/db?application_name=a+b&sslmode=require", "postgres://u@h/db?application_name=a+b&sslmode=require"],
+    ["%2B", "postgres://u:pw@h/db?application_name=a%2Bb&password=q", "postgres://u@h/db?application_name=a%2Bb"],
+    ["%3D in a value", "postgres://u:pw@h/db?options=-c%20statement_timeout%3D0&password=q&sslmode=require", "postgres://u@h/db?options=-c%20statement_timeout%3D0&sslmode=require"],
+    ["multiple params, password first", "postgres://u@h/db?password=q&a=%2F%20+%3D&b=%41&c", "postgres://u@h/db?a=%2F%20+%3D&b=%41&c"],
+    ["password last, fragment kept", "postgres://u@h/db?x=1%202&password=q#frag", "postgres://u@h/db?x=1%202#frag"],
+    ["only password param drops the ?", "postgres://u@h/db?password=q", "postgres://u@h/db"],
+    ["no password: byte-identical", "postgres://u@h:5433/d%20b?options=-c%20x%3D1&a=b+c", "postgres://u@h:5433/d%20b?options=-c%20x%3D1&a=b+c"],
+    ["encoded key name", "postgres://u@h/db?pass%77ord=q&a=%20", "postgres://u@h/db?a=%20"],
+  ])("keeps the other URL bytes untouched when stripping the password: %s", (_name, input, expected) => {
+    const invocation = buildPgDumpInvocation(input, 5, {});
+    expect(invocation.args[0]).toBe(`--dbname=${expected}`);
+  });
+
+  it("decodes a query password as libpq does (percent only, plus stays plus)", () => {
+    expect(buildPgDumpInvocation("postgres://u@h/db?password=a+b%2Bc%20d", 5, {}).env.PGPASSWORD).toBe("a+b+c d");
+  });
+
+  it("refuses sslpassword without echoing it, and never reaches argv", () => {
+    for (const url of [
+      "postgres://u@h/db?sslmode=require&sslpassword=key-pass-secret",
+      "postgres://u@h/db?sslpass%77ord=key-pass-secret",
+    ]) {
+      const error = (() => { try { buildPgDumpInvocation(url, 5, {}); } catch (e) { return e as Error; } })();
+      expect(error?.message).toMatch(/sslpassword/);
+      expect(error?.message).not.toContain("key-pass-secret");
+    }
+  });
+
+  it("surfaces the sslpassword refusal from the backup runner before spawning", async () => {
+    const dir = await fixture();
+    const error = await runPgDumpBackup({
+      connectionString: "postgres://u@h/db?sslpassword=key-pass-secret", backupFile: join(dir, "x.sql.gz"), connectTimeout: 5,
+    }).catch((v: unknown) => v);
+    expect(String(error)).toMatch(/sslpassword/);
+    expect(String(error)).not.toContain("key-pass-secret");
+    expect(mocks.spawn).not.toHaveBeenCalled();
+  });
+
+  it("redacts the decoded password from stderr even when only the decoded form appears", async () => {
+    const dir = await fixture();
+    mocks.spawn.mockImplementation(() => child({ exitCode: 1, stderr: "auth failed for p@ss/w:rd% and p%40ss%2Fw%3Ard%25 and q+x" }));
+    const error = await runPgDumpBackup({
+      connectionString: "postgres://u:p%40ss%2Fw%3Ard%25@h/db?password=q%2Bx", backupFile: join(dir, "x.sql.gz"), connectTimeout: 5,
+    }).catch((v: unknown) => v);
+    expect(String(error)).toContain("auth failed for *** and *** and ***");
+    expect(String(error)).not.toMatch(/p@ss|p%40ss|q\+x/);
+    const onlyDecoded = buildPgDumpInvocation("postgres://u:p%40ss@h/db", 5, {});
+    expect(onlyDecoded.secrets).toContain("p@ss");
+  });
+
+  it("never mutates process.env.PGPASSWORD; the password reaches only the child env", async () => {
+    const url = "postgres://u:child-only-pw@h/db";
+    for (const before of [undefined, "operator-sentinel"]) {
+      vi.stubEnv("PGPASSWORD", before);
+      const dir = await fixture();
+      mocks.spawn.mockImplementation(() => child());
+      await runPgDumpBackup({ connectionString: url, backupFile: join(dir, "x.sql.gz"), connectTimeout: 5 });
+      const [, , spawnOptions] = mocks.spawn.mock.calls.at(-1) as [string, string[], { env: NodeJS.ProcessEnv }];
+      expect(spawnOptions.env.PGPASSWORD).toBe("child-only-pw");
+      expect(process.env.PGPASSWORD).toBe(before);
+      expect(JSON.stringify(process.env)).not.toContain("child-only-pw");
+    }
+  });
+
   it("keeps an inherited PGPASSWORD when the URL has no password and rejects non-URL strings without echoing them", () => {
     expect(buildPgDumpInvocation("postgres://u@h/db", 5, { PGPASSWORD: "inherited" }).env.PGPASSWORD).toBe("inherited");
     expect(() => buildPgDumpInvocation("host=h password=topsecret dbname=d", 5)).toThrowError(

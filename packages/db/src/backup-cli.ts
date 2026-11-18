@@ -66,12 +66,83 @@ function safeDecode(value: string): string {
   }
 }
 
+// libpq 16 has PGPASSWORD but no environment variable for the client-key
+// passphrase (`sslpassword`), so it can only be given on the command line.
+const QUERY_SECRET_KEYS_REFUSED = new Set(["sslpassword"]);
+
+/**
+ * Remove secrets from the raw connection string WITHOUT re-serializing it. Going
+ * through URL#toString()/URLSearchParams rewrites the query (`%20` -> `+`), and
+ * libpq only percent-decodes, so `+` would reach it as a literal plus. Only the
+ * userinfo password and `password=` query pairs are cut; every other byte stays.
+ */
+function stripPasswordsFromRawUrl(raw: string): {
+  stripped: string;
+  userinfoPassword: string | undefined;
+  queryPasswords: string[];
+  queryKeys: string[];
+} {
+  const schemeEnd = raw.indexOf("://") + 3;
+  const scheme = raw.slice(0, schemeEnd);
+  let rest = raw.slice(schemeEnd);
+  let fragment = "";
+  const hash = rest.indexOf("#");
+  if (hash >= 0) {
+    fragment = rest.slice(hash);
+    rest = rest.slice(0, hash);
+  }
+  let query: string | undefined;
+  const question = rest.indexOf("?");
+  if (question >= 0) {
+    query = rest.slice(question + 1);
+    rest = rest.slice(0, question);
+  }
+  // Authority ends at the first "/" (the URL parser already stopped it at ?/#).
+  const slash = rest.indexOf("/");
+  let authority = slash >= 0 ? rest.slice(0, slash) : rest;
+  const path = slash >= 0 ? rest.slice(slash) : "";
+
+  let userinfoPassword: string | undefined;
+  const at = authority.lastIndexOf("@");
+  if (at >= 0) {
+    const userinfo = authority.slice(0, at);
+    const colon = userinfo.indexOf(":");
+    if (colon >= 0) {
+      const rawPassword = userinfo.slice(colon + 1);
+      if (rawPassword) userinfoPassword = rawPassword;
+      const user = userinfo.slice(0, colon);
+      authority = (user ? `${user}@` : "") + authority.slice(at + 1);
+    }
+  }
+
+  const queryPasswords: string[] = [];
+  const queryKeys: string[] = [];
+  let keptQuery: string | undefined;
+  if (query !== undefined) {
+    const kept: string[] = [];
+    for (const pair of query.split("&")) {
+      const eq = pair.indexOf("=");
+      const key = safeDecode(eq >= 0 ? pair.slice(0, eq) : pair);
+      queryKeys.push(key);
+      if (key === "password") {
+        if (eq >= 0) queryPasswords.push(pair.slice(eq + 1));
+        continue;
+      }
+      kept.push(pair);
+    }
+    keptQuery = kept.join("&");
+  }
+  const stripped = scheme + authority + path + (keptQuery ? `?${keptQuery}` : "") + fragment;
+  return { stripped, userinfoPassword, queryPasswords, queryKeys };
+}
+
 /**
  * Build pg_dump argv/env so the database password never appears in argv (visible
  * in process listings). The password is moved to PGPASSWORD in the child's
  * environment only; the connection URL passed to --dbname has it stripped, and
- * other libpq URL parameters (sslmode, host, ...) are preserved. Errors never
- * echo the connection string.
+ * every other part of the URL (sslmode, host, percent-encoding, ...) is kept
+ * byte-for-byte. A `sslpassword` parameter is refused because libpq has no env
+ * var for it. Errors never echo the connection string.
  */
 export function buildPgDumpInvocation(
   connectionString: string,
@@ -87,24 +158,31 @@ export function buildPgDumpInvocation(
   if (url.protocol !== "postgres:" && url.protocol !== "postgresql:") {
     throw new Error("Database connection string must be a postgres:// or postgresql:// URL");
   }
+  const parts = stripPasswordsFromRawUrl(connectionString);
+  if (parts.queryKeys.some((key) => QUERY_SECRET_KEYS_REFUSED.has(key))) {
+    throw new Error(
+      "Database connection string sets sslpassword, which cannot be passed to pg_dump safely "
+        + "(libpq has no environment variable for it and argv is visible in process listings); "
+        + "use an unencrypted client key or remove sslpassword",
+    );
+  }
   const secrets: string[] = [];
   const env: NodeJS.ProcessEnv = { ...baseEnv, PGCONNECT_TIMEOUT: String(connectTimeout) };
-  const hasUserinfoPassword = Boolean(url.password);
-  if (url.password) {
-    const password = safeDecode(url.password);
+  if (parts.userinfoPassword) {
+    const password = safeDecode(parts.userinfoPassword);
     env.PGPASSWORD = password;
-    secrets.push(password, url.password);
-    url.password = "";
+    secrets.push(password, parts.userinfoPassword);
   }
-  const queryPassword = url.searchParams.get("password");
-  if (queryPassword) {
-    secrets.push(queryPassword);
-    if (!hasUserinfoPassword) env.PGPASSWORD = queryPassword;
+  // libpq percent-decodes query values only; "+" stays a literal plus.
+  for (const rawQueryPassword of parts.queryPasswords) {
+    const queryPassword = safeDecode(rawQueryPassword);
+    secrets.push(queryPassword, rawQueryPassword);
   }
-  url.searchParams.delete("password");
+  const lastQueryPassword = parts.queryPasswords.at(-1);
+  if (lastQueryPassword && !parts.userinfoPassword) env.PGPASSWORD = safeDecode(lastQueryPassword);
   return {
     args: [
-      `--dbname=${url.toString()}`,
+      `--dbname=${parts.stripped}`,
       "--format=plain",
       "--clean",
       "--if-exists",
