@@ -179,17 +179,21 @@ describe("preserve-all native backup policy", () => {
       .toMatchObject({ status: "ok", latestBackup: { path: result.backupFile } });
   });
 
-  it("never passes the password in argv and supplies it via PGPASSWORD only", async () => {
+  it("never passes the password in argv and supplies it via PGPASSWORD only (query password wins, as in libpq)", async () => {
     const dir = await fixture();
     const url = "postgres://us%40er:p%40ss%2Fw%3Ard%25@db.example.invalid:5433/app%20db?sslmode=require&password=ignored-q";
     await runDatabaseBackup({ ...options(dir), connectionString: url });
-    const [, args, spawnOptions] = mocks.spawn.mock.calls[0] as [string, string[], { env: NodeJS.ProcessEnv }];
+    const [, args, spawnOptions] = mocks.spawn.mock.calls[0] as [
+      string, string[], { env: NodeJS.ProcessEnv; windowsHide?: boolean; stdio?: unknown },
+    ];
     const argv = args.join("\n");
     for (const secret of ["p@ss/w:rd%", "p%40ss%2Fw%3Ard%25", "ignored-q"]) expect(argv).not.toContain(secret);
+    expect(spawnOptions).toMatchObject({ windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
     expect(args[0]).toContain("sslmode=require");
     expect(args[0]).toContain("db.example.invalid:5433");
     expect(args[0]).toContain("us%40er");
-    expect(spawnOptions.env.PGPASSWORD).toBe("p@ss/w:rd%");
+    // libpq applies URI query parameters after userinfo, so the query password wins.
+    expect(spawnOptions.env.PGPASSWORD).toBe("ignored-q");
     expect(buildPgDumpInvocation("postgres://u@h/db?password=q%40x&sslmode=require", 5, {}).env.PGPASSWORD).toBe("q@x");
     const plain = buildPgDumpInvocation("postgres://u:p%40ss%2Fw%3Ard%25@h/db?sslmode=require", 7, {});
     expect(plain.env).toMatchObject({ PGPASSWORD: "p@ss/w:rd%", PGCONNECT_TIMEOUT: "7" });
@@ -210,6 +214,31 @@ describe("preserve-all native backup policy", () => {
   ])("keeps the other URL bytes untouched when stripping the password: %s", (_name, input, expected) => {
     const invocation = buildPgDumpInvocation(input, 5, {});
     expect(invocation.args[0]).toBe(`--dbname=${expected}`);
+  });
+
+  it("lets the last query password win over userinfo and redacts every password seen", () => {
+    const both = buildPgDumpInvocation("postgres://u:from-userinfo@h/db?password=first&password=last-wins&sslmode=require", 5, {});
+    expect(both.env.PGPASSWORD).toBe("last-wins");
+    expect(both.args[0]).toBe("--dbname=postgres://u@h/db?sslmode=require");
+    expect(both.secrets).toEqual(expect.arrayContaining(["from-userinfo", "first", "last-wins"]));
+    expect(buildPgDumpInvocation("postgres://u:from-userinfo@h/db", 5, {}).env.PGPASSWORD).toBe("from-userinfo");
+  });
+
+  it.each([
+    ["empty userinfo password", "postgres://u:@h/db", "postgres://u@h/db"],
+    ["empty query password", "postgres://u@h/db?password=", "postgres://u@h/db"],
+    ["empty query password beats userinfo", "postgres://u:from-userinfo@h/db?password=", "postgres://u@h/db"],
+    ["empty userinfo password and no user", "postgres://:@h/db", "postgres://h/db"],
+  ])("an explicit empty password overrides an inherited PGPASSWORD: %s", (_name, input, expectedDbname) => {
+    const invocation = buildPgDumpInvocation(input, 5, { PGPASSWORD: "inherited-secret" });
+    expect(invocation.env.PGPASSWORD).toBe("");
+    expect(invocation.args[0]).toBe(`--dbname=${expectedDbname}`);
+    expect(invocation.args.join(" ")).not.toContain("inherited-secret");
+  });
+
+  it("keeps an inherited PGPASSWORD for a URL with no password marker", () => {
+    expect(buildPgDumpInvocation("postgres://u@h/db?sslmode=require", 5, { PGPASSWORD: "inherited" }).env.PGPASSWORD).toBe("inherited");
+    expect(buildPgDumpInvocation("postgres://u@h/db?sslmode=require", 5, {}).env).not.toHaveProperty("PGPASSWORD");
   });
 
   it("decodes a query password as libpq does (percent only, plus stays plus)", () => {
@@ -235,6 +264,20 @@ describe("preserve-all native backup policy", () => {
     expect(String(error)).toMatch(/sslpassword/);
     expect(String(error)).not.toContain("key-pass-secret");
     expect(mocks.spawn).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["sslpassword", "postgres://u@h/db?sslpassword=key-pass-secret", /sslpassword/],
+    ["a non-URL connection string", "host=h password=topsecret dbname=d", /postgres:\/\/ or postgresql:\/\/ URL/],
+  ])("preserve-all reports a fixed actionable hint for %s before creating any staging file or spawning", async (_name, url, hint) => {
+    const dir = await fixture();
+    const error = await runDatabaseBackup({ ...options(dir), connectionString: url }).catch((v: unknown) => v);
+    expect(error).toBeInstanceOf(PreservedBackupError);
+    expect(error).toMatchObject({ phase: "dump", code: "dump_failed", retainedArtifact: undefined });
+    expect((error as Error).message).toMatch(hint);
+    expect((error as Error).message).not.toMatch(/key-pass-secret|topsecret/);
+    expect(mocks.spawn).not.toHaveBeenCalled();
+    expect(await readdir(dir)).toEqual([]);
   });
 
   it("redacts the decoded password from stderr even when only the decoded form appears", async () => {

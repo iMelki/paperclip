@@ -58,6 +58,18 @@ export async function settleBackupChildPipeline(
   if (pipelineResult.status === "rejected") throw pipelineResult.reason;
 }
 
+/**
+ * Fixed, secret-free refusal of a connection string that cannot be handed to
+ * pg_dump safely. The message never contains any part of the string, so callers
+ * may surface it verbatim.
+ */
+export class PgDumpConnectionStringError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "PgDumpConnectionStringError";
+  }
+}
+
 function safeDecode(value: string): string {
   try {
     return decodeURIComponent(value);
@@ -65,6 +77,8 @@ function safeDecode(value: string): string {
     return value;
   }
 }
+
+const NOT_A_URL_MESSAGE = "Database connection string must be a postgres:// or postgresql:// URL";
 
 // libpq 16 has PGPASSWORD but no environment variable for the client-key
 // passphrase (`sslpassword`), so it can only be given on the command line.
@@ -108,8 +122,8 @@ function stripPasswordsFromRawUrl(raw: string): {
     const userinfo = authority.slice(0, at);
     const colon = userinfo.indexOf(":");
     if (colon >= 0) {
-      const rawPassword = userinfo.slice(colon + 1);
-      if (rawPassword) userinfoPassword = rawPassword;
+      // An explicit empty password ("user:@host") is still an explicit value.
+      userinfoPassword = userinfo.slice(colon + 1);
       const user = userinfo.slice(0, colon);
       authority = (user ? `${user}@` : "") + authority.slice(at + 1);
     }
@@ -153,14 +167,14 @@ export function buildPgDumpInvocation(
   try {
     url = new URL(connectionString);
   } catch {
-    throw new Error("Database connection string must be a postgres:// or postgresql:// URL");
+    throw new PgDumpConnectionStringError(NOT_A_URL_MESSAGE);
   }
   if (url.protocol !== "postgres:" && url.protocol !== "postgresql:") {
-    throw new Error("Database connection string must be a postgres:// or postgresql:// URL");
+    throw new PgDumpConnectionStringError(NOT_A_URL_MESSAGE);
   }
   const parts = stripPasswordsFromRawUrl(connectionString);
   if (parts.queryKeys.some((key) => QUERY_SECRET_KEYS_REFUSED.has(key))) {
-    throw new Error(
+    throw new PgDumpConnectionStringError(
       "Database connection string sets sslpassword, which cannot be passed to pg_dump safely "
         + "(libpq has no environment variable for it and argv is visible in process listings); "
         + "use an unencrypted client key or remove sslpassword",
@@ -168,18 +182,15 @@ export function buildPgDumpInvocation(
   }
   const secrets: string[] = [];
   const env: NodeJS.ProcessEnv = { ...baseEnv, PGCONNECT_TIMEOUT: String(connectTimeout) };
-  if (parts.userinfoPassword) {
-    const password = safeDecode(parts.userinfoPassword);
-    env.PGPASSWORD = password;
-    secrets.push(password, parts.userinfoPassword);
-  }
-  // libpq percent-decodes query values only; "+" stays a literal plus.
-  for (const rawQueryPassword of parts.queryPasswords) {
-    const queryPassword = safeDecode(rawQueryPassword);
-    secrets.push(queryPassword, rawQueryPassword);
-  }
-  const lastQueryPassword = parts.queryPasswords.at(-1);
-  if (lastQueryPassword && !parts.userinfoPassword) env.PGPASSWORD = safeDecode(lastQueryPassword);
+  // libpq applies URI query parameters after userinfo, so the LAST `password=`
+  // pair wins over `user:pass@`. libpq percent-decodes only; "+" stays a literal plus.
+  const rawEffective = parts.queryPasswords.length > 0 ? parts.queryPasswords.at(-1) : parts.userinfoPassword;
+  // Every password seen in the URL is redacted from stderr, winner or not.
+  const seen = parts.userinfoPassword === undefined ? parts.queryPasswords : [parts.userinfoPassword, ...parts.queryPasswords];
+  for (const raw of seen) secrets.push(safeDecode(raw), raw);
+  // An explicit empty password must override an inherited PGPASSWORD; with no
+  // password in the URL at all, the inherited value is what libpq would use.
+  if (rawEffective !== undefined) env.PGPASSWORD = safeDecode(rawEffective);
   return {
     args: [
       `--dbname=${parts.stripped}`,
@@ -205,6 +216,7 @@ export async function runPgDumpBackup(opts: {
   const child = spawn(pgDumpBin, invocation.args, {
     stdio: ["ignore", "pipe", "pipe"],
     env: invocation.env,
+    windowsHide: true,
   });
 
   if (!child.stdout) throw new Error("pg_dump did not expose stdout");
@@ -250,6 +262,8 @@ const NO_HARDLINK_CODES = new Set(["EPERM", "ENOTSUP", "EOPNOTSUPP", "EXDEV", "E
 // Only fixed, secret-free text is derived from the underlying error (its code).
 function failureHint(phase: PreservationPhase, error: unknown): string | undefined {
   const code = error && typeof error === "object" && "code" in error ? String(error.code) : "";
+  // Fixed, secret-free refusal text from buildPgDumpInvocation (sslpassword, non-URL string).
+  if (phase === "dump" && error instanceof PgDumpConnectionStringError) return error.message;
   if (phase === "dump" && code === "ENOENT") {
     return "pg_dump was not found; install the PostgreSQL client tools or set PAPERCLIP_PG_DUMP_PATH, or disable PAPERCLIP_DB_BACKUP_PRESERVE_ALL";
   }
@@ -266,6 +280,12 @@ export async function runPreservedPgDumpBackup(opts: {
   connectTimeout: number;
 }): Promise<{ sizeBytes: number; retainedPartialFile: string }> {
   await refuseExistingOutput(opts.backupFile);
+  // Refuse an unusable connection string before any staging file exists.
+  try {
+    buildPgDumpInvocation(opts.connectionString, opts.connectTimeout);
+  } catch (error) {
+    throw new PreservedBackupError("dump", "dump_failed", undefined, failureHint("dump", error));
+  }
   const partialFile = `${opts.backupFile}.partial-${randomUUID()}`;
   let phase: PreservationPhase = "reserve";
   let retainedArtifact: string | undefined;

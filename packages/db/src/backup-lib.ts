@@ -119,14 +119,54 @@ function monthlyRetentionCutoff(nowMs: number, monthlyMonths: number): number {
   return Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - months, 1);
 }
 
+// `<name>.sql.gz.partial-<uuid>`: staging/hard-link names written by the preserve-all path.
+const PRESERVE_PARTIAL_NAME = /^(.+\.sql\.gz)\.partial-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u;
+
+/**
+ * Remove preserve-all `.partial-<uuid>` links: those of backups pruned in this run (so the
+ * inode is released), and orphans whose backup name does not exist (failed staging output)
+ * only when older than every retention tier. Returns the number of orphans removed.
+ */
+function prunePartialLinks(opts: {
+  backupDir: string;
+  dirNames: readonly string[];
+  filenamePrefix: string;
+  prunedNames: ReadonlySet<string>;
+  monthlyCutoff: number;
+}): number {
+  const present = new Set(opts.dirNames);
+  let orphans = 0;
+  for (const name of opts.dirNames) {
+    if (!name.startsWith(`${opts.filenamePrefix}-`)) continue;
+    const owner = PRESERVE_PARTIAL_NAME.exec(name)?.[1];
+    if (!owner) continue;
+    const fullPath = resolve(opts.backupDir, name);
+    if (opts.prunedNames.has(owner)) {
+      unlinkSync(fullPath);
+    } else if (!present.has(owner) && statSync(fullPath).mtimeMs < opts.monthlyCutoff) {
+      unlinkSync(fullPath);
+      orphans += 1;
+    }
+  }
+  return orphans;
+}
+
 /**
  * Tiered backup pruning:
  * - Daily tier: keep ALL backups from the last `dailyDays` days
  * - Weekly tier: keep the NEWEST backup per calendar week for `weeklyWeeks` weeks
  * - Monthly tier: keep the NEWEST backup per calendar month for `monthlyMonths` months
  * - Everything else is deleted
+ *
+ * Preserve-all runs leave a second hard link `<backup>.sql.gz.partial-<uuid>` to each
+ * published dump. These links keep the inode (and its disk blocks) alive, so when a
+ * backup is pruned its partial links are removed with it; otherwise turning
+ * preserve-all off after using it would reclaim no disk. A partial whose backup no
+ * longer exists (failed staging output) never competes for a week/month bucket and is
+ * removed only once it is older than every retention tier. Returns the number of
+ * backups pruned (a backup's own partial links are not counted separately).
  */
-function pruneOldBackups(backupDir: string, retention: BackupRetentionPolicy, filenamePrefix: string): number {
+export function pruneOldBackups(backupDir: string, retention: BackupRetentionPolicy, filenamePrefix: string): number {
   if (!existsSync(backupDir)) return 0;
 
   const now = Date.now();
@@ -137,8 +177,10 @@ function pruneOldBackups(backupDir: string, retention: BackupRetentionPolicy, fi
   type BackupEntry = { name: string; fullPath: string; mtimeMs: number };
   const entries: BackupEntry[] = [];
 
-  for (const name of readdirSync(backupDir)) {
+  const dirNames = readdirSync(backupDir);
+  for (const name of dirNames) {
     if (!name.startsWith(`${filenamePrefix}-`)) continue;
+    // `.sql.gz.partial-<uuid>` names fail this test: they are handled by prunePartialLinks.
     if (!name.endsWith(".sql") && !name.endsWith(".sql.gz")) continue;
     const fullPath = resolve(backupDir, name);
     const stat = statSync(fullPath);
@@ -188,7 +230,11 @@ function pruneOldBackups(backupDir: string, retention: BackupRetentionPolicy, fi
     unlinkSync(filePath);
   }
 
-  return toDelete.length;
+  const deleted = new Set(toDelete);
+  const prunedNames = new Set(entries.filter((entry) => deleted.has(entry.fullPath)).map((entry) => entry.name));
+  const orphans = prunePartialLinks({ backupDir, dirNames, filenamePrefix, prunedNames, monthlyCutoff });
+
+  return toDelete.length + orphans;
 }
 
 function formatBackupSize(sizeBytes: number): string {
@@ -314,6 +360,7 @@ async function restoreWithPsql(opts: RunDatabaseRestoreOptions, connectTimeout: 
         ...process.env,
         PGCONNECT_TIMEOUT: String(connectTimeout),
       },
+      windowsHide: true,
     },
   );
 
