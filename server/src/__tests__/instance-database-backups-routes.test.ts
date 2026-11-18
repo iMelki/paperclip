@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import express from "express";
 import request from "supertest";
-import ts from "typescript";
+import ts from "typescript-compiler-api";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { RunDatabaseBackupOptions, RunDatabaseBackupResult } from "../../../packages/db/src/backup-lib.js";
 import { errorHandler } from "../middleware/index.js";

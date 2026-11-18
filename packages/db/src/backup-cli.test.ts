@@ -8,7 +8,6 @@ import { gunzipSync } from "node:zlib";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createBufferedTextFileWriter, runDatabaseBackup, type RunDatabaseBackupOptions } from "./backup-lib.js";
 import { PreservedBackupError, runPreservedPgDumpBackup, settleBackupChildPipeline } from "./backup-cli.js";
-import { inspectDatabaseBackupHealth } from "../../../server/src/services/database-backup-health.js";
 
 const mocks = vi.hoisted(() => ({ spawn: vi.fn(), postgres: vi.fn(), link: vi.fn(), open: vi.fn() }));
 vi.mock("node:child_process", () => ({ spawn: mocks.spawn }));
@@ -19,6 +18,17 @@ vi.mock("node:fs/promises", async () => {
 });
 
 const fs = await vi.importActual<typeof import("node:fs/promises")>("node:fs/promises");
+// The server health reader is the consumer of these backups. It lives outside this
+// package's tsc rootDir, so load it at runtime by URL instead of a static import
+// (a static import breaks `tsc` with TS6059 for @paperclipai/db).
+type BackupHealthInspector = (options: { enabled: boolean; backupDir: string; maxAgeHours: number }) => {
+  status: "ok" | "warning";
+  latestBackup: { path: string } | null;
+};
+const healthUrl = new URL("../../../server/src/services/database-backup-health.ts", import.meta.url).href;
+const { inspectDatabaseBackupHealth } = (await import(/* @vite-ignore */ healthUrl)) as {
+  inspectDatabaseBackupHealth: BackupHealthInspector;
+};
 const fixtures: string[] = [];
 const sql = "CREATE TABLE public.sample (id integer);\nINSERT INTO public.sample VALUES (42);\n";
 // Synthetic only: never a live endpoint or credential.
