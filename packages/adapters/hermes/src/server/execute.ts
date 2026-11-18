@@ -55,6 +55,7 @@ import {
 } from "./detect-model.js";
 import { reconcileHermesPaperclipSkills, resolveHermesOperationalSkillPreload } from "./skills.js";
 import { resolveStrictHermesIsolation } from "./strict-isolation.js";
+import { resolveConfiguredApiUrl } from "./api-url.js";
 
 // ---------------------------------------------------------------------------
 // Config helpers
@@ -95,9 +96,8 @@ const HERMES_DEFAULT_PROMPT_TEMPLATE = [
   "Paperclip API guidance:",
   "- Use `curl` from the terminal for Paperclip API calls; browser/web extraction tools may not reach localhost.",
   "- Use `$PAPERCLIP_API_URL`, `$PAPERCLIP_API_KEY`, and `$PAPERCLIP_RUN_ID`; do not hard-code local ports or copy secrets into comments.",
-  "- Displayed command logs may redact secrets; rely on environment variables instead of printed token values.",
-  "- Include `-H \"Authorization: Bearer $PAPERCLIP_API_KEY\"` on API requests.",
-  "- Include `-H \"X-Paperclip-Run-Id: $PAPERCLIP_RUN_ID\"` on mutating issue requests.",
+  "- Never put `$PAPERCLIP_API_KEY` on a command line: the shell expands it into the process arguments, which other processes can read.",
+  "- Send the authorization and run-id headers from a private header file written with the `printf` builtin, as in the pattern below (`curl -H @file`).",
   "- For multiline comments or status updates, preserve newlines with `jq --arg` or a heredoc-fed helper rather than hand-escaping JSON.",
   "",
   "Safe multiline update pattern:",
@@ -112,12 +112,14 @@ const HERMES_DEFAULT_PROMPT_TEMPLATE = [
   "- Detail two",
   "MD",
   ")",
+  "hdr=\"$(mktemp)\"",
+  "printf 'Authorization: Bearer %s\\nX-Paperclip-Run-Id: %s\\n' \"$PAPERCLIP_API_KEY\" \"$PAPERCLIP_RUN_ID\" > \"$hdr\"",
   "jq -n --arg status done --arg comment \"$body\" '{status:$status, comment:$comment}' | \\",
   "  curl -sS -X PATCH \"$api/issues/{{context.issueId}}\" \\",
-  "    -H \"Authorization: Bearer $PAPERCLIP_API_KEY\" \\",
-  "    -H \"X-Paperclip-Run-Id: $PAPERCLIP_RUN_ID\" \\",
+  "    -H @\"$hdr\" \\",
   "    -H \"Content-Type: application/json\" \\",
   "    --data-binary @-",
+  "rm -f \"$hdr\"",
   "```",
   "",
   DEFAULT_PAPERCLIP_AGENT_PROMPT_TEMPLATE,
@@ -139,7 +141,7 @@ function renderConditionalSections(template: string, vars: Record<string, unknow
 export function buildPrompt(
   ctx: AdapterExecutionContext,
   config: Record<string, unknown>,
-  options: { resumedSession?: boolean } = {},
+  options: { resumedSession?: boolean; paperclipApiUrl?: string } = {},
 ): string {
   const template = cfgString(config.promptTemplate) || HERMES_DEFAULT_PROMPT_TEMPLATE;
 
@@ -154,8 +156,10 @@ export function buildPrompt(
   const projectName = cfgString(context.projectName) || cfgString(ctx.config?.projectName) || "";
 
   // Build API URL — ensure it has the /api path
+  // A configured override must be loopback; the same validated value feeds the child environment.
   let paperclipApiUrl =
-    cfgString(config.paperclipApiUrl) ||
+    options.paperclipApiUrl ||
+    resolveConfiguredApiUrl(config.paperclipApiUrl) ||
     process.env.PAPERCLIP_API_URL ||
     "http://127.0.0.1:3100/api";
   // Ensure /api suffix
@@ -329,6 +333,44 @@ function parseHermesOutput(stdout: string, stderr: string): ParsedOutput {
   return result;
 }
 
+/** `auto`, and any provider-qualified auto router such as `openrouter/auto`, lets the provider pick the model. */
+export function isAutoModel(model: string): boolean {
+  return /^(?:[^/\s]+\/)?auto(?::\S*)?$/i.test(model.trim());
+}
+
+/**
+ * The adapter binds the model, provider and profile it validated. A caller-supplied flag later on the
+ * command line would override them, so any spelling of those flags (including argparse prefixes and
+ * `--flag=value`) is refused in extraArgs.
+ */
+export function assertNoCompetingLaunchFlags(extraArgs: string[] | undefined): void {
+  for (const arg of extraArgs ?? []) {
+    const flag = arg.split("=", 1)[0];
+    const longPrefix = flag.length > 2 && flag.startsWith("--");
+    const competing =
+      (longPrefix && ["--model", "--provider", "--profile"].some((name) => name.startsWith(flag))) ||
+      /^-[A-Za-z]*[mp]/.test(flag) && !flag.startsWith("--");
+    if (competing) {
+      throw new Error(
+        `Hermes adapter forbids ${JSON.stringify(flag)} in extraArgs: the model, provider and profile `
+        + "come from adapterConfig and must not be overridden.",
+      );
+    }
+  }
+}
+
+/**
+ * Reserved credential names. Windows environments are case-insensitive, so a differently cased copy
+ * would reach the child unless every case variant is removed before the trusted values are injected.
+ */
+const RESERVED_CREDENTIAL_ENV = new Set(["HERMES_YOLO_MODE", "PAPERCLIP_API_KEY"]);
+
+export function stripReservedCredentialEnv(env: Record<string, string>): void {
+  for (const key of Object.keys(env)) {
+    if (RESERVED_CREDENTIAL_ENV.has(key.toUpperCase())) delete env[key];
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Main execute
 // ---------------------------------------------------------------------------
@@ -347,12 +389,16 @@ export async function execute(
   const model = configuredModel || DEFAULT_MODEL;
   // Fail closed: with no model, or "auto", the provider (OpenRouter in particular) chooses the model
   // per call, so it is not known which model receives the agent's instructions or what a run costs.
-  if (!configuredModel || configuredModel.toLowerCase() === "auto") {
+  // OpenRouter's provider-qualified router ("openrouter/auto") delegates the choice just the same.
+  if (!configuredModel || isAutoModel(configuredModel)) {
     throw new Error(
-      "hermes_local requires an explicit model (not unset or \"auto\") so the model that receives "
-      + "the agent's instructions is known; set adapterConfig.model and adapterConfig.provider.",
+      "hermes_local requires an explicit model (not unset, \"auto\" or a provider's auto router) so the "
+      + "model that receives the agent's instructions is known; set adapterConfig.model and adapterConfig.provider.",
     );
   }
+  assertNoCompetingLaunchFlags(cfgStringArray(config.extraArgs));
+  // One validated API URL for both the prompt and the child environment (normal lane).
+  const validatedApiUrl = strictIsolation ? strictIsolation.paperclipApiUrl : resolveConfiguredApiUrl(config.paperclipApiUrl);
   const timeoutSec = strictIsolation?.timeoutSec ?? resolveAdapterTimeoutSec({
     configured: config.timeoutSec,
     adapterDefaultSec: DEFAULT_TIMEOUT_SEC,
@@ -375,7 +421,11 @@ export async function execute(
   let preloadSkillName: string | null = null;
   if (Object.prototype.hasOwnProperty.call(config, "paperclipRuntimeSkills")) {
     try {
-      const selectedSkills = await reconcileHermesPaperclipSkills(config);
+      // Link where the child will actually read skills: strict isolation uses its own profile home;
+      // the normal lane uses the environment the child inherits plus the adapter env block.
+      const selectedSkills = await reconcileHermesPaperclipSkills(config, undefined, {
+        ...(strictIsolation ? { strict: { root: strictIsolation.root, profile: strictIsolation.profile } } : {}),
+      });
       preloadSkillName = await resolveHermesOperationalSkillPreload(config, selectedSkills);
       if (selectedSkills.length > 0) {
         await ctx.onLog(
@@ -420,6 +470,11 @@ export async function execute(
     detectedApiMode: detectedConfig?.apiMode,
     model,
   });
+  if (resolvedProvider === "auto") {
+    throw new Error(
+      "hermes_local could not bind a provider for this model (resolved to \"auto\"); set adapterConfig.provider.",
+    );
+  }
 
   // ── Load agent instructions file (Paperclip instruction bundles) ──────
   // Paperclip can materialize managed instructions into instructionsFilePath;
@@ -449,7 +504,10 @@ export async function execute(
   }
 
   // ── Build prompt ───────────────────────────────────────────────────────
-  let prompt = buildPrompt(ctx, config, { resumedSession: canResumeSession });
+  let prompt = buildPrompt(ctx, config, {
+    resumedSession: canResumeSession,
+    ...(validatedApiUrl ? { paperclipApiUrl: validatedApiUrl } : {}),
+  });
   if (agentInstructions) {
     prompt = agentInstructions + "\n\n---\n\n" + prompt;
   }
@@ -513,24 +571,23 @@ export async function execute(
 
   // ── Build environment ──────────────────────────────────────────────────
   const userEnv = config.env as Record<string, string> | undefined;
-  const env: Record<string, string> = {
+  const inheritedEnv: Record<string, string> = {
     ...(strictIsolation?.env ?? (process.env as Record<string, string>)),
     ...(!strictIsolation && userEnv && typeof userEnv === "object" ? userEnv : {}),
+  };
+  // Remove every case variant of the reserved names before the trusted values are injected.
+  stripReservedCredentialEnv(inheritedEnv);
+  const env: Record<string, string> = {
+    ...inheritedEnv,
     ...(strictIsolation ? {
       PAPERCLIP_AGENT_ID: ctx.agent.id,
       PAPERCLIP_COMPANY_ID: ctx.agent.companyId,
       PAPERCLIP_API_URL: strictIsolation.paperclipApiUrl,
     } : buildPaperclipEnv(ctx.agent)),
   };
-  // An adapter-configured Paperclip API URL (loopback) wins over the server's own value, which may
-  // be a tailnet or public address the tool shell cannot rely on. Same /api normalization as the prompt.
-  const configuredApiUrl = cfgString(config.paperclipApiUrl);
-  if (configuredApiUrl && !strictIsolation) {
-    env.PAPERCLIP_API_URL = configuredApiUrl.endsWith("/api") ? configuredApiUrl : configuredApiUrl.replace(/\/+$/, "") + "/api";
-  }
-  for (const key of Object.keys(env)) {
-    if (key.toUpperCase() === "HERMES_YOLO_MODE") delete env[key];
-  }
+  // A validated, adapter-configured loopback API URL wins over the server's own value, which may be a
+  // tailnet or public address the tool shell cannot rely on. It is the same value the prompt printed.
+  if (validatedApiUrl && !strictIsolation) env.PAPERCLIP_API_URL = validatedApiUrl;
 
   if (ctx.runId) env.PAPERCLIP_RUN_ID = ctx.runId;
 
