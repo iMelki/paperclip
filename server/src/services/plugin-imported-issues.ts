@@ -24,6 +24,8 @@ type TaskJournal = RootJournal & { taskId: string; nodeId: string; sourceUrl: st
 type StoredOperation = BoardImportOperation & { intent: BoardImportIntent; receipt?: BoardImportReceipt } &
   ({ userId: string; nativeOwner?: never } | { nativeOwner: ScheduledBoardOwner; userId?: never });
 const MAX_EXCLUSIONS = 1000;
+// Drift that board users may cause and that does not change which GitHub issue a task stands for.
+const PLACEMENT_DRIFT_FIELDS: ReadonlySet<string> = new Set(["parentId", "projectId"]);
 export type BoardImportIntentValidation = (
   executor: Db, context: BoardImportHostContext, intent: BoardImportIntent,
 ) => Promise<void>;
@@ -502,9 +504,16 @@ export function pluginImportedIssuesService(
           if (!existing || existing.issue.id !== row.id) throw conflict("Missing authoritative manual-import exclusion");
           return existing;
         });
-        // A task whose stored identity drifted is quarantined, not fatal: its source stays excluded (the task still
-        // exists and is journaled, so repository sync must not mint a second one), nothing is overwritten, and it is
-        // named in the result. Every other task keeps syncing. A missing journal or ambiguous rows still hold sync.
+        // Only a placement drift (the parent or the project, which board users may change) is quarantined: the task
+        // and its source still agree with the journal, so its source stays excluded (the task exists and is journaled,
+        // repository sync must not mint a second one), nothing is overwritten, and it is named in the result. If the
+        // task id, the node id or the source URL no longer agree, the excluded URL could belong to a different GitHub
+        // issue, so sync is held instead. A missing journal or ambiguous rows still hold sync. Every other task syncs.
+        const identityDrift = found.drift.filter(field => !PLACEMENT_DRIFT_FIELDS.has(field));
+        if (identityDrift.length) {
+          throw conflict(`Native GitHub task identity changed; repository sync must remain held (task ${found.issue.id}, `
+            + `fields: ${identityDrift.join(", ")})`, { code: "task_identity_drift" });
+        }
         sourceUrls.push(found.journal.sourceUrl);
         if (found.drift.length) quarantined.push({ taskId: found.issue.id, sourceUrl: found.journal.sourceUrl, fields: found.drift });
       }
