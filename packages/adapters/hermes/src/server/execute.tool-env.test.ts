@@ -103,6 +103,15 @@ describe("hermes_local preloads the operational Paperclip skill", () => {
     expect((await fs.lstat(path.join(home, "hermes-home", "skills", "paperclip"))).isSymbolicLink()).toBe(true);
   });
 
+  it("negative: a missing operational skill source fails the run before Hermes is spawned", async () => {
+    const [skill] = await runtimeSkill();
+    const paperclipRuntimeSkills = [{ ...skill, sourceStatus: "missing", missingDetail: "snapshot deleted" }];
+    const ctx = makeCtx({ model: MODEL, env: { HOME: home, HERMES_HOME: path.join(home, "hermes-home") }, paperclipRuntimeSkills });
+    await expect(execute(ctx as never)).rejects.toThrow(/operational Paperclip skill.*unavailable/);
+    expect(vi.mocked(serverUtils.runChildProcess)).not.toHaveBeenCalled();
+    expect(ctx.onSpawn).not.toHaveBeenCalled();
+  });
+
   it("negative: without the runtime skill there is no preload", async () => {
     await execute(makeCtx({ model: MODEL, env: { HOME: home } }) as never);
     expect(lastSpawn().args).not.toContain("-s");

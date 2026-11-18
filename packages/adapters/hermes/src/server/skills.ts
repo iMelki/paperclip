@@ -378,12 +378,22 @@ export async function resolveHermesOperationalSkillPreload(
   config: Record<string, unknown>,
   reconciledKeys: string[],
 ): Promise<string | null> {
-  // The skill is already verified readable through its link by reconcileHermesPaperclipSkills.
-  if (!reconciledKeys.some((key) => key.trim().toLowerCase() === PAPERCLIP_OPERATIONAL_SKILL_KEY)) return null;
   const entries = await readPaperclipRuntimeSkillEntries(config, __moduleDir);
   const entry = entries.find((candidate) => candidate.key.trim().toLowerCase() === PAPERCLIP_OPERATIONAL_SKILL_KEY);
-  if (!entry || isPaperclipSkillSourceMissing(entry)) return null;
-  return asString(entry.runtimeName) ?? null;
+  // No operational skill in the runtime inventory: nothing is required, nothing to preload.
+  if (!entry) return null;
+  // The skill is part of the inventory, so the run needs it: without the preload the tool shell
+  // lacks every PAPERCLIP_* variable. Fail before Hermes starts instead of running without them.
+  // A reconciled skill is already verified readable through its link by reconcileHermesPaperclipSkills.
+  const reconciled = reconciledKeys.some((key) => key.trim().toLowerCase() === PAPERCLIP_OPERATIONAL_SKILL_KEY);
+  const runtimeName = asString(entry.runtimeName);
+  if (!reconciled || isPaperclipSkillSourceMissing(entry) || !runtimeName) {
+    throw new Error(
+      `The operational Paperclip skill "${entry.key}" is unavailable (source missing or not reconciled); ` +
+        "Hermes would start without the PAPERCLIP_* tool-shell variables, so the run was not started.",
+    );
+  }
+  return runtimeName;
 }
 
 export async function syncHermesSkills(
