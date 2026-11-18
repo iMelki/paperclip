@@ -42,7 +42,8 @@ All notable changes to this repository should be recorded here.
      `$PAPERCLIP_API_KEY` into `curl`'s arguments. The adapter preloads the Paperclip
      skill (`-s paperclip`) so its declared variables reach Hermes' tool shell. When the Paperclip skill is in
      the runtime inventory but its source is missing or it cannot be linked, the run fails before
-     Hermes is spawned instead of starting without those variables.
+     Hermes is spawned instead of starting without those variables. This includes a runtime inventory that lacks
+     the skill or is empty; only `adapterConfig.paperclipSkill: "disabled"` runs Hermes without it.
 
 - **[Refs #265]** `check:tokens` accepts a per-machine ignore list for dynamic
   usernames: `CHECK_FORBIDDEN_TOKENS_IGNORE_USERNAMES`. Use it only on a shared

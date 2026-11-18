@@ -36,7 +36,7 @@ Env vars auto-injected: `PAPERCLIP_AGENT_ID`, `PAPERCLIP_COMPANY_ID`, `PAPERCLIP
 **Keep the run key off command lines.** The shell expands `-H "Authorization: Bearer $PAPERCLIP_API_KEY"` into the process arguments of `curl`, and other processes on the machine can read those. Wherever an example below shows that header, send it from a private header file instead. `printf` is a shell builtin, so the key never appears in any process's arguments:
 
 ```bash
-hdr="$(mktemp)"
+hdr="$(mktemp)"; trap 'rm -f "$hdr"' EXIT   # removed even if a later command fails
 printf 'Authorization: Bearer %s\nX-Paperclip-Run-Id: %s\n' "$PAPERCLIP_API_KEY" "$PAPERCLIP_RUN_ID" > "$hdr"
 api="${PAPERCLIP_API_URL%/}"; api="${api%/api}"        # PAPERCLIP_API_URL is the bare origin; paths add /api
 curl -sS -H @"$hdr" "$api/api/agents/me"              # -H @file reads the headers from the file

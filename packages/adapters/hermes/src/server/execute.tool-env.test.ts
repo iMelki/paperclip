@@ -112,6 +112,30 @@ describe("hermes_local preloads the operational Paperclip skill", () => {
     expect(ctx.onSpawn).not.toHaveBeenCalled();
   });
 
+  const hermesEnv = () => ({ HOME: home, HERMES_HOME: path.join(home, "hermes-home") });
+
+  it("negative: an inventory without the operational skill fails before spawn by default", async () => {
+    const other = { key: "paperclipai/paperclip/other", runtimeName: "other", source: path.join(home, "other") };
+    await fs.mkdir(other.source, { recursive: true });
+    await fs.writeFile(path.join(other.source, "SKILL.md"), "# Other\n", "utf8");
+    const ctx = makeCtx({ model: MODEL, env: hermesEnv(), paperclipRuntimeSkills: [other] });
+    await expect(execute(ctx as never)).rejects.toThrow(/operational Paperclip skill.*absent/);
+    expect(vi.mocked(serverUtils.runChildProcess)).not.toHaveBeenCalled();
+    expect(ctx.onSpawn).not.toHaveBeenCalled();
+  });
+
+  it("negative: an empty inventory fails before spawn by default", async () => {
+    const ctx = makeCtx({ model: MODEL, env: hermesEnv(), paperclipRuntimeSkills: [] });
+    await expect(execute(ctx as never)).rejects.toThrow(/operational Paperclip skill.*absent/);
+    expect(vi.mocked(serverUtils.runChildProcess)).not.toHaveBeenCalled();
+    expect(ctx.onSpawn).not.toHaveBeenCalled();
+  });
+
+  it("an explicit paperclipSkill: disabled runs without the skill and without -s", async () => {
+    await execute(makeCtx({ model: MODEL, env: hermesEnv(), paperclipRuntimeSkills: [], paperclipSkill: "disabled" }) as never);
+    expect(lastSpawn().args).not.toContain("-s");
+  });
+
   it("negative: without the runtime skill there is no preload", async () => {
     await execute(makeCtx({ model: MODEL, env: { HOME: home } }) as never);
     expect(lastSpawn().args).not.toContain("-s");

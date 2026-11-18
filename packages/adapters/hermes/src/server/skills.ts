@@ -380,8 +380,15 @@ export async function resolveHermesOperationalSkillPreload(
 ): Promise<string | null> {
   const entries = await readPaperclipRuntimeSkillEntries(config, __moduleDir);
   const entry = entries.find((candidate) => candidate.key.trim().toLowerCase() === PAPERCLIP_OPERATIONAL_SKILL_KEY);
-  // No operational skill in the runtime inventory: nothing is required, nothing to preload.
-  if (!entry) return null;
+  // An explicit opt-out is the only way to run Hermes without the operational skill.
+  if (config.paperclipSkill === "disabled") return null;
+  if (!entry) {
+    throw new Error(
+      `The operational Paperclip skill "${PAPERCLIP_OPERATIONAL_SKILL_KEY}" is absent from the runtime inventory; ` +
+        "Hermes would start without the PAPERCLIP_* tool-shell variables, so the run was not started. " +
+        'Set adapterConfig.paperclipSkill to "disabled" only for a run that must not use Paperclip.',
+    );
+  }
   // The skill is part of the inventory, so the run needs it: without the preload the tool shell
   // lacks every PAPERCLIP_* variable. Fail before Hermes starts instead of running without them.
   // A reconciled skill is already verified readable through its link by reconcileHermesPaperclipSkills.
