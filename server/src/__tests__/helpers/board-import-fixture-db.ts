@@ -192,7 +192,7 @@ export async function waitForFixtureReady(service: FixtureCommand, dataDir: stri
   throw new Error("Fixture PostgreSQL readiness deadline exceeded");
 }
 
-// Worst failure chain: stop10s + own terminate4s + status5s =19s; client close5s leaves6s of each30s hook.
+// Allow a shutdown checkpoint up to 15s; retain bounded ownership and pipe-drain checks.
 export function createCleanup(run: NativeRun, artifactDir: string, dataDir: string, port: number,
   pgCtl: string, stage: { startRequested: boolean; service?: FixtureCommand }) {
   let stopped = false;
@@ -207,7 +207,7 @@ export function createCleanup(run: NativeRun, artifactDir: string, dataDir: stri
           pid: service?.pid, dataDir, port, observedAt: new Date().toISOString(),
         }), { flag: "wx" });
         service?.beginStop();
-        await run("stop", pgCtl, ["stop", "-D", dataDir, "-m", "fast", "-w", "-t", "5"], 8000);
+        await run("stop", pgCtl, ["stop", "-D", dataDir, "-m", "fast", "-w", "-t", "15"], 18000);
       } else if (service) { service.beginStop(); service.terminate(); }
     } catch (error) { failures.push(error); service?.terminate(); }
     if (service) { try { await service.completion; } catch (error) { failures.push(error); } }

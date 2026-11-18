@@ -180,7 +180,7 @@ describeEmbeddedPostgres("plugin install route security floor", () => {
 
   afterAll(async () => {
     try { await db?.$client.end({ timeout: 5 }); } finally { await tempDb?.cleanup(); }
-  }, 30_000);
+  }, 45_000);
 
   describe("cloud-managed instances", () => {
     it("rejects npm installs outright", async () => {

@@ -274,10 +274,10 @@ describe("foreground fixture service lifetime", () => {
     const failed = expect(result).rejects.toThrow("owned shutdown or pipe drain unverified");
     await vi.advanceTimersByTimeAsync(40_000); await failed;
     expect(settledAt).toBeDefined();
-    expect(settledAt! - started).toBeLessThanOrEqual(19_000);
-    expect(settledAt! - started + 5000).toBeLessThan(30_000); // Actual consumers reserve client.end({ timeout:5 }).
+    expect(settledAt! - started).toBeLessThanOrEqual(29_000);
+    expect(settledAt! - started + 5000).toBeLessThan(45_000); // Actual consumers reserve client.end({ timeout:5 }).
     expect(run).toHaveBeenNthCalledWith(1, "stop", "unexecuted-pg_ctl",
-      ["stop", "-D", f.dataDir, "-m", "fast", "-w", "-t", "5"], 8000);
+      ["stop", "-D", f.dataDir, "-m", "fast", "-w", "-t", "15"], 18000);
     expect(run).toHaveBeenNthCalledWith(2, "shutdown-status", "unexecuted-pg_ctl",
       ["status", "-D", f.dataDir], 3000, [3]);
     expect(f.child.kill).toHaveBeenCalledTimes(1);

@@ -139,7 +139,7 @@ describe.skipIf(!CLIENT_ROOT || !CLIENT_REQUEST)("retained native PG18 custom ar
     try { await fixture?.cleanup(); } catch (error) { failures.push(error); }
     try { verifyExistingClientPins(); } catch (error) { failures.push(error); }
     if (failures.length) throw new AggregateError(failures, "Backup fixture cleanup/pins unverified; all evidence retained");
-  }, 30_000);
+  }, 45_000);
 
   it("retains a CREATE_NEW archive, rejects truncated input and restores twice into distinct empty targets", async () => {
     const { artifactDir } = ownedFixture();
