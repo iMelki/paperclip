@@ -51,9 +51,13 @@ export type BudgetServiceHooks = {
  * `resultJson.usage_status = "unknown"`) and that no later measured run
  * (`usage_status = "reported"`) of the same session has recovered. Such a run
  * may have spent tokens that were never recorded, so a budget must not count
- * it as free.
+ * it as free. Recovery needs a later reported run whose final session
+ * (session_id_after) equals the unknown run's session AND whose cost event is
+ * already recorded (the report is persisted before its cost event, so a bare
+ * report is not proof the budget includes the usage). A run with no recorded
+ * session has nothing to match, so it stays blocking until reconciled.
  */
-async function findUnrecoveredUnmeasuredRun(db: Db, agentId: string) {
+async function findUnrecoveredUnmeasuredRun(db: Db, companyId: string, agentId: string) {
   const runTime = sql`coalesce(${heartbeatRuns.finishedAt}, ${heartbeatRuns.createdAt})`;
   const unknownSession = sql`coalesce(${heartbeatRuns.sessionIdAfter}, ${heartbeatRuns.sessionIdBefore})`;
   return db
@@ -64,15 +68,22 @@ async function findUnrecoveredUnmeasuredRun(db: Db, agentId: string) {
     .from(heartbeatRuns)
     .where(
       and(
+        eq(heartbeatRuns.companyId, companyId),
         eq(heartbeatRuns.agentId, agentId),
         sql`${heartbeatRuns.resultJson}->>'usage_status' = 'unknown'`,
         sql`not exists (
           select 1 from heartbeat_runs r
           where r.agent_id = ${heartbeatRuns.agentId}
+            and r.company_id = ${heartbeatRuns.companyId}
             and r.result_json->>'usage_status' = 'reported'
             and coalesce(r.finished_at, r.created_at) > ${runTime}
-            and (${unknownSession} is null
-              or ${unknownSession} in (r.session_id_before, r.session_id_after))
+            and ${unknownSession} = r.session_id_after
+            and exists (
+              select 1 from cost_events ce
+              where ce.heartbeat_run_id = r.id
+                and ce.company_id = r.company_id
+                and ce.agent_id = r.agent_id
+            )
         )`,
       ),
     )
@@ -849,8 +860,10 @@ export function budgetService(db: Db, hooks: BudgetServiceHooks = {}) {
         }
       }
 
-      if (agentPolicy && agentPolicy.hardStopEnabled && agentPolicy.amount > 0) {
-        const unmeasured = await findUnrecoveredUnmeasuredRun(db, agentId);
+      const hasHardStop = (policy: typeof agentPolicy) =>
+        Boolean(policy && policy.hardStopEnabled && policy.amount > 0);
+      if (hasHardStop(agentPolicy) || hasHardStop(companyPolicy)) {
+        const unmeasured = await findUnrecoveredUnmeasuredRun(db, companyId, agentId);
         if (unmeasured) {
           return {
             scopeType: "agent" as const,

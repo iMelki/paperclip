@@ -4,6 +4,7 @@ import {
   agents,
   budgetPolicies,
   companies,
+  costEvents,
   createDb,
   heartbeatRuns,
 } from "@paperclipai/db";
@@ -29,6 +30,7 @@ describeEmbeddedPostgres("budgetService unmeasured usage block (#294)", () => {
   }, EMBEDDED_POSTGRES_TEST_SETUP_TIMEOUT_MS);
 
   afterEach(async () => {
+    await db.delete(costEvents);
     await db.delete(heartbeatRuns);
     await db.delete(budgetPolicies);
     await db.delete(agents);
@@ -39,7 +41,7 @@ describeEmbeddedPostgres("budgetService unmeasured usage block (#294)", () => {
     await tempDb?.cleanup();
   });
 
-  async function createAgent(opts: { withBudget: boolean }) {
+  async function createAgent(opts: { withBudget: boolean; scope?: "agent" | "company" }) {
     const companyId = randomUUID();
     const agentId = randomUUID();
     await db.insert(companies).values({
@@ -62,8 +64,8 @@ describeEmbeddedPostgres("budgetService unmeasured usage block (#294)", () => {
     if (opts.withBudget) {
       await db.insert(budgetPolicies).values({
         companyId,
-        scopeType: "agent",
-        scopeId: agentId,
+        scopeType: opts.scope ?? "agent",
+        scopeId: opts.scope === "company" ? companyId : agentId,
         metric: "billed_cents",
         windowKind: "calendar_month_utc",
         amount: 1000,
@@ -82,6 +84,8 @@ describeEmbeddedPostgres("budgetService unmeasured usage block (#294)", () => {
     usageStatus: "unknown" | "reported";
     finishedAt: Date;
     session?: string | null;
+    sessionBefore?: string | null;
+    cost?: boolean;
     reason?: string;
   }) {
     const id = randomUUID();
@@ -91,13 +95,41 @@ describeEmbeddedPostgres("budgetService unmeasured usage block (#294)", () => {
       agentId: input.agentId,
       status: "succeeded",
       finishedAt: input.finishedAt,
+      sessionIdBefore: input.sessionBefore ?? null,
       sessionIdAfter: input.session ?? null,
       resultJson: {
         usage_status: input.usageStatus,
         ...(input.reason ? { usage_unavailable_reason: input.reason } : {}),
       },
     });
+    if (input.cost) {
+      await db.insert(costEvents).values({
+        companyId: input.companyId,
+        agentId: input.agentId,
+        heartbeatRunId: id,
+        provider: "test",
+        model: "test-model",
+        costCents: 5,
+        occurredAt: input.finishedAt,
+      });
+    }
     return id;
+  }
+
+  async function addAgent(companyId: string) {
+    const agentId = randomUUID();
+    await db.insert(agents).values({
+      id: agentId,
+      companyId,
+      name: "Second Agent",
+      role: "engineer",
+      status: "active",
+      adapterType: "hermes_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+    return agentId;
   }
 
   it("blocks the next wake after an unknown-usage run and names the run", async () => {
@@ -161,7 +193,7 @@ describeEmbeddedPostgres("budgetService unmeasured usage block (#294)", () => {
     });
     expect(await service.getInvocationBlock(companyId, agentId)).not.toBeNull();
 
-    // A measured run of the same session does.
+    // A report of the same session whose cost event is not recorded yet does not.
     await insertRun({
       companyId,
       agentId,
@@ -169,6 +201,122 @@ describeEmbeddedPostgres("budgetService unmeasured usage block (#294)", () => {
       finishedAt: new Date("2026-11-01T12:00:00Z"),
       session: "sess-1",
     });
+    expect(await service.getInvocationBlock(companyId, agentId)).not.toBeNull();
+
+    // Once the cost event is durably recorded for a same-session report, it does.
+    await insertRun({
+      companyId,
+      agentId,
+      usageStatus: "reported",
+      finishedAt: new Date("2026-11-01T13:00:00Z"),
+      session: "sess-1",
+      cost: true,
+    });
     expect(await service.getInvocationBlock(companyId, agentId)).toBeNull();
+  });
+
+  it("stays blocked when the unknown run recorded no session, even after a measured run elsewhere", async () => {
+    const { companyId, agentId } = await createAgent({ withBudget: true });
+    await insertRun({
+      companyId,
+      agentId,
+      usageStatus: "unknown",
+      finishedAt: new Date("2026-11-01T10:00:00Z"),
+      session: null,
+    });
+    await insertRun({
+      companyId,
+      agentId,
+      usageStatus: "reported",
+      finishedAt: new Date("2026-11-01T11:00:00Z"),
+      session: "sess-other",
+      cost: true,
+    });
+    expect(await budgetService(db).getInvocationBlock(companyId, agentId)).not.toBeNull();
+  });
+
+  it("a report from a rotated session (before = old session, after = new) does not clear the old hold", async () => {
+    const { companyId, agentId } = await createAgent({ withBudget: true });
+    await insertRun({
+      companyId,
+      agentId,
+      usageStatus: "unknown",
+      finishedAt: new Date("2026-11-01T10:00:00Z"),
+      session: "sess-1",
+    });
+    await insertRun({
+      companyId,
+      agentId,
+      usageStatus: "reported",
+      finishedAt: new Date("2026-11-01T11:00:00Z"),
+      sessionBefore: "sess-1",
+      session: "sess-2",
+      cost: true,
+    });
+    expect(await budgetService(db).getInvocationBlock(companyId, agentId)).not.toBeNull();
+  });
+
+  it("recovers only the matching unknown run when several are open", async () => {
+    const { companyId, agentId } = await createAgent({ withBudget: true });
+    await insertRun({
+      companyId,
+      agentId,
+      usageStatus: "unknown",
+      finishedAt: new Date("2026-11-01T09:00:00Z"),
+      session: "sess-1",
+    });
+    const second = await insertRun({
+      companyId,
+      agentId,
+      usageStatus: "unknown",
+      finishedAt: new Date("2026-11-01T10:00:00Z"),
+      session: "sess-2",
+    });
+    await insertRun({
+      companyId,
+      agentId,
+      usageStatus: "reported",
+      finishedAt: new Date("2026-11-01T11:00:00Z"),
+      session: "sess-1",
+      cost: true,
+    });
+    const block = await budgetService(db).getInvocationBlock(companyId, agentId);
+    expect(block?.reason).toContain(second);
+  });
+
+  it("another agent's recovery never clears this agent's hold", async () => {
+    const { companyId, agentId } = await createAgent({ withBudget: true });
+    const otherAgentId = await addAgent(companyId);
+    await insertRun({
+      companyId,
+      agentId,
+      usageStatus: "unknown",
+      finishedAt: new Date("2026-11-01T10:00:00Z"),
+      session: "sess-1",
+    });
+    await insertRun({
+      companyId,
+      agentId: otherAgentId,
+      usageStatus: "reported",
+      finishedAt: new Date("2026-11-01T11:00:00Z"),
+      session: "sess-1",
+      cost: true,
+    });
+    expect(await budgetService(db).getInvocationBlock(companyId, agentId)).not.toBeNull();
+  });
+
+  it("blocks an unmeasured run under a company-scope hard stop with no agent policy", async () => {
+    const { companyId, agentId } = await createAgent({ withBudget: true, scope: "company" });
+    await insertRun({
+      companyId,
+      agentId,
+      usageStatus: "unknown",
+      finishedAt: new Date("2026-11-01T10:00:00Z"),
+      session: "sess-1",
+    });
+    expect(await budgetService(db).getInvocationBlock(companyId, agentId)).toMatchObject({
+      scopeType: "agent",
+      scopeId: agentId,
+    });
   });
 });
