@@ -7,6 +7,7 @@ import type {
   AdapterSkillSnapshot,
 } from "@paperclipai/adapter-utils";
 import {
+  PAPERCLIP_OPERATIONAL_SKILL_KEY,
   ensurePaperclipSkillSymlink,
   isPaperclipSkillSourceMissing,
   readInstalledSkillTargets,
@@ -32,6 +33,26 @@ function resolveHermesHome(config: Record<string, unknown>): string {
       : {};
   const configuredHome = asString(env.HOME);
   return configuredHome ? path.resolve(configuredHome) : os.homedir();
+}
+
+/**
+ * Directory Hermes reads its skills from. An explicit HERMES_HOME wins. On Windows, Hermes' own
+ * default home is %LOCALAPPDATA%/hermes, so a configured LOCALAPPDATA selects it. Otherwise the
+ * long-standing ~/.hermes layout applies. The adapter env block is the only input: nothing is
+ * read from the server process, so a missing variable never changes where skills are linked.
+ */
+export function resolveHermesSkillsDir(config: Record<string, unknown>): string {
+  const env =
+    typeof config.env === "object" && config.env !== null && !Array.isArray(config.env)
+      ? (config.env as Record<string, unknown>)
+      : {};
+  const explicitHome = asString(env.HERMES_HOME);
+  if (explicitHome) return path.join(path.resolve(explicitHome), "skills");
+  const localAppData = asString(env.LOCALAPPDATA);
+  if (process.platform === "win32" && localAppData) {
+    return path.join(path.resolve(localAppData), "hermes", "skills");
+  }
+  return path.join(resolveHermesHome(config), ".hermes", "skills");
 }
 
 interface SkillFrontmatter {
@@ -130,8 +151,7 @@ async function buildSkillEntry(
 // ---------------------------------------------------------------------------
 
 async function buildHermesSkillSnapshot(config: Record<string, unknown>): Promise<AdapterSkillSnapshot> {
-  const home = resolveHermesHome(config);
-  const hermesSkillsHome = path.join(home, ".hermes", "skills");
+  const hermesSkillsHome = resolveHermesSkillsDir(config);
 
   // 1. Scan Paperclip-managed skills (bundled with the adapter)
   const paperclipEntries = await readPaperclipRuntimeSkillEntries(config, __moduleDir);
@@ -224,7 +244,7 @@ export async function reconcileHermesPaperclipSkills(
       ]))
     : resolveLegacyPaperclipDesiredSkillNames(config, availableEntries);
   const desiredSet = new Set(desiredSkills);
-  const skillsHome = path.join(resolveHermesHome(config), ".hermes", "skills");
+  const skillsHome = resolveHermesSkillsDir(config);
   await fs.mkdir(skillsHome, { recursive: true });
   const installed = await readInstalledSkillTargets(skillsHome);
   const availableByRuntimeName = new Map(availableEntries.map((entry) => [entry.runtimeName, entry]));
@@ -252,6 +272,22 @@ export async function reconcileHermesPaperclipSkills(
   }
 
   return desiredSkills;
+}
+
+/**
+ * Runtime name of the operational Paperclip skill when it is among the reconciled skills, so the
+ * adapter can preload it (`hermes chat -s <name>`). Loading it registers the variables its
+ * frontmatter declares for Hermes' tool shell, which otherwise receives none of them.
+ */
+export async function resolveHermesOperationalSkillPreload(
+  config: Record<string, unknown>,
+  reconciledKeys: string[],
+): Promise<string | null> {
+  if (!reconciledKeys.some((key) => key.trim().toLowerCase() === PAPERCLIP_OPERATIONAL_SKILL_KEY)) return null;
+  const entries = await readPaperclipRuntimeSkillEntries(config, __moduleDir);
+  const entry = entries.find((candidate) => candidate.key.trim().toLowerCase() === PAPERCLIP_OPERATIONAL_SKILL_KEY);
+  if (!entry || isPaperclipSkillSourceMissing(entry)) return null;
+  return asString(entry.runtimeName) ?? null;
 }
 
 export async function syncHermesSkills(

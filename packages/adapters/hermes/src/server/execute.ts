@@ -53,7 +53,7 @@ import {
   detectModel,
   resolveProvider,
 } from "./detect-model.js";
-import { reconcileHermesPaperclipSkills } from "./skills.js";
+import { reconcileHermesPaperclipSkills, resolveHermesOperationalSkillPreload } from "./skills.js";
 import { resolveStrictHermesIsolation } from "./strict-isolation.js";
 
 // ---------------------------------------------------------------------------
@@ -343,7 +343,16 @@ export async function execute(
 
   // ── Resolve configuration ──────────────────────────────────────────────
   const hermesCmd = resolveHermesCommand(config);
-  const model = cfgString(config.model) || DEFAULT_MODEL;
+  const configuredModel = (cfgString(config.model) ?? "").trim();
+  const model = configuredModel || DEFAULT_MODEL;
+  // Fail closed: with no model, or "auto", the provider (OpenRouter in particular) chooses the model
+  // per call, so it is not known which model receives the agent's instructions or what a run costs.
+  if (!configuredModel || configuredModel.toLowerCase() === "auto") {
+    throw new Error(
+      "hermes_local requires an explicit model (not unset or \"auto\") so the model that receives "
+      + "the agent's instructions is known; set adapterConfig.model and adapterConfig.provider.",
+    );
+  }
   const timeoutSec = strictIsolation?.timeoutSec ?? resolveAdapterTimeoutSec({
     configured: config.timeoutSec,
     adapterDefaultSec: DEFAULT_TIMEOUT_SEC,
@@ -363,9 +372,11 @@ export async function execute(
   // The server adds this runtime inventory at the run boundary. Requiring the
   // marker avoids touching a developer's real Hermes home in direct unit or
   // library calls that did not opt into Paperclip runtime skills.
+  let preloadSkillName: string | null = null;
   if (Object.prototype.hasOwnProperty.call(config, "paperclipRuntimeSkills")) {
     try {
       const selectedSkills = await reconcileHermesPaperclipSkills(config);
+      preloadSkillName = await resolveHermesOperationalSkillPreload(config, selectedSkills);
       if (selectedSkills.length > 0) {
         await ctx.onLog(
           "stdout",
@@ -455,6 +466,12 @@ export async function execute(
     args.push("-m", model);
   }
 
+  // Hermes' tool shell strips secrets. Preloading the operational Paperclip skill registers the
+  // variables its frontmatter declares (API URL, run key, ids) so the agent's curl calls work.
+  if (preloadSkillName) {
+    args.push("-s", preloadSkillName);
+  }
+
   // Always pass --provider when we have a resolved one (not "auto").
   // "auto" means Hermes will decide on its own — no need to pass it.
   if (resolvedProvider !== "auto") {
@@ -505,6 +522,12 @@ export async function execute(
       PAPERCLIP_API_URL: strictIsolation.paperclipApiUrl,
     } : buildPaperclipEnv(ctx.agent)),
   };
+  // An adapter-configured Paperclip API URL (loopback) wins over the server's own value, which may
+  // be a tailnet or public address the tool shell cannot rely on. Same /api normalization as the prompt.
+  const configuredApiUrl = cfgString(config.paperclipApiUrl);
+  if (configuredApiUrl && !strictIsolation) {
+    env.PAPERCLIP_API_URL = configuredApiUrl.endsWith("/api") ? configuredApiUrl : configuredApiUrl.replace(/\/+$/, "") + "/api";
+  }
   for (const key of Object.keys(env)) {
     if (key.toUpperCase() === "HERMES_YOLO_MODE") delete env[key];
   }

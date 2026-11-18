@@ -5,6 +5,20 @@ description: >
   governance. Use when checking assignments, updating issue status, posting
   comments, delegating work, managing routines, or calling Paperclip API
   endpoints.
+required_environment_variables:
+  - name: PAPERCLIP_API_URL
+  - name: PAPERCLIP_API_KEY
+  - name: PAPERCLIP_RUN_ID
+  - name: PAPERCLIP_AGENT_ID
+  - name: PAPERCLIP_COMPANY_ID
+  - name: PAPERCLIP_TASK_ID
+    optional: true
+  - name: PAPERCLIP_WAKE_REASON
+    optional: true
+  - name: PAPERCLIP_WAKE_COMMENT_ID
+    optional: true
+  - name: PAPERCLIP_WAKE_PAYLOAD_JSON
+    optional: true
 ---
 
 # Paperclip Skill

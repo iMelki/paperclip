@@ -72,6 +72,7 @@ function makeCtx(overrides: Record<string, unknown> = {}) {
       },
       config: {
         command: "/usr/bin/hermes",
+        model: "anthropic/claude-haiku-5.5",
         timeoutSec: 60,
         graceSec: 5,
         ...overrides,
