@@ -327,7 +327,8 @@ describe("source-projected server database backup caller", () => {
   });
   afterEach(() => vi.unstubAllEnvs());
 
-  it("selects strict native preservation from the real manual adapter, ignoring request overrides", async () => {
+  it("selects strict native preservation from the real manual adapter when opted in, ignoring request overrides", async () => {
+    vi.stubEnv("PAPERCLIP_DB_BACKUP_PRESERVE_ALL", "1");
     const caller = projectBackupCaller();
     const res = await request(createApp(adminActor, caller.service))
       .post("/api/instance/database-backups")
@@ -360,7 +361,8 @@ describe("source-projected server database backup caller", () => {
     expect(scheduled[0].arguments[0].getText(parsed)).toBe('"scheduled"');
   });
 
-  it("uses strict preservation for scheduled runs and propagates preserved result fields", async () => {
+  it("uses strict preservation for scheduled runs when opted in and propagates preserved result fields", async () => {
+    vi.stubEnv("PAPERCLIP_DB_BACKUP_PRESERVE_ALL", "true");
     const caller = projectBackupCaller();
     const result = await caller.run("scheduled");
     assertStrictPolicy(caller);
@@ -402,11 +404,32 @@ describe("source-projected server database backup caller", () => {
     await expect(caller.run("scheduled")).resolves.toMatchObject({ trigger: "scheduled" });
   });
 
-  it.each(["backupEngine", "preserveAll"] as const)("detects a source mutant removing %s", async (option) => {
-    const line = option === "backupEngine" ? '        backupEngine: "pg_dump",\n' : "        preserveAll: true,\n";
-    expect(serverSource.split(line)).toHaveLength(2);
-    const caller = projectBackupCaller(serverSource.replace(line, ""));
+  it.each([undefined, "", "0", "false"])("keeps prior retention-driven behaviour by default (flag=%s)", async (flag) => {
+    vi.stubEnv("PAPERCLIP_DB_BACKUP_PRESERVE_ALL", flag);
+    const caller = projectBackupCaller();
     await caller.service.runManualBackup();
-    expect(() => assertStrictPolicy(caller)).toThrowError(new RegExp(`${option} must`));
+    await caller.run("scheduled");
+    expect(caller.runDatabaseBackup).toHaveBeenCalledTimes(2);
+    for (const [options] of caller.runDatabaseBackup.mock.calls) {
+      expect(options).toEqual({
+        connectionString: caller.activeDatabaseConnectionString, backupDir: "synthetic",
+        retention: caller.retention, filenamePrefix: "paperclip",
+      });
+    }
+  });
+
+  it("detects a source mutant that makes preservation unconditional or drops it", async () => {
+    const spread = '        ...(preserveAllBackups ? { backupEngine: "pg_dump" as const, preserveAll: true } : {}),\n';
+    expect(serverSource.split(spread)).toHaveLength(2);
+    vi.stubEnv("PAPERCLIP_DB_BACKUP_PRESERVE_ALL", "1");
+    const dropped = projectBackupCaller(serverSource.replace(spread, ""));
+    await dropped.service.runManualBackup();
+    expect(() => assertStrictPolicy(dropped)).toThrowError(/backupEngine must/);
+    vi.stubEnv("PAPERCLIP_DB_BACKUP_PRESERVE_ALL", undefined);
+    const unconditional = projectBackupCaller(
+      serverSource.replace(spread, '        backupEngine: "pg_dump",\n        preserveAll: true,\n'),
+    );
+    await unconditional.service.runManualBackup();
+    expect(unconditional.runDatabaseBackup.mock.calls[0]?.[0]).toHaveProperty("preserveAll", true);
   });
 });

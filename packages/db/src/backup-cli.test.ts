@@ -7,7 +7,7 @@ import { PassThrough } from "node:stream";
 import { gunzipSync } from "node:zlib";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createBufferedTextFileWriter, runDatabaseBackup, type RunDatabaseBackupOptions } from "./backup-lib.js";
-import { PreservedBackupError, runPreservedPgDumpBackup, settleBackupChildPipeline } from "./backup-cli.js";
+import { PreservedBackupError, buildPgDumpInvocation, runPgDumpBackup, runPreservedPgDumpBackup, settleBackupChildPipeline } from "./backup-cli.js";
 
 const mocks = vi.hoisted(() => ({ spawn: vi.fn(), postgres: vi.fn(), link: vi.fn(), open: vi.fn() }));
 vi.mock("node:child_process", () => ({ spawn: mocks.spawn }));
@@ -179,6 +179,48 @@ describe("preserve-all native backup policy", () => {
       .toMatchObject({ status: "ok", latestBackup: { path: result.backupFile } });
   });
 
+  it("never passes the password in argv and supplies it via PGPASSWORD only", async () => {
+    const dir = await fixture();
+    const url = "postgres://us%40er:p%40ss%2Fw%3Ard%25@db.example.invalid:5433/app%20db?sslmode=require&password=ignored-q";
+    await runDatabaseBackup({ ...options(dir), connectionString: url });
+    const [, args, spawnOptions] = mocks.spawn.mock.calls[0] as [string, string[], { env: NodeJS.ProcessEnv }];
+    const argv = args.join("\n");
+    for (const secret of ["p@ss/w:rd%", "p%40ss%2Fw%3Ard%25", "ignored-q"]) expect(argv).not.toContain(secret);
+    expect(args[0]).toContain("sslmode=require");
+    expect(args[0]).toContain("db.example.invalid:5433");
+    expect(args[0]).toContain("us%40er");
+    expect(spawnOptions.env.PGPASSWORD).toBe("p@ss/w:rd%");
+    expect(buildPgDumpInvocation("postgres://u@h/db?password=q%40x&sslmode=require", 5, {}).env.PGPASSWORD).toBe("q@x");
+    const plain = buildPgDumpInvocation("postgres://u:p%40ss%2Fw%3Ard%25@h/db?sslmode=require", 7, {});
+    expect(plain.env).toMatchObject({ PGPASSWORD: "p@ss/w:rd%", PGCONNECT_TIMEOUT: "7" });
+    expect(plain.args.join(" ")).not.toMatch(/p@ss|p%40ss/);
+    expect(plain.args[0]).toBe("--dbname=postgres://u@h/db?sslmode=require");
+  });
+
+  it("keeps an inherited PGPASSWORD when the URL has no password and rejects non-URL strings without echoing them", () => {
+    expect(buildPgDumpInvocation("postgres://u@h/db", 5, { PGPASSWORD: "inherited" }).env.PGPASSWORD).toBe("inherited");
+    expect(() => buildPgDumpInvocation("host=h password=topsecret dbname=d", 5)).toThrowError(
+      expect.not.objectContaining({ message: expect.stringContaining("topsecret") }),
+    );
+  });
+
+  it("redacts the password from captured pg_dump stderr in the non-preserving path", async () => {
+    const dir = await fixture();
+    mocks.spawn.mockImplementation(() => child({ exitCode: 1, stderr: "failed for synthetic-secret here" }));
+    const error = await runPgDumpBackup({ connectionString, backupFile: join(dir, "x.sql.gz"), connectTimeout: 5 }).catch((v: unknown) => v);
+    expect(String(error)).toContain("failed for *** here");
+    expect(String(error)).not.toContain("synthetic-secret");
+  });
+
+  it("gives an actionable error when pg_dump is missing", async () => {
+    const dir = await fixture();
+    mocks.spawn.mockImplementation(() => child({ spawnError: Object.assign(new Error("spawn pg_dump ENOENT"), { code: "ENOENT" }) }));
+    const error = await runDatabaseBackup(options(dir)).catch((v: unknown) => v);
+    expect(error).toMatchObject({ phase: "dump", code: "dump_failed" });
+    expect(String(error)).toMatch(/PAPERCLIP_PG_DUMP_PATH/);
+    expect(String(error)).not.toContain("synthetic-secret");
+  });
+
   it("refuses an existing final name before spawning and preserves its bytes", async () => {
     const dir = await fixture();
     const target = join(dir, "existing.sql.gz");
@@ -216,11 +258,16 @@ describe("preserve-all native backup policy", () => {
   it.each(["EXDEV", "ENOTSUP", "EACCES"])("retains staging and fails closed on publish %s", async (code) => {
     const dir = await fixture();
     mocks.link.mockRejectedValue(Object.assign(new Error("synthetic publish error"), { code }));
-    await expect(runDatabaseBackup(options(dir))).rejects.toMatchObject({ phase: "publish", code: "publish_failed" });
+    const error = await runDatabaseBackup(options(dir)).catch((value: unknown) => value);
+    expect(error).toMatchObject({ phase: "publish", code: "publish_failed" });
+    expect(String(error)).toMatch(/hard-link/);
+    expect((error as PreservedBackupError).retainedArtifact).toContain(".partial-");
+    expect(resolve((error as PreservedBackupError).retainedArtifact!)).toBe((error as PreservedBackupError).retainedArtifact);
     const names = await readdir(dir);
     expect(names).toHaveLength(1);
     expect(names[0]).toContain(".partial-");
     expect(names[0]?.endsWith(".sql.gz")).toBe(false);
+
     expect(gunzipSync(await readFile(join(dir, names[0]!))).toString()).toBe(sql);
     expect(inspectDatabaseBackupHealth({ enabled: true, backupDir: dir, maxAgeHours: 24 }))
       .toMatchObject({ status: "warning", latestBackup: null });

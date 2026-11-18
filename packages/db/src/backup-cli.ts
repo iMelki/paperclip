@@ -1,7 +1,6 @@
 import { createWriteStream, type WriteStream } from "node:fs";
 import { link, lstat, mkdir, open } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
-import { basename } from "node:path";
 import { spawn } from "node:child_process";
 import { pipeline } from "node:stream/promises";
 import { createGzip } from "node:zlib";
@@ -14,7 +13,19 @@ function appendCapturedStderr(previous: string, chunk: Buffer | string): string 
   return Buffer.from(next, "utf8").subarray(-BACKUP_CLI_STDERR_BYTES).toString("utf8");
 }
 
-export async function waitForChildExit(child: ReturnType<typeof spawn>, label: string): Promise<void> {
+function redactSecrets(text: string, secrets: readonly string[]): string {
+  let out = text;
+  for (const secret of secrets) {
+    if (secret) out = out.split(secret).join("***");
+  }
+  return out;
+}
+
+export async function waitForChildExit(
+  child: ReturnType<typeof spawn>,
+  label: string,
+  redact: readonly string[] = [],
+): Promise<void> {
   let stderr = "";
   child.stderr?.on("data", (chunk) => {
     stderr = appendCapturedStderr(stderr, chunk);
@@ -25,11 +36,12 @@ export async function waitForChildExit(child: ReturnType<typeof spawn>, label: s
     child.once("exit", (code, signal) => resolve({ code, signal }));
   });
 
+  const detail = redactSecrets(stderr, redact).trim();
   if (result.signal) {
-    throw new Error(`${label} exited via ${result.signal}${stderr.trim() ? `: ${stderr.trim()}` : ""}`);
+    throw new Error(`${label} exited via ${result.signal}${detail ? `: ${detail}` : ""}`);
   }
   if (result.code !== 0) {
-    throw new Error(`${label} failed with exit code ${result.code ?? "unknown"}${stderr.trim() ? `: ${stderr.trim()}` : ""}`);
+    throw new Error(`${label} failed with exit code ${result.code ?? "unknown"}${detail ? `: ${detail}` : ""}`);
   }
 }
 
@@ -46,6 +58,64 @@ export async function settleBackupChildPipeline(
   if (pipelineResult.status === "rejected") throw pipelineResult.reason;
 }
 
+function safeDecode(value: string): string {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+}
+
+/**
+ * Build pg_dump argv/env so the database password never appears in argv (visible
+ * in process listings). The password is moved to PGPASSWORD in the child's
+ * environment only; the connection URL passed to --dbname has it stripped, and
+ * other libpq URL parameters (sslmode, host, ...) are preserved. Errors never
+ * echo the connection string.
+ */
+export function buildPgDumpInvocation(
+  connectionString: string,
+  connectTimeout: number,
+  baseEnv: NodeJS.ProcessEnv = process.env,
+): { args: string[]; env: NodeJS.ProcessEnv; secrets: string[] } {
+  let url: URL;
+  try {
+    url = new URL(connectionString);
+  } catch {
+    throw new Error("Database connection string must be a postgres:// or postgresql:// URL");
+  }
+  if (url.protocol !== "postgres:" && url.protocol !== "postgresql:") {
+    throw new Error("Database connection string must be a postgres:// or postgresql:// URL");
+  }
+  const secrets: string[] = [];
+  const env: NodeJS.ProcessEnv = { ...baseEnv, PGCONNECT_TIMEOUT: String(connectTimeout) };
+  const hasUserinfoPassword = Boolean(url.password);
+  if (url.password) {
+    const password = safeDecode(url.password);
+    env.PGPASSWORD = password;
+    secrets.push(password, url.password);
+    url.password = "";
+  }
+  const queryPassword = url.searchParams.get("password");
+  if (queryPassword) {
+    secrets.push(queryPassword);
+    if (!hasUserinfoPassword) env.PGPASSWORD = queryPassword;
+  }
+  url.searchParams.delete("password");
+  return {
+    args: [
+      `--dbname=${url.toString()}`,
+      "--format=plain",
+      "--clean",
+      "--if-exists",
+      "--no-owner",
+      "--no-privileges",
+    ],
+    env,
+    secrets,
+  };
+}
+
 export async function runPgDumpBackup(opts: {
   connectionString: string;
   backupFile: string;
@@ -53,29 +123,16 @@ export async function runPgDumpBackup(opts: {
   output?: WriteStream;
 }): Promise<void> {
   const pgDumpBin = process.env.PAPERCLIP_PG_DUMP_PATH || "pg_dump";
-  const child = spawn(
-    pgDumpBin,
-    [
-      `--dbname=${opts.connectionString}`,
-      "--format=plain",
-      "--clean",
-      "--if-exists",
-      "--no-owner",
-      "--no-privileges",
-    ],
-    {
-      stdio: ["ignore", "pipe", "pipe"],
-      env: {
-        ...process.env,
-        PGCONNECT_TIMEOUT: String(opts.connectTimeout),
-      },
-    },
-  );
+  const invocation = buildPgDumpInvocation(opts.connectionString, opts.connectTimeout);
+  const child = spawn(pgDumpBin, invocation.args, {
+    stdio: ["ignore", "pipe", "pipe"],
+    env: invocation.env,
+  });
 
   if (!child.stdout) throw new Error("pg_dump did not expose stdout");
   await settleBackupChildPipeline(
     pipeline(child.stdout, createGzip(), opts.output ?? createWriteStream(opts.backupFile)),
-    waitForChildExit(child, pgDumpBin),
+    waitForChildExit(child, pgDumpBin, invocation.secrets),
   );
 }
 
@@ -85,9 +142,11 @@ export class PreservedBackupError extends Error {
   constructor(
     readonly phase: PreservationPhase,
     readonly code: "output_exists" | "output_create_failed" | "dump_failed" | "publish_failed",
+    /** Absolute path of the retained staging file (same form as `retainedPartialFile`). */
     readonly retainedArtifact?: string,
+    readonly hint?: string,
   ) {
-    super(`Preserved database backup failed (${phase}:${code})`);
+    super(`Preserved database backup failed (${phase}:${code})${hint ? `. ${hint}` : ""}`);
     this.name = "PreservedBackupError";
   }
 }
@@ -108,6 +167,20 @@ async function refuseExistingOutput(backupFile: string): Promise<void> {
  * this is one inode with two directory entries, not an extra recovery copy.
  * No rename, copyFile rollback, pruning or unlink occurs in this policy.
  */
+const NO_HARDLINK_CODES = new Set(["EPERM", "ENOTSUP", "EOPNOTSUPP", "EXDEV", "EMLINK", "ENOSYS", "EACCES"]);
+
+// Only fixed, secret-free text is derived from the underlying error (its code).
+function failureHint(phase: PreservationPhase, error: unknown): string | undefined {
+  const code = error && typeof error === "object" && "code" in error ? String(error.code) : "";
+  if (phase === "dump" && code === "ENOENT") {
+    return "pg_dump was not found; install the PostgreSQL client tools or set PAPERCLIP_PG_DUMP_PATH, or disable PAPERCLIP_DB_BACKUP_PRESERVE_ALL";
+  }
+  if (phase === "publish" && NO_HARDLINK_CODES.has(code)) {
+    return `could not hard-link the finished dump to its final name (${code}); the backup directory filesystem may not support hard links (FAT/exFAT, some network shares). The complete dump is retained as the staging file; use a hard-link-capable backup directory`;
+  }
+  return undefined;
+}
+
 export async function runPreservedPgDumpBackup(opts: {
   connectionString: string;
   backupDir: string;
@@ -118,10 +191,11 @@ export async function runPreservedPgDumpBackup(opts: {
   const partialFile = `${opts.backupFile}.partial-${randomUUID()}`;
   let phase: PreservationPhase = "reserve";
   let retainedArtifact: string | undefined;
+  let failure: unknown;
   try {
     await mkdir(opts.backupDir, { recursive: true });
     const file = await open(partialFile, "wx", 0o600);
-    retainedArtifact = basename(partialFile);
+    retainedArtifact = partialFile;
     let output: WriteStream | undefined;
     let sizeBytes: number;
     try {
@@ -137,10 +211,11 @@ export async function runPreservedPgDumpBackup(opts: {
     phase = "publish";
     await link(partialFile, opts.backupFile);
     return { sizeBytes, retainedPartialFile: partialFile };
-  } catch {
+  } catch (error) {
+    failure = error;
     const code = phase === "reserve" ? "output_create_failed"
       : phase === "dump" ? "dump_failed" : "publish_failed";
     // No cause/stderr/connection string is attached to the public error.
-    throw new PreservedBackupError(phase, code, retainedArtifact);
+    throw new PreservedBackupError(phase, code, retainedArtifact, failureHint(phase, failure));
   }
 }

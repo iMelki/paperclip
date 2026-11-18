@@ -26,10 +26,23 @@ coordination is unchanged.
 
 The CTO accepted the exact helper contract on 2026-10-04 at 12:26 UTC in
 [the independent source disposition](https://github.com/iMelki/agent-settings/issues/1443#issuecomment-5975653584).
-The isolated server candidate now selects `backupEngine: "pg_dump"` and
-`preserveAll: true` at its existing shared manual/scheduled backup call. Only
-those two argument lines changed in `server/src/index.ts`. This is not enabled
-in the installed app and does not authorize an app start or native backup.
+The server selects `backupEngine: "pg_dump"` and `preserveAll: true` at its
+existing shared manual/scheduled backup call **only when
+`PAPERCLIP_DB_BACKUP_PRESERVE_ALL` is set to `1`/`true`/`yes`/`on`**. With the
+flag unset (default) the call is unchanged: retention settings apply and the
+JavaScript exporter remains the fallback when `pg_dump` is unavailable. Issue
+#125 lists preserve-first as a recommended operator decision, not a mandatory
+default, so the policy is opt-in. With the flag on, a missing `pg_dump` fails
+with an actionable message (install the PostgreSQL client tools or set
+`PAPERCLIP_PG_DUMP_PATH`). This is not enabled in the installed app and does
+not authorize an app start or native backup.
+
+`pg_dump` receives the connection URL with the password removed; the password
+is supplied through the child's `PGPASSWORD` environment variable only, so it
+never appears in argv. Captured stderr is redacted of the password, and
+preserve-all errors never include stderr or the connection string. If the final
+`link()` fails (hard links unsupported, e.g. FAT/exFAT or some network shares),
+the error says so and the complete dump remains as the staging file.
 
 ## Output publication contract
 
