@@ -10,7 +10,9 @@
 const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]"]);
 
 /**
- * Returns the validated base URL ending in `/api`, or `null` when nothing is configured.
+ * Returns the validated bare origin (for example `http://127.0.0.1:3100`, no `/api`), or `null` when
+ * nothing is configured. The bare origin is what every other adapter puts in `PAPERCLIP_API_URL` and
+ * what the shared skill builds its `/api/...` paths from, so the child variable stays an origin.
  * Throws on an unusable value. The message never repeats the URL, which may carry credentials.
  */
 export function resolveConfiguredApiUrl(raw: unknown): string | null {
@@ -30,5 +32,10 @@ export function resolveConfiguredApiUrl(raw: unknown): string | null {
   if (!LOOPBACK_HOSTS.has(url.hostname.toLowerCase())) reject("must be a loopback address (localhost, 127.0.0.1 or [::1])");
   const trimmedPath = url.pathname.replace(/\/+$/, "");
   if (trimmedPath !== "" && trimmedPath !== "/api") reject("must be the server root or end in /api");
-  return `${url.origin}/api`;
+  return url.origin;
+}
+
+/** The same origin with `/api`, for prompt text that shows the API base. */
+export function apiBaseOf(origin: string): string {
+  return `${origin.replace(/\/+$/, "")}/api`;
 }

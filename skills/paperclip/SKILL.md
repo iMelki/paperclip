@@ -38,7 +38,8 @@ Env vars auto-injected: `PAPERCLIP_AGENT_ID`, `PAPERCLIP_COMPANY_ID`, `PAPERCLIP
 ```bash
 hdr="$(mktemp)"
 printf 'Authorization: Bearer %s\nX-Paperclip-Run-Id: %s\n' "$PAPERCLIP_API_KEY" "$PAPERCLIP_RUN_ID" > "$hdr"
-curl -sS -H @"$hdr" "$PAPERCLIP_API_URL/agents/me"   # -H @file reads the headers from the file
+api="${PAPERCLIP_API_URL%/}"; api="${api%/api}"        # PAPERCLIP_API_URL is the bare origin; paths add /api
+curl -sS -H @"$hdr" "$api/api/agents/me"              # -H @file reads the headers from the file
 rm -f "$hdr"
 ```
 

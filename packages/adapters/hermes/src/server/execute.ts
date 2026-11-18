@@ -55,7 +55,7 @@ import {
 } from "./detect-model.js";
 import { reconcileHermesPaperclipSkills, resolveHermesOperationalSkillPreload } from "./skills.js";
 import { resolveStrictHermesIsolation } from "./strict-isolation.js";
-import { resolveConfiguredApiUrl } from "./api-url.js";
+import { apiBaseOf, resolveConfiguredApiUrl } from "./api-url.js";
 
 // ---------------------------------------------------------------------------
 // Config helpers
@@ -159,7 +159,7 @@ export function buildPrompt(
   // A configured override must be loopback; the same validated value feeds the child environment.
   let paperclipApiUrl =
     options.paperclipApiUrl ||
-    resolveConfiguredApiUrl(config.paperclipApiUrl) ||
+    (() => { const origin = resolveConfiguredApiUrl(config.paperclipApiUrl); return origin ? apiBaseOf(origin) : ""; })() ||
     process.env.PAPERCLIP_API_URL ||
     "http://127.0.0.1:3100/api";
   // Ensure /api suffix
@@ -398,7 +398,8 @@ export async function execute(
   }
   assertNoCompetingLaunchFlags(cfgStringArray(config.extraArgs));
   // One validated API URL for both the prompt and the child environment (normal lane).
-  const validatedApiUrl = strictIsolation ? strictIsolation.paperclipApiUrl : resolveConfiguredApiUrl(config.paperclipApiUrl);
+  // Strict isolation validates and sets its own URL; the normal lane validates here (a bare origin).
+  const validatedApiUrl = strictIsolation ? null : resolveConfiguredApiUrl(config.paperclipApiUrl);
   const timeoutSec = strictIsolation?.timeoutSec ?? resolveAdapterTimeoutSec({
     configured: config.timeoutSec,
     adapterDefaultSec: DEFAULT_TIMEOUT_SEC,
@@ -506,7 +507,7 @@ export async function execute(
   // ── Build prompt ───────────────────────────────────────────────────────
   let prompt = buildPrompt(ctx, config, {
     resumedSession: canResumeSession,
-    ...(validatedApiUrl ? { paperclipApiUrl: validatedApiUrl } : {}),
+    ...(validatedApiUrl ? { paperclipApiUrl: apiBaseOf(validatedApiUrl) } : {}),
   });
   if (agentInstructions) {
     prompt = agentInstructions + "\n\n---\n\n" + prompt;
@@ -586,7 +587,8 @@ export async function execute(
     } : buildPaperclipEnv(ctx.agent)),
   };
   // A validated, adapter-configured loopback API URL wins over the server's own value, which may be a
-  // tailnet or public address the tool shell cannot rely on. It is the same value the prompt printed.
+  // tailnet or public address the tool shell cannot rely on. It stays the bare origin like every other
+  // adapter; only the prompt text adds /api.
   if (validatedApiUrl && !strictIsolation) env.PAPERCLIP_API_URL = validatedApiUrl;
 
   if (ctx.runId) env.PAPERCLIP_RUN_ID = ctx.runId;
