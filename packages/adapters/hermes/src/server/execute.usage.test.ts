@@ -27,14 +27,15 @@ function exportRecord(overrides: Record<string, unknown> = {}) {
 }
 
 /** First call is the chat run; a call with `sessions` is the export, which writes its output file. */
-function stubHermes(options: { record?: string | null; exportExitCode?: number } = {}) {
+function stubHermes(options: { record?: string | null; exportExitCode?: number; exportTimedOut?: boolean; noSessionId?: boolean } = {}) {
   const record = options.record === undefined ? exportRecord() : options.record;
   vi.mocked(serverUtils.runChildProcess).mockImplementation((async (_runId: string, _command: string, args: string[]) => {
     if (args.includes("sessions")) {
       if (record !== null) await fs.writeFile(args[args.length - 1], `${record}\n`, "utf8");
-      return { exitCode: options.exportExitCode ?? 0, signal: null, timedOut: false, stdout: "", stderr: "" };
+      return { exitCode: options.exportExitCode ?? 0, signal: null, timedOut: options.exportTimedOut === true, stdout: "", stderr: "" };
     }
-    return { exitCode: 0, signal: null, timedOut: false, stdout: `Done.\n\nsession_id: ${SESSION}\n`, stderr: "" };
+    const stdout = options.noSessionId ? "Done.\n" : `Done.\n\nsession_id: ${SESSION}\n`;
+    return { exitCode: 0, signal: null, timedOut: false, stdout, stderr: "" };
   }) as never);
 }
 
@@ -97,15 +98,44 @@ describe("hermes_local usage reporting", () => {
   });
 
   it.each([
-    ["the export fails", { exportExitCode: 1 }],
-    ["the export writes nothing", { record: null }],
-    ["the export is not a session record", { record: "not json" }],
-  ])("when %s the run still succeeds and says usage is unavailable", async (_label, options) => {
+    ["the export fails", { exportExitCode: 1 }, "export_failed"],
+    ["the export times out", { exportTimedOut: true, exportExitCode: 1 }, "export_timed_out"],
+    ["the export writes nothing", { record: null }, "export_failed"],
+    ["the export is not a session record", { record: "not json" }, "record_unreadable"],
+    ["Hermes printed no session id", { noSessionId: true }, "no_session_id"],
+  ])("when %s the run still succeeds, reports usage as unknown (not zero) and says why", async (_label, options, reason) => {
     stubHermes(options);
     const { ctx, logs } = makeCtx();
     const result = await execute(ctx as never);
     expect(result.exitCode).toBe(0);
+    // Unknown, never zero: no usage and no cost object that a budget check could read as "free".
     expect(result.usage).toBeUndefined();
+    expect(result.costUsd ?? null).toBeNull();
+    expect(result.resultJson).toMatchObject({ usage_status: "unknown", usage_unavailable_reason: reason, usage: null });
     expect(logs.join("")).toContain("Usage unavailable");
+  });
+
+  it("a measured run says its usage is reported", async () => {
+    stubHermes();
+    const result = await execute(makeCtx().ctx as never);
+    expect(result.resultJson).toMatchObject({ usage_status: "reported", usage_unavailable_reason: null });
+  });
+
+  it("after a failed read the previous baseline of the same session is kept, so the next read recovers the share", async () => {
+    stubHermes({ exportExitCode: 1 });
+    const baseline = { sessionId: SESSION, inputTokens: 600, outputTokens: 40, cachedInputTokens: 100, costUsd: 0.02 };
+    const failed = await execute(makeCtx({ sessionId: SESSION, usageBaseline: baseline }).ctx as never);
+    expect(failed.sessionParams).toMatchObject({ sessionId: SESSION, usageBaseline: baseline });
+    // The next run reads the cumulative record against that older baseline: both runs' tokens appear.
+    stubHermes();
+    const next = await execute(makeCtx(failed.sessionParams as Record<string, unknown>).ctx as never);
+    expect(next.usage).toEqual({ inputTokens: 400, outputTokens: 60, cachedInputTokens: 300 });
+  });
+
+  it("a baseline of another session is not carried over", async () => {
+    stubHermes({ exportExitCode: 1 });
+    const other = { sessionId: "local-other", inputTokens: 5, outputTokens: 5, cachedInputTokens: 0, costUsd: 0.001 };
+    const failed = await execute(makeCtx({ sessionId: "local-other", usageBaseline: other }).ctx as never);
+    expect((failed.sessionParams as Record<string, unknown>).usageBaseline).toBeUndefined();
   });
 });

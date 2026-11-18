@@ -149,8 +149,25 @@ export interface ReadSessionUsageOptions {
   timeoutSec: number;
 }
 
-/** Runs `sessions export` for one session and parses it. Never throws: usage is best effort. */
-export async function readHermesSessionUsage(options: ReadSessionUsageOptions): Promise<HermesSessionUsage | null> {
+/** Why usage could not be read. A budget check must treat each of these as unknown, never as zero. */
+export type UsageUnavailableReason = "no_session_id" | "export_timed_out" | "export_failed" | "record_unreadable";
+
+export type HermesUsageOutcome =
+  | { status: "ok"; usage: HermesSessionUsage }
+  | { status: "unavailable"; reason: UsageUnavailableReason };
+
+export const USAGE_UNAVAILABLE_TEXT: Record<UsageUnavailableReason, string> = {
+  no_session_id: "Hermes printed no session id, so there is no session record to read",
+  export_timed_out: "reading the session record timed out",
+  export_failed: "reading the session record failed",
+  record_unreadable: "the session record could not be parsed",
+};
+
+/**
+ * Runs `sessions export` for one session and parses it. Never throws: usage is best effort, but the
+ * outcome always says whether usage is known, so a failure is reported as unknown and not as zero.
+ */
+export async function readHermesSessionUsage(options: ReadSessionUsageOptions): Promise<HermesUsageOutcome> {
   let dir: string | null = null;
   try {
     dir = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-hermes-usage-"));
@@ -165,11 +182,14 @@ export async function readHermesSessionUsage(options: ReadSessionUsageOptions): 
       graceSec: 5,
       onLog: async () => undefined,
     });
-    if (result.exitCode !== 0 || result.timedOut) return null;
+    if (result.timedOut) return { status: "unavailable", reason: "export_timed_out" };
+    if (result.exitCode !== 0) return { status: "unavailable", reason: "export_failed" };
     const parsed = parseHermesSessionExport(await fs.readFile(file, "utf8"));
-    return parsed && parsed.sessionId === options.sessionId ? parsed : null;
+    return parsed && parsed.sessionId === options.sessionId
+      ? { status: "ok", usage: parsed }
+      : { status: "unavailable", reason: "record_unreadable" };
   } catch {
-    return null;
+    return { status: "unavailable", reason: "export_failed" };
   } finally {
     if (dir) await fs.rm(dir, { recursive: true, force: true }).catch(() => undefined);
   }

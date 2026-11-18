@@ -55,7 +55,8 @@ import {
 } from "./detect-model.js";
 import { reconcileHermesPaperclipSkills, resolveHermesOperationalSkillPreload } from "./skills.js";
 import {
-  computeRunUsage, readHermesSessionUsage, readUsageBaseline, toUsageBaseline, type HermesSessionUsage,
+  computeRunUsage, readHermesSessionUsage, readUsageBaseline, toUsageBaseline, USAGE_UNAVAILABLE_TEXT,
+  type HermesSessionUsage, type UsageUnavailableReason,
 } from "./usage.js";
 import { resolveStrictHermesIsolation } from "./strict-isolation.js";
 import { resolveConfiguredApiUrl } from "./api-url.js";
@@ -678,9 +679,12 @@ export async function execute(
 
   // ── Usage from Hermes' own session record (best effort) ─────────────────
   // Hermes prints no token counts or cost in a chat run, so without this Paperclip budgets never move.
+  // The export runs after the chat process, outside the run's timeout, with its own fixed 180 s limit.
+  // It cannot be switched off: usage reporting is what lets per-agent budgets trip.
   let sessionUsage: HermesSessionUsage | null = null;
+  let usageUnavailable: UsageUnavailableReason | null = null;
   if (parsed.sessionId) {
-    sessionUsage = await readHermesSessionUsage({
+    const outcome = await readHermesSessionUsage({
       command: hermesCmd,
       argsPrefix: strictIsolation ? ["--profile", strictIsolation.profile] : [],
       env,
@@ -690,9 +694,14 @@ export async function execute(
       sessionId: parsed.sessionId,
       timeoutSec: 180,
     });
-    if (!sessionUsage) {
-      await ctx.onLog("stdout", "[hermes] Usage unavailable: the session record could not be read\n");
-    }
+    if (outcome.status === "ok") sessionUsage = outcome.usage;
+    else usageUnavailable = outcome.reason;
+  } else {
+    usageUnavailable = "no_session_id";
+  }
+  if (usageUnavailable) {
+    // Unknown is not zero: no usage or cost is reported, and the result says so for any budget check.
+    await ctx.onLog("stdout", `[hermes] Usage unavailable: ${USAGE_UNAVAILABLE_TEXT[usageUnavailable]}\n`);
   }
 
   // ── Build result ───────────────────────────────────────────────────────
@@ -751,13 +760,22 @@ export async function execute(
     cost_usd: runUsage?.costUsd ?? parsed.costUsd ?? null,
     cost_status: sessionUsage?.costStatus ?? null,
     served_model: sessionUsage?.model ?? null,
+    // "unknown" means the run may have spent tokens that were not measured; it is never a zero.
+    usage_status: usageUnavailable ? "unknown" : "reported",
+    usage_unavailable_reason: usageUnavailable,
   };
 
   // Store session ID for next run
   if (persistSession && parsed.sessionId) {
+    // After a failed read, keep the previous baseline of this same session so the next successful
+    // read reports everything since then, including this run's unmeasured share.
+    const previousBaseline = readUsageBaseline(ctx.runtime?.sessionParams);
+    const carriedBaseline = previousBaseline && previousBaseline.sessionId === parsed.sessionId ? previousBaseline : null;
     executionResult.sessionParams = {
       sessionId: parsed.sessionId,
-      ...(sessionUsage ? { usageBaseline: toUsageBaseline(sessionUsage) } : {}),
+      ...(sessionUsage
+        ? { usageBaseline: toUsageBaseline(sessionUsage) }
+        : carriedBaseline ? { usageBaseline: carriedBaseline } : {}),
     };
     executionResult.sessionDisplayId = parsed.sessionId.slice(0, 16);
   }
