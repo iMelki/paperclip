@@ -72,7 +72,7 @@ function read(setup: Awaited<ReturnType<typeof seed>>) {
 }
 describe("native operator-only OAuth Project page authority", () => {
   beforeAll(async () => { fixture = await startBoardImportFixtureDatabase(); db = createDb(fixture.connectionString); }, BOARD_IMPORT_FIXTURE_SETUP_TIMEOUT_MS);
-  afterAll(async () => { try { await db?.$client.end({ timeout: 5 }); } finally { await fixture?.cleanup(); } }, 30_000);
+  afterAll(async () => { try { await db?.$client.end({ timeout: 5 }); } finally { await fixture?.cleanup(); } }, 45_000);
   beforeEach(() => {
     pageHandler = null; calls.length = 0;
     vi.stubEnv("PAPERCLIP_SECRETS_MASTER_KEY", "11".repeat(32));

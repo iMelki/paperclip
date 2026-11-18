@@ -25,6 +25,15 @@ integration outcome; later rows remain queued and do not imply concurrent execut
 
 ## Current work
 
+- [#126 / #129 — Qualify standing GitHub Project sync](https://github.com/iMelki/paperclip/issues/126):
+  Qualify the local standing-grant candidate, including revocation, one current
+  board per company, rollback to a disabled legacy marker, and two scheduled
+  imports without duplicates or agent runs. Source changes are not installation
+  evidence. One isolated database run passed its three selected assertions but
+  failed teardown when its five-second PostgreSQL shutdown limit was reached;
+  the fixture and logs were retained. The longer bounded shutdown and a full
+  regression run require verification. See `doc/github-project-standing-grants.md`.
+
 - [Embedded PostgreSQL reuse identity - upstream #6597](https://github.com/paperclipai/paperclip/issues/6597):
   Server startup now verifies PostgreSQL's data directory on the PID file's
   recorded port before reuse. The regression fails against the original server

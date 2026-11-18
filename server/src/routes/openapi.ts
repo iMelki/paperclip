@@ -6178,7 +6178,7 @@ registry.registerPath({
       jobId: z.string().uuid(),
       enabled: z.boolean().optional(),
       maxItems: z.number().int().min(1).max(20),
-      expiresAt: z.string().datetime(),
+      expiresAt: z.string().datetime().nullable().describe("Use null for revocable standing authorization; a timestamp must be within 24 hours."),
     })),
   },
   responses: {
@@ -6189,6 +6189,27 @@ registry.registerPath({
     409: r.conflict,
     422: r.unprocessable,
   },
+});
+
+registry.registerPath({
+  method: "get",
+  path: "/api/plugins/{pluginId}/companies/{companyId}/projects/{projectId}/github-board/schedule-grant/inspect",
+  tags: ["plugins"],
+  summary: "Inspect native GitHub board grant consistency",
+  request: { params: githubBoardScheduleGrantParams },
+  responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden, 404: r.notFound, 422: r.unprocessable },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/api/plugins/{pluginId}/companies/{companyId}/projects/{projectId}/github-board/schedule-grant/reconcile",
+  tags: ["plugins"],
+  summary: "Reconcile conflicting board grant records to a revoked state",
+  request: { params: githubBoardScheduleGrantParams, body: jsonBody(z.object({
+    expectedLegacyRevision: z.number().int().nonnegative(),
+    expectedDurableRevision: z.number().int().nonnegative(),
+  }).strict()) },
+  responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden, 404: r.notFound, 409: r.conflict, 422: r.unprocessable },
 });
 
 registry.registerPath({

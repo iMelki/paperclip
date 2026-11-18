@@ -174,7 +174,7 @@ async function reviewedWrite(connection: Connection) {
 describe("native GitHub OAuth service and routes (mandatory private PostgreSQL)", () => {
   let native: Awaited<ReturnType<typeof startBoardImportFixtureDatabase>> | null = null;
   beforeAll(async () => { native = await startBoardImportFixtureDatabase(); db = createDb(native.connectionString); }, BOARD_IMPORT_FIXTURE_SETUP_TIMEOUT_MS);
-  afterAll(async () => { await db?.$client.end({ timeout: 5 }); await native?.cleanup(); }, 25_000);
+  afterAll(async () => { await db?.$client.end({ timeout: 5 }); await native?.cleanup(); }, 45_000);
   beforeEach(() => {
     resetTransport();
     // Public, synthetic key: the provider's env-first branch prevents any key-file fallback.

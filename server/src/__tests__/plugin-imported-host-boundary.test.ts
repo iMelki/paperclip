@@ -165,7 +165,7 @@ describe("native imported-board generic host boundary", () => {
   });
   afterAll(async () => {
     try { await db?.$client.end({ timeout: 5 }); } finally { await fixture?.cleanup(); }
-  }, 30_000);
+  }, 45_000);
 
   const patches: Array<{ name: string; patch: (setup: Setup) => UpdateRequest["patch"] }> = [
     { name: "reparent", patch: setup => ({ parentId: setup.outsideParentId }) },
