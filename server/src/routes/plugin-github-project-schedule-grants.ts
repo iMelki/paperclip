@@ -45,8 +45,7 @@ export function registerGitHubProjectScheduleGrantRoutes(router: Router, db: Db)
     });
     return pluginGitHubProjectScheduleGrants(db, identity, boards);
   };
-  const route = "/plugins/:pluginId/companies/:companyId/projects/:projectId/github-board/schedule-grant";
-  router.get(route, async (req, res) => {
+  router.get("/plugins/:pluginId/companies/:companyId/projects/:projectId/github-board/schedule-grant", async (req, res) => {
     const { scope, context } = trustedScope(req);
     if (req.body !== undefined && (req.body === null || typeof req.body !== "object" || Array.isArray(req.body)
       || Object.keys(req.body).length !== 0)) throw unprocessable("Grant reads do not accept a request body");
@@ -54,27 +53,27 @@ export function registerGitHubProjectScheduleGrantRoutes(router: Router, db: Db)
     res.setHeader("Cache-Control", "no-store");
     res.json(result);
   });
-  router.post(route, async (req, res) => {
+  router.post("/plugins/:pluginId/companies/:companyId/projects/:projectId/github-board/schedule-grant", async (req, res) => {
     const { scope, context } = trustedScope(req);
     const input = parseScheduleGrantInput(createBody, req.body);
     const result = await services(scope.pluginId).create(context, { ...input, companyId: scope.companyId, projectId: scope.projectId });
     res.setHeader("Cache-Control", "no-store");
     res.status(201).json(result);
   });
-  router.post(`${route}/revoke`, async (req, res) => {
+  router.post("/plugins/:pluginId/companies/:companyId/projects/:projectId/github-board/schedule-grant/revoke", async (req, res) => {
     const { scope, context } = trustedScope(req);
     const input = parseScheduleGrantInput(revokeBody, req.body);
     const result = await services(scope.pluginId).revoke(context, { ...input, companyId: scope.companyId, projectId: scope.projectId });
     res.setHeader("Cache-Control", "no-store");
     res.json(result);
   });
-  router.get(`${route}/inspect`, async (req, res) => {
+  router.get("/plugins/:pluginId/companies/:companyId/projects/:projectId/github-board/schedule-grant/inspect", async (req, res) => {
     const { scope, context } = trustedScope(req);
     const result = await services(scope.pluginId).inspect(context, { companyId: scope.companyId, projectId: scope.projectId });
     res.setHeader("Cache-Control", "no-store");
     res.json(result);
   });
-  router.post(`${route}/reconcile`, async (req, res) => {
+  router.post("/plugins/:pluginId/companies/:companyId/projects/:projectId/github-board/schedule-grant/reconcile", async (req, res) => {
     const { scope, context } = trustedScope(req);
     const input = parseScheduleGrantInput(reconcileBody, req.body);
     const result = await services(scope.pluginId).reconcile(context, { ...input, companyId: scope.companyId, projectId: scope.projectId });
