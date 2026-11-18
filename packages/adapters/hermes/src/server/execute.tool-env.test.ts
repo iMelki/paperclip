@@ -64,6 +64,8 @@ describe("hermes_local requires an explicit model", () => {
     ["empty", { model: "  " }],
     ["auto", { model: "auto" }],
     ["AUTO", { model: "AUTO" }],
+    ["the OpenRouter auto router", { model: "openrouter/auto", provider: "openrouter" }],
+    ["a provider-qualified auto router in any case", { model: "OpenRouter/AUTO" }],
   ])("refuses to start when the model is %s, before any child process", async (_label, config) => {
     await expect(execute(makeCtx(config) as never)).rejects.toThrow(/explicit model/);
     expect(vi.mocked(serverUtils.runChildProcess)).not.toHaveBeenCalled();
@@ -80,7 +82,7 @@ describe("hermes_local preloads the operational Paperclip skill", () => {
   let home: string;
   beforeEach(async () => {
     vi.clearAllMocks();
-    home = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-hermes-toolenv-"));
+    home = await fs.mkdtemp(path.join(await fs.realpath(os.tmpdir()), "paperclip-hermes-toolenv-"));
   });
   afterEach(async () => {
     await fs.rm(home, { recursive: true, force: true });
@@ -95,10 +97,10 @@ describe("hermes_local preloads the operational Paperclip skill", () => {
 
   it("passes -s paperclip, so the declared variables reach the tool shell", async () => {
     const paperclipRuntimeSkills = await runtimeSkill();
-    await execute(makeCtx({ model: MODEL, env: { HOME: home }, paperclipRuntimeSkills }) as never);
+    await execute(makeCtx({ model: MODEL, env: { HOME: home, HERMES_HOME: path.join(home, "hermes-home") }, paperclipRuntimeSkills }) as never);
     const { args } = lastSpawn();
     expect(args[args.indexOf("-s") + 1]).toBe("paperclip");
-    expect((await fs.lstat(path.join(home, ".hermes", "skills", "paperclip"))).isSymbolicLink()).toBe(true);
+    expect((await fs.lstat(path.join(home, "hermes-home", "skills", "paperclip"))).isSymbolicLink()).toBe(true);
   });
 
   it("negative: without the runtime skill there is no preload", async () => {
@@ -129,29 +131,61 @@ describe("Hermes skills directory", () => {
   const setPlatform = (value: string) => Object.defineProperty(process, "platform", { value, configurable: true });
   const realPlatform = process.platform;
   afterEach(() => setPlatform(realPlatform));
+  const abs = (value: string) => path.resolve(value);
 
   it("an explicit HERMES_HOME wins", () => {
-    expect(resolveHermesSkillsDir({ env: { HERMES_HOME: path.resolve("/tmp/hermes-home"), HOME: "/srv/hermes-user" } }))
-      .toBe(path.join(path.resolve("/tmp/hermes-home"), "skills"));
+    expect(resolveHermesSkillsDir({ env: { HERMES_HOME: abs("/tmp/hermes-home"), HOME: abs("/srv/hermes-user") } }, { baseEnv: {} }))
+      .toBe(path.join(abs("/tmp/hermes-home"), "skills"));
   });
 
   it("on Windows a configured LOCALAPPDATA selects Hermes' own default home", () => {
     setPlatform("win32");
-    expect(resolveHermesSkillsDir({ env: { LOCALAPPDATA: path.resolve("/profile/AppData/Local"), HOME: path.resolve("/profile") } }))
-      .toBe(path.join(path.resolve("/profile/AppData/Local"), "hermes", "skills"));
+    expect(resolveHermesSkillsDir({ env: { LOCALAPPDATA: abs("/profile/AppData/Local"), HOME: abs("/profile") } }, { baseEnv: {} }))
+      .toBe(path.join(abs("/profile/AppData/Local"), "hermes", "skills"));
+  });
+
+  it("on Windows an inherited LOCALAPPDATA selects the home the child will really use", () => {
+    setPlatform("win32");
+    expect(resolveHermesSkillsDir({ env: { HOME: abs("/profile") } }, { baseEnv: { LOCALAPPDATA: abs("/server/AppData/Local") } }))
+      .toBe(path.join(abs("/server/AppData/Local"), "hermes", "skills"));
+  });
+
+  it("an inherited HERMES_HOME is used, and the adapter env block overrides it", () => {
+    expect(resolveHermesSkillsDir({}, { baseEnv: { HERMES_HOME: abs("/inherited") } })).toBe(path.join(abs("/inherited"), "skills"));
+    expect(resolveHermesSkillsDir({ env: { HERMES_HOME: abs("/override") } }, { baseEnv: { HERMES_HOME: abs("/inherited") } }))
+      .toBe(path.join(abs("/override"), "skills"));
+  });
+
+  it("strict isolation links into its own profile home, not the server user's home", () => {
+    expect(resolveHermesSkillsDir({}, { baseEnv: { HERMES_HOME: abs("/inherited") }, strict: { root: abs("/iso"), profile: "worker" } }))
+      .toBe(path.join(abs("/iso"), "profiles", "worker", "skills"));
   });
 
   it("otherwise the ~/.hermes layout applies, on any platform without LOCALAPPDATA", () => {
     setPlatform("linux");
-    expect(resolveHermesSkillsDir({ env: { LOCALAPPDATA: path.resolve("/ignored"), HOME: path.resolve("/srv/hermes-user") } }))
-      .toBe(path.join(path.resolve("/srv/hermes-user"), ".hermes", "skills"));
+    expect(resolveHermesSkillsDir({ env: { LOCALAPPDATA: abs("/ignored"), HOME: abs("/srv/hermes-user") } }, { baseEnv: {} }))
+      .toBe(path.join(abs("/srv/hermes-user"), ".hermes", "skills"));
+  });
+
+  it("refuses a relative home", () => {
+    expect(() => resolveHermesSkillsDir({ env: { HERMES_HOME: "relative/home" } }, { baseEnv: {} })).toThrow(/absolute/);
+    expect(() => resolveHermesSkillsDir({ env: { HOME: "relative" } }, { baseEnv: {} })).toThrow(/absolute/);
   });
 });
 
 describe("the Paperclip skill declares every variable the adapter sets", () => {
   const skill = readFileSync(new URL("../../../../../skills/paperclip/SKILL.md", import.meta.url), "utf8");
   const frontmatter = skill.match(/^---\r?\n([\s\S]*?)\r?\n---/)?.[1] ?? "";
-  const declared = [...frontmatter.matchAll(/^\s*-\s*name:\s*(\S+)/gm)].map((match) => match[1]);
+  // Only entries of the required_environment_variables list count, not any `name:` elsewhere in the frontmatter.
+  const listBlock = frontmatter.match(/^required_environment_variables:[ \t]*\r?\n((?:[ \t]+.*(?:\r?\n|$))+)/m)?.[1] ?? "";
+  const declared = [...listBlock.matchAll(/^[ \t]*-[ \t]*name:[ \t]*(\S+)/gm)].map((match) => match[1]);
+
+  it("reads a non-empty declaration list (the parser itself is checked)", () => {
+    expect(declared.length).toBeGreaterThanOrEqual(9);
+    const decoy = "name: PAPERCLIP_DECOY\nrequired_environment_variables:\n  - name: ONLY_THIS\nother:\n  - name: NOT_THIS\n";
+    const block = decoy.match(/^required_environment_variables:[ \t]*\r?\n((?:[ \t]+.*(?:\r?\n|$))+)/m)?.[1] ?? "";
+    expect([...block.matchAll(/^[ \t]*-[ \t]*name:[ \t]*(\S+)/gm)].map((match) => match[1])).toEqual(["ONLY_THIS"]);
+  });
 
   it.each([
     "PAPERCLIP_API_URL", "PAPERCLIP_API_KEY", "PAPERCLIP_RUN_ID", "PAPERCLIP_AGENT_ID", "PAPERCLIP_COMPANY_ID",
