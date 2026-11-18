@@ -82,6 +82,13 @@ const DECLARED_SOURCE_TESTS = new Map([
     ],
   ],
   [
+    "server/src/__tests__/helpers/board-import-fixture-db.ts",
+    [
+      "server/src/__tests__/board-import-fixture-pipes.test.ts",
+      "server/src/__tests__/plugin-imported-issues.test.ts"
+    ],
+  ],
+  [
     "server/src/routes/plugins.ts",
     [
       "server/src/__tests__/plugin-job-status-route.test.ts",
