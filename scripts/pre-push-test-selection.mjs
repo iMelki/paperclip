@@ -57,6 +57,13 @@ const NON_PRODUCTION_PATH_PATTERNS = [
 const DECLARED_SOURCE_TESTS = new Map([
   // Explicit higher-level contracts for board synchronization, scope and packaging.
   [
+    "packages/adapters/hermes/src/server/skills.ts",
+    [
+      "packages/adapters/hermes/src/index.test.ts",
+      "packages/adapters/hermes/src/server/execute.tool-env.test.ts"
+    ],
+  ],
+  [
     "packages/db/src/index.ts",
     [
       "packages/db/src/pipelines-schema.test.ts"
