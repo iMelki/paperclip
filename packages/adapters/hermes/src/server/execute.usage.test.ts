@@ -27,14 +27,17 @@ function exportRecord(overrides: Record<string, unknown> = {}) {
 }
 
 /** First call is the chat run; a call with `sessions` is the export, which writes its output file. */
-function stubHermes(options: { record?: string | null; exportExitCode?: number; exportTimedOut?: boolean; noSessionId?: boolean } = {}) {
+function stubHermes(options: {
+  record?: string | null; exportExitCode?: number; exportTimedOut?: boolean; noSessionId?: boolean; chatOutput?: string;
+} = {}) {
   const record = options.record === undefined ? exportRecord() : options.record;
   vi.mocked(serverUtils.runChildProcess).mockImplementation((async (_runId: string, _command: string, args: string[]) => {
     if (args.includes("sessions")) {
       if (record !== null) await fs.writeFile(args[args.length - 1], `${record}\n`, "utf8");
       return { exitCode: options.exportExitCode ?? 0, signal: null, timedOut: options.exportTimedOut === true, stdout: "", stderr: "" };
     }
-    const stdout = options.noSessionId ? "Done.\n" : `Done.\n\nsession_id: ${SESSION}\n`;
+    const body = options.chatOutput ?? "Done.\n";
+    const stdout = options.noSessionId ? body : `${body}\nsession_id: ${SESSION}\n`;
     return { exitCode: 0, signal: null, timedOut: false, stdout, stderr: "" };
   }) as never);
 }
@@ -137,5 +140,75 @@ describe("hermes_local usage reporting", () => {
     const other = { sessionId: "local-other", inputTokens: 5, outputTokens: 5, cachedInputTokens: 0, costUsd: 0.001 };
     const failed = await execute(makeCtx({ sessionId: "local-other", usageBaseline: other }).ctx as never);
     expect((failed.sessionParams as Record<string, unknown>).usageBaseline).toBeUndefined();
+  });
+
+  const SCRAPED = "cost: $0\ntokens: 12 input 3 output\n";
+
+  it("output saying cost $0 does not override an export whose cost is unknown", async () => {
+    stubHermes({ record: exportRecord({ model: "auto", estimated_cost_usd: 0, cost_status: "unknown" }), chatOutput: SCRAPED });
+    const result = await execute(makeCtx().ctx as never);
+    expect(result.costUsd ?? null).toBeNull();
+    expect(result.resultJson).toMatchObject({ cost_usd: null });
+    expect(result.usage?.inputTokens).toBe(1000);
+  });
+
+  it("output-derived numbers are not used when the export fails: usage and cost stay unknown", async () => {
+    stubHermes({ exportExitCode: 1, chatOutput: SCRAPED });
+    const result = await execute(makeCtx().ctx as never);
+    expect(result.usage).toBeUndefined();
+    expect(result.costUsd ?? null).toBeNull();
+    expect(result.resultJson).toMatchObject({ usage_status: "unknown", usage: null, cost_usd: null });
+  });
+
+  it("a record with a missing counter is unknown, not zero, and keeps the earlier baseline", async () => {
+    const baseline = { sessionId: SESSION, inputTokens: 600, outputTokens: 40, cachedInputTokens: 100, costUsd: 0.02 };
+    stubHermes({ record: exportRecord({ input_tokens: undefined }), chatOutput: SCRAPED });
+    const result = await execute(makeCtx({ sessionId: SESSION, usageBaseline: baseline }).ctx as never);
+    expect(result.usage).toBeUndefined();
+    expect(result.resultJson).toMatchObject({ usage_status: "unknown", usage_unavailable_reason: "record_incomplete" });
+    expect(result.sessionParams).toMatchObject({ usageBaseline: baseline });
+  });
+
+  it("a record with an invalid estimated cost reports tokens but no cost", async () => {
+    stubHermes({ record: exportRecord({ estimated_cost_usd: "" }) });
+    const result = await execute(makeCtx().ctx as never);
+    expect(result.usage?.inputTokens).toBe(1000);
+    expect(result.costUsd ?? null).toBeNull();
+  });
+
+  it("a stored baseline with missing counters makes the resumed run unknown", async () => {
+    stubHermes();
+    const baseline = { sessionId: SESSION, outputTokens: 40, cachedInputTokens: 100, costUsd: 0.02 };
+    const result = await execute(makeCtx({ sessionId: SESSION, usageBaseline: baseline }).ctx as never);
+    expect(result.usage).toBeUndefined();
+    expect(result.resultJson).toMatchObject({ usage_unavailable_reason: "baseline_unusable" });
+  });
+
+  it("a counter that went down is unknown and the higher watermark survives to the next run", async () => {
+    const baseline = { sessionId: SESSION, inputTokens: 1000, outputTokens: 100, cachedInputTokens: 400, costUsd: 0.05 };
+    stubHermes({ record: exportRecord({ input_tokens: 900 }) });
+    const dropped = await execute(makeCtx({ sessionId: SESSION, usageBaseline: baseline }).ctx as never);
+    expect(dropped.usage).toBeUndefined();
+    expect(dropped.resultJson).toMatchObject({ usage_unavailable_reason: "counter_regressed" });
+    expect(dropped.sessionParams).toMatchObject({ usageBaseline: baseline });
+    stubHermes({ record: exportRecord({ input_tokens: 1100 }) });
+    const next = await execute(makeCtx(dropped.sessionParams as Record<string, unknown>).ctx as never);
+    expect(next.usage?.inputTokens).toBe(100);
+  });
+
+  it("end to end over three runs: 1000, then 900 (unknown), then 1100 reports 100 above the kept watermark", async () => {
+    stubHermes({ record: exportRecord({ input_tokens: 1000 }) });
+    const first = await execute(makeCtx().ctx as never);
+    expect(first.usage?.inputTokens).toBe(1000);
+    expect(first.sessionParams).toMatchObject({ usageBaseline: { inputTokens: 1000 } });
+    stubHermes({ record: exportRecord({ input_tokens: 900 }) });
+    const second = await execute(makeCtx(first.sessionParams as Record<string, unknown>).ctx as never);
+    expect(second.usage).toBeUndefined();
+    expect(second.resultJson).toMatchObject({ usage_status: "unknown", usage_unavailable_reason: "counter_regressed", usage: null });
+    expect(second.sessionParams).toMatchObject({ usageBaseline: { inputTokens: 1000 } });
+    stubHermes({ record: exportRecord({ input_tokens: 1100 }) });
+    const third = await execute(makeCtx(second.sessionParams as Record<string, unknown>).ctx as never);
+    expect(third.usage?.inputTokens).toBe(100);
+    expect(third.resultJson).toMatchObject({ usage_status: "reported" });
   });
 });

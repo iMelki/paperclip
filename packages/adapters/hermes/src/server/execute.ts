@@ -55,7 +55,7 @@ import {
 } from "./detect-model.js";
 import { reconcileHermesPaperclipSkills, resolveHermesOperationalSkillPreload } from "./skills.js";
 import {
-  computeRunUsage, readHermesSessionUsage, readUsageBaseline, toUsageBaseline, USAGE_UNAVAILABLE_TEXT,
+  computeRunUsage, readHermesSessionUsage, readUsageBaseline, USAGE_UNAVAILABLE_TEXT,
   type HermesSessionUsage, type UsageUnavailableReason,
 } from "./usage.js";
 import { resolveStrictHermesIsolation } from "./strict-isolation.js";
@@ -701,6 +701,19 @@ export async function execute(
   } else {
     usageUnavailable = "no_session_id";
   }
+  // The session record is authoritative: the model that actually answered, the billing provider, the
+  // tokens, and a cost only when Hermes could price the model. A resumed session is cumulative, so
+  // report this run's share against the baseline kept in the session parameters. Numbers scraped from
+  // the chat output are never used for usage or cost: an unknown measurement stays unknown.
+  let runUsage: ReturnType<typeof computeRunUsage> | null = null;
+  if (sessionUsage) {
+    runUsage = computeRunUsage(
+      sessionUsage,
+      readUsageBaseline(ctx.runtime?.sessionParams),
+      canResumeSession ? prevSessionId ?? null : null,
+    );
+    usageUnavailable = runUsage.unknownReason;
+  }
   if (usageUnavailable) {
     // Unknown is not zero: no usage or cost is reported, and the result says so for any budget check.
     await ctx.onLog("stdout", `[hermes] Usage unavailable: ${USAGE_UNAVAILABLE_TEXT[usageUnavailable]}\n`);
@@ -721,27 +734,12 @@ export async function execute(
     executionResult.errorMessage = `Hermes exited with code ${result.exitCode}`;
   }
 
-  if (parsed.usage) {
-    executionResult.usage = parsed.usage;
-  }
-
-  if (parsed.costUsd !== undefined) {
-    executionResult.costUsd = parsed.costUsd;
-  }
-
-  // The session record is authoritative: the model that actually answered, the billing provider, the
-  // tokens, and a cost only when Hermes could price the model. A resumed session is cumulative, so
-  // report this run's share against the baseline kept in the session parameters.
-  let runUsage: ReturnType<typeof computeRunUsage> | null = null;
   if (sessionUsage) {
-    runUsage = computeRunUsage(
-      sessionUsage,
-      readUsageBaseline(ctx.runtime?.sessionParams),
-      canResumeSession ? prevSessionId ?? null : null,
-    );
-    executionResult.usage = runUsage.usage;
-    executionResult.usageBasis = runUsage.usageBasis;
-    if (runUsage.costUsd !== null) {
+    if (runUsage?.usage) {
+      executionResult.usage = runUsage.usage;
+      executionResult.usageBasis = runUsage.usageBasis;
+    }
+    if (runUsage?.costUsd != null) {
       executionResult.costUsd = runUsage.costUsd;
       executionResult.billingType = "metered_api";
     }
@@ -758,8 +756,8 @@ export async function execute(
   executionResult.resultJson = {
     result: parsed.response || "",
     session_id: parsed.sessionId || null,
-    usage: runUsage?.usage ?? parsed.usage ?? null,
-    cost_usd: runUsage?.costUsd ?? parsed.costUsd ?? null,
+    usage: runUsage?.usage ?? null,
+    cost_usd: runUsage?.costUsd ?? null,
     cost_status: sessionUsage?.costStatus ?? null,
     served_model: sessionUsage?.model ?? null,
     // "unknown" means the run may have spent tokens that were not measured; it is never a zero.
@@ -773,11 +771,10 @@ export async function execute(
     // read reports everything since then, including this run's unmeasured share.
     const previousBaseline = readUsageBaseline(ctx.runtime?.sessionParams);
     const carriedBaseline = previousBaseline && previousBaseline.sessionId === parsed.sessionId ? previousBaseline : null;
+    const nextBaseline = runUsage?.nextBaseline ?? carriedBaseline;
     executionResult.sessionParams = {
       sessionId: parsed.sessionId,
-      ...(sessionUsage
-        ? { usageBaseline: toUsageBaseline(sessionUsage) }
-        : carriedBaseline ? { usageBaseline: carriedBaseline } : {}),
+      ...(nextBaseline ? { usageBaseline: nextBaseline } : {}),
     };
     executionResult.sessionDisplayId = parsed.sessionId.slice(0, 16);
   }

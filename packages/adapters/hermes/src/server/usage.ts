@@ -14,14 +14,18 @@ import path from "node:path";
 import { runChildProcess } from "@paperclipai/adapter-utils/server-utils";
 import type { UsageSummary } from "@paperclipai/adapter-utils";
 
+/**
+ * A counter is null when the record did not report a valid value. Unknown is never zero: a missing
+ * measurement must not read as "used nothing", so every consumer treats a null counter as unknown.
+ */
 export interface HermesSessionUsage {
   sessionId: string;
   model: string | null;
   provider: string | null;
-  inputTokens: number;
-  outputTokens: number;
-  cachedInputTokens: number;
-  /** Known cost in USD, or null when Hermes cannot price the model (status "unknown"). */
+  inputTokens: number | null;
+  outputTokens: number | null;
+  cachedInputTokens: number | null;
+  /** Known cost in USD, or null when Hermes cannot price the model or the cost is missing or invalid. */
   costUsd: number | null;
   costStatus: string | null;
 }
@@ -29,21 +33,31 @@ export interface HermesSessionUsage {
 /** What the previous run of the same session had already used; stored in the session parameters. */
 export interface HermesUsageBaseline {
   sessionId: string;
-  inputTokens: number;
-  outputTokens: number;
-  cachedInputTokens: number;
+  inputTokens: number | null;
+  outputTokens: number | null;
+  cachedInputTokens: number | null;
   costUsd: number | null;
 }
+
+/** Why usage could not be read. A budget check must treat each of these as unknown, never as zero. */
+export type UsageUnavailableReason =
+  | "no_session_id" | "export_timed_out" | "export_failed" | "record_unreadable"
+  | "record_incomplete" | "baseline_unusable" | "counter_regressed";
 
 export interface HermesRunUsage {
-  usage: UsageSummary;
-  usageBasis: "per_run" | "session_cumulative";
+  /** This run's tokens, or null when they cannot be determined (see unknownReason). */
+  usage: UsageSummary | null;
+  usageBasis: "per_run" | "session_cumulative" | null;
   costUsd: number | null;
+  unknownReason: UsageUnavailableReason | null;
+  /** Baseline to store for the next run; null keeps the previous baseline of this session unchanged. */
+  nextBaseline: HermesUsageBaseline | null;
 }
 
-const asNumber = (value: unknown): number => {
+/** A finite, non-negative number, else null. Missing, blank, null and malformed values are null, not 0. */
+const asCount = (value: unknown): number | null => {
   const n = typeof value === "number" ? value : typeof value === "string" && value.trim() ? Number(value) : NaN;
-  return Number.isFinite(n) && n >= 0 ? n : 0;
+  return Number.isFinite(n) && n >= 0 ? n : null;
 };
 const asText = (value: unknown): string | null =>
   typeof value === "string" && value.trim() ? value.trim() : null;
@@ -61,19 +75,17 @@ export function parseHermesSessionExport(text: string): HermesSessionUsage | nul
   const sessionId = asText(record.id);
   if (!sessionId) return null;
   const costStatus = asText(record.cost_status);
+  // The cost stays null unless the status names a cost field and that field holds a valid number.
   let costUsd: number | null = null;
-  if (costStatus === "actual" && record.actual_cost_usd !== "" && record.actual_cost_usd != null) {
-    costUsd = asNumber(record.actual_cost_usd);
-  } else if (costStatus === "estimated") {
-    costUsd = asNumber(record.estimated_cost_usd);
-  }
+  if (costStatus === "actual") costUsd = asCount(record.actual_cost_usd);
+  else if (costStatus === "estimated") costUsd = asCount(record.estimated_cost_usd);
   return {
     sessionId,
     model: asText(record.model),
     provider: asText(record.billing_provider),
-    inputTokens: asNumber(record.input_tokens),
-    outputTokens: asNumber(record.output_tokens),
-    cachedInputTokens: asNumber(record.cache_read_tokens),
+    inputTokens: asCount(record.input_tokens),
+    outputTokens: asCount(record.output_tokens),
+    cachedInputTokens: asCount(record.cache_read_tokens),
     costUsd,
     costStatus,
   };
@@ -88,10 +100,10 @@ export function readUsageBaseline(sessionParams: unknown): HermesUsageBaseline |
   if (!sessionId) return null;
   return {
     sessionId,
-    inputTokens: asNumber(record.inputTokens),
-    outputTokens: asNumber(record.outputTokens),
-    cachedInputTokens: asNumber(record.cachedInputTokens),
-    costUsd: typeof record.costUsd === "number" && Number.isFinite(record.costUsd) ? record.costUsd : null,
+    inputTokens: asCount(record.inputTokens),
+    outputTokens: asCount(record.outputTokens),
+    cachedInputTokens: asCount(record.cachedInputTokens),
+    costUsd: asCount(record.costUsd),
   };
 }
 
@@ -105,36 +117,57 @@ export function toUsageBaseline(current: HermesSessionUsage): HermesUsageBaselin
   };
 }
 
+const unknownRun = (
+  unknownReason: UsageUnavailableReason, nextBaseline: HermesUsageBaseline | null,
+): HermesRunUsage => ({ usage: null, usageBasis: null, costUsd: null, unknownReason, nextBaseline });
+
 /**
  * This run's share of the session totals. A fresh session counts in full. A resumed session with a
  * matching baseline reports the difference. A resumed session without one reports the cumulative
  * tokens, marked as such so the server takes the delta, and no cost (it cannot be split safely).
+ *
+ * Unknown is never zero. Incomplete counters, an unusable baseline, or a counter that went DOWN make
+ * the run's usage unknown. After a regression the previous (higher) baseline is kept, so a later,
+ * higher reading reports only what lies above the old watermark.
  */
 export function computeRunUsage(
   current: HermesSessionUsage,
   previous: HermesUsageBaseline | null,
   resumedSessionId: string | null,
 ): HermesRunUsage {
-  const totals: UsageSummary = {
-    inputTokens: current.inputTokens,
-    outputTokens: current.outputTokens,
-    cachedInputTokens: current.cachedInputTokens,
-  };
-  if (!resumedSessionId) return { usage: totals, usageBasis: "per_run", costUsd: current.costUsd };
-  if (previous && previous.sessionId === current.sessionId) {
-    const share = (now: number, before: number) => Math.max(0, now - before);
-    return {
-      usage: {
-        inputTokens: share(current.inputTokens, previous.inputTokens),
-        outputTokens: share(current.outputTokens, previous.outputTokens),
-        cachedInputTokens: share(current.cachedInputTokens, previous.cachedInputTokens),
-      },
-      usageBasis: "per_run",
-      costUsd: current.costUsd !== null && previous.costUsd !== null
-        ? Math.max(0, current.costUsd - previous.costUsd) : null,
-    };
+  const { inputTokens, outputTokens, cachedInputTokens } = current;
+  if (inputTokens === null || outputTokens === null || cachedInputTokens === null) {
+    return unknownRun("record_incomplete", null);
   }
-  return { usage: totals, usageBasis: "session_cumulative", costUsd: null };
+  const totals: UsageSummary = { inputTokens, outputTokens, cachedInputTokens };
+  const reanchor = toUsageBaseline(current);
+  if (!resumedSessionId) {
+    return { usage: totals, usageBasis: "per_run", costUsd: current.costUsd, unknownReason: null, nextBaseline: reanchor };
+  }
+  if (!previous || previous.sessionId !== current.sessionId) {
+    return { usage: totals, usageBasis: "session_cumulative", costUsd: null, unknownReason: null, nextBaseline: reanchor };
+  }
+  if (previous.inputTokens === null || previous.outputTokens === null || previous.cachedInputTokens === null) {
+    // Subtracting an unknown baseline as zero would count earlier usage of the session again.
+    return unknownRun("baseline_unusable", reanchor);
+  }
+  if (inputTokens < previous.inputTokens || outputTokens < previous.outputTokens
+    || cachedInputTokens < previous.cachedInputTokens) {
+    return unknownRun("counter_regressed", null);
+  }
+  const bothCosts = current.costUsd !== null && previous.costUsd !== null;
+  const costRegressed = bothCosts && (current.costUsd as number) < (previous.costUsd as number);
+  return {
+    usage: {
+      inputTokens: inputTokens - previous.inputTokens,
+      outputTokens: outputTokens - previous.outputTokens,
+      cachedInputTokens: cachedInputTokens - previous.cachedInputTokens,
+    },
+    usageBasis: "per_run",
+    costUsd: bothCosts && !costRegressed ? (current.costUsd as number) - (previous.costUsd as number) : null,
+    unknownReason: null,
+    nextBaseline: costRegressed ? { ...reanchor, costUsd: previous.costUsd } : reanchor,
+  };
 }
 
 export interface ReadSessionUsageOptions {
@@ -149,9 +182,6 @@ export interface ReadSessionUsageOptions {
   timeoutSec: number;
 }
 
-/** Why usage could not be read. A budget check must treat each of these as unknown, never as zero. */
-export type UsageUnavailableReason = "no_session_id" | "export_timed_out" | "export_failed" | "record_unreadable";
-
 export type HermesUsageOutcome =
   | { status: "ok"; usage: HermesSessionUsage }
   | { status: "unavailable"; reason: UsageUnavailableReason };
@@ -161,6 +191,9 @@ export const USAGE_UNAVAILABLE_TEXT: Record<UsageUnavailableReason, string> = {
   export_timed_out: "reading the session record timed out",
   export_failed: "reading the session record failed",
   record_unreadable: "the session record could not be parsed",
+  record_incomplete: "the session record has missing or invalid token counters",
+  baseline_unusable: "the stored usage baseline of this session has missing or invalid counters",
+  counter_regressed: "a cumulative counter went down compared with the stored baseline",
 };
 
 /**
