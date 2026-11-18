@@ -1,0 +1,320 @@
+import { EventEmitter } from "node:events";
+import type { ChildProcess } from "node:child_process";
+import { mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { basename, join, resolve, sep } from "node:path";
+import { PassThrough } from "node:stream";
+import { gunzipSync } from "node:zlib";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { createBufferedTextFileWriter, runDatabaseBackup, type RunDatabaseBackupOptions } from "./backup-lib.js";
+import { PreservedBackupError, runPreservedPgDumpBackup, settleBackupChildPipeline } from "./backup-cli.js";
+import { inspectDatabaseBackupHealth } from "../../../server/src/services/database-backup-health.js";
+
+const mocks = vi.hoisted(() => ({ spawn: vi.fn(), postgres: vi.fn(), link: vi.fn(), open: vi.fn() }));
+vi.mock("node:child_process", () => ({ spawn: mocks.spawn }));
+vi.mock("postgres", () => ({ default: mocks.postgres }));
+vi.mock("node:fs/promises", async () => {
+  const actual = await vi.importActual<typeof import("node:fs/promises")>("node:fs/promises");
+  return { ...actual, link: mocks.link, open: mocks.open };
+});
+
+const fs = await vi.importActual<typeof import("node:fs/promises")>("node:fs/promises");
+const fixtures: string[] = [];
+const sql = "CREATE TABLE public.sample (id integer);\nINSERT INTO public.sample VALUES (42);\n";
+// Synthetic only: never a live endpoint or credential.
+const connectionString = "postgres://fixture:synthetic-secret@invalid.invalid/fixture";
+
+async function fixture(): Promise<string> {
+  const dir = await mkdtemp(join(tmpdir(), "paperclip-preserve-test-"));
+  fixtures.push(dir);
+  return dir;
+}
+
+function options(dir: string): RunDatabaseBackupOptions {
+  return {
+    connectionString,
+    backupDir: dir,
+    retention: { dailyDays: 0, weeklyWeeks: 0, monthlyMonths: 0 },
+    backupEngine: "pg_dump",
+    preserveAll: true,
+    filenamePrefix: "fixture",
+  };
+}
+
+function child(input: { exitCode?: number; spawnError?: Error; streamError?: Error; stderr?: string } = {}): ChildProcess {
+  const process = new EventEmitter();
+  const stdout = new PassThrough();
+  const stderr = new PassThrough();
+  Object.assign(process, { stdout, stderr });
+  queueMicrotask(() => {
+    if (input.stderr) stderr.write(input.stderr);
+    if (input.streamError) stdout.destroy(input.streamError);
+    else stdout.end(sql);
+    stderr.end();
+    if (input.spawnError) process.emit("error", input.spawnError);
+    else process.emit("exit", input.exitCode ?? 0, null);
+  });
+  return process as ChildProcess;
+}
+
+beforeEach(() => {
+  vi.resetAllMocks();
+  mocks.link.mockImplementation(fs.link);
+  mocks.open.mockImplementation(fs.open);
+  mocks.spawn.mockImplementation(() => child());
+  mocks.postgres.mockImplementation(() => { throw new Error("Unexpected JavaScript backup fallback"); });
+  vi.stubEnv("PAPERCLIP_PG_DUMP_PATH", "synthetic-pg-dump");
+  vi.useFakeTimers({ toFake: ["Date"] });
+  vi.setSystemTime(new Date("2026-10-04T00:00:00Z"));
+});
+
+afterEach(async () => {
+  vi.useRealTimers();
+  vi.unstubAllEnvs();
+  vi.restoreAllMocks();
+  // The operator permits cleanup ONLY of these newly created synthetic fixtures.
+  while (fixtures.length) {
+    const dir = fixtures.pop()!;
+    const parent = resolve(tmpdir()) + sep;
+    if (!resolve(dir).startsWith(parent) || !basename(dir).startsWith("paperclip-preserve-test-")) {
+      throw new Error("Refusing cleanup outside newly created fixture scope");
+    }
+    await rm(dir, { recursive: true });
+  }
+});
+
+describe("settleBackupChildPipeline (upstream PR #13153 regression cases)", () => {
+  it("prefers the child stderr error over the pipeline error", async () => {
+    const childError = new Error("synthetic pg_dump stderr");
+    await expect(settleBackupChildPipeline(Promise.reject(new Error("pipeline")), Promise.reject(childError)))
+      .rejects.toBe(childError);
+  });
+
+  it("prefers spawn ENOENT over the pipeline error", async () => {
+    const childError = Object.assign(new Error("missing synthetic client"), { code: "ENOENT" });
+    await expect(settleBackupChildPipeline(Promise.reject(new Error("pipeline")), Promise.reject(childError)))
+      .rejects.toBe(childError);
+  });
+
+  it("keeps the pipeline error when the child succeeds", async () => {
+    const error = new Error("pipeline");
+    await expect(settleBackupChildPipeline(Promise.reject(error), Promise.resolve())).rejects.toBe(error);
+  });
+
+  it("keeps the child error when the pipeline succeeds", async () => {
+    const error = new Error("child");
+    await expect(settleBackupChildPipeline(Promise.resolve(), Promise.reject(error))).rejects.toBe(error);
+  });
+
+  it("resolves only when both halves settle successfully", async () => {
+    await expect(settleBackupChildPipeline(Promise.resolve(), Promise.resolve())).resolves.toBeUndefined();
+  });
+
+  it("consumes both rejections and waits for the second half", async () => {
+    const unhandled = vi.fn();
+    process.on("unhandledRejection", unhandled);
+    const error = new Error("child");
+    let rejectChild!: (error: Error) => void;
+    const pending = new Promise<void>((_, reject) => { rejectChild = reject; });
+    const result = settleBackupChildPipeline(Promise.reject(new Error("pipeline")), pending);
+    const caught = expect(result).rejects.toBe(error);
+    try {
+      await Promise.resolve();
+      rejectChild(error);
+      await caught;
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(unhandled).not.toHaveBeenCalled();
+    } finally {
+      process.off("unhandledRejection", unhandled);
+    }
+  });
+});
+
+describe("preserve-all native backup policy", () => {
+  it("retains history and publishes one complete inode under two names after closing the writer", async () => {
+    const dir = await fixture();
+    const historical = join(dir, "fixture-20000101-000000.sql.gz");
+    await writeFile(historical, "historical fixture");
+    await fs.utimes(historical, new Date("2000-01-01T00:00:00Z"), new Date("2000-01-01T00:00:00Z"));
+    let closed = false;
+    mocks.open.mockImplementation(async (...args: Parameters<typeof fs.open>) => {
+      const file = await fs.open(...args);
+      const close = file.close.bind(file);
+      vi.spyOn(file, "close").mockImplementation(async () => { await close(); closed = true; });
+      return file;
+    });
+    mocks.link.mockImplementation(async (partial: string, final: string) => {
+      expect(closed).toBe(true);
+      expect(partial.endsWith(".sql.gz")).toBe(false);
+      expect(gunzipSync(await readFile(partial)).toString()).toBe(sql);
+      await fs.link(partial, final);
+    });
+    const result = await runDatabaseBackup(options(dir));
+    const names = await readdir(dir);
+    expect(result).toMatchObject({ prunedCount: 0, backupEngine: "pg_dump", preservationPolicy: "preserve-all" });
+    expect(result.retainedPartialFile).toBeDefined();
+    expect(await readFile(historical, "utf8")).toBe("historical fixture");
+    const final = await stat(result.backupFile);
+    const partial = await stat(result.retainedPartialFile!);
+    expect(final.ino).toBe(partial.ino);
+    expect(final.nlink).toBe(2);
+    expect(result.sizeBytes).toBe(final.size);
+    expect(gunzipSync(await readFile(result.backupFile)).toString()).toBe(sql);
+    expect(names.filter((name) => name.endsWith(".sql.gz"))).toHaveLength(2);
+    expect(names.filter((name) => name.endsWith(".sql"))).toHaveLength(0);
+    expect(mocks.open.mock.calls[0]?.slice(1)).toEqual(["wx", 0o600]);
+    expect(mocks.spawn).toHaveBeenCalledTimes(1);
+    expect(mocks.postgres).not.toHaveBeenCalled();
+    expect(inspectDatabaseBackupHealth({ enabled: true, backupDir: dir, maxAgeHours: 24 }))
+      .toMatchObject({ status: "ok", latestBackup: { path: result.backupFile } });
+  });
+
+  it("refuses an existing final name before spawning and preserves its bytes", async () => {
+    const dir = await fixture();
+    const target = join(dir, "existing.sql.gz");
+    await writeFile(target, "existing fixture");
+    await expect(runPreservedPgDumpBackup({ connectionString, backupDir: dir, backupFile: target, connectTimeout: 5 }))
+      .rejects.toMatchObject({ phase: "reserve", code: "output_exists" });
+    expect(await readFile(target, "utf8")).toBe("existing fixture");
+    expect(mocks.spawn).not.toHaveBeenCalled();
+    expect(mocks.open).not.toHaveBeenCalled();
+  });
+
+  it("refuses a same-second repeated backup without altering the first or history", async () => {
+    const dir = await fixture();
+    const first = await runDatabaseBackup(options(dir));
+    const before = await readFile(first.backupFile);
+    await expect(runDatabaseBackup(options(dir))).rejects.toMatchObject({ code: "output_exists" });
+    expect(await readFile(first.backupFile)).toEqual(before);
+    expect(mocks.spawn).toHaveBeenCalledTimes(1);
+  });
+
+  it("refuses a final-name race atomically and retains complete staging output", async () => {
+    const dir = await fixture();
+    mocks.link.mockImplementation(async (partial: string, final: string) => {
+      await writeFile(final, "racing fixture", { flag: "wx" });
+      await fs.link(partial, final);
+    });
+    await expect(runDatabaseBackup(options(dir))).rejects.toMatchObject({ phase: "publish", code: "publish_failed" });
+    const names = await readdir(dir);
+    const final = names.find((name) => name.endsWith(".sql.gz"))!;
+    const partial = names.find((name) => name.includes(".partial-"))!;
+    expect(await readFile(join(dir, final), "utf8")).toBe("racing fixture");
+    expect(gunzipSync(await readFile(join(dir, partial))).toString()).toBe(sql);
+  });
+
+  it.each(["EXDEV", "ENOTSUP", "EACCES"])("retains staging and fails closed on publish %s", async (code) => {
+    const dir = await fixture();
+    mocks.link.mockRejectedValue(Object.assign(new Error("synthetic publish error"), { code }));
+    await expect(runDatabaseBackup(options(dir))).rejects.toMatchObject({ phase: "publish", code: "publish_failed" });
+    const names = await readdir(dir);
+    expect(names).toHaveLength(1);
+    expect(names[0]).toContain(".partial-");
+    expect(names[0]?.endsWith(".sql.gz")).toBe(false);
+    expect(gunzipSync(await readFile(join(dir, names[0]!))).toString()).toBe(sql);
+    expect(inspectDatabaseBackupHealth({ enabled: true, backupDir: dir, maxAgeHours: 24 }))
+      .toMatchObject({ status: "warning", latestBackup: null });
+  });
+
+  it.each(["nonzero", "spawn", "stream"])("retains failed %s output without health-visible success or fallback", async (kind) => {
+    const dir = await fixture();
+    const secretError = new Error(`synthetic stderr ${connectionString}`);
+    mocks.spawn.mockImplementation(() => child({
+      exitCode: kind === "nonzero" ? 1 : 0,
+      spawnError: kind === "spawn" ? secretError : undefined,
+      streamError: kind === "stream" ? secretError : undefined,
+      stderr: secretError.message,
+    }));
+    const error = await runDatabaseBackup(options(dir)).catch((value: unknown) => value);
+    expect(error).toBeInstanceOf(PreservedBackupError);
+    expect(error).toMatchObject({ phase: "dump", code: "dump_failed" });
+    expect(String(error)).not.toContain(connectionString);
+    expect(JSON.stringify(error)).not.toContain("synthetic-secret");
+    expect(error).not.toHaveProperty("cause");
+    const names = await readdir(dir);
+    expect(names).toHaveLength(1);
+    expect(names[0]?.endsWith(".sql.gz")).toBe(false);
+    expect(mocks.link).not.toHaveBeenCalled();
+    expect(mocks.postgres).not.toHaveBeenCalled();
+    expect(inspectDatabaseBackupHealth({ enabled: true, backupDir: dir, maxAgeHours: 24 }))
+      .toMatchObject({ status: "warning", latestBackup: null });
+  });
+
+  it("sanitizes reservation failure without spawning or overwriting a colliding partial", async () => {
+    const dir = await fixture();
+    mocks.open.mockImplementation(async (partial: string) => {
+      await writeFile(partial, "colliding fixture", { flag: "wx" });
+      return fs.open(partial, "wx", 0o600);
+    });
+    await expect(runDatabaseBackup(options(dir))).rejects.toMatchObject({ phase: "reserve", code: "output_create_failed" });
+    const names = await readdir(dir);
+    expect(await readFile(join(dir, names[0]!), "utf8")).toBe("colliding fixture");
+    expect(mocks.spawn).not.toHaveBeenCalled();
+  });
+
+  it.each(["constructor", "sync", "stat", "close"])("closes and retains the file on %s failure without publishing", async (stage) => {
+    const dir = await fixture();
+    let opened!: Awaited<ReturnType<typeof fs.open>>;
+    mocks.open.mockImplementation(async (...args: Parameters<typeof fs.open>) => {
+      const file = await fs.open(...args);
+      opened = file;
+      const error = new Error(`synthetic failure ${connectionString}`);
+      if (stage === "constructor") vi.spyOn(file, "createWriteStream").mockImplementation(() => { throw error; });
+      if (stage === "sync") vi.spyOn(file, "sync").mockRejectedValue(error);
+      if (stage === "stat") vi.spyOn(file, "stat").mockRejectedValue(error);
+      if (stage === "close") {
+        const close = file.close.bind(file);
+        vi.spyOn(file, "close").mockImplementation(async () => { await close(); throw error; });
+      }
+      return file;
+    });
+    const error = await runDatabaseBackup(options(dir)).catch((value: unknown) => value);
+    expect(error).toBeInstanceOf(PreservedBackupError);
+    expect(String(error)).not.toContain(connectionString);
+    expect(opened.fd).toBe(-1);
+    expect(mocks.link).not.toHaveBeenCalled();
+    const names = await readdir(dir);
+    expect(names).toHaveLength(1);
+    expect(names[0]?.endsWith(".sql.gz")).toBe(false);
+  });
+
+  it.each([
+    { backupEngine: "auto" }, { backupEngine: "javascript" },
+    { excludeTables: ["users"] }, { nullifyColumns: { users: ["email"] } },
+    { filenamePrefix: "../escape" }, { filenamePrefix: "fixture\n" },
+  ] satisfies Partial<RunDatabaseBackupOptions>[])("rejects unsupported policy options before creating files: %j", async (override) => {
+    const dir = await fixture();
+    await expect(runDatabaseBackup({ ...options(dir), ...override })).rejects.toThrow("Preserve-all requires");
+    expect(await readdir(dir)).toEqual([]);
+    expect(mocks.spawn).not.toHaveBeenCalled();
+    expect(mocks.postgres).not.toHaveBeenCalled();
+  });
+});
+
+describe("legacy caller regression", () => {
+  it("preserves buffered SQL line boundaries", async () => {
+    const dir = await fixture();
+    const path = join(dir, "buffered.sql");
+    const writer = createBufferedTextFileWriter(path, 16);
+    const lines = ["-- header", "BEGIN;", "", "INSERT INTO sample VALUES (42);", "-- footer"];
+    for (const line of lines) writer.emit(line);
+    await writer.close();
+    expect(await readFile(path, "utf8")).toBe(lines.join("\n"));
+  });
+
+  it("leaves the legacy auto caller's retention and response contract unchanged", async () => {
+    const dir = await fixture();
+    const old = join(dir, "fixture-20000101-000000.sql.gz");
+    await writeFile(old, "new synthetic historical fixture");
+    await fs.utimes(old, new Date("2000-01-01T00:00:00Z"), new Date("2000-01-01T00:00:00Z"));
+    const database = Object.assign(vi.fn().mockResolvedValue([]), { end: vi.fn().mockResolvedValue(undefined) });
+    mocks.postgres.mockReturnValue(database);
+    const result = await runDatabaseBackup({ ...options(dir), preserveAll: false, backupEngine: "auto" });
+    expect(result).toMatchObject({ prunedCount: 1 });
+    expect(result).not.toHaveProperty("preservationPolicy");
+    expect(result).not.toHaveProperty("retainedPartialFile");
+    expect(gunzipSync(await readFile(result.backupFile)).toString()).toBe(sql);
+    expect(await readdir(dir)).toEqual([basename(result.backupFile)]);
+    expect(database.end).toHaveBeenCalledTimes(1);
+  });
+});

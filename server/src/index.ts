@@ -869,6 +869,8 @@ export async function startServer(): Promise<StartedServer> {
         backupDir: config.databaseBackupDir,
         retention,
         filenamePrefix: "paperclip",
+        backupEngine: "pg_dump",
+        preserveAll: true,
       });
       const finishedAt = new Date();
       const response: InstanceDatabaseBackupRunResult = {

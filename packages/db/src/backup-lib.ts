@@ -7,6 +7,7 @@ import { open as openFile } from "node:fs/promises";
 import { pipeline } from "node:stream/promises";
 import { createGunzip, createGzip } from "node:zlib";
 import postgres from "postgres";
+import { runPgDumpBackup, runPreservedPgDumpBackup, waitForChildExit } from "./backup-cli.js";
 
 export type BackupRetentionPolicy = {
   dailyDays: number;
@@ -29,12 +30,17 @@ export type RunDatabaseBackupOptions = {
   excludeTables?: string[];
   nullifyColumns?: Record<string, string[]>;
   backupEngine?: "auto" | "pg_dump" | "javascript";
+  /** Opt-in pg_dump-only policy: preserve history and failed/staging output. */
+  preserveAll?: boolean;
 };
 
 export type RunDatabaseBackupResult = {
   backupFile: string;
   sizeBytes: number;
   prunedCount: number;
+  backupEngine?: "pg_dump";
+  preservationPolicy?: "preserve-all";
+  retainedPartialFile?: string;
 };
 
 export type RunDatabaseRestoreOptions = {
@@ -69,7 +75,6 @@ type ExtensionDefinition = {
 
 const DEFAULT_BACKUP_WRITE_BUFFER_BYTES = 1024 * 1024;
 const BACKUP_DATA_CURSOR_ROWS = 100;
-const BACKUP_CLI_STDERR_BYTES = 64 * 1024;
 const BACKUP_BREAKPOINT_DETECT_BYTES = 64 * 1024;
 
 const STATEMENT_BREAKPOINT = "-- paperclip statement breakpoint 69f6f3f1-42fd-46a6-bf17-d1d85f8f3900";
@@ -293,66 +298,6 @@ function formatSqlValue(
   return formatSqlLiteral(String(val));
 }
 
-function appendCapturedStderr(previous: string, chunk: Buffer | string): string {
-  const next = previous + (Buffer.isBuffer(chunk) ? chunk.toString("utf8") : chunk);
-  if (Buffer.byteLength(next, "utf8") <= BACKUP_CLI_STDERR_BYTES) return next;
-  return Buffer.from(next, "utf8").subarray(-BACKUP_CLI_STDERR_BYTES).toString("utf8");
-}
-
-async function waitForChildExit(child: ReturnType<typeof spawn>, label: string): Promise<void> {
-  let stderr = "";
-  child.stderr?.on("data", (chunk) => {
-    stderr = appendCapturedStderr(stderr, chunk);
-  });
-
-  const result = await new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve, reject) => {
-    child.once("error", reject);
-    child.once("exit", (code, signal) => resolve({ code, signal }));
-  });
-
-  if (result.signal) {
-    throw new Error(`${label} exited via ${result.signal}${stderr.trim() ? `: ${stderr.trim()}` : ""}`);
-  }
-  if (result.code !== 0) {
-    throw new Error(`${label} failed with exit code ${result.code ?? "unknown"}${stderr.trim() ? `: ${stderr.trim()}` : ""}`);
-  }
-}
-
-async function runPgDumpBackup(opts: {
-  connectionString: string;
-  backupFile: string;
-  connectTimeout: number;
-}): Promise<void> {
-  const pgDumpBin = process.env.PAPERCLIP_PG_DUMP_PATH || "pg_dump";
-  const child = spawn(
-    pgDumpBin,
-    [
-      `--dbname=${opts.connectionString}`,
-      "--format=plain",
-      "--clean",
-      "--if-exists",
-      "--no-owner",
-      "--no-privileges",
-    ],
-    {
-      stdio: ["ignore", "pipe", "pipe"],
-      env: {
-        ...process.env,
-        PGCONNECT_TIMEOUT: String(opts.connectTimeout),
-      },
-    },
-  );
-
-  if (!child.stdout) {
-    throw new Error("pg_dump did not expose stdout");
-  }
-
-  await Promise.all([
-    pipeline(child.stdout, createGzip(), createWriteStream(opts.backupFile)),
-    waitForChildExit(child, pgDumpBin),
-  ]);
-}
-
 async function restoreWithPsql(opts: RunDatabaseRestoreOptions, connectTimeout: number): Promise<void> {
   const psqlBin = process.env.PAPERCLIP_PSQL_PATH || "psql";
   const child = spawn(
@@ -567,6 +512,15 @@ export async function runDatabaseBackup(opts: RunDatabaseBackupOptions): Promise
   const connectTimeout = Math.max(1, Math.trunc(opts.connectTimeoutSeconds ?? 5));
   const backupEngine = opts.backupEngine ?? "auto";
   const canUsePgDump = !hasBackupTransforms(opts);
+  if (opts.preserveAll) {
+    if (backupEngine !== "pg_dump" || !canUsePgDump ||
+        !/^[A-Za-z0-9][A-Za-z0-9_-]{0,80}(?![\s\S])/u.test(filenamePrefix)) {
+      throw new Error("Preserve-all requires pg_dump, no transforms and a safe filename prefix");
+    }
+    const backupFile = resolve(opts.backupDir, `${filenamePrefix}-${timestamp()}.sql.gz`);
+    const result = await runPreservedPgDumpBackup({ ...opts, backupFile, connectTimeout });
+    return { backupFile, ...result, prunedCount: 0, backupEngine: "pg_dump", preservationPolicy: "preserve-all" };
+  }
   const excludedTableNames = normalizeTableNameSet(opts.excludeTables);
   const nullifiedColumnsByTable = normalizeNullifyColumnMap(opts.nullifyColumns);
   let sql = postgres(opts.connectionString, { max: 1, connect_timeout: connectTimeout });
