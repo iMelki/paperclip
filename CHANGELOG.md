@@ -20,6 +20,28 @@ All notable changes to this repository should be recorded here.
 
 ## Unreleased
 
+- **[Refs #288]** `hermes_local` now binds what it launches. Operators must act on
+  four changes:
+  1. **An explicit model is required.** A run refuses to start when `model` is
+     unset, empty, `auto`, or a provider's auto router such as `openrouter/auto`,
+     because the provider would choose the model per call. Set `adapterConfig.model`
+     and `adapterConfig.provider` on every `hermes_local` agent before upgrading;
+     an agent that relied on the former `auto` default fails fast until you do.
+     `extraArgs` may no longer carry `-m`, `--model`, `--provider`, `--profile` or
+     `-p`.
+  2. **A configured `paperclipApiUrl` must be a loopback address** (`localhost`,
+     `127.0.0.1` or `[::1]`) without credentials, query or fragment. The child's
+     `PAPERCLIP_API_URL` is the bare origin, like every other adapter.
+  3. **Skills are linked where Hermes reads them, and only there.** On Windows an
+     inherited `LOCALAPPDATA` selects `%LOCALAPPDATA%\hermes\skills` when no
+     `HERMES_HOME` is set; strict isolation links into its own profile home. A home
+     reached through a symlink or junction is refused, and `HERMES_HOME` must be
+     absolute.
+  4. **The run key stays off command lines.** The prompt and the Paperclip skill
+     send headers from a private file (`curl -H @file`) instead of expanding
+     `$PAPERCLIP_API_KEY` into `curl`'s arguments. The adapter preloads the Paperclip
+     skill (`-s paperclip`) so its declared variables reach Hermes' tool shell.
+
 - **[Refs #265]** `check:tokens` accepts a per-machine ignore list for dynamic
   usernames: `CHECK_FORBIDDEN_TOKENS_IGNORE_USERNAMES`. Use it only on a shared
   or generic account whose name is an ordinary word in the repo. Without it, the

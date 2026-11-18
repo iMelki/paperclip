@@ -118,7 +118,7 @@ describe("hermes_local uses the configured loopback Paperclip API URL", () => {
 
   it("a configured loopback URL wins over the server's own value", async () => {
     await execute(makeCtx({ model: MODEL, paperclipApiUrl: "http://127.0.0.1:5113" }) as never);
-    expect(lastSpawn().opts.env.PAPERCLIP_API_URL).toBe("http://127.0.0.1:5113/api");
+    expect(lastSpawn().opts.env.PAPERCLIP_API_URL).toBe("http://127.0.0.1:5113");
   });
 
   it("negative: without a configured URL the server's value is kept", async () => {

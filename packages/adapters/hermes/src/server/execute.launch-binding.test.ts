@@ -7,6 +7,7 @@
  * command line or in any log, and no stray case variant of a reserved credential in the environment.
  */
 import { spawnSync } from "node:child_process";
+import { readFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import * as fs from "node:fs/promises";
@@ -76,16 +77,18 @@ describe("the configured Paperclip API URL must be loopback", () => {
   });
 
   it.each([
-    ["http://127.0.0.1:5113", "http://127.0.0.1:5113/api"],
-    ["http://127.0.0.1:5113/", "http://127.0.0.1:5113/api"],
-    ["http://localhost:3100/api", "http://localhost:3100/api"],
-    ["http://[::1]:3100", "http://[::1]:3100/api"],
-  ])("accepts %s and uses one value for the prompt and the environment", async (url, expected) => {
+    ["http://127.0.0.1:5113", "http://127.0.0.1:5113"],
+    ["http://127.0.0.1:5113/", "http://127.0.0.1:5113"],
+    ["http://localhost:3100/api", "http://localhost:3100"],
+    ["http://[::1]:3100", "http://[::1]:3100"],
+  ])("accepts %s: the child variable is the bare origin, the prompt shows the /api base", async (url, origin) => {
     const { ctx } = makeCtx({ paperclipApiUrl: url });
     await execute(ctx as never);
     const { args, env } = lastSpawn();
-    expect(env.PAPERCLIP_API_URL).toBe(expected);
-    expect(args[args.indexOf("-q") + 1]).toContain(`- API base: ${expected}`);
+    // Like every other adapter and the shared skill: PAPERCLIP_API_URL is the origin, paths add /api.
+    expect(env.PAPERCLIP_API_URL).toBe(origin);
+    expect(env.PAPERCLIP_API_URL.endsWith("/api")).toBe(false);
+    expect(args[args.indexOf("-q") + 1]).toContain(`- API base: ${origin}/api`);
   });
 
   it("buildPrompt refuses a non-loopback override too (it is exported)", () => {
@@ -173,46 +176,74 @@ describe("the run key never reaches a command line or a log", () => {
   });
 });
 
+
 const bashAvailable = spawnSync("bash", ["-c", "command -v mktemp printf >/dev/null"], { encoding: "utf8" }).status === 0;
+const slash = (value: string) => value.split(String.fromCharCode(92)).join("/");
 
 describe.skipIf(!bashAvailable)("the documented API call keeps the run key out of argv", () => {
   let dir: string;
   beforeEach(async () => { dir = await fs.mkdtemp(path.join(await fs.realpath(os.tmpdir()), "paperclip-hermes-argv-")); });
   afterEach(async () => { await fs.rm(dir, { recursive: true, force: true }); });
 
-  it("runs the prompt's example with a recording curl: dummy key absent from argv, present in the header file", async () => {
-    const { ctx } = makeCtx({});
-    const prompt = buildPrompt(ctx as never, { paperclipApiUrl: "http://127.0.0.1:5113" });
-    const snippet = prompt.match(/```bash\n([\s\S]*?)\n```/)?.[1];
-    expect(snippet).toBeTruthy();
+  /** Runs a documented snippet with recording curl and jq shims; returns what curl was asked to send. */
+  async function runSnippet(snippet: string, apiUrl: string) {
     const argvLog = path.join(dir, "argv.log");
     const headerLog = path.join(dir, "headers.log");
-    await fs.mkdir(path.join(dir, "bin"));
+    await fs.mkdir(path.join(dir, "bin"), { recursive: true });
     // curl shim: record every argument; for -H @file also record the file's content (what real curl would send).
     await fs.writeFile(path.join(dir, "bin", "curl"), [
       "#!/bin/sh",
-      `for a in "$@"; do printf '%s\\n' "$a" >> '${argvLog.replace(/\\/g, "/")}'; done`,
+      `for a in "$@"; do printf '%s\n' "$a" >> '${slash(argvLog)}'; done`,
       "prev=''",
-      `for a in "$@"; do case "$prev" in -H) case "$a" in @*) cat "\${a#@}" >> '${headerLog.replace(/\\/g, "/")}';; esac;; esac; prev="$a"; done`,
+      `for a in "$@"; do case "$prev" in -H) case "$a" in @*) cat "\${a#@}" >> '${slash(headerLog)}';; esac;; esac; prev="$a"; done`,
       "cat >/dev/null",
     ].join("\n"), { mode: 0o755 });
     await fs.writeFile(path.join(dir, "bin", "jq"), "#!/bin/sh\necho '{}'\n", { mode: 0o755 });
-    const result = spawnSync("bash", ["-c", snippet!], {
+    const result = spawnSync("bash", ["-c", snippet], {
       encoding: "utf8",
       env: {
         ...process.env,
         PATH: `${path.join(dir, "bin")}${path.delimiter}${process.env.PATH ?? ""}`,
-        PAPERCLIP_API_URL: "http://127.0.0.1:5113/api",
+        PAPERCLIP_API_URL: apiUrl,
         PAPERCLIP_API_KEY: DUMMY_KEY,
         PAPERCLIP_RUN_ID: "run-binding-1",
       },
     });
+    return {
+      result,
+      argv: await fs.readFile(argvLog, "utf8").catch(() => ""),
+      headers: await fs.readFile(headerLog, "utf8").catch(() => ""),
+    };
+  }
+
+  it("the prompt's example: dummy key absent from argv, present in the header file, no doubled /api", async () => {
+    const { ctx } = makeCtx({});
+    const prompt = buildPrompt(ctx as never, { paperclipApiUrl: "http://127.0.0.1:5113/api" });
+    const snippet = prompt.match(/```bash\n([\s\S]*?)\n```/)?.[1];
+    expect(snippet).toBeTruthy();
+    const { result, argv, headers } = await runSnippet(snippet!, "http://127.0.0.1:5113");
     expect(result.status, result.stderr).toBe(0);
-    const argv = await fs.readFile(argvLog, "utf8");
-    const headers = await fs.readFile(headerLog, "utf8");
     expect(argv).not.toContain(DUMMY_KEY);
     expect(result.stdout + result.stderr).not.toContain(DUMMY_KEY);
     expect(headers).toContain(`Authorization: Bearer ${DUMMY_KEY}`);
     expect(headers).toContain("X-Paperclip-Run-Id: run-binding-1");
+    expect(argv).toContain("http://127.0.0.1:5113/api/issues/issue-1");
+    expect(argv).not.toContain("/api/api");
+  });
+
+  const skillSnippet = readFileSync(new URL("../../../../../skills/paperclip/SKILL.md", import.meta.url), "utf8")
+    .match(/```bash\n(hdr=[\s\S]*?)\n```/)?.[1];
+
+  it.each([
+    ["the bare origin every adapter sets", "http://127.0.0.1:5113"],
+    ["an origin that already ends in /api", "http://127.0.0.1:5113/api"],
+  ])("the shared skill's example builds the right URL from %s, with the key out of argv", async (_label, apiUrl) => {
+    expect(skillSnippet).toBeTruthy();
+    const { result, argv, headers } = await runSnippet(skillSnippet!, apiUrl);
+    expect(result.status, result.stderr).toBe(0);
+    expect(argv).toContain("http://127.0.0.1:5113/api/agents/me");
+    expect(argv).not.toContain("/api/api");
+    expect(argv).not.toContain(DUMMY_KEY);
+    expect(headers).toContain(`Authorization: Bearer ${DUMMY_KEY}`);
   });
 });
