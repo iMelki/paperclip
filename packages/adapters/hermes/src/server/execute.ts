@@ -116,7 +116,7 @@ const HERMES_DEFAULT_PROMPT_TEMPLATE = [
   "- Detail two",
   "MD",
   ")",
-  "hdr=\"$(mktemp)\"",
+  "hdr=\"$(mktemp)\"; trap 'rm -f \"$hdr\"' EXIT",
   "printf 'Authorization: Bearer %s\\nX-Paperclip-Run-Id: %s\\n' \"$PAPERCLIP_API_KEY\" \"$PAPERCLIP_RUN_ID\" > \"$hdr\"",
   "jq -n --arg status done --arg comment \"$body\" '{status:$status, comment:$comment}' | \\",
   "  curl -sS -X PATCH \"$api/issues/{{context.issueId}}\" \\",
