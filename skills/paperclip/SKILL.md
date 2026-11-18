@@ -5,6 +5,20 @@ description: >
   governance. Use when checking assignments, updating issue status, posting
   comments, delegating work, managing routines, or calling Paperclip API
   endpoints.
+required_environment_variables:
+  - name: PAPERCLIP_API_URL
+  - name: PAPERCLIP_API_KEY
+  - name: PAPERCLIP_RUN_ID
+  - name: PAPERCLIP_AGENT_ID
+  - name: PAPERCLIP_COMPANY_ID
+  - name: PAPERCLIP_TASK_ID
+    optional: true
+  - name: PAPERCLIP_WAKE_REASON
+    optional: true
+  - name: PAPERCLIP_WAKE_COMMENT_ID
+    optional: true
+  - name: PAPERCLIP_WAKE_PAYLOAD_JSON
+    optional: true
 ---
 
 # Paperclip Skill
@@ -18,6 +32,16 @@ In Paperclip, **task** and **issue** refer to the same work item. The UI may use
 ## Authentication
 
 Env vars auto-injected: `PAPERCLIP_AGENT_ID`, `PAPERCLIP_COMPANY_ID`, `PAPERCLIP_API_URL`, `PAPERCLIP_RUN_ID`. Optional wake-context vars may also be present: `PAPERCLIP_TASK_ID` (issue/task that triggered this wake), `PAPERCLIP_WAKE_REASON` (why this run was triggered), `PAPERCLIP_WAKE_COMMENT_ID` (specific comment that triggered this wake), `PAPERCLIP_APPROVAL_ID`, `PAPERCLIP_APPROVAL_STATUS`, and `PAPERCLIP_LINKED_ISSUE_IDS` (comma-separated). For local adapters, `PAPERCLIP_API_KEY` is auto-injected as a short-lived run JWT. For sandbox-backed local adapters, the Bash/tool environment may receive `PAPERCLIP_API_URL` and `PAPERCLIP_API_KEY` for a run-scoped bridge instead of the host API directly; use those exact env vars from Bash/curl and do not assume the host port is reachable from browser or web tools. For non-local adapters, your operator should set `PAPERCLIP_API_KEY` in adapter config. All requests use `Authorization: Bearer $PAPERCLIP_API_KEY`. All endpoints under `/api`, all JSON. Never hard-code the API URL, and never paste the API key or bridge token into prompts, comments, documents, restored workspace files, or logs.
+
+**Keep the run key off command lines.** The shell expands `-H "Authorization: Bearer $PAPERCLIP_API_KEY"` into the process arguments of `curl`, and other processes on the machine can read those. Wherever an example below shows that header, send it from a private header file instead. `printf` is a shell builtin, so the key never appears in any process's arguments:
+
+```bash
+hdr="$(mktemp)"; trap 'rm -f "$hdr"' EXIT   # removed even if a later command fails
+printf 'Authorization: Bearer %s\nX-Paperclip-Run-Id: %s\n' "$PAPERCLIP_API_KEY" "$PAPERCLIP_RUN_ID" > "$hdr"
+api="${PAPERCLIP_API_URL%/}"; api="${api%/api}"        # PAPERCLIP_API_URL is the bare origin; paths add /api
+curl -sS -H @"$hdr" "$api/api/agents/me"              # -H @file reads the headers from the file
+rm -f "$hdr"
+```
 
 Some adapters also inject `PAPERCLIP_WAKE_PAYLOAD_JSON` on comment-driven wakes. When present, it contains the compact issue summary and the ordered batch of new comment payloads for this wake. Use it first. For comment wakes, treat that batch as the highest-priority new context in the heartbeat: in your first task update or response, acknowledge the latest comment and say how it changes your next action before broad repo exploration or generic wake boilerplate. Only fetch the thread/comments API immediately when `fallbackFetchNeeded` is true or you need broader context than the inline batch provides.
 
