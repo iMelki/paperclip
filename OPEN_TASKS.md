@@ -647,7 +647,7 @@ This file is the durable local index for active `paperclip` issues.
     inventory and fingerprints are in `doc/security/gitleaks-history-inventory-2026-08-02.md`;
     the current report is the paired `paperclip-gitleaks-history-902118b6.stdout.log` /
     `paperclip-gitleaks-history-902118b6.stderr.log` artifacts under
-    `S:\source\CCAI\Assistants\_factory-work`;
+    `<local factory-work folder>`;
     no active credential rotation was warranted.
 
 - [#13 - Replace inert secrets-filter attributes with enforced secret scanning](https://github.com/iMelki/paperclip/issues/13)
