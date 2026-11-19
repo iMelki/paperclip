@@ -148,8 +148,9 @@ export function computeRunUsage(
     return { usage: totals, usageBasis: "session_cumulative", costUsd: null, unknownReason: null, nextBaseline: reanchor };
   }
   if (previous.inputTokens === null || previous.outputTokens === null || previous.cachedInputTokens === null) {
-    // Subtracting an unknown baseline as zero would count earlier usage of the session again.
-    return unknownRun("baseline_unusable", reanchor);
+    // Subtracting an unknown baseline as zero would count earlier usage of the session again. The
+    // valid per-field watermarks survive, so what this unknown run saw is recovered by a later read.
+    return unknownRun("baseline_unusable", mergeUnusableBaseline(current, previous));
   }
   if (inputTokens < previous.inputTokens || outputTokens < previous.outputTokens
     || cachedInputTokens < previous.cachedInputTokens) {
@@ -166,7 +167,31 @@ export function computeRunUsage(
     usageBasis: "per_run",
     costUsd: bothCosts && !costRegressed ? (current.costUsd as number) - (previous.costUsd as number) : null,
     unknownReason: null,
-    nextBaseline: costRegressed ? { ...reanchor, costUsd: previous.costUsd } : reanchor,
+    // The cost watermark moves only on a valid, non-regressed cost; an unknown cost keeps the last one.
+    nextBaseline: { ...reanchor, costUsd: costWatermark(current.costUsd, previous.costUsd) },
+  };
+}
+
+/** Last valid cost watermark: advances on a valid, non-lower cost; an unknown or lower cost keeps the old one. */
+function costWatermark(current: number | null, previous: number | null): number | null {
+  if (current === null) return previous;
+  if (previous === null) return current;
+  return current < previous ? previous : current;
+}
+
+/**
+ * Baseline after a run whose stored baseline had an invalid counter. That run reports nothing, so its
+ * usage is not accounted: every valid stored counter stays where it is (a later read recovers the gap),
+ * and only a counter with no valid stored value is anchored at the current reading, because there is
+ * nothing earlier to recover it from. The cost watermark is kept independently of the tokens.
+ */
+function mergeUnusableBaseline(current: HermesSessionUsage, previous: HermesUsageBaseline): HermesUsageBaseline {
+  return {
+    sessionId: current.sessionId,
+    inputTokens: previous.inputTokens ?? current.inputTokens,
+    outputTokens: previous.outputTokens ?? current.outputTokens,
+    cachedInputTokens: previous.cachedInputTokens ?? current.cachedInputTokens,
+    costUsd: costWatermark(current.costUsd, previous.costUsd),
   };
 }
 

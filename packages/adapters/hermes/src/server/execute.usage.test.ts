@@ -176,12 +176,44 @@ describe("hermes_local usage reporting", () => {
     expect(result.costUsd ?? null).toBeNull();
   });
 
-  it("a stored baseline with missing counters makes the resumed run unknown", async () => {
-    stubHermes();
+  it("a stored baseline with a missing counter makes the run unknown but keeps the valid watermarks and recovers them", async () => {
+    // Prior input watermark is invalid; output 40 and cached 100 are valid and were already accounted.
     const baseline = { sessionId: SESSION, outputTokens: 40, cachedInputTokens: 100, costUsd: 0.02 };
-    const result = await execute(makeCtx({ sessionId: SESSION, usageBaseline: baseline }).ctx as never);
-    expect(result.usage).toBeUndefined();
-    expect(result.resultJson).toMatchObject({ usage_unavailable_reason: "baseline_unusable" });
+    stubHermes({ record: exportRecord({ output_tokens: 100 }) });
+    const unknown = await execute(makeCtx({ sessionId: SESSION, usageBaseline: baseline }).ctx as never);
+    expect(unknown.usage).toBeUndefined();
+    expect(unknown.resultJson).toMatchObject({ usage_unavailable_reason: "baseline_unusable" });
+    // Valid watermarks are not replaced by this run's totals: output stays 40, cached stays 100.
+    expect(unknown.sessionParams).toMatchObject({
+      usageBaseline: { sessionId: SESSION, inputTokens: 1000, outputTokens: 40, cachedInputTokens: 100, costUsd: 0.05 },
+    });
+    // Recovery: a later reading reports what the unknown run saw (100 - 40), not only the 10 since then.
+    stubHermes({ record: exportRecord({ input_tokens: 1050, output_tokens: 110 }) });
+    const next = await execute(makeCtx(unknown.sessionParams as Record<string, unknown>).ctx as never);
+    expect(next.usage).toEqual({ inputTokens: 50, outputTokens: 70, cachedInputTokens: 300 });
+    expect(next.resultJson).toMatchObject({ usage_status: "reported" });
+  });
+
+  it("cost known -> unknown -> known: an unknown cost keeps the watermark, so the outstanding cost is reported", async () => {
+    const baseline = { sessionId: SESSION, inputTokens: 600, outputTokens: 40, cachedInputTokens: 100, costUsd: 0.02 };
+    // Tokens are known but Hermes cannot price this reading: no cost reported, watermark 0.02 kept.
+    stubHermes({ record: exportRecord({ estimated_cost_usd: 0, cost_status: "unknown" }) });
+    const unpriced = await execute(makeCtx({ sessionId: SESSION, usageBaseline: baseline }).ctx as never);
+    expect(unpriced.usage).toEqual({ inputTokens: 400, outputTokens: 60, cachedInputTokens: 300 });
+    expect(unpriced.costUsd ?? null).toBeNull();
+    expect(unpriced.sessionParams).toMatchObject({ usageBaseline: { inputTokens: 1000, costUsd: 0.02 } });
+    // A valid cumulative 0.05 now reports the full outstanding 0.03.
+    stubHermes({ record: exportRecord({ input_tokens: 1100, estimated_cost_usd: 0.05 }) });
+    const priced = await execute(makeCtx(unpriced.sessionParams as Record<string, unknown>).ctx as never);
+    expect(priced.costUsd).toBeCloseTo(0.03, 10);
+    expect(priced.sessionParams).toMatchObject({ usageBaseline: { costUsd: 0.05 } });
+  });
+
+  it("an unknown run (unusable baseline) also keeps the valid cost watermark", async () => {
+    const baseline = { sessionId: SESSION, outputTokens: 40, cachedInputTokens: 100, costUsd: 0.02 };
+    stubHermes({ record: exportRecord({ estimated_cost_usd: 0, cost_status: "unknown" }) });
+    const unknown = await execute(makeCtx({ sessionId: SESSION, usageBaseline: baseline }).ctx as never);
+    expect(unknown.sessionParams).toMatchObject({ usageBaseline: { costUsd: 0.02 } });
   });
 
   it("a counter that went down is unknown and the higher watermark survives to the next run", async () => {
