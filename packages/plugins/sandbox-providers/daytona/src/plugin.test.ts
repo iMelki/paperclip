@@ -2700,9 +2700,14 @@ describe("Daytona sandbox provider plugin", () => {
 
       const sandbox = createMockSandbox({ id: "lease-a" });
       let resolveUpload!: () => void;
+      let signalUploadEntered!: () => void;
+      const uploadEntered = new Promise<void>((resolve) => {
+        signalUploadEntered = resolve;
+      });
       sandbox.fs.uploadFiles.mockImplementation(async () => {
         await new Promise<void>((resolve) => {
           resolveUpload = resolve;
+          signalUploadEntered();
         });
       });
       mockGet.mockResolvedValue(sandbox);
@@ -2720,8 +2725,11 @@ describe("Daytona sandbox provider plugin", () => {
           },
         ],
       });
-      // Let syncIn register on the activity gate and reach the hung upload.
-      await new Promise((resolve) => setTimeout(resolve, 0));
+      // Wait until syncIn has registered on the activity gate AND reached the
+      // hung upload. A single setTimeout(0) is not enough: getSandbox,
+      // ensureSandboxStarted, mkdir, and the symlink-escape guard all await
+      // before uploadFiles, so resolveUpload can still be unassigned.
+      await uploadEntered;
 
       const cancelPromise = plugin.definition.onEnvironmentCancelInteractiveSetup?.({
         driverKey: "daytona",
