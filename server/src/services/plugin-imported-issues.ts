@@ -24,6 +24,8 @@ type TaskJournal = RootJournal & { taskId: string; nodeId: string; sourceUrl: st
 type StoredOperation = BoardImportOperation & { intent: BoardImportIntent; receipt?: BoardImportReceipt } &
   ({ userId: string; nativeOwner?: never } | { nativeOwner: ScheduledBoardOwner; userId?: never });
 const MAX_EXCLUSIONS = 1000;
+// Drift that board users may cause and that does not change which GitHub issue a task stands for.
+const PLACEMENT_DRIFT_FIELDS: ReadonlySet<string> = new Set(["parentId", "projectId"]);
 export type BoardImportIntentValidation = (
   executor: Db, context: BoardImportHostContext, intent: BoardImportIntent,
 ) => Promise<void>;
@@ -147,7 +149,9 @@ export function pluginImportedIssuesService(
     return journal;
   }
 
-  async function taskJournal(executor: Db, companyId: string, node: string, locked = false) {
+  // Reads the journal and its single native task. `drift` names every stored identity field that no longer
+  // matches (empty when the task is intact); it never carries values, only field names.
+  async function readTaskJournal(executor: Db, companyId: string, node: string, locked = false) {
     const journal = await readState<TaskJournal>(executor, companyId, `task:${taskKey(companyId, node)}`);
     const rows = await executor.select().from(issues).where(and(
       eq(issues.companyId, companyId), eq(issues.originKind, origins.task), eq(issues.originId, node),
@@ -156,11 +160,23 @@ export function pluginImportedIssuesService(
     if (!journal) return null;
     validateBoardImportSourceUrl(journal.sourceUrl);
     const issue = rows[0];
-    if (!issue || journal.nodeId !== node || issue.id !== journal.taskId || issue.projectId !== journal.projectId
-      || issue.parentId !== journal.rootId || issue.originFingerprint !== journal.sourceUrl) {
-      throw conflict("Native GitHub task identity changed; existing work preserved");
+    if (!issue) throw conflict("Native GitHub task identity changed; existing work preserved", { code: "task_missing" });
+    const drift = [
+      journal.nodeId !== node && "githubIssueNodeId", issue.id !== journal.taskId && "taskId",
+      issue.projectId !== journal.projectId && "projectId", issue.parentId !== journal.rootId && "parentId",
+      issue.originFingerprint !== journal.sourceUrl && "sourceUrl",
+    ].filter((field): field is string => Boolean(field));
+    return { journal, issue, drift };
+  }
+  async function taskJournal(executor: Db, companyId: string, node: string, locked = false) {
+    const found = await readTaskJournal(executor, companyId, node, locked);
+    if (!found) return null;
+    if (found.drift.length) {
+      // Name the task and the drifted fields so an operator can act without a database read.
+      throw conflict(`Native GitHub task identity changed; existing work preserved (task ${found.issue.id}, `
+        + `${found.journal.sourceUrl}, fields: ${found.drift.join(", ")})`, { code: "task_identity_drift" });
     }
-    return { journal, issue };
+    return { journal: found.journal, issue: found.issue };
   }
   async function taskReadback(executor: Db, companyId: string, node: string): Promise<BoardImportTask | null> {
     const existing = await taskJournal(executor, companyId, node);
@@ -480,16 +496,29 @@ export function pluginImportedIssuesService(
         });
       });
       const sourceUrls: string[] = [];
+      const quarantined: Array<{ taskId: string; sourceUrl: string; fields: string[] }> = [];
       for (const row of snapshot) {
-        const sourceUrl = await transact(async executor => {
+        const found = await transact(async executor => {
           await authorize(executor, context, undefined, true);
-          const existing = await taskJournal(executor, context.companyId, validateBoardImportNode(row.originId));
+          const existing = await readTaskJournal(executor, context.companyId, validateBoardImportNode(row.originId));
           if (!existing || existing.issue.id !== row.id) throw conflict("Missing authoritative manual-import exclusion");
-          return existing.journal.sourceUrl;
+          return existing;
         });
-        sourceUrls.push(sourceUrl);
+        // Only a placement drift (the parent or the project, which board users may change) is quarantined: the task
+        // and its source still agree with the journal, so its source stays excluded (the task exists and is journaled,
+        // repository sync must not mint a second one), nothing is overwritten, and it is named in the result. If the
+        // task id, the node id or the source URL no longer agree, the excluded URL could belong to a different GitHub
+        // issue, so sync is held instead. A missing journal or ambiguous rows still hold sync. Every other task syncs.
+        const identityDrift = found.drift.filter(field => !PLACEMENT_DRIFT_FIELDS.has(field));
+        if (identityDrift.length) {
+          throw conflict(`Native GitHub task identity changed; repository sync must remain held (task ${found.issue.id}, `
+            + `fields: ${identityDrift.join(", ")})`, { code: "task_identity_drift" });
+        }
+        sourceUrls.push(found.journal.sourceUrl);
+        if (found.drift.length) quarantined.push({ taskId: found.issue.id, sourceUrl: found.journal.sourceUrl, fields: found.drift });
       }
-      return { companyId: context.companyId, sourceUrls: [...new Set(sourceUrls)].sort() };
+      return { companyId: context.companyId, sourceUrls: [...new Set(sourceUrls)].sort(),
+        ...(quarantined.length ? { quarantined } : {}) };
     },
   };
 }

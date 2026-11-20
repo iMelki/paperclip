@@ -199,6 +199,119 @@ describe("native board import transaction and readback", () => {
     await expect(setup.service.readTask(setup.context, { githubIssueNodeId: setup.input.githubIssueNodeId })).rejects.toThrow();
   });
 
+  it("quarantines one drifted import: it is named, stays excluded, others keep syncing, nothing is overwritten (#281)", async () => {
+    const setup = await seed();
+    const clean = await importItem(setup);
+    const secondInput = intent(setup.companyId, setup.projectId, {
+      githubIssueNodeId: "I_fixture_node_2", boardItemId: "PVTI_item_2",
+      task: { ...setup.input.task, githubIssueNodeId: "I_fixture_node_2", title: "Second fixture",
+        sourceUrl: "https://github.com/example/fixture/issues/2" },
+    });
+    const drifted = await importItem(setup, secondInput);
+    // A board user clears the parent of the second task (an allowed board action), as in the observed case.
+    await db.update(issues).set({ parentId: null }).where(eq(issues.id, drifted.task.id));
+    const before = (await nativeTasks(setup.companyId)).find(row => row.id === drifted.task.id);
+    const stateBefore = await nativeState(setup.companyId);
+
+    const result = await setup.service.getExcludedSources({ companyId: setup.companyId, actor: { type: "system" } });
+    expect(result.sourceUrls).toEqual([clean.task.sourceUrl, drifted.task.sourceUrl].sort());
+    expect(result.quarantined).toEqual([
+      { taskId: drifted.task.id, sourceUrl: drifted.task.sourceUrl, fields: ["parentId"] },
+    ]);
+    expect(await nativeState(setup.companyId)).toEqual(stateBefore); // the exclusion read writes nothing
+    expect((await nativeTasks(setup.companyId)).find(row => row.id === drifted.task.id)).toEqual(before);
+
+    // Negative proof: the guard still refuses to touch the drifted task, and now names it.
+    const named = new RegExp(`${drifted.task.id}.*parentId`);
+    await expect(setup.service.readTask(setup.context, { githubIssueNodeId: "I_fixture_node_2" })).rejects.toThrow(named);
+    await expect(setup.service.commit(setup.context, { intent: secondInput })).rejects.toThrow(named);
+    expect((await setup.service.readTask(setup.context, { githubIssueNodeId: setup.input.githubIssueNodeId }))?.id)
+      .toBe(clean.task.id);
+    expect((await nativeTasks(setup.companyId)).find(row => row.id === drifted.task.id)).toEqual(before);
+  });
+
+  it("does not quarantine ambiguity: a journal with two native rows still holds sync (#281)", async () => {
+    const setup = await seed();
+    const first = await importItem(setup);
+    await db.insert(issues).values({ companyId: setup.companyId, projectId: setup.projectId, title: "Duplicate origin",
+      originKind: boardImportOrigins(setup.pluginKey).task, originId: setup.input.githubIssueNodeId,
+      originFingerprint: first.task.sourceUrl });
+    await expect(setup.service.getExcludedSources({ companyId: setup.companyId, actor: { type: "system" } })).rejects.toThrow();
+  });
+
+  it("does not quarantine ambiguity that the count check cannot see: equal counts still reach the per-origin guard (#281)", async () => {
+    const setup = await seed();
+    const first = await importItem(setup);
+    await db.insert(issues).values({ companyId: setup.companyId, projectId: setup.projectId, title: "Duplicate origin",
+      originKind: boardImportOrigins(setup.pluginKey).task, originId: setup.input.githubIssueNodeId,
+      originFingerprint: first.task.sourceUrl });
+    // A second, unrelated journal row makes native tasks and journals equal in number (2 and 2).
+    await db.insert(pluginState).values({ pluginId: setup.pluginId, scopeKind: "company", scopeId: setup.companyId,
+      namespace: BOARD_IMPORT_NAMESPACE, stateKey: `task:${boardImportDigest(["unrelated"])}`, valueJson: {} });
+    const native = await db.select({ id: issues.id }).from(issues).where(and(eq(issues.companyId, setup.companyId),
+      eq(issues.originKind, boardImportOrigins(setup.pluginKey).task)));
+    expect(native).toHaveLength(2);
+    await expect(setup.service.getExcludedSources({ companyId: setup.companyId, actor: { type: "system" } }))
+      .rejects.toThrow(/Ambiguous or unjournaled/);
+  });
+
+  it.each(["sourceUrl", "githubIssueNodeId", "taskId"] as const)(
+    "does not quarantine a %s mismatch: it could put a different issue's URL on the exclusion list, so sync is held (#281)",
+    async (field) => {
+      const setup = await seed();
+      const clean = await importItem(setup);
+      const secondInput = intent(setup.companyId, setup.projectId, {
+        githubIssueNodeId: "I_fixture_node_2", boardItemId: "PVTI_item_2",
+        task: { ...setup.input.task, githubIssueNodeId: "I_fixture_node_2", title: "Second fixture",
+          sourceUrl: "https://github.com/example/fixture/issues/2" },
+      });
+      const second = await importItem(setup, secondInput);
+      const otherUrl = "https://github.com/example/fixture/issues/99"; // well formed, but another GitHub issue
+      if (field === "sourceUrl") {
+        await db.update(issues).set({ originFingerprint: otherUrl }).where(eq(issues.id, second.task.id));
+      } else {
+        const key = `task:${secondInput.taskKey}`;
+        const [row] = await db.select().from(pluginState).where(and(eq(pluginState.scopeId, setup.companyId),
+          eq(pluginState.namespace, BOARD_IMPORT_NAMESPACE), eq(pluginState.stateKey, key)));
+        const value = { ...(row.valueJson as Record<string, unknown>) };
+        if (field === "githubIssueNodeId") value.nodeId = "I_some_other_node"; else value.taskId = randomUUID();
+        await db.update(pluginState).set({ valueJson: value }).where(eq(pluginState.id, row.id));
+      }
+      const stateBefore = await nativeState(setup.companyId);
+      await expect(setup.service.getExcludedSources({ companyId: setup.companyId, actor: { type: "system" } }))
+        .rejects.toThrow(new RegExp(`must remain held.*${field}`));
+      expect(await nativeState(setup.companyId)).toEqual(stateBefore); // nothing was written
+      // The clean task is untouched by the failed scan.
+      expect((await setup.service.readTask(setup.context, { githubIssueNodeId: setup.input.githubIssueNodeId }))?.id)
+        .toBe(clean.task.id);
+    },
+  );
+
+  it("refuses a fresh intent against a drifted task: nothing is created, changed or recorded (#281)", async () => {
+    const setup = await seed();
+    await importItem(setup);
+    const drifted = await importItem(setup, intent(setup.companyId, setup.projectId, {
+      githubIssueNodeId: "I_fixture_node_2", boardItemId: "PVTI_item_2",
+      task: { ...setup.input.task, githubIssueNodeId: "I_fixture_node_2", title: "Second fixture",
+        sourceUrl: "https://github.com/example/fixture/issues/2" },
+    }));
+    await db.update(issues).set({ parentId: null }).where(eq(issues.id, drifted.task.id));
+    const rowsBefore = await nativeTasks(setup.companyId);
+    const stateBefore = await nativeState(setup.companyId);
+    // A NEW intent (new board item, new operation id) for the same GitHub issue, not a replay of a committed one.
+    const fresh = intent(setup.companyId, setup.projectId, {
+      githubIssueNodeId: "I_fixture_node_2", boardItemId: "PVTI_fresh_item", sourceUpdatedAt: "2026-10-12T19:05:00Z",
+      task: { ...setup.input.task, githubIssueNodeId: "I_fixture_node_2", title: "Second fixture",
+        sourceUrl: "https://github.com/example/fixture/issues/2" },
+    });
+    await setup.service.begin(setup.context, { intent: fresh }).catch(() => undefined);
+    await expect(setup.service.commit(setup.context, { intent: fresh }))
+      .rejects.toThrow(new RegExp(`${drifted.task.id}.*parentId`));
+    expect(await nativeTasks(setup.companyId)).toEqual(rowsBefore);
+    expect((await nativeState(setup.companyId)).filter(row => row.stateKey.startsWith("membership:")))
+      .toEqual(stateBefore.filter(row => row.stateKey.startsWith("membership:")));
+  });
+
   it("rejects legacy native or entity URL mappings before minting another task", async () => {
     for (const mode of ["native", "entity"] as const) {
       const setup = await seed();
