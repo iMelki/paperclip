@@ -1,11 +1,13 @@
 import { createHash, randomUUID } from "node:crypto";
+import express from "express";
+import request from "supertest";
 import fs from "node:fs";
 import { createRequire } from "node:module";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { and, eq, sql } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { activityLog, agents, agentWakeupRequests, companies, companyMemberships, companySecrets, createDb, heartbeatRuns, issues, issueTreeHolds, plugins,
+import { activityLog, agents, agentWakeupRequests, companies, companyMemberships, companySecrets, createDb, heartbeatRuns, issues, issueTreeHolds, plugins, pluginJobs, pluginJobRuns,
   pluginState, projects, toolApplications, toolConnections } from "@paperclipai/db";
 import type { PaperclipPluginManifestV1 } from "@paperclipai/shared";
 import { createGitHubOAuthProviderConfig } from "@paperclipai/shared/github-oauth";
@@ -16,6 +18,13 @@ import { GITHUB_PROJECT_BINDING_NAMESPACE, GITHUB_PROJECT_IMPORTER_KEY } from ".
 import { githubProjectAuthorizationDigest } from "../services/github-oauth-project-page.js";
 import { toolConnectionSnapshotColumns } from "../services/tool-connection-snapshot.js";
 import { pluginGitHubProjectBoardService } from "../services/plugin-github-project-board.js";
+import { pluginGitHubProjectScheduleGrants } from "../services/plugin-github-project-schedule-grants.js";
+import { createScheduledGitHubProjectBoardService } from "../services/plugin-github-project-scheduled.js";
+import { scheduleGrantSchema as legacyGrantSchema } from "./github-project-schedule-grant-v1.fixture.js";
+import { selectNativeBoardJobTargets as legacyTargets } from "./helpers/github-project-board-job-targets-v1.fixture.js";
+import { pluginGitHubProjectScheduleGrants as legacyGrantService } from "./helpers/plugin-github-project-schedule-grants-v1.fixture.js";
+import { registerGitHubProjectScheduleGrantRoutes } from "../routes/plugin-github-project-schedule-grants.js";
+import { errorHandler } from "../middleware/error-handler.js";
 import { pluginImportedIssuesService } from "../services/plugin-imported-issues.js";
 import { pluginLifecycleManager } from "../services/plugin-lifecycle.js";
 import type { PluginLoader } from "../services/plugin-loader.js";
@@ -181,7 +190,7 @@ describe.skipIf(WINDOWS_NATIVE_FIXTURE_MISSING)(
     });
   });
   afterEach(() => dispose.splice(0).forEach(action => action()));
-  afterAll(async () => { try { await db?.$client.end({ timeout: 5 }); } finally { await fixture?.cleanup(); } }, 30_000);
+  afterAll(async () => { try { await db?.$client.end({ timeout: 5 }); } finally { await fixture?.cleanup(); } }, 45_000);
   // Acceptance-only: needs the hash-pinned, separately built Project12 worker artifact
   // (PAPERCLIP_BOARD_ARTIFACT_ROOT + SHA-256 pins). Not platform-bound; skipped where absent.
   it.skipIf(!process.env.PAPERCLIP_BOARD_ARTIFACT_ROOT)(
@@ -245,6 +254,202 @@ describe.skipIf(WINDOWS_NATIVE_FIXTURE_MISSING)(
     expect(await db.select().from(issues).where(eq(issues.companyId, setup.companyId))).toHaveLength(2); // one manual parent, one issue
     await noAgentEffects(setup);
   });
+  it("creates a revocable durable schedule and invalidates it on changed connection", async () => {
+    const setup = await seed();
+    await binding(setup);
+    const proposedId = randomUUID();
+    await db.insert(pluginJobs).values({ id: proposedId, pluginId, jobKey: "sync.github-project-board",
+      schedule: "*/5 * * * *", status: "paused" }).onConflictDoNothing();
+    const [job] = await db.select().from(pluginJobs).where(and(eq(pluginJobs.pluginId, pluginId),
+      eq(pluginJobs.jobKey, "sync.github-project-board")));
+    const context = { companyId: setup.companyId, actor: setup.context.invocationScope.actor };
+    const identity = { pluginId, pluginKey: GITHUB_PROJECT_IMPORTER_KEY };
+    const service = pluginGitHubProjectScheduleGrants(db, identity, pluginGitHubProjectBoardService(db, identity, pageReader));
+    const created = await service.create(context, { ...setup.scope, expectedRevision: 0, jobId: job.id,
+      enabled: true, maxItems: 20, expiresAt: null });
+    expect(created).toMatchObject({ version: 2, enabled: true, expiresAt: null, noDispatch: true, importOnly: true });
+    expect(await service.read(context, setup.scope)).toMatchObject({ status: "enabled", enabled: true });
+    const marker = (await state(setup)).find(row => row.stateKey === `schedule-grant:${setup.projectId}`)!;
+    expect(legacyGrantSchema.safeParse(marker.valueJson).success).toBe(true);
+    expect(legacyTargets([marker], pluginId, job.id)).toEqual([]);
+    await db.update(pluginState).set({ valueJson: { ...(marker.valueJson as object), revision: 2 } })
+      .where(and(eq(pluginState.pluginId, pluginId), eq(pluginState.scopeId, setup.companyId), eq(pluginState.stateKey, marker.stateKey)));
+    await expect(service.read(context, setup.scope)).rejects.toThrow("legacy marker differ");
+    await db.update(pluginState).set({ valueJson: marker.valueJson })
+      .where(and(eq(pluginState.pluginId, pluginId), eq(pluginState.scopeId, setup.companyId), eq(pluginState.stateKey, marker.stateKey)));
+    await expect(service.create(context, { ...setup.scope, expectedRevision: 0, jobId: job.id,
+      enabled: true, maxItems: 20, expiresAt: null })).rejects.toThrow("revision changed");
+    await db.update(toolConnections).set({ config: { ...setup.config, label: "changed-after-grant" } })
+      .where(eq(toolConnections.id, setup.connectionId));
+    expect(await service.read(context, setup.scope)).toMatchObject({ status: "stale", enabled: false });
+    const revoked = await service.revoke(context, { ...setup.scope, expectedRevision: 1 });
+    expect(revoked).toMatchObject({ version: 1, enabled: false, revision: 2, revokedByUserId: setup.userId });
+    expect(Date.parse(revoked.expiresAt!) - Date.parse(revoked.grantedAt)).toBe(24 * 60 * 60 * 1000);
+    expect(legacyGrantSchema.safeParse(revoked).success).toBe(true);
+    expect(await service.read(context, setup.scope)).toMatchObject({ status: "revoked", enabled: false });
+    await noAgentEffects(setup);
+  });
+  it("runs the durable scheduled board twice without duplicates or agent wakes", async () => {
+    const setup = await seed(); await binding(setup);
+    const proposedId = randomUUID();
+    await db.insert(pluginJobs).values({ id: proposedId, pluginId, jobKey: "sync.github-project-board",
+      schedule: "*/5 * * * *", status: "active" }).onConflictDoUpdate({
+      target: [pluginJobs.pluginId, pluginJobs.jobKey], set: { status: "active" },
+    });
+    const [job] = await db.select().from(pluginJobs).where(and(eq(pluginJobs.pluginId, pluginId),
+      eq(pluginJobs.jobKey, "sync.github-project-board")));
+    const context = { companyId: setup.companyId, actor: setup.context.invocationScope.actor };
+    const identity = { pluginId, pluginKey: GITHUB_PROJECT_IMPORTER_KEY };
+    const service = pluginGitHubProjectScheduleGrants(db, identity, pluginGitHubProjectBoardService(db, identity, pageReader));
+    await service.create(context, { ...setup.scope, expectedRevision: 0, jobId: job.id,
+      enabled: true, maxItems: 20, expiresAt: null });
+    const reader = vi.fn(async (input: { authorizationDigest: string }) => ({ page: boardPage(),
+      account: { accountId: 42, login: "example" }, authorizationDigest: input.authorizationDigest }));
+    const scheduled = createScheduledGitHubProjectBoardService(db, identity, reader, { enabled: true });
+    const run = async () => {
+      const jobRunId = randomUUID();
+      await db.insert(pluginJobRuns).values({ id: jobRunId, pluginId, companyId: setup.companyId,
+        jobId: job.id, trigger: "schedule", status: "running", startedAt: new Date() });
+      return scheduled.run({ ...setup.scope, pluginId, jobId: job.id, jobRunId },
+        { ownerEpoch: randomUUID(), isCurrent: () => true });
+    };
+    const started = Date.now();
+    const first = await run();
+    expect(first).toMatchObject({ status: "verified", batchVerified: true, complete: true });
+    const lease = (await state(setup)).find(row => row.stateKey === `schedule-lease:${setup.projectId}`)?.valueJson as
+      { status: string; expiresAt: string } | undefined;
+    expect(lease?.status).toBe("settled");
+    expect(Date.parse(lease!.expiresAt)).toBeLessThanOrEqual(started + 90_000 + 1_000);
+    expect(Date.parse(lease!.expiresAt)).toBeGreaterThan(started);
+    const firstIssues = await db.select().from(issues).where(eq(issues.companyId, setup.companyId));
+    const second = await run();
+    expect(second).toMatchObject({ status: "verified", batchVerified: true, complete: true, created: 0 });
+    const secondIssues = await db.select().from(issues).where(eq(issues.companyId, setup.companyId));
+    expect(secondIssues.map(issue => issue.id).sort()).toEqual(firstIssues.map(issue => issue.id).sort());
+    expect(firstIssues).toHaveLength(2);
+    await noAgentEffects(setup);
+    await db.update(toolConnections).set({ config: { ...setup.config, label: "changed-after-schedule" } })
+      .where(eq(toolConnections.id, setup.connectionId));
+    await expect(run()).rejects.toThrow();
+    await service.revoke(context, { ...setup.scope, expectedRevision: 1 });
+    await expect(run()).rejects.toThrow();
+    await noAgentEffects(setup);
+  }, 45_000);
+  it("honors old-host revoke and fails closed after an old-host grant replaces the marker", async () => {
+    const identity = { pluginId, pluginKey: GITHUB_PROJECT_IMPORTER_KEY };
+    await db.insert(pluginJobs).values({ id: randomUUID(), pluginId, jobKey: "sync.github-project-board",
+      schedule: "*/5 * * * *", status: "paused" }).onConflictDoNothing();
+    const [job] = await db.select().from(pluginJobs).where(and(eq(pluginJobs.pluginId, pluginId),
+      eq(pluginJobs.jobKey, "sync.github-project-board")));
+    for (const action of ["revoke", "create"] as const) {
+      const setup = await seed(); await binding(setup);
+      const context = { companyId: setup.companyId, actor: setup.context.invocationScope.actor };
+      const board = pluginGitHubProjectBoardService(db, identity, pageReader);
+      const current = pluginGitHubProjectScheduleGrants(db, identity, board);
+      const old = legacyGrantService(db, identity, board);
+      await current.create(context, { ...setup.scope, expectedRevision: 0, jobId: job.id,
+        enabled: true, maxItems: 20, expiresAt: null });
+      expect(await old.read(context, setup.scope)).toMatchObject({ status: "disabled", enabled: false });
+      if (action === "revoke") {
+        const result = await old.revoke(context, { ...setup.scope, expectedRevision: 1 });
+        expect(result).toMatchObject({ version: 1, revision: 2, enabled: false, revokedByUserId: setup.userId });
+      } else {
+        const result = await old.create(context, { ...setup.scope, expectedRevision: 1, jobId: job.id,
+          enabled: true, maxItems: 20, expiresAt: new Date(Date.now() + 60_000).toISOString() });
+        expect(result).toMatchObject({ version: 1, revision: 2, enabled: true });
+      }
+      await expect(current.read(context, setup.scope)).rejects.toThrow("legacy marker differ");
+      const app = express(), router = express.Router();
+      app.use(express.json());
+      let role = "admin";
+      app.use((req, _res, next) => {
+        (req as any).actor = { type: "board", source: "session", sessionId: "fixture-session", userId: setup.userId,
+          companyIds: [setup.companyId], memberships: [{ companyId: setup.companyId, membershipRole: role, status: "active" }] };
+        next();
+      });
+      registerGitHubProjectScheduleGrantRoutes(router, db);
+      app.use("/api", router); app.use(errorHandler);
+      const route = `/api/plugins/${pluginId}/companies/${setup.companyId}/projects/${setup.projectId}/github-board/schedule-grant`;
+      await request(app).get(route).expect(409);
+      const inspection = await request(app).get(`${route}/inspect`).expect(200);
+      expect(inspection.body).toEqual({ legacy: { version: 1, revision: 2, enabled: action === "create", revoked: action === "revoke" },
+        durable: { version: 2, revision: 1, enabled: true, revoked: false }, consistent: false });
+      role = "viewer";
+      await request(app).get(`${route}/inspect`).expect(403);
+      await request(app).post(`${route}/reconcile`).send({ expectedLegacyRevision: 2, expectedDurableRevision: 1 }).expect(403);
+      role = "admin";
+      await request(app).get(`${route.replace(setup.companyId, randomUUID())}/inspect`).expect(404);
+      await request(app).post(`${route.replace(setup.companyId, randomUUID())}/reconcile`)
+        .send({ expectedLegacyRevision: 2, expectedDurableRevision: 1 }).expect(404);
+      await request(app).post(`${route}/reconcile`).send({ expectedLegacyRevision: 1, expectedDurableRevision: 1 }).expect(409);
+      await expect(current.reconcile(context, { ...setup.scope, expectedLegacyRevision: 1, expectedDurableRevision: 1 }))
+        .rejects.toThrow("changed or is not required");
+      const input = { expectedLegacyRevision: 2, expectedDurableRevision: 1 };
+      const attempts = await Promise.all([request(app).post(`${route}/reconcile`).send(input), request(app).post(`${route}/reconcile`).send(input)]);
+      expect(attempts.map(result => result.status).sort()).toEqual([200, 409]);
+      const reconciled = attempts.find(result => result.status === 200)!.body;
+      expect(reconciled).toMatchObject({ version: 1, revision: 3, enabled: false, revokedByUserId: setup.userId });
+      expect(await current.read(context, setup.scope)).toMatchObject({ status: "revoked", enabled: false });
+      expect(await old.read(context, setup.scope)).toMatchObject({ status: "revoked", enabled: false });
+      await request(app).get(route).expect(200).expect(response => expect(response.body).toMatchObject({ status: "revoked", enabled: false }));
+      await expect(current.reconcile(context, { ...setup.scope, ...input }))
+        .rejects.toThrow("changed or is not required");
+      await noAgentEffects(setup);
+    }
+  }, 45_000);
+  it("reconciles a prior v1 durable tombstone after the old host creates a grant", async () => {
+    const setup = await seed(); await binding(setup);
+    const identity = { pluginId, pluginKey: GITHUB_PROJECT_IMPORTER_KEY };
+    await db.insert(pluginJobs).values({ id: randomUUID(), pluginId, jobKey: "sync.github-project-board",
+      schedule: "*/5 * * * *", status: "paused" }).onConflictDoNothing();
+    const [job] = await db.select().from(pluginJobs).where(and(eq(pluginJobs.pluginId, pluginId),
+      eq(pluginJobs.jobKey, "sync.github-project-board")));
+    const context = { companyId: setup.companyId, actor: setup.context.invocationScope.actor };
+    const board = pluginGitHubProjectBoardService(db, identity, pageReader);
+    const current = pluginGitHubProjectScheduleGrants(db, identity, board), old = legacyGrantService(db, identity, board);
+    await current.create(context, { ...setup.scope, expectedRevision: 0, jobId: job.id,
+      enabled: true, maxItems: 20, expiresAt: null });
+    await current.revoke(context, { ...setup.scope, expectedRevision: 1 });
+    await old.create(context, { ...setup.scope, expectedRevision: 2, jobId: job.id,
+      enabled: true, maxItems: 20, expiresAt: new Date(Date.now() + 60_000).toISOString() });
+    await expect(current.read(context, setup.scope)).rejects.toThrow("legacy marker differ");
+    expect(await current.inspect(context, setup.scope)).toEqual({ legacy: { version: 1, revision: 3, enabled: true, revoked: false },
+      durable: { version: 1, revision: 2, enabled: false, revoked: true }, consistent: false });
+    const input = { ...setup.scope, expectedLegacyRevision: 3, expectedDurableRevision: 2 };
+    expect(await current.reconcile(context, input)).toMatchObject({ version: 1, revision: 4, enabled: false });
+    expect(await old.read(context, setup.scope)).toMatchObject({ status: "revoked", enabled: false });
+    expect(await current.read(context, setup.scope)).toMatchObject({ status: "revoked", enabled: false });
+    await expect(current.reconcile(context, input)).rejects.toThrow("changed or is not required");
+    await noAgentEffects(setup);
+  }, 45_000);
+  it("stops an in-flight scheduled import when its durable grant is revoked", async () => {
+    const setup = await seed(); await binding(setup);
+    const identity = { pluginId, pluginKey: GITHUB_PROJECT_IMPORTER_KEY };
+    await db.insert(pluginJobs).values({ id: randomUUID(), pluginId, jobKey: "sync.github-project-board",
+      schedule: "*/5 * * * *", status: "active" }).onConflictDoUpdate({
+      target: [pluginJobs.pluginId, pluginJobs.jobKey], set: { status: "active" },
+    });
+    const [job] = await db.select().from(pluginJobs).where(and(eq(pluginJobs.pluginId, pluginId),
+      eq(pluginJobs.jobKey, "sync.github-project-board")));
+    const context = { companyId: setup.companyId, actor: setup.context.invocationScope.actor };
+    const grants = pluginGitHubProjectScheduleGrants(db, identity, pluginGitHubProjectBoardService(db, identity, pageReader));
+    await grants.create(context, { ...setup.scope, expectedRevision: 0, jobId: job.id,
+      enabled: true, maxItems: 20, expiresAt: null });
+    const reader = vi.fn(async (input: { authorizationDigest: string }) => {
+      await grants.revoke(context, { ...setup.scope, expectedRevision: 1 });
+      return { page: boardPage(), account: { accountId: 42, login: "example" }, authorizationDigest: input.authorizationDigest };
+    });
+    const scheduled = createScheduledGitHubProjectBoardService(db, identity, reader, { enabled: true });
+    const jobRunId = randomUUID();
+    await db.insert(pluginJobRuns).values({ id: jobRunId, pluginId, companyId: setup.companyId,
+      jobId: job.id, trigger: "schedule", status: "running", startedAt: new Date() });
+    await expect(scheduled.run({ ...setup.scope, pluginId, jobId: job.id, jobRunId },
+      { ownerEpoch: randomUUID(), isCurrent: () => true })).rejects.toThrow();
+    expect(reader).toHaveBeenCalledTimes(1);
+    expect(await grants.read(context, setup.scope)).toMatchObject({ status: "revoked", enabled: false });
+    expect(await db.select().from(issues).where(eq(issues.companyId, setup.companyId))).toEqual([]);
+    await noAgentEffects(setup);
+  }, 45_000);
   it("keeps a first install dormant, explicitly enables once, then imports twice with an eligible idle agent", async () => {
     const setup = await seed();
     const loadSingle = vi.fn(async () => ({ success: true }));

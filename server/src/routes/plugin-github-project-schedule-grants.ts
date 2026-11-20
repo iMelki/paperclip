@@ -5,11 +5,12 @@ import { forbidden, notFound, unprocessable } from "../errors.js";
 import { assertBoard, assertCompanyAccess, getActorInfo, hasCompanyAccess } from "./authz.js";
 import { pluginGitHubProjectBoardService, GITHUB_PROJECT_IMPORTER_KEY } from "../services/plugin-github-project-board.js";
 import { pluginGitHubProjectScheduleGrants } from "../services/plugin-github-project-schedule-grants.js";
-import { createScheduleGrantSchema, parseScheduleGrantInput, revokeScheduleGrantSchema } from "../services/github-project-schedule-grant-contract.js";
+import { createScheduleGrantSchema, parseScheduleGrantInput, reconcileScheduleGrantSchema, revokeScheduleGrantSchema } from "../services/github-project-schedule-grant-contract.js";
 
 const pathSchema = z.object({ pluginId: z.string().uuid(), companyId: z.string().uuid(), projectId: z.string().uuid() }).strict();
 const createBody = createScheduleGrantSchema.omit({ companyId: true, projectId: true });
 const revokeBody = revokeScheduleGrantSchema.omit({ companyId: true, projectId: true });
+const reconcileBody = reconcileScheduleGrantSchema.omit({ companyId: true, projectId: true });
 const empty = z.object({}).strict();
 
 function trustedScope(req: Request) {
@@ -63,6 +64,19 @@ export function registerGitHubProjectScheduleGrantRoutes(router: Router, db: Db)
     const { scope, context } = trustedScope(req);
     const input = parseScheduleGrantInput(revokeBody, req.body);
     const result = await services(scope.pluginId).revoke(context, { ...input, companyId: scope.companyId, projectId: scope.projectId });
+    res.setHeader("Cache-Control", "no-store");
+    res.json(result);
+  });
+  router.get("/plugins/:pluginId/companies/:companyId/projects/:projectId/github-board/schedule-grant/inspect", async (req, res) => {
+    const { scope, context } = trustedScope(req);
+    const result = await services(scope.pluginId).inspect(context, { companyId: scope.companyId, projectId: scope.projectId });
+    res.setHeader("Cache-Control", "no-store");
+    res.json(result);
+  });
+  router.post("/plugins/:pluginId/companies/:companyId/projects/:projectId/github-board/schedule-grant/reconcile", async (req, res) => {
+    const { scope, context } = trustedScope(req);
+    const input = parseScheduleGrantInput(reconcileBody, req.body);
+    const result = await services(scope.pluginId).reconcile(context, { ...input, companyId: scope.companyId, projectId: scope.projectId });
     res.setHeader("Cache-Control", "no-store");
     res.json(result);
   });

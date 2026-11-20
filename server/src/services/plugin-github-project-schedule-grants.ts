@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
-import { and, eq, like, sql } from "drizzle-orm";
+import { and, eq, like, or, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { activityLog, companyMemberships, pluginJobs, pluginState } from "@paperclipai/db";
 import { conflict, forbidden } from "../errors.js";
@@ -10,7 +10,8 @@ import { GITHUB_PROJECT_BINDING_NAMESPACE, pluginGitHubProjectBoardService,
 import { boardImportDigest, type BoardImportHostContext } from "./plugin-imported-issues-contract.js";
 import { assertScheduleGrantRevision, createScheduleGrantSchema, grantScopeSchema,
   GITHUB_PROJECT_BOARD_JOB_KEY, GITHUB_PROJECT_GRANT_MAX_AGE_MS, parseScheduleGrantInput,
-  revokeScheduleGrantSchema, scheduleGrantSchema, type GitHubProjectScheduleGrant } from "./github-project-schedule-grant-contract.js";
+  durableScheduleGrantKey, legacyScheduleGrantMarker, reconcileScheduleGrantSchema, revokeScheduleGrantSchema, scheduleGrantDeadline,
+  scheduleGrantSchema, type GitHubProjectScheduleGrant } from "./github-project-schedule-grant-contract.js";
 
 type BoardService = ReturnType<typeof pluginGitHubProjectBoardService>;
 type Scope = { companyId: string; projectId: string };
@@ -35,8 +36,16 @@ export async function readRetainedNativeScheduleGrant(
   const parsed = parseScheduleGrantInput(grantScopeSchema, scope);
   const value = await pluginStateStore(executor).get(identity.pluginId, "company", `schedule-grant:${parsed.projectId}`,
     { scopeId: parsed.companyId, namespace: GITHUB_PROJECT_BINDING_NAMESPACE });
-  if (value === null) return null;
-  const grant = parseScheduleGrantInput(scheduleGrantSchema, value);
+  const durable = await pluginStateStore(executor).get(identity.pluginId, "company", durableScheduleGrantKey(parsed.projectId),
+    { scopeId: parsed.companyId, namespace: GITHUB_PROJECT_BINDING_NAMESPACE });
+  if (value === null && durable === null) return null;
+  if (value === null) throw conflict("Durable schedule grant lacks legacy marker");
+  const marker = parseScheduleGrantInput(scheduleGrantSchema, value);
+  if (marker.version !== 1) throw conflict("Legacy schedule marker must be version 1");
+  const grant = durable === null ? marker : parseScheduleGrantInput(scheduleGrantSchema, durable);
+  if (durable !== null && !isDeepStrictEqual(marker, legacyScheduleGrantMarker(grant))) {
+    throw conflict("Durable schedule grant and legacy marker differ");
+  }
   if (grant.pluginId !== identity.pluginId || grant.companyId !== parsed.companyId || grant.projectId !== parsed.projectId) {
     throw conflict("Retained GitHub board schedule grant scope differs");
   }
@@ -76,15 +85,26 @@ export function pluginGitHubProjectScheduleGrants(
     const rows = await executor.select({ stateKey: pluginState.stateKey, valueJson: pluginState.valueJson }).from(pluginState)
       .where(and(eq(pluginState.pluginId, identity.pluginId), eq(pluginState.scopeKind, "company"),
         eq(pluginState.namespace, GITHUB_PROJECT_BINDING_NAMESPACE), eq(pluginState.scopeId, scope.companyId),
-        like(pluginState.stateKey, "schedule-grant:%"))).limit(1001);
+        or(like(pluginState.stateKey, "schedule-grant:%"), like(pluginState.stateKey, "durable-schedule-grant:%")))).limit(1001);
+    if (rows.length > 1000) throw conflict("Native board grant scan exceeds its bounded limit");
+    const pairs = new Map<string, { marker?: GitHubProjectScheduleGrant; durable?: GitHubProjectScheduleGrant }>();
     for (const row of rows) {
-      if (row.stateKey === key(scope.projectId)) continue;
       const parsed = scheduleGrantSchema.safeParse(row.valueJson);
-      if (!parsed.success) throw conflict("A retained board schedule grant in this company is invalid; resolve it first");
-      const other = parsed.data;
-      if (other.jobId === jobId && other.enabled && other.revokedAt === null && Date.parse(other.expiresAt) > now) {
+      if (!parsed.success || parsed.data.pluginId !== identity.pluginId || parsed.data.companyId !== scope.companyId)
+        throw conflict("A retained board schedule grant in this company is invalid; resolve it first");
+      const grant = parsed.data, pair = pairs.get(grant.projectId) ?? {};
+      if (row.stateKey === key(grant.projectId) && grant.version === 1 && !pair.marker) pair.marker = grant;
+      else if (row.stateKey === durableScheduleGrantKey(grant.projectId) && !pair.durable) pair.durable = grant;
+      else throw conflict("A retained board schedule grant in this company is invalid; resolve it first");
+      pairs.set(grant.projectId, pair);
+    }
+    for (const [projectId, pair] of pairs) {
+      if (!pair.marker || (pair.durable && !isDeepStrictEqual(pair.marker, legacyScheduleGrantMarker(pair.durable))))
+        throw conflict("A retained board schedule grant in this company is inconsistent; resolve it first");
+      const other = pair.durable ?? pair.marker;
+      if (projectId !== scope.projectId && other.jobId === jobId && other.enabled
+        && other.revokedAt === null && scheduleGrantDeadline(other) > now)
         throw conflict("Another current board schedule grant exists for this company and job; revoke it before creating a new one");
-      }
     }
   }
   function transaction<T>(work: (executor: Db, startedAt: number) => Promise<T>) {
@@ -97,9 +117,15 @@ export function pluginGitHubProjectScheduleGrants(
       return result;
     });
   }
-  async function save(executor: Db, grant: GitHubProjectScheduleGrant, actorId: string, action: "created" | "revoked") {
+  async function save(executor: Db, grant: GitHubProjectScheduleGrant, actorId: string, action: "created" | "revoked" | "reconciled") {
+    const priorDurable = await pluginStateStore(executor).get(identity.pluginId, "company", durableScheduleGrantKey(grant.projectId),
+      options(grant.companyId));
+    if (grant.version === 2 || priorDurable !== null) {
+      await pluginStateStore(executor).set(identity.pluginId, { scopeKind: "company", ...options(grant.companyId),
+        stateKey: durableScheduleGrantKey(grant.projectId), value: grant });
+    }
     await pluginStateStore(executor).set(identity.pluginId, { scopeKind: "company", ...options(grant.companyId),
-      stateKey: key(grant.projectId), value: grant });
+      stateKey: key(grant.projectId), value: legacyScheduleGrantMarker(grant) });
     if (!isDeepStrictEqual(await retained(executor, grant), grant)) throw conflict("Native board schedule grant readback failed");
     // Deliberately transactional audit row, with no event publication or agent callback.
     await executor.insert(activityLog).values({ companyId: grant.companyId, actorType: "user", actorId,
@@ -121,14 +147,14 @@ export function pluginGitHubProjectScheduleGrants(
         await job(executor, input.jobId);
         const previous = await retained(executor, scope);
         assertScheduleGrantRevision(previous, input.expectedRevision);
-        const now = Date.now(), expires = Date.parse(input.expiresAt);
+        const now = Date.now(), expires = input.expiresAt === null ? null : Date.parse(input.expiresAt);
         if (input.enabled) await assertNoOtherCurrentGrant(executor, scope, input.jobId, now);
-        if (expires <= now || expires - now > GITHUB_PROJECT_GRANT_MAX_AGE_MS) {
+        if (expires !== null && (expires <= now || expires - now > GITHUB_PROJECT_GRANT_MAX_AGE_MS)) {
           throw forbidden("Board schedule grant expiry must be future and at most 24 hours away");
         }
         const binding = snapshot.binding;
         const grant = parseScheduleGrantInput(scheduleGrantSchema, {
-          ...scope, version: 1, pluginId: identity.pluginId, grantId: randomUUID(), revision: input.expectedRevision + 1,
+          ...scope, version: input.expiresAt === null ? 2 : 1, pluginId: identity.pluginId, grantId: randomUUID(), revision: input.expectedRevision + 1,
           jobId: input.jobId, jobKey: GITHUB_PROJECT_BOARD_JOB_KEY, enabled: input.enabled,
           maxItems: input.maxItems, boardId: binding.boardId, boardUrl: binding.boardUrl,
           connectionId: binding.connectionId, accountId: binding.accountId, login: binding.login,
@@ -154,7 +180,7 @@ export function pluginGitHubProjectScheduleGrants(
         const grant = await retained(executor, input);
         if (!grant) return { status: "absent", enabled: false, grant: null };
         if (grant.revokedAt !== null) return { status: "revoked", enabled: false, grant };
-        if (Date.parse(grant.expiresAt) <= Date.now()) return { status: "expired", enabled: false, grant };
+        if (scheduleGrantDeadline(grant) <= Date.now()) return { status: "expired", enabled: false, grant };
         if (!await grantorIsActive(executor, grant)) return { status: "stale", enabled: false, grant };
         if (!snapshot || !sameSnapshot(grant, snapshot)) return { status: "stale", enabled: false, grant };
         try { await job(executor, grant.jobId); }
@@ -163,6 +189,57 @@ export function pluginGitHubProjectScheduleGrants(
           return { status: "stale", enabled: false, grant };
         }
         return { status: grant.enabled ? "enabled" : "disabled", enabled: grant.enabled, grant };
+      });
+    },
+    async inspect(context: BoardImportHostContext, value: unknown) {
+      const input = parseScheduleGrantInput(grantScopeSchema, value);
+      return transaction(async executor => {
+        const scope = await boards.authorizeBindingScope(executor, context, input);
+        assertOwner(scope);
+        const store = pluginStateStore(executor), opts = options(input.companyId);
+        const values = await Promise.all([
+          store.get(identity.pluginId, "company", key(input.projectId), opts),
+          store.get(identity.pluginId, "company", durableScheduleGrantKey(input.projectId), opts),
+        ]);
+        const grants = values.map(value => value === null ? null : parseScheduleGrantInput(scheduleGrantSchema, value));
+        for (const grant of grants) {
+          if (grant && (grant.pluginId !== identity.pluginId || grant.companyId !== input.companyId || grant.projectId !== input.projectId)) {
+            throw conflict("Schedule inspection scope differs");
+          }
+        }
+        const [marker, durable] = grants;
+        const metadata = (grant: GitHubProjectScheduleGrant | null) => grant && ({ version: grant.version,
+          revision: grant.revision, enabled: grant.enabled, revoked: grant.revokedAt !== null });
+        return { legacy: metadata(marker), durable: metadata(durable),
+          consistent: durable === null ? marker === null || marker.version === 1 :
+            marker !== null && marker.version === 1 && isDeepStrictEqual(marker, legacyScheduleGrantMarker(durable)) };
+      });
+    },
+    async reconcile(context: BoardImportHostContext, value: unknown) {
+      const input = parseScheduleGrantInput(reconcileScheduleGrantSchema, value);
+      return transaction(async executor => {
+        const scope = await boards.authorizeBindingScope(executor, context,
+          { companyId: input.companyId, projectId: input.projectId });
+        assertOwner(scope);
+        const store = pluginStateStore(executor), opts = options(input.companyId);
+        const markerValue = await store.get(identity.pluginId, "company", key(input.projectId), opts);
+        const durableValue = await store.get(identity.pluginId, "company", durableScheduleGrantKey(input.projectId), opts);
+        const marker = parseScheduleGrantInput(scheduleGrantSchema, markerValue);
+        const durable = parseScheduleGrantInput(scheduleGrantSchema, durableValue);
+        for (const grant of [marker, durable]) {
+          if (grant.pluginId !== identity.pluginId || grant.companyId !== input.companyId || grant.projectId !== input.projectId) {
+            throw conflict("Schedule reconciliation scope differs");
+          }
+        }
+        if (marker.version !== 1 || marker.revision !== input.expectedLegacyRevision
+          || durable.revision !== input.expectedDurableRevision || isDeepStrictEqual(marker, legacyScheduleGrantMarker(durable))) {
+          throw conflict("Schedule reconciliation changed or is not required");
+        }
+        const revision = Math.max(marker.revision, durable.revision) + 1;
+        if (!Number.isSafeInteger(revision)) throw conflict("Schedule reconciliation revision exhausted");
+        const revoked = parseScheduleGrantInput(scheduleGrantSchema, { ...marker, enabled: false, revision,
+          revokedAt: new Date().toISOString(), revokedByUserId: scope.userId });
+        return save(executor, revoked, scope.userId, "reconciled");
       });
     },
     async revoke(context: BoardImportHostContext, value: unknown) {
@@ -175,7 +252,11 @@ export function pluginGitHubProjectScheduleGrants(
         assertScheduleGrantRevision(previous, input.expectedRevision);
         if (!previous) throw conflict("No retained board schedule grant to revoke");
         if (previous.revokedAt !== null) return previous;
-        const grant = parseScheduleGrantInput(scheduleGrantSchema, { ...previous, enabled: false,
+        // A durable grant must be revoked before rolling back to a version-1-only host.
+        // Retain a version-1 tombstone so the old host can safely enumerate it.
+        const tombstone = previous.version === 2 ? { version: 1,
+          expiresAt: new Date(Date.parse(previous.grantedAt) + GITHUB_PROJECT_GRANT_MAX_AGE_MS).toISOString() } : {};
+        const grant = parseScheduleGrantInput(scheduleGrantSchema, { ...previous, ...tombstone, enabled: false,
           revision: previous.revision + 1, revokedAt: new Date(Date.now()).toISOString(), revokedByUserId: scope.userId });
         return save(executor, grant, scope.userId, "revoked");
       });

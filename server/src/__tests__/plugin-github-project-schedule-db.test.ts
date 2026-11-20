@@ -4,7 +4,7 @@ import request from "supertest";
 import { eq } from "drizzle-orm";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { agents, companies, companyMemberships, companySecrets, createDb, plugins, pluginJobRuns, pluginJobs,
-  projects, toolApplications, toolConnections } from "@paperclipai/db";
+  projects, toolApplications, toolConnections, issues, agentWakeupRequests, heartbeatRuns } from "@paperclipai/db";
 import type { PaperclipPluginManifestV1 } from "@paperclipai/shared";
 import { createGitHubOAuthProviderConfig } from "@paperclipai/shared/github-oauth";
 import { errorHandler } from "../middleware/index.js";
@@ -125,7 +125,7 @@ describe.skipIf(WINDOWS_NATIVE_FIXTURE_MISSING)("native board schedule grants, t
       .returning({ id: pluginJobs.id });
     jobId = job!.id;
   }, BOARD_IMPORT_FIXTURE_SETUP_TIMEOUT_MS);
-  afterAll(async () => { try { await db?.$client.end({ timeout: 5 }); } finally { await fixture?.cleanup(); } }, 30_000);
+  afterAll(async () => { try { await db?.$client.end({ timeout: 5 }); } finally { await fixture?.cleanup(); } }, 45_000);
   beforeEach(() => undefined);
 
   describe("grant create, read and revoke with revision checks", () => {
@@ -289,6 +289,31 @@ describe.skipIf(WINDOWS_NATIVE_FIXTURE_MISSING)("native board schedule grants, t
         .resolves.toMatchObject({ revision: 2, enabled: true });
     });
 
+    it("a standing grant blocks a second destination and leaves an inert legacy marker", async () => {
+      const setup = await seed();
+      const second = await addBoundProject(setup);
+      const standing = await createGrant(setup, { expiresAt: null });
+      expect(standing).toMatchObject({ version: 2, enabled: true, expiresAt: null, noDispatch: true });
+      expect(await retainedGrant(setup)).toMatchObject({ version: 1, enabled: false });
+      await expect(setup.grants.create(setup.context, { ...second, expectedRevision: 0, jobId, enabled: true, maxItems: 5, expiresAt: inHours(1) }))
+        .rejects.toThrow(/Another current board schedule grant exists/);
+      await setup.grants.revoke(setup.context, { ...setup.scope, expectedRevision: 1 });
+      await expect(setup.grants.create(setup.context, { ...second, expectedRevision: 0, jobId, enabled: true, maxItems: 5, expiresAt: inHours(1) }))
+        .resolves.toMatchObject({ enabled: true });
+    });
+
+    it("concurrent finite and standing creates keep one enabled grant", async () => {
+      const setup = await seed();
+      const second = await addBoundProject(setup);
+      const body = { expectedRevision: 0, jobId, enabled: true, maxItems: 5 };
+      const outcomes = await Promise.allSettled([
+        setup.grants.create(setup.context, { ...setup.scope, ...body, expiresAt: null }),
+        setup.grants.create(setup.context, { ...second, ...body, expiresAt: inHours(1) }),
+      ]);
+      expect(outcomes.filter(item => item.status === "fulfilled")).toHaveLength(1);
+      expect(outcomes.filter(item => item.status === "rejected")).toHaveLength(1);
+    });
+
     it("concurrent creates in one company: exactly one enabled grant results", async () => {
       const setup = await seed();
       const projectsInCompany = [setup.scope, ...await Promise.all([addBoundProject(setup), addBoundProject(setup), addBoundProject(setup)])];
@@ -326,6 +351,26 @@ describe.skipIf(WINDOWS_NATIVE_FIXTURE_MISSING)("native board schedule grants, t
   });
 
   describe("scheduled run lease", () => {
+    it("standing grant schedules twice without duplicate tasks or agent wakeups", async () => {
+      const setup = await seed();
+      await createGrant(setup, { expiresAt: null });
+      const { service } = scheduledService(1);
+      const baseline = await db.select().from(issues).where(eq(issues.companyId, setup.companyId));
+      const first = await service.run(targetFor(setup, await runRow(setup.companyId)), custody("standing-first"));
+      expect(first).toMatchObject({ status: "verified", created: 1 });
+      const before = await db.select().from(issues).where(eq(issues.companyId, setup.companyId));
+      const imported = before.filter(item => item.title === "Synthetic issue 1");
+      expect(imported).toHaveLength(1);
+      expect(before.length).toBeGreaterThan(baseline.length);
+      const second = await service.run(targetFor(setup, await runRow(setup.companyId)), custody("standing-second"));
+      expect(second).toMatchObject({ status: "verified", created: 0, reused: 1 });
+      const after = await db.select().from(issues).where(eq(issues.companyId, setup.companyId));
+      expect(after.map(item => item.id).sort()).toEqual(before.map(item => item.id).sort());
+      expect(after.filter(item => item.title === "Synthetic issue 1").map(item => item.id)).toEqual(imported.map(item => item.id));
+      expect(await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.companyId, setup.companyId))).toEqual([]);
+      expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.companyId, setup.companyId))).toEqual([]);
+    });
+
     it("lets exactly one of two concurrent runs claim the lease; the other is refused", async () => {
       const setup = await seed();
       await createGrant(setup);

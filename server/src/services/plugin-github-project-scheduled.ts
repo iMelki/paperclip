@@ -7,7 +7,7 @@ import { pluginStateStore } from "./plugin-state-store.js";
 import { GITHUB_PROJECT_BINDING_NAMESPACE, GITHUB_PROJECT_IMPORTER_KEY,
   pluginGitHubProjectBoardService } from "./plugin-github-project-board.js";
 import { matchesNativeScheduleGrantSnapshot, readRetainedNativeScheduleGrant } from "./plugin-github-project-schedule-grants.js";
-import { GITHUB_PROJECT_BOARD_JOB_KEY, type GitHubProjectScheduleGrant } from "./github-project-schedule-grant-contract.js";
+import { GITHUB_PROJECT_BOARD_JOB_KEY, scheduleGrantDeadline, type GitHubProjectScheduleGrant } from "./github-project-schedule-grant-contract.js";
 import { pluginImportedIssuesService } from "./plugin-imported-issues.js";
 import { boardImportDigest, validateBoardImportIntent, type BoardImportIntent,
   type BoardImportReceipt } from "./plugin-imported-issues-contract.js";
@@ -97,7 +97,7 @@ export function createScheduledGitHubProjectBoardService(
   async function verifiedGrant(executor: Db, target: ScheduledBoardTarget) {
     const scope = { companyId: target.companyId, projectId: target.projectId };
     const first = await readRetainedNativeScheduleGrant(executor, identity, scope);
-    if (!first || !first.enabled || first.revokedAt !== null || Date.parse(first.expiresAt) <= Date.now()
+    if (!first || !first.enabled || first.revokedAt !== null || scheduleGrantDeadline(first) <= Date.now()
       || first.jobId !== target.jobId || first.jobKey !== GITHUB_PROJECT_BOARD_JOB_KEY) throw forbidden("Current enabled board schedule grant required");
     // Canonical metadata order first, matching management CRUD; job/run locks come afterwards.
     const snapshot = await boards.verifyDelegatedBindingSnapshot(executor, first);
@@ -141,7 +141,7 @@ export function createScheduledGitHubProjectBoardService(
       if (!custody.isCurrent() || custody.signal?.aborted) throw forbidden("Native board dispatch owner changed");
       const lease: Lease = { ...target, version: 1, revision: (previous?.revision ?? 0) + 1,
         grantId: fresh.grant.grantId, grantRevision: fresh.grant.revision, ownerEpoch: custody.ownerEpoch,
-        status: "active", expiresAt: new Date(Math.min(startedAt + LEASE_MS, Date.parse(fresh.grant.expiresAt))).toISOString(),
+        status: "active", expiresAt: new Date(Math.min(startedAt + LEASE_MS, scheduleGrantDeadline(fresh.grant))).toISOString(),
         attempted: [], runStartedAtExact: fresh.runStartedAtExact, result: null };
       await writeLease(executor, lease);
       await executor.insert(activityLog).values({ companyId: target.companyId, actorType: "system", actorId: `job-run:${target.jobRunId}`,
@@ -156,7 +156,7 @@ export function createScheduledGitHubProjectBoardService(
       owner: Object.freeze({ grantId: value.grant.grantId, grantRevision: value.grant.revision,
         preparedByJobRunId: target.jobRunId, ownerEpoch: custody.ownerEpoch }), grantedByUserId: value.grant.grantedByUserId,
       leaseRevision: value.lease.revision, actorId: `job-run:${target.jobRunId}`, maxItems: value.grant.maxItems,
-      deadlineMs: Math.min(startedAt + TOTAL_MS, Date.parse(value.grant.expiresAt)) });
+      deadlineMs: Math.min(startedAt + TOTAL_MS, scheduleGrantDeadline(value.grant)) });
     issued.set(authority, { verified, grant: value.grant, lease: value.lease, custody,
       startedAt, monotonicAt, prepared: new Set(), planned: new Set() });
     return authority;

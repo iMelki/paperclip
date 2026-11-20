@@ -95,7 +95,7 @@ describe("native GitHub gateway boundary (mandatory isolated PostgreSQL)", () =>
   afterAll(async () => {
     await db?.$client.end({ timeout: 5 });
     await fixtureDb?.cleanup();
-  }, 25_000);
+  }, 45_000);
   beforeEach(() => {
     nativeExecutor.mockReset();
     syntheticDispatch.mockReset();

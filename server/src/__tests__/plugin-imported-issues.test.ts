@@ -61,7 +61,7 @@ describe("native board import transaction and readback", () => {
     fixture = await startBoardImportFixtureDatabase();
     db = createDb(fixture.connectionString);
   }, BOARD_IMPORT_FIXTURE_SETUP_TIMEOUT_MS);
-  afterAll(async () => { await fixture?.cleanup(); }, 25_000);
+  afterAll(async () => { await fixture?.cleanup(); }, 45_000);
 
   async function seed() {
     const companyId = randomUUID(), projectId = randomUUID(), pluginId = randomUUID();

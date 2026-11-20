@@ -101,6 +101,24 @@ const DECLARED_SOURCE_TESTS = new Map([
     ],
   ],
   [
+    "server/src/__tests__/github-project-schedule-grant-v1.fixture.ts",
+    [
+      "server/src/__tests__/github-project-durable-targets.test.ts",
+      "server/src/__tests__/plugin-github-project-board.test.ts"
+    ],
+  ],
+  [
+    "server/src/__tests__/helpers/github-project-board-job-targets-v1.fixture.ts",
+    [
+      "server/src/__tests__/github-project-durable-targets.test.ts",
+      "server/src/__tests__/plugin-github-project-board.test.ts"
+    ],
+  ],
+  [
+    "server/src/__tests__/helpers/plugin-github-project-schedule-grants-v1.fixture.ts",
+    ["server/src/__tests__/plugin-github-project-board.test.ts"],
+  ],
+  [
     "server/src/routes/plugins.ts",
     [
       "server/src/__tests__/plugin-job-status-route.test.ts",
