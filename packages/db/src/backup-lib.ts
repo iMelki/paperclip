@@ -7,6 +7,7 @@ import { open as openFile } from "node:fs/promises";
 import { pipeline } from "node:stream/promises";
 import { createGunzip, createGzip } from "node:zlib";
 import postgres from "postgres";
+import { runPgDumpBackup, runPreservedPgDumpBackup, waitForChildExit } from "./backup-cli.js";
 
 export type BackupRetentionPolicy = {
   dailyDays: number;
@@ -29,12 +30,17 @@ export type RunDatabaseBackupOptions = {
   excludeTables?: string[];
   nullifyColumns?: Record<string, string[]>;
   backupEngine?: "auto" | "pg_dump" | "javascript";
+  /** Opt-in pg_dump-only policy: preserve history and failed/staging output. */
+  preserveAll?: boolean;
 };
 
 export type RunDatabaseBackupResult = {
   backupFile: string;
   sizeBytes: number;
   prunedCount: number;
+  backupEngine?: "pg_dump";
+  preservationPolicy?: "preserve-all";
+  retainedPartialFile?: string;
 };
 
 export type RunDatabaseRestoreOptions = {
@@ -69,7 +75,6 @@ type ExtensionDefinition = {
 
 const DEFAULT_BACKUP_WRITE_BUFFER_BYTES = 1024 * 1024;
 const BACKUP_DATA_CURSOR_ROWS = 100;
-const BACKUP_CLI_STDERR_BYTES = 64 * 1024;
 const BACKUP_BREAKPOINT_DETECT_BYTES = 64 * 1024;
 
 const STATEMENT_BREAKPOINT = "-- paperclip statement breakpoint 69f6f3f1-42fd-46a6-bf17-d1d85f8f3900";
@@ -114,14 +119,54 @@ function monthlyRetentionCutoff(nowMs: number, monthlyMonths: number): number {
   return Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - months, 1);
 }
 
+// `<name>.sql.gz.partial-<uuid>`: staging/hard-link names written by the preserve-all path.
+const PRESERVE_PARTIAL_NAME = /^(.+\.sql\.gz)\.partial-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u;
+
+/**
+ * Remove preserve-all `.partial-<uuid>` links: those of backups pruned in this run (so the
+ * inode is released), and orphans whose backup name does not exist (failed staging output)
+ * only when older than every retention tier. Returns the number of orphans removed.
+ */
+function prunePartialLinks(opts: {
+  backupDir: string;
+  dirNames: readonly string[];
+  filenamePrefix: string;
+  prunedNames: ReadonlySet<string>;
+  monthlyCutoff: number;
+}): number {
+  const present = new Set(opts.dirNames);
+  let orphans = 0;
+  for (const name of opts.dirNames) {
+    if (!name.startsWith(`${opts.filenamePrefix}-`)) continue;
+    const owner = PRESERVE_PARTIAL_NAME.exec(name)?.[1];
+    if (!owner) continue;
+    const fullPath = resolve(opts.backupDir, name);
+    if (opts.prunedNames.has(owner)) {
+      unlinkSync(fullPath);
+    } else if (!present.has(owner) && statSync(fullPath).mtimeMs < opts.monthlyCutoff) {
+      unlinkSync(fullPath);
+      orphans += 1;
+    }
+  }
+  return orphans;
+}
+
 /**
  * Tiered backup pruning:
  * - Daily tier: keep ALL backups from the last `dailyDays` days
  * - Weekly tier: keep the NEWEST backup per calendar week for `weeklyWeeks` weeks
  * - Monthly tier: keep the NEWEST backup per calendar month for `monthlyMonths` months
  * - Everything else is deleted
+ *
+ * Preserve-all runs leave a second hard link `<backup>.sql.gz.partial-<uuid>` to each
+ * published dump. These links keep the inode (and its disk blocks) alive, so when a
+ * backup is pruned its partial links are removed with it; otherwise turning
+ * preserve-all off after using it would reclaim no disk. A partial whose backup no
+ * longer exists (failed staging output) never competes for a week/month bucket and is
+ * removed only once it is older than every retention tier. Returns the number of
+ * backups pruned (a backup's own partial links are not counted separately).
  */
-function pruneOldBackups(backupDir: string, retention: BackupRetentionPolicy, filenamePrefix: string): number {
+export function pruneOldBackups(backupDir: string, retention: BackupRetentionPolicy, filenamePrefix: string): number {
   if (!existsSync(backupDir)) return 0;
 
   const now = Date.now();
@@ -132,8 +177,10 @@ function pruneOldBackups(backupDir: string, retention: BackupRetentionPolicy, fi
   type BackupEntry = { name: string; fullPath: string; mtimeMs: number };
   const entries: BackupEntry[] = [];
 
-  for (const name of readdirSync(backupDir)) {
+  const dirNames = readdirSync(backupDir);
+  for (const name of dirNames) {
     if (!name.startsWith(`${filenamePrefix}-`)) continue;
+    // `.sql.gz.partial-<uuid>` names fail this test: they are handled by prunePartialLinks.
     if (!name.endsWith(".sql") && !name.endsWith(".sql.gz")) continue;
     const fullPath = resolve(backupDir, name);
     const stat = statSync(fullPath);
@@ -183,7 +230,11 @@ function pruneOldBackups(backupDir: string, retention: BackupRetentionPolicy, fi
     unlinkSync(filePath);
   }
 
-  return toDelete.length;
+  const deleted = new Set(toDelete);
+  const prunedNames = new Set(entries.filter((entry) => deleted.has(entry.fullPath)).map((entry) => entry.name));
+  const orphans = prunePartialLinks({ backupDir, dirNames, filenamePrefix, prunedNames, monthlyCutoff });
+
+  return toDelete.length + orphans;
 }
 
 function formatBackupSize(sizeBytes: number): string {
@@ -293,66 +344,6 @@ function formatSqlValue(
   return formatSqlLiteral(String(val));
 }
 
-function appendCapturedStderr(previous: string, chunk: Buffer | string): string {
-  const next = previous + (Buffer.isBuffer(chunk) ? chunk.toString("utf8") : chunk);
-  if (Buffer.byteLength(next, "utf8") <= BACKUP_CLI_STDERR_BYTES) return next;
-  return Buffer.from(next, "utf8").subarray(-BACKUP_CLI_STDERR_BYTES).toString("utf8");
-}
-
-async function waitForChildExit(child: ReturnType<typeof spawn>, label: string): Promise<void> {
-  let stderr = "";
-  child.stderr?.on("data", (chunk) => {
-    stderr = appendCapturedStderr(stderr, chunk);
-  });
-
-  const result = await new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve, reject) => {
-    child.once("error", reject);
-    child.once("exit", (code, signal) => resolve({ code, signal }));
-  });
-
-  if (result.signal) {
-    throw new Error(`${label} exited via ${result.signal}${stderr.trim() ? `: ${stderr.trim()}` : ""}`);
-  }
-  if (result.code !== 0) {
-    throw new Error(`${label} failed with exit code ${result.code ?? "unknown"}${stderr.trim() ? `: ${stderr.trim()}` : ""}`);
-  }
-}
-
-async function runPgDumpBackup(opts: {
-  connectionString: string;
-  backupFile: string;
-  connectTimeout: number;
-}): Promise<void> {
-  const pgDumpBin = process.env.PAPERCLIP_PG_DUMP_PATH || "pg_dump";
-  const child = spawn(
-    pgDumpBin,
-    [
-      `--dbname=${opts.connectionString}`,
-      "--format=plain",
-      "--clean",
-      "--if-exists",
-      "--no-owner",
-      "--no-privileges",
-    ],
-    {
-      stdio: ["ignore", "pipe", "pipe"],
-      env: {
-        ...process.env,
-        PGCONNECT_TIMEOUT: String(opts.connectTimeout),
-      },
-    },
-  );
-
-  if (!child.stdout) {
-    throw new Error("pg_dump did not expose stdout");
-  }
-
-  await Promise.all([
-    pipeline(child.stdout, createGzip(), createWriteStream(opts.backupFile)),
-    waitForChildExit(child, pgDumpBin),
-  ]);
-}
-
 async function restoreWithPsql(opts: RunDatabaseRestoreOptions, connectTimeout: number): Promise<void> {
   const psqlBin = process.env.PAPERCLIP_PSQL_PATH || "psql";
   const child = spawn(
@@ -369,6 +360,7 @@ async function restoreWithPsql(opts: RunDatabaseRestoreOptions, connectTimeout: 
         ...process.env,
         PGCONNECT_TIMEOUT: String(connectTimeout),
       },
+      windowsHide: true,
     },
   );
 
@@ -567,6 +559,15 @@ export async function runDatabaseBackup(opts: RunDatabaseBackupOptions): Promise
   const connectTimeout = Math.max(1, Math.trunc(opts.connectTimeoutSeconds ?? 5));
   const backupEngine = opts.backupEngine ?? "auto";
   const canUsePgDump = !hasBackupTransforms(opts);
+  if (opts.preserveAll) {
+    if (backupEngine !== "pg_dump" || !canUsePgDump ||
+        !/^[A-Za-z0-9][A-Za-z0-9_-]{0,80}(?![\s\S])/u.test(filenamePrefix)) {
+      throw new Error("Preserve-all requires pg_dump, no transforms and a safe filename prefix");
+    }
+    const backupFile = resolve(opts.backupDir, `${filenamePrefix}-${timestamp()}.sql.gz`);
+    const result = await runPreservedPgDumpBackup({ ...opts, backupFile, connectTimeout });
+    return { backupFile, ...result, prunedCount: 0, backupEngine: "pg_dump", preservationPolicy: "preserve-all" };
+  }
   const excludedTableNames = normalizeTableNameSet(opts.excludeTables);
   const nullifiedColumnsByTable = normalizeNullifyColumnMap(opts.nullifyColumns);
   let sql = postgres(opts.connectionString, { max: 1, connect_timeout: connectTimeout });

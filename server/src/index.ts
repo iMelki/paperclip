@@ -863,12 +863,16 @@ export async function startServer(): Promise<StartedServer> {
       // Read retention from Instance Settings (DB) so changes take effect without restart.
       const generalSettings = await backupSettingsSvc.getGeneral();
       const retention = generalSettings.backupRetention;
+      // Opt-in (#125): PAPERCLIP_DB_BACKUP_PRESERVE_ALL=1 selects native pg_dump with no pruning and
+      // no JavaScript fallback. Default off keeps the prior retention-driven behaviour.
+      const preserveAllBackups = /^(1|true|yes|on)$/i.test(process.env.PAPERCLIP_DB_BACKUP_PRESERVE_ALL ?? "");
 
       const result = await runDatabaseBackup({
         connectionString: activeDatabaseConnectionString,
         backupDir: config.databaseBackupDir,
         retention,
         filenamePrefix: "paperclip",
+        ...(preserveAllBackups ? { backupEngine: "pg_dump" as const, preserveAll: true } : {}),
       });
       const finishedAt = new Date();
       const response: InstanceDatabaseBackupRunResult = {
