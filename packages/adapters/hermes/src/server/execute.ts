@@ -54,6 +54,10 @@ import {
   resolveProvider,
 } from "./detect-model.js";
 import { reconcileHermesPaperclipSkills, resolveHermesOperationalSkillPreload } from "./skills.js";
+import {
+  computeRunUsage, readHermesSessionUsage, readUsageBaseline, USAGE_UNAVAILABLE_TEXT,
+  type HermesSessionUsage, type UsageUnavailableReason,
+} from "./usage.js";
 import { resolveStrictHermesIsolation } from "./strict-isolation.js";
 import { apiBaseOf, resolveConfiguredApiUrl } from "./api-url.js";
 
@@ -675,6 +679,46 @@ export async function execute(
     await ctx.onLog("stdout", `[hermes] Session: ${parsed.sessionId}\n`);
   }
 
+  // ── Usage from Hermes' own session record (best effort) ─────────────────
+  // Hermes prints no token counts or cost in a chat run, so without this Paperclip budgets never move.
+  // The export runs after the chat process, outside the run's timeout, with its own fixed 180 s limit.
+  // It cannot be switched off: usage reporting is what lets per-agent budgets trip.
+  let sessionUsage: HermesSessionUsage | null = null;
+  let usageUnavailable: UsageUnavailableReason | null = null;
+  if (parsed.sessionId) {
+    const outcome = await readHermesSessionUsage({
+      command: hermesCmd,
+      argsPrefix: strictIsolation ? ["--profile", strictIsolation.profile] : [],
+      env,
+      inheritEnv: !strictIsolation,
+      cwd,
+      runId: ctx.runId,
+      sessionId: parsed.sessionId,
+      timeoutSec: 180,
+    });
+    if (outcome.status === "ok") sessionUsage = outcome.usage;
+    else usageUnavailable = outcome.reason;
+  } else {
+    usageUnavailable = "no_session_id";
+  }
+  // The session record is authoritative: the model that actually answered, the billing provider, the
+  // tokens, and a cost only when Hermes could price the model. A resumed session is cumulative, so
+  // report this run's share against the baseline kept in the session parameters. Numbers scraped from
+  // the chat output are never used for usage or cost: an unknown measurement stays unknown.
+  let runUsage: ReturnType<typeof computeRunUsage> | null = null;
+  if (sessionUsage) {
+    runUsage = computeRunUsage(
+      sessionUsage,
+      readUsageBaseline(ctx.runtime?.sessionParams),
+      canResumeSession ? prevSessionId ?? null : null,
+    );
+    usageUnavailable = runUsage.unknownReason;
+  }
+  if (usageUnavailable) {
+    // Unknown is not zero: no usage or cost is reported, and the result says so for any budget check.
+    await ctx.onLog("stdout", `[hermes] Usage unavailable: ${USAGE_UNAVAILABLE_TEXT[usageUnavailable]}\n`);
+  }
+
   // ── Build result ───────────────────────────────────────────────────────
   const executionResult: AdapterExecutionResult = {
     exitCode: result.exitCode,
@@ -690,12 +734,17 @@ export async function execute(
     executionResult.errorMessage = `Hermes exited with code ${result.exitCode}`;
   }
 
-  if (parsed.usage) {
-    executionResult.usage = parsed.usage;
-  }
-
-  if (parsed.costUsd !== undefined) {
-    executionResult.costUsd = parsed.costUsd;
+  if (sessionUsage) {
+    if (runUsage?.usage) {
+      executionResult.usage = runUsage.usage;
+      executionResult.usageBasis = runUsage.usageBasis;
+    }
+    if (runUsage?.costUsd != null) {
+      executionResult.costUsd = runUsage.costUsd;
+      executionResult.billingType = "metered_api";
+    }
+    if (sessionUsage.model) executionResult.model = sessionUsage.model;
+    if (sessionUsage.provider) executionResult.biller = sessionUsage.provider;
   }
 
   // Summary from agent response
@@ -707,13 +756,26 @@ export async function execute(
   executionResult.resultJson = {
     result: parsed.response || "",
     session_id: parsed.sessionId || null,
-    usage: parsed.usage || null,
-    cost_usd: parsed.costUsd ?? null,
+    usage: runUsage?.usage ?? null,
+    cost_usd: runUsage?.costUsd ?? null,
+    cost_status: sessionUsage?.costStatus ?? null,
+    served_model: sessionUsage?.model ?? null,
+    // "unknown" means the run may have spent tokens that were not measured; it is never a zero.
+    usage_status: usageUnavailable ? "unknown" : "reported",
+    usage_unavailable_reason: usageUnavailable,
   };
 
   // Store session ID for next run
   if (persistSession && parsed.sessionId) {
-    executionResult.sessionParams = { sessionId: parsed.sessionId };
+    // After a failed read, keep the previous baseline of this same session so the next successful
+    // read reports everything since then, including this run's unmeasured share.
+    const previousBaseline = readUsageBaseline(ctx.runtime?.sessionParams);
+    const carriedBaseline = previousBaseline && previousBaseline.sessionId === parsed.sessionId ? previousBaseline : null;
+    const nextBaseline = runUsage?.nextBaseline ?? carriedBaseline;
+    executionResult.sessionParams = {
+      sessionId: parsed.sessionId,
+      ...(nextBaseline ? { usageBaseline: nextBaseline } : {}),
+    };
     executionResult.sessionDisplayId = parsed.sessionId.slice(0, 16);
   }
 
