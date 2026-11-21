@@ -44,6 +44,14 @@ test("enumerates GIT_INDEX_FILE as repository-local state", () => {
   assert.ok(names.includes("GIT_INDEX_FILE"));
 });
 
+test("clears Windows case variants and indexed hook config without losing intentional global config", () => {
+  const source = { git_dir: "foreign", Git_Index_File: "foreign-index", GIT_CONFIG_COUNT: "1",
+    GIT_CONFIG_KEY_0: "core.bare", GIT_CONFIG_VALUE_0: "true", GIT_CONFIG_GLOBAL: "intentional-config" };
+  const clean = sanitizeGitLocalEnvironment(source, ["GIT_DIR", "GIT_INDEX_FILE", "GIT_CONFIG_COUNT"]);
+  assert.deepEqual(clean, { GIT_CONFIG_GLOBAL: "intentional-config" });
+  assert.equal(source.GIT_CONFIG_COUNT, "1");
+});
+
 test("sanitized test children can create a linked worktree from a foreign temporary repository", () => {
   const root = mkdtempSync(path.join(os.tmpdir(), "paperclip-git-local-env-"));
   const repo = path.join(root, "repo");

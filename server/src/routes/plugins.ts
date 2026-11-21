@@ -24,6 +24,7 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { Router } from "express";
+import { registerGitHubProjectScheduleGrantRoutes } from "./plugin-github-project-schedule-grants.js";
 import type { Request, Response } from "express";
 import { and, desc, eq, gte } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
@@ -55,7 +56,7 @@ import {
 import { logActivity } from "../services/activity-log.js";
 import { publishGlobalLiveEvent } from "../services/live-events.js";
 import { issueService } from "../services/issues.js";
-import type { PluginJobScheduler } from "../services/plugin-job-scheduler.js";
+import { PluginJobScheduleError, type PluginJobScheduler } from "../services/plugin-job-scheduler.js";
 import type { PluginJobStore } from "../services/plugin-job-store.js";
 import type { PluginWorkerManager } from "../services/plugin-worker-manager.js";
 import type { PluginStreamBus } from "../services/plugin-stream-bus.js";
@@ -93,8 +94,23 @@ import {
   isWithinBundledPluginRoot,
 } from "../services/plugin-install-guard.js";
 import { isCloudManagedInstance } from "../services/cloud-instance.js";
+import { getHiddenSettings } from "../services/settings-visibility.js";
 import { secretService } from "../services/secrets.js";
 import { badRequest, forbidden, notFound, unauthorized, unprocessable } from "../errors.js";
+
+/**
+ * Floor: when the hosting operator hides the Plugins settings surface
+ * (`instance.plugins` in PAPERCLIP_HIDDEN_SETTINGS), plugin lifecycle and
+ * configuration writes are rejected alongside it. Reads stay open — installed
+ * plugins keep running and `/plugins/ui-contributions` still powers their UI.
+ */
+function assertPluginManagementVisible() {
+  if (getHiddenSettings().has("instance.plugins")) {
+    throw forbidden("Plugin management is managed by the hosting operator on this instance", {
+      code: "settings_operator_managed",
+    });
+  }
+}
 
 /** UI slot declaration extracted from plugin manifest */
 type PluginUiSlotDeclaration = NonNullable<NonNullable<PaperclipPluginManifestV1["ui"]>["slots"]>[number];
@@ -129,6 +145,8 @@ interface PluginInstallRequest {
   version?: string;
   /** True if packageName is a local filesystem path */
   isLocalPath?: boolean;
+  /** False installs without starting the plugin runtime. Defaults to true. */
+  activate?: boolean;
 }
 
 interface AvailableBundledPlugin {
@@ -160,6 +178,16 @@ const UUID_REGEX =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 const PLUGIN_API_BODY_LIMIT_BYTES = 1_000_000;
+
+/**
+ * RPC timeout for the performAction bridge routes (`/bridge/action` and
+ * `/actions/:key`). Plugin actions such as GitHub Sync's `sync.runNow` can run
+ * well past the 30s default RPC timeout; when that default fires the host
+ * clears the invocation scope while the worker keeps running, so the rest of
+ * the action fails with "missing, expired, or unknown invocation scope".
+ * Scoped to these two routes only; every other bridge call keeps the default.
+ */
+export const PLUGIN_ACTION_RPC_TIMEOUT_MS = 5 * 60 * 1000;
 const PLUGIN_SCOPED_API_RESPONSE_HEADER_ALLOWLIST = new Set([
   "cache-control",
   "etag",
@@ -489,6 +517,7 @@ interface PluginToolExecuteRequest {
  * | GET | /plugins/:pluginId/jobs | List jobs for a plugin |
  * | GET | /plugins/:pluginId/jobs/:jobId/runs | List runs for a job |
  * | POST | /plugins/:pluginId/jobs/:jobId/trigger | Manually trigger a job |
+ * | PATCH | /plugins/:pluginId/jobs/:jobId | Pause or resume a job (instance admin) |
  * | POST | /plugins/:pluginId/webhooks/:endpointKey | Receive inbound webhook |
  * | GET | /plugins/:pluginId/companies/:companyId/trusted-loopback-http | Read exact local HTTP rules |
  * | PUT | /plugins/:pluginId/companies/:companyId/trusted-loopback-http | Replace exact local HTTP rules |
@@ -526,6 +555,7 @@ export function pluginRoutes(
   toolGatewayDeps?: PluginRouteToolGatewayDeps,
 ) {
   const router = Router();
+  registerGitHubProjectScheduleGrantRoutes(router, db);
   const registry = pluginRegistryService(db);
   const lifecycle = pluginLifecycleManager(db, {
     loader,
@@ -697,6 +727,7 @@ export function pluginRoutes(
     entityId: string,
     details: Record<string, unknown>,
     scopeCompanyId?: string,
+    entityType = "plugin",
   ): Promise<void> {
     const companyIds = scopeCompanyId
       ? [scopeCompanyId]
@@ -713,7 +744,7 @@ export function pluginRoutes(
         runId: actor.runId,
         agentApiKeyId: actor.agentApiKeyId,
         action,
-        entityType: "plugin",
+        entityType,
         entityId,
         details,
       })));
@@ -1134,7 +1165,8 @@ export function pluginRoutes(
    */
   router.post("/plugins/install", async (req, res) => {
     assertInstanceAdmin(req);
-    const { packageName, version, isLocalPath } = req.body as PluginInstallRequest;
+    assertPluginManagementVisible();
+    const { packageName, version, isLocalPath, activate } = req.body as PluginInstallRequest;
 
     // Input validation
     if (!packageName || typeof packageName !== "string") {
@@ -1149,6 +1181,11 @@ export function pluginRoutes(
 
     if (isLocalPath !== undefined && typeof isLocalPath !== "boolean") {
       res.status(400).json({ error: "isLocalPath must be a boolean if provided" });
+      return;
+    }
+
+    if (activate !== undefined && typeof activate !== "boolean") {
+      res.status(400).json({ error: "activate must be a boolean if provided" });
       return;
     }
 
@@ -1207,10 +1244,10 @@ export function pluginRoutes(
         return;
       }
 
-      // Transition to ready state
+      // Deferred installation persists the package but does not start its runtime.
       const existingPlugin = await registry.getByKey(discovered.manifest.id);
       if (existingPlugin) {
-        await lifecycle.load(existingPlugin.id);
+        if (activate !== false) await lifecycle.load(existingPlugin.id);
         const updated = await registry.getById(existingPlugin.id);
         await logPluginMutationActivity(req, "plugin.installed", existingPlugin.id, {
           pluginId: existingPlugin.id,
@@ -1218,6 +1255,7 @@ export function pluginRoutes(
           packageName: updated?.packageName ?? existingPlugin.packageName,
           version: updated?.version ?? existingPlugin.version,
           source: isLocalPath ? "local_path" : "npm",
+          activationRequested: activate !== false,
         });
         publishGlobalLiveEvent({ type: "plugin.ui.updated", payload: { pluginId: existingPlugin.id, action: "installed" } });
         res.json(updated);
@@ -1532,6 +1570,7 @@ export function pluginRoutes(
           actorContext: performActionActorContext(req, companyId),
           renderEnvironment: body.renderEnvironment ?? null,
         },
+        PLUGIN_ACTION_RPC_TIMEOUT_MS,
       );
       res.json({ data: result });
     } catch (err) {
@@ -1716,6 +1755,7 @@ export function pluginRoutes(
           actorContext: performActionActorContext(req, companyId),
           renderEnvironment: body?.renderEnvironment ?? null,
         },
+        PLUGIN_ACTION_RPC_TIMEOUT_MS,
       );
       res.json({ data: result });
     } catch (err) {
@@ -1977,6 +2017,7 @@ export function pluginRoutes(
    */
   router.delete("/plugins/:pluginId", async (req, res) => {
     assertInstanceAdmin(req);
+    assertPluginManagementVisible();
     const { pluginId } = req.params;
     const purge = req.query.purge === "true";
 
@@ -2013,6 +2054,7 @@ export function pluginRoutes(
    */
   router.post("/plugins/:pluginId/enable", async (req, res) => {
     assertInstanceAdmin(req);
+    assertPluginManagementVisible();
     const { pluginId } = req.params;
 
     const plugin = await resolvePlugin(registry, pluginId);
@@ -2051,6 +2093,7 @@ export function pluginRoutes(
    */
   router.post("/plugins/:pluginId/disable", async (req, res) => {
     assertInstanceAdmin(req);
+    assertPluginManagementVisible();
     const { pluginId } = req.params;
     const body = req.body as { reason?: string } | undefined;
     const reason = body?.reason;
@@ -2225,9 +2268,36 @@ export function pluginRoutes(
    */
   router.post("/plugins/:pluginId/upgrade", async (req, res) => {
     assertInstanceAdmin(req);
+    assertPluginManagementVisible();
     const { pluginId } = req.params;
-    const body = req.body as { version?: string } | undefined;
+    const body = req.body as { version?: string; localPath?: string; activate?: boolean } | undefined;
     const version = body?.version;
+
+    if (version !== undefined && typeof version !== "string") {
+      res.status(400).json({ error: "version must be a string if provided" });
+      return;
+    }
+    if (body?.activate !== undefined && typeof body.activate !== "boolean") {
+      res.status(400).json({ error: "activate must be a boolean if provided" });
+      return;
+    }
+    let canonicalLocalPath: string | undefined;
+    if (body?.localPath !== undefined) {
+      if (typeof body.localPath !== "string" || !body.localPath.trim()) {
+        res.status(400).json({ error: "localPath must be a nonempty string if provided" });
+        return;
+      }
+      const validated = await canonicalizeLocalPluginPath(body.localPath.trim());
+      if (!validated.ok) {
+        res.status(400).json({ error: `Invalid localPath: ${validated.reason}` });
+        return;
+      }
+      if (isCloudManagedInstance() && !(await isWithinBundledPluginRoot(validated.canonicalPath))) {
+        res.status(403).json({ error: "cloud-managed instances may only upgrade from the bundled plugin catalog" });
+        return;
+      }
+      canonicalLocalPath = validated.canonicalPath;
+    }
 
     const plugin = await resolvePlugin(registry, pluginId);
     if (!plugin) {
@@ -2241,13 +2311,20 @@ export function pluginRoutes(
       // 2. Compare capabilities
       // 3. If new capabilities, mark as upgrade_pending
       // 4. Otherwise, transition to ready
-      const result = await lifecycle.upgrade(plugin.id, version);
+      const upgradeOptions = {
+        ...(canonicalLocalPath !== undefined ? { localPath: canonicalLocalPath } : {}),
+        ...(body?.activate !== undefined ? { activate: body.activate } : {}),
+      };
+      const result = Object.keys(upgradeOptions).length > 0
+        ? await lifecycle.upgrade(plugin.id, version, upgradeOptions)
+        : await lifecycle.upgrade(plugin.id, version);
       await logPluginMutationActivity(req, "plugin.upgraded", plugin.id, {
         pluginId: plugin.id,
         pluginKey: plugin.pluginKey,
         previousVersion: plugin.version,
         version: result?.version ?? plugin.version,
         targetVersion: version ?? null,
+        activationRequested: body?.activate !== false,
       });
       publishGlobalLiveEvent({ type: "plugin.ui.updated", payload: { pluginId: plugin.id, action: "upgraded" } });
       res.json(result);
@@ -2306,6 +2383,7 @@ export function pluginRoutes(
    */
   router.post("/plugins/:pluginId/config", async (req, res) => {
     assertInstanceAdmin(req);
+    assertPluginManagementVisible();
     const { pluginId } = req.params;
 
     const plugin = await resolvePlugin(registry, pluginId);
@@ -2438,6 +2516,7 @@ export function pluginRoutes(
    */
   router.post("/plugins/:pluginId/config/test", async (req, res) => {
     assertBoardOrgAccess(req);
+    assertPluginManagementVisible();
 
     if (!bridgeDeps) {
       res.status(501).json({ error: "Plugin bridge is not enabled" });
@@ -2635,8 +2714,10 @@ export function pluginRoutes(
    *
    * Creates a run with `trigger: "manual"` and dispatches immediately.
    * The response returns before the job completes (non-blocking).
+   * A job declared `scope: "company"` gets one run per configured company;
+   * an optional body `{ companyId }` runs it for that one configured company.
    *
-   * Response: `{ runId: string, jobId: string }`
+   * Response: `{ runId: string, jobId: string, runs: Array<{ runId, companyId }> }`
    * Errors:
    * - 404 if plugin not found
    * - 400 if job not found, not active, already running, or worker unavailable
@@ -2662,12 +2743,136 @@ export function pluginRoutes(
     }
 
     try {
-      const result = await jobDeps.scheduler.triggerJob(jobId, "manual");
+      const requestedCompanyId = typeof req.body?.companyId === "string" && req.body.companyId.trim()
+        ? req.body.companyId.trim()
+        : null;
+      const result = await jobDeps.scheduler.triggerJob(jobId, "manual", {
+        companyId: requestedCompanyId,
+      });
       res.json(result);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       res.status(400).json({ error: message });
     }
+  });
+
+  /**
+   * PATCH /api/plugins/:pluginId/jobs/:jobId
+   *
+   * Instance-admin only. Set a job's status to `active` or `paused`.
+   *
+   * Plugin reload deliberately does not resume a paused job, so this is the
+   * only way to resume one. A job whose status already equals the requested
+   * status is left untouched (no status write, no audit entry). Resuming
+   * arms the job's `nextRunAt` from its schedule in the same write as the
+   * status flip (null or past values are recomputed; a missed run is not
+   * replayed). A no-change `active` request only repairs an active job stuck
+   * with a null `nextRunAt` (conditional write, reported as `changed: true`
+   * with its own audit entry); it never resumes a paused job.
+   * Pausing leaves `nextRunAt` as it is: the scheduler only fires active jobs.
+   *
+   * Body: `{ status: "active" | "paused" }` (unknown fields are rejected).
+   *
+   * Response: `{ jobId, jobKey, status, previousStatus, changed }`
+   * Errors:
+   * - 400 if the body is invalid
+   * - 403 if the caller is not an instance admin
+   * - 404 if the plugin or job is not found
+   * - 422 if resuming a job whose schedule cannot produce a next run
+   * - 501 if job scheduling is not enabled
+   */
+  router.patch("/plugins/:pluginId/jobs/:jobId", async (req, res) => {
+    assertInstanceAdmin(req);
+    if (!jobDeps) {
+      res.status(501).json({ error: "Job scheduling is not enabled" });
+      return;
+    }
+
+    const body: unknown = req.body;
+    if (typeof body !== "object" || body === null || Array.isArray(body)) {
+      throw badRequest("Request body must be a JSON object");
+    }
+    const unknownKeys = Object.keys(body).filter((key) => key !== "status");
+    if (unknownKeys.length > 0) {
+      throw badRequest(`Unknown field(s): ${unknownKeys.join(", ")}`);
+    }
+    const requestedStatus = (body as { status?: unknown }).status;
+    if (requestedStatus !== "active" && requestedStatus !== "paused") {
+      throw badRequest('"status" must be "active" or "paused"');
+    }
+
+    const { pluginId, jobId } = req.params;
+    const plugin = await resolvePlugin(registry, pluginId);
+    if (!plugin) {
+      res.status(404).json({ error: "Plugin not found" });
+      return;
+    }
+
+    const job = await jobDeps.jobStore.getJobByIdForPlugin(plugin.id, jobId);
+    if (!job) {
+      res.status(404).json({ error: "Job not found" });
+      return;
+    }
+
+    const previousStatus = job.status;
+    if (previousStatus === requestedStatus) {
+      // Narrow repair only: an active job stuck with a null nextRunAt (for
+      // example after a failed earlier resume). The store re-checks "still
+      // active and null" inside the write, so this can never resume a job a
+      // concurrent request just paused.
+      let repaired = false;
+      if (requestedStatus === "active") {
+        try {
+          repaired = await jobDeps.scheduler.repairActiveJob(job.id);
+        } catch (err) {
+          if (err instanceof PluginJobScheduleError) throw unprocessable(err.message);
+          throw err;
+        }
+      }
+      if (repaired) {
+        await logPluginMutationActivity(req, "plugin.job_schedule_repaired", job.id, {
+          pluginId: plugin.id,
+          jobId: job.id,
+          jobKey: job.jobKey,
+        }, undefined, "plugin_job");
+      }
+      res.json({
+        jobId: job.id,
+        jobKey: job.jobKey,
+        status: previousStatus,
+        previousStatus,
+        changed: repaired,
+      });
+      return;
+    }
+
+    if (requestedStatus === "active") {
+      // Computes nextRunAt first and writes status + nextRunAt together, so a
+      // scheduler tick never sees an active job with a stale pointer. A
+      // failure leaves the job paused.
+      try {
+        await jobDeps.scheduler.activateJob(job.id);
+      } catch (err) {
+        if (err instanceof PluginJobScheduleError) throw unprocessable(err.message);
+        throw err;
+      }
+    } else {
+      await jobDeps.jobStore.updateJobStatus(job.id, requestedStatus);
+    }
+    await logPluginMutationActivity(req, "plugin.job_status_changed", job.id, {
+      pluginId: plugin.id,
+      jobId: job.id,
+      jobKey: job.jobKey,
+      from: previousStatus,
+      to: requestedStatus,
+    }, undefined, "plugin_job");
+    res.json({
+      jobId: job.id,
+      jobKey: job.jobKey,
+      status: requestedStatus,
+      previousStatus,
+      changed: true,
+    });
   });
 
   // ===========================================================================
@@ -2993,6 +3198,7 @@ export function pluginRoutes(
 
   router.put("/plugins/:pluginId/companies/:companyId/local-folders/:folderKey", async (req, res) => {
     assertBoardOrgAccess(req);
+    assertPluginManagementVisible();
     const { pluginId, companyId, folderKey } = req.params;
     assertCompanyAccess(req, companyId);
 

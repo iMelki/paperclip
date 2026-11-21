@@ -1,0 +1,1547 @@
+{
+  "chromeSample": "n northwind robotics new task search dashboard inbox 9 decisions 10 status beta conference room work tasks cases beta routines pipelines goals artifacts skills projects agents ada chen leo fontaine marcus webb see all agents company org apps timeline costs activity settings new task search dashboard",
+  "surfaces": [
+    {
+      "id": "dashboard",
+      "path": "/dashboard",
+      "finalPath": "/NOR/dashboard",
+      "title": "Dashboard • Northwind Robotics • Paperclip",
+      "mainLen": 2190,
+      "headings": [
+        "Dashboard",
+        "Agents",
+        "Run Activity",
+        "Tasks by Status",
+        "Success Rate",
+        "Recent Activity",
+        "Recent Tasks",
+        "Command Palette"
+      ],
+      "mainSample": "AGENTS AC Ada Chen Finished just now NOR-8 - Grasp planner drops slippery utensils in humid kitchens Recovery needed AC Ada Chen failed after 1 second just now AC Ada Chen Finished just now NOR-5 - Battery dock alignment drifts after firmware 3.4.1 Recovery ne",
+      "chromeLen": 528,
+      "candidates": [
+        "Run Activity",
+        "Tasks by Status",
+        "Success Rate",
+        "Recent Activity"
+      ],
+      "currentExpect": "Recovery needed",
+      "currentExpectIsChrome": false
+    },
+    {
+      "id": "dashboard-live",
+      "path": "/dashboard/live",
+      "finalPath": "/NOR/dashboard/live",
+      "title": "Live runs • Dashboard • Northwind Robotics • Paperclip",
+      "mainLen": 3779,
+      "headings": [
+        "Live agent runs",
+        "Active / recent",
+        "Command Palette"
+      ],
+      "mainSample": "Dashboard Live agent runs Active runs first, followed by the most recent completed runs. Showing up to 50 ACTIVE / RECENT AC Ada Chen Finished just now NOR-8 - Grasp planner drops slippery utensils in humid kitchens Recovery needed AC Ada Chen failed after 1 s",
+      "chromeLen": 548,
+      "candidates": [
+        "Live agent runs",
+        "Active / recent",
+        "Command Palette"
+      ],
+      "currentExpect": "Live",
+      "currentExpectIsChrome": false
+    },
+    {
+      "id": "timeline",
+      "path": "/timeline",
+      "finalPath": "/NOR/timeline",
+      "title": "Timeline • Northwind Robotics • Paperclip",
+      "mainLen": 351,
+      "headings": [
+        "Timeline",
+        "Work Timeline",
+        "Command Palette"
+      ],
+      "mainSample": "Work Timeline Runs 24 Agents 4 Run time 0m Tokens used Not tracked Delegated Automation Cancelled Now Leo Fontaine Marcus Webb Priya Raman Ada Chen Leo Fontaine Marcus Webb Priya Raman BO BO Ada Chen BO BO BO BO BO Aug 19 Aug 20 Aug 21 Aug 22 Aug 23 Aug 24 Aug",
+      "chromeLen": 498,
+      "candidates": [
+        "Work Timeline",
+        "Command Palette"
+      ],
+      "currentExpect": "Ada Chen",
+      "currentExpectIsChrome": true
+    },
+    {
+      "id": "companies",
+      "path": "/companies",
+      "finalPath": "/NOR/companies",
+      "title": "Companies • Northwind Robotics • Paperclip",
+      "mainLen": 176,
+      "headings": [
+        "Companies",
+        "Northwind Robotics",
+        "Command Palette"
+      ],
+      "mainSample": "New Company Northwind Robotics active Fictional home-robotics company used as the capture fixture for UI/UX evidence runs. 6 agents 8 tasks $0.00Unlimited budget Created 1m ago",
+      "chromeLen": 528,
+      "candidates": [
+        "Companies",
+        "Command Palette"
+      ],
+      "currentExpect": "Northwind Robotics",
+      "currentExpectIsChrome": true
+    },
+    {
+      "id": "org",
+      "path": "/org",
+      "finalPath": "/NOR/org",
+      "title": "Org Chart • Northwind Robotics • Paperclip",
+      "mainLen": 821,
+      "headings": [
+        "Org Chart",
+        "Command Palette"
+      ],
+      "mainSample": "Import company Export company Reflection Coach Reflection Coach Claude Code Runs evidence-backed reflection loops on recent agent work, proposes small instruction and skill improvements, and requests approval before changes are applied. Summarizer Summarizer C",
+      "chromeLen": 528,
+      "candidates": [
+        "Org Chart",
+        "Command Palette"
+      ],
+      "currentExpect": "Chief Technology Officer",
+      "currentExpectIsChrome": false
+    },
+    {
+      "id": "search",
+      "path": "/search",
+      "finalPath": "/NOR/search",
+      "title": "Search • Northwind Robotics • Paperclip",
+      "mainLen": 552,
+      "headings": [
+        "Search",
+        "Search",
+        "Type to search company memory.",
+        "Command Palette"
+      ],
+      "mainSample": "Search ⌘K status:todo Filter by task status status:blocked Find blocked work assignee:me Use your current board user project:\"Paperclip App\" Quote multi-word project names All Tasks Comments Documents Artifacts Agents Projects Type to search company memory. Ta",
+      "chromeLen": 528,
+      "candidates": [
+        "Type to search company memory.",
+        "Command Palette"
+      ],
+      "currentExpect": "Search",
+      "currentExpectIsChrome": true
+    },
+    {
+      "id": "design-guide",
+      "path": "/design-guide",
+      "finalPath": "/NOR/design-guide",
+      "title": "Northwind Robotics • Paperclip",
+      "mainLen": 17001,
+      "headings": [
+        "Design Guide",
+        "Component Coverage",
+        "Colors",
+        "Typography",
+        "Page Title — text-xl font-bold",
+        "Section Title — text-lg font-semibold",
+        "Section Heading — text-sm font-semibold uppercase tracking-wide",
+        "Radius"
+      ],
+      "mainSample": "Design Guide Every component, style, and pattern used across Paperclip. COMPONENT COVERAGE This page should be updated when new UI primitives or app-level patterns ship. UI primitives avatar badge breadcrumb button card checkbox collapsible command dialog drop",
+      "chromeLen": 562,
+      "candidates": [
+        "Design Guide",
+        "Component Coverage",
+        "Colors",
+        "Typography"
+      ],
+      "currentExpect": "Design",
+      "currentExpectIsChrome": false
+    },
+    {
+      "id": "issues",
+      "path": "/issues",
+      "finalPath": "/NOR/issues",
+      "title": "Tasks • Northwind Robotics • Paperclip",
+      "mainLen": 1096,
+      "headings": [
+        "Tasks",
+        "Command Palette"
+      ],
+      "mainSample": "New Task Open NOR-8: Grasp planner drops slippery utensils in humid kitchens Grasp planner drops slippery utensils in humid kitchens NOR-8 1m ago Open NOR-5: Battery dock alignment drifts after firmware 3.4.1 Battery dock alignment drifts after firmware 3.4.1 ",
+      "chromeLen": 528,
+      "candidates": [
+        "Command Palette"
+      ],
+      "currentExpect": "Arm stalls when the dish rack is over-filled",
+      "currentExpectIsChrome": false
+    },
+    {
+      "id": "projects",
+      "path": "/projects",
+      "finalPath": "/NOR/projects",
+      "title": "Projects • Northwind Robotics • Paperclip",
+      "mainLen": 163,
+      "headings": [
+        "Projects",
+        "My Projects",
+        "Command Palette"
+      ],
+      "mainSample": "Sort: Name Add Project My Projects 1 project Kitchen Autonomy Dish handling, counter wiping, and appliance interaction for the v3 launch. 8 tasks in progress Leave",
+      "chromeLen": 528,
+      "candidates": [
+        "My Projects",
+        "Command Palette"
+      ],
+      "currentExpect": "Kitchen Autonomy",
+      "currentExpectIsChrome": false
+    },
+    {
+      "id": "workspaces",
+      "path": "/workspaces",
+      "finalPath": "/NOR/issues",
+      "title": "Tasks • Northwind Robotics • Paperclip",
+      "mainLen": 1096,
+      "headings": [
+        "Tasks",
+        "Command Palette"
+      ],
+      "mainSample": "New Task Open NOR-8: Grasp planner drops slippery utensils in humid kitchens Grasp planner drops slippery utensils in humid kitchens NOR-8 1m ago Open NOR-5: Battery dock alignment drifts after firmware 3.4.1 Battery dock alignment drifts after firmware 3.4.1 ",
+      "chromeLen": 528,
+      "candidates": [
+        "Command Palette"
+      ],
+      "currentExpect": "orkspace",
+      "currentExpectIsChrome": false
+    },
+    {
+      "id": "routines",
+      "path": "/routines",
+      "finalPath": "/NOR/routines",
+      "title": "Routines • Northwind Robotics • Paperclip",
+      "mainLen": 437,
+      "headings": [
+        "Routines",
+        "Routines",
+        "Command Palette"
+      ],
+      "mainSample": "Routines Recurring work definitions that materialize into auditable execution tasks. Create routine Routines Recent Runs 2 routines Sort Group New folder Group these routines into folders to keep things tidy. Create your first folder BUILT-IN ROUTINES 2 Refres",
+      "chromeLen": 528,
+      "candidates": [
+        "Command Palette"
+      ],
+      "currentExpect": "outine",
+      "currentExpectIsChrome": true
+    },
+    {
+      "id": "goals",
+      "path": "/goals",
+      "finalPath": "/NOR/goals",
+      "title": "Goals • Northwind Robotics • Paperclip",
+      "mainLen": 68,
+      "headings": [
+        "Goals",
+        "Command Palette"
+      ],
+      "mainSample": "New Goal Company Ship the v3 home robot to 5,000 retail units active",
+      "chromeLen": 528,
+      "candidates": [
+        "Command Palette"
+      ],
+      "currentExpect": "Ship the v3 home robot to 5,000 retail units",
+      "currentExpectIsChrome": false
+    },
+    {
+      "id": "artifacts",
+      "path": "/artifacts",
+      "finalPath": "/NOR/artifacts",
+      "title": "Artifacts • Northwind Robotics • Paperclip",
+      "mainLen": 62,
+      "headings": [
+        "Artifacts",
+        "Command Palette"
+      ],
+      "mainSample": "All Images Videos Documents Text Files No artifact stacks yet.",
+      "chromeLen": 528,
+      "candidates": [
+        "Command Palette"
+      ],
+      "currentExpect": "rtifact",
+      "currentExpectIsChrome": true
+    },
+    {
+      "id": "costs",
+      "path": "/costs",
+      "finalPath": "/NOR/costs",
+      "title": "Costs • Northwind Robotics • Paperclip",
+      "mainLen": 1125,
+      "headings": [
+        "Costs",
+        "Costs",
+        "Command Palette"
+      ],
+      "mainSample": "Costs Inference spend, platform fees, credits, and live quota windows. Month to Date Last 7 Days Last 30 Days Year to Date All Time Custom INFERENCE SPEND $0.00 0 tokens across request-scoped events BUDGET Open No monthly cap configured FINANCE NET $0.00 $0.00",
+      "chromeLen": 528,
+      "candidates": [
+        "Command Palette"
+      ],
+      "currentExpect": "Spend",
+      "currentExpectIsChrome": false
+    },
+    {
+      "id": "activity",
+      "path": "/activity",
+      "finalPath": "/NOR/activity",
+      "title": "Activity • Northwind Robotics • Paperclip",
+      "mainLen": 6406,
+      "headings": [
+        "Activity",
+        "Activity",
+        "Command Palette"
+      ],
+      "mainSample": "Activity Everything happening in your company, newest first — people, agents, and the system. Each line is one recorded action. All activity Agent actions All agents All responsible users All actions All entities Export CSV BO Board instance settings experimen",
+      "chromeLen": 528,
+      "candidates": [
+        "Command Palette"
+      ],
+      "currentExpect": "ctivity",
+      "currentExpectIsChrome": true
+    },
+    {
+      "id": "approvals-pending",
+      "path": "/approvals/pending",
+      "finalPath": "/NOR/approvals/pending",
+      "title": "Approvals • Northwind Robotics • Paperclip",
+      "mainLen": 33,
+      "headings": [
+        "Approvals",
+        "Command Palette"
+      ],
+      "mainSample": "Pending All No pending approvals.",
+      "chromeLen": 528,
+      "candidates": [
+        "Approvals",
+        "Command Palette"
+      ],
+      "currentExpect": "pproval",
+      "currentExpectIsChrome": false
+    },
+    {
+      "id": "approvals-all",
+      "path": "/approvals/all",
+      "finalPath": "/NOR/approvals/all",
+      "title": "Approvals • Northwind Robotics • Paperclip",
+      "mainLen": 29,
+      "headings": [
+        "Approvals",
+        "Command Palette"
+      ],
+      "mainSample": "Pending All No approvals yet.",
+      "chromeLen": 528,
+      "candidates": [
+        "Approvals",
+        "Command Palette"
+      ],
+      "currentExpect": "pproval",
+      "currentExpectIsChrome": false
+    },
+    {
+      "id": "agents-all",
+      "path": "/agents/all",
+      "finalPath": "/NOR/agents/all",
+      "title": "Agents • Northwind Robotics • Paperclip",
+      "mainLen": 494,
+      "headings": [
+        "Agents",
+        "Command Palette"
+      ],
+      "mainSample": "All Active Paused Error Built-in New Agent 6 agents Ada ChenCTO - Chief Technology Officer — Process 3m ago error Leave Leo FontaineEngineer - Senior Manipulation Engineer — Process 3m ago error Leave Marcus WebbDevOps - Fleet Reliability Engineer — Process 3m",
+      "chromeLen": 528,
+      "candidates": [
+        "Command Palette"
+      ],
+      "currentExpect": "Priya Raman",
+      "currentExpectIsChrome": false
+    },
+    {
+      "id": "agents-active",
+      "path": "/agents/active",
+      "finalPath": "/NOR/agents/active",
+      "title": "Agents • Northwind Robotics • Paperclip",
+      "mainLen": 79,
+      "headings": [
+        "Agents",
+        "Command Palette"
+      ],
+      "mainSample": "All Active Paused Error Built-in New Agent No agents match the selected status.",
+      "chromeLen": 528,
+      "candidates": [
+        "Command Palette"
+      ],
+      "currentExpect": "gent",
+      "currentExpectIsChrome": true
+    },
+    {
+      "id": "agents-paused",
+      "path": "/agents/paused",
+      "finalPath": "/NOR/agents/paused",
+      "title": "Agents • Northwind Robotics • Paperclip",
+      "mainLen": 198,
+      "headings": [
+        "Agents",
+        "Command Palette"
+      ],
+      "mainSample": "All Active Paused Error Built-in New Agent 2 agents Reflection CoachGeneral - Reflection Coach — Claude Code — paused Leave SummarizerGeneral - Summarizer claude-haiku-4-5 Claude Code — paused Leave",
+      "chromeLen": 528,
+      "candidates": [
+        "Command Palette"
+      ],
+      "currentExpect": "gent",
+      "currentExpectIsChrome": true
+    },
+    {
+      "id": "agents-error",
+      "path": "/agents/error",
+      "finalPath": "/NOR/agents/error",
+      "title": "Agents • Northwind Robotics • Paperclip",
+      "mainLen": 347,
+      "headings": [
+        "Agents",
+        "Command Palette"
+      ],
+      "mainSample": "All Active Paused Error Built-in New Agent 4 agents Ada ChenCTO - Chief Technology Officer — Process 3m ago error Leave Leo FontaineEngineer - Senior Manipulation Engineer — Process 3m ago error Leave Marcus WebbDevOps - Fleet Reliability Engineer — Process 3m",
+      "chromeLen": 528,
+      "candidates": [
+        "Command Palette"
+      ],
+      "currentExpect": "gent",
+      "currentExpectIsChrome": true
+    },
+    {
+      "id": "agents-builtin",
+      "path": "/agents/builtin",
+      "finalPath": "/NOR/agents/builtin",
+      "title": "Agents • Northwind Robotics • Paperclip",
+      "mainLen": 198,
+      "headings": [
+        "Agents",
+        "Command Palette"
+      ],
+      "mainSample": "All Active Paused Error Built-in New Agent 2 agents Reflection CoachGeneral - Reflection Coach — Claude Code — paused Leave SummarizerGeneral - Summarizer claude-haiku-4-5 Claude Code — paused Leave",
+      "chromeLen": 528,
+      "candidates": [
+        "Command Palette"
+      ],
+      "currentExpect": "gent",
+      "currentExpectIsChrome": true
+    },
+    {
+      "id": "agents-new",
+      "path": "/agents/new",
+      "finalPath": "/NOR/agents/new",
+      "title": "New Agent • Agents • Northwind Robotics • Paperclip",
+      "mainLen": 1540,
+      "headings": [
+        "New Agent",
+        "Trust",
+        "Company skills",
+        "Command Palette"
+      ],
+      "mainSample": "New Agent Advanced agent configuration General Reports to... Trust Trust preset Standard Low-trust review Company-visible collaboration. This is the default for normal work. Advanced permissions remain editable through the EE permissions extension when install",
+      "chromeLen": 545,
+      "candidates": [
+        "New Agent",
+        "Trust",
+        "Company skills",
+        "Command Palette"
+      ],
+      "currentExpect": "dapter",
+      "currentExpectIsChrome": false
+    },
+    {
+      "id": "inbox-mine",
+      "path": "/inbox/mine",
+      "finalPath": "/NOR/inbox/mine",
+      "title": "Inbox • Northwind Robotics • Paperclip",
+      "mainLen": 1793,
+      "headings": [
+        "Inbox",
+        "Command Palette"
+      ],
+      "mainSample": "Mine Recent Unread Blocked All Mark all as read Archive Open NOR-5: Battery dock alignment drifts after firmware 3.4.1 Battery dock alignment drifts after firmware 3.4.1 NOR-5 Archive 3m ago Archive Open NOR-8: Grasp planner drops slippery utensils in humid ki",
+      "chromeLen": 528,
+      "candidates": [
+        "Command Palette"
+      ],
+      "currentExpect": "NOR-",
+      "currentExpectIsChrome": false
+    },
+    {
+      "id": "inbox-recent",
+      "path": "/inbox/recent",
+      "finalPath": "/NOR/inbox/recent",
+      "title": "Inbox • Northwind Robotics • Paperclip",
+      "mainLen": 1633,
+      "headings": [
+        "Inbox",
+        "Command Palette"
+      ],
+      "mainSample": "Mine Recent Unread Blocked All Mark all as read Open NOR-5: Battery dock alignment drifts after firmware 3.4.1 Battery dock alignment drifts after firmware 3.4.1 NOR-5 3m ago Open NOR-8: Grasp planner drops slippery utensils in humid kitchens Grasp planner dro",
+      "chromeLen": 528,
+      "candidates": [
+        "Command Palette"
+      ],
+      "currentExpect": "NOR-",
+      "currentExpectIsChrome": false
+    },
+    {
+      "id": "inbox-unread",
+      "path": "/inbox/unread",
+      "finalPath": "/NOR/inbox/unread",
+      "title": "Inbox • Northwind Robotics • Paperclip",
+      "mainLen": 1214,
+      "headings": [
+        "Inbox",
+        "Command Palette"
+      ],
+      "mainSample": "Mine Recent Unread Blocked All Mark all as read Open NOR-5: Battery dock alignment drifts after firmware 3.4.1 Battery dock alignment drifts after firmware 3.4.1 NOR-5 3m ago Open NOR-8: Grasp planner drops slippery utensils in humid kitchens Grasp planner dro",
+      "chromeLen": 528,
+      "candidates": [
+        "Command Palette"
+      ],
+      "currentExpect": "nread",
+      "currentExpectIsChrome": false
+    },
+    {
+      "id": "inbox-blocked",
+      "path": "/inbox/blocked",
+      "finalPath": "/NOR/inbox/blocked",
+      "title": "Inbox • Northwind Robotics • Paperclip",
+      "mainLen": 1011,
+      "headings": [
+        "Inbox",
+        "Command Palette"
+      ],
+      "mainSample": "Mine Recent Unread Blocked All Open NOR-5: Battery dock alignment drifts after firmware 3.4.1 Battery dock alignment drifts after firmware 3.4.1 NOR-5 Blocked chain stalled stopped 3m Open NOR-8: Grasp planner drops slippery utensils in humid kitchens Grasp pl",
+      "chromeLen": 528,
+      "candidates": [
+        "Command Palette"
+      ],
+      "currentExpect": "locked",
+      "currentExpectIsChrome": false
+    },
+    {
+      "id": "inbox-all",
+      "path": "/inbox/all",
+      "finalPath": "/NOR/inbox/all",
+      "title": "Inbox • Northwind Robotics • Paperclip",
+      "mainLen": 1670,
+      "headings": [
+        "Inbox",
+        "Command Palette"
+      ],
+      "mainSample": "Mine Recent Unread Blocked All Mark all as read All categories All approval statuses Open NOR-5: Battery dock alignment drifts after firmware 3.4.1 Battery dock alignment drifts after firmware 3.4.1 NOR-5 3m ago Open NOR-8: Grasp planner drops slippery utensil",
+      "chromeLen": 528,
+      "candidates": [
+        "Command Palette"
+      ],
+      "currentExpect": "NOR-",
+      "currentExpectIsChrome": false
+    },
+    {
+      "id": "inbox-requests",
+      "path": "/inbox/requests",
+      "finalPath": "/NOR/inbox/requests",
+      "title": "Join Requests • Inbox • Northwind Robotics • Northwind Robotics • Paperclip",
+      "mainLen": 271,
+      "headings": [
+        "Join Request Queue",
+        "Command Palette"
+      ],
+      "mainSample": "Join Request Queue Review human and agent join requests outside the mixed inbox feed. This queue uses the same approval mutations as the inline inbox cards. Status Pending approval Approved Rejected Request type All Human Agent No join requests match the curre",
+      "chromeLen": 567,
+      "candidates": [
+        "Join Request Queue",
+        "Command Palette"
+      ],
+      "currentExpect": "equest",
+      "currentExpectIsChrome": false
+    },
+    {
+      "id": "cases",
+      "path": "/cases",
+      "finalPath": "/NOR/cases",
+      "title": "Cases • Northwind Robotics • Paperclip",
+      "mainLen": 483,
+      "headings": [
+        "Cases",
+        "Cases",
+        "No cases yet",
+        "Command Palette"
+      ],
+      "mainSample": "Cases Experimental No cases yet Cases are durable work products — blog posts, tweet storms, docs pages — that tasks create and iterate on. In v1 they're created by agents, not from the UI. To start creating cases, add this to a skill: \"Create a case of type bl",
+      "chromeLen": 528,
+      "candidates": [
+        "No cases yet",
+        "Command Palette"
+      ],
+      "currentExpect": "ase",
+      "currentExpectIsChrome": true
+    },
+    {
+      "id": "status",
+      "path": "/status",
+      "finalPath": "/NOR/status",
+      "title": "Status • Northwind Robotics • Paperclip",
+      "mainLen": 126,
+      "headings": [
+        "Status",
+        "Status",
+        "Command Palette"
+      ],
+      "mainSample": "Status Experimental New card No status cards yet Create a card to keep a living summary of the issues you care about. New card",
+      "chromeLen": 528,
+      "candidates": [
+        "Command Palette"
+      ],
+      "currentExpect": "tatus",
+      "currentExpectIsChrome": true
+    },
+    {
+      "id": "review-queue",
+      "path": "/review-queue",
+      "finalPath": "/NOR/review-queue",
+      "title": "Review queue • Northwind Robotics • Paperclip",
+      "mainLen": 147,
+      "headings": [
+        "Review queue",
+        "Review queue",
+        "Command Palette"
+      ],
+      "mainSample": "Review queue Needs your attention (0) Approve 0 items Nothing needs you right now. Shortcuts: j/k or arrow keys move, Enter opens item, a approves.",
+      "chromeLen": 528,
+      "candidates": [
+        "Review queue",
+        "Review queue",
+        "Command Palette"
+      ],
+      "currentExpect": "eview",
+      "currentExpectIsChrome": false
+    },
+    {
+      "id": "learnings",
+      "path": "/learnings",
+      "finalPath": "/NOR/learnings",
+      "title": "Learnings • Northwind Robotics • Paperclip",
+      "mainLen": 120,
+      "headings": [
+        "Learnings",
+        "Learnings",
+        "Command Palette"
+      ],
+      "mainSample": "Learnings Patterns from review decisions and hand moves, in plain words. No rows No learnings yet. Previous No rows Next",
+      "chromeLen": 528,
+      "candidates": [
+        "Learnings",
+        "Learnings",
+        "Command Palette"
+      ],
+      "currentExpect": "earning",
+      "currentExpectIsChrome": false
+    },
+    {
+      "id": "pipelines",
+      "path": "/pipelines",
+      "error": "TimeoutError: page.goto: Timeout 45000ms exceeded.\nCall log:\n\u001b[2m  - navigating to \"http://127.0.0.1:3197/NOR/pipelines\", waiting until \"net"
+    },
+    {
+      "id": "decisions",
+      "path": "/decisions",
+      "error": "TimeoutError: page.goto: Timeout 45000ms exceeded.\nCall log:\n\u001b[2m  - navigating to \"http://127.0.0.1:3197/NOR/decisions\", waiting until \"net"
+    },
+    {
+      "id": "decisions-training",
+      "path": "/decisions/training",
+      "finalPath": "/NOR/decisions/training",
+      "title": "Training • Decisions • Northwind Robotics • Paperclip",
+      "mainLen": 227,
+      "headings": [
+        "Training examples",
+        "Command Palette"
+      ],
+      "mainSample": "Training examples Human decision traces with frozen state for future eval cases. Export JSONL Project: All Decision kind: All Author: All No training examples match these filters. Decision Outcome Snapshot Author Created Edited",
+      "chromeLen": 643,
+      "candidates": [
+        "Training examples",
+        "Command Palette"
+      ],
+      "currentExpect": "raining",
+      "currentExpectIsChrome": false
+    },
+    {
+      "id": "board-chat",
+      "path": "/board-chat",
+      "finalPath": "/NOR/board-chat",
+      "title": "Conference Room • Northwind Robotics • Paperclip",
+      "mainLen": 1362,
+      "headings": [
+        "Conference Room",
+        "Conference Room",
+        "Agent Feed",
+        "Command Palette"
+      ],
+      "mainSample": "Conference Room Northwind Robotics Agent Feed Live activity from your agents System moved to blocked NOR-8 Grasp planner drops slippery utensils in humid kitchens 6m ago System moved to blocked NOR-5 Battery dock alignment drifts after firmware 3.4.1 6m ago Sy",
+      "chromeLen": 1858,
+      "candidates": [
+        "Agent Feed",
+        "Command Palette"
+      ],
+      "currentExpect": "hat",
+      "currentExpectIsChrome": false
+    },
+    {
+      "id": "apps",
+      "path": "/apps",
+      "finalPath": "/NOR/apps",
+      "title": "Apps • Northwind Robotics • Northwind Robotics • Paperclip",
+      "mainLen": 798,
+      "headings": [
+        "Browse",
+        "Command Palette"
+      ],
+      "mainSample": "Browse Choose an app or connect your own MCP server. POPULAR Zapier Connect → GitHub Coming soon Slack Coming soon Notion Connect → Linear Coming soon ALL APPS Zapier Reach thousands of apps through your Zapier account. Connect → GitHub Read code and pull requ",
+      "chromeLen": 904,
+      "candidates": [
+        "Browse",
+        "Command Palette"
+      ],
+      "currentExpect": "pp",
+      "currentExpectIsChrome": true
+    },
+    {
+      "id": "apps-connections",
+      "path": "/apps/connections",
+      "finalPath": "/NOR/apps/connections",
+      "title": "Connections • Apps • Northwind Robotics • Northwind Robotics • Paperclip",
+      "mainLen": 159,
+      "headings": [
+        "Connections",
+        "Command Palette"
+      ],
+      "mainSample": "Connections The tools you’ve connected, and whether they’re working. No connections yet. Add one from Apps to give your agents the tools they need. Browse apps",
+      "chromeLen": 932,
+      "candidates": [
+        "Connections",
+        "Command Palette"
+      ],
+      "currentExpect": "onnection",
+      "currentExpectIsChrome": false
+    },
+    {
+      "id": "apps-connect",
+      "path": "/apps/connect",
+      "finalPath": "/NOR/apps",
+      "title": "Apps • Northwind Robotics • Northwind Robotics • Paperclip",
+      "mainLen": 798,
+      "headings": [
+        "Browse",
+        "Command Palette"
+      ],
+      "mainSample": "Browse Choose an app or connect your own MCP server. POPULAR Zapier Connect → GitHub Coming soon Slack Coming soon Notion Connect → Linear Coming soon ALL APPS Zapier Reach thousands of apps through your Zapier account. Connect → GitHub Read code and pull requ",
+      "chromeLen": 904,
+      "candidates": [
+        "Browse",
+        "Command Palette"
+      ],
+      "currentExpect": "onnect",
+      "currentExpectIsChrome": false
+    },
+    {
+      "id": "apps-review",
+      "path": "/apps/review",
+      "finalPath": "/NOR/apps/review",
+      "title": "Review • Apps • Northwind Robotics • Northwind Robotics • Paperclip",
+      "mainLen": 140,
+      "headings": [
+        "Review",
+        "Command Palette"
+      ],
+      "mainSample": "Review Actions your agents want to run that need your OK first. Approve, always-allow, or decline. Nothing is waiting for your OK right now.",
+      "chromeLen": 957,
+      "candidates": [
+        "Review",
+        "Command Palette"
+      ],
+      "currentExpect": "eview",
+      "currentExpectIsChrome": false
+    },
+    {
+      "id": "apps-gateways",
+      "path": "/apps/gateways",
+      "finalPath": "/NOR/apps/gateways",
+      "title": "Gateways • Apps • Northwind Robotics • Northwind Robotics • Paperclip",
+      "mainLen": 288,
+      "headings": [
+        "Apps",
+        "No gateways yet",
+        "Command Palette"
+      ],
+      "mainSample": "Apps A gateway is one safe MCP endpoint that exposes only the apps you assign. Hand it to a client like Cursor or Claude Desktop. Connected Gateways Activity No gateways yet Group your connected apps into one safe endpoint you can hand to a client, then revoke",
+      "chromeLen": 1018,
+      "candidates": [
+        "No gateways yet",
+        "Command Palette"
+      ],
+      "currentExpect": "ateway",
+      "currentExpectIsChrome": false
+    },
+    {
+      "id": "apps-advanced",
+      "path": "/apps/advanced",
+      "finalPath": "/NOR/apps/advanced",
+      "title": "Advanced setup • Apps • Northwind Robotics • Northwind Robotics • Paperclip",
+      "mainLen": 827,
+      "headings": [
+        "Advanced setup",
+        "Your own tools",
+        "Command Palette"
+      ],
+      "mainSample": "Advanced setup Advanced For tools that aren't in the gallery. You'll need details from the tool's documentation. Most people never need this — if the app you want is in the gallery, connect it there instead. Run your own Paste a config For a tool that runs fro",
+      "chromeLen": 1102,
+      "candidates": [
+        "Advanced setup",
+        "Your own tools",
+        "Command Palette"
+      ],
+      "currentExpect": "dvanced",
+      "currentExpectIsChrome": false
+    },
+    {
+      "id": "apps-profile-new",
+      "path": "/apps/advanced/profiles/new",
+      "finalPath": "/NOR/apps/advanced/profiles/new",
+      "title": "New profile • Access profiles • Apps • Northwind Robotics • Northwind Robotics • Paperclip",
+      "mainLen": 500,
+      "headings": [
+        "New access profile",
+        "Start from",
+        "Command Palette"
+      ],
+      "mainSample": "New access profile Choose which tools this profile allows, then assign it to the agents that need them. 1 Name → 2 Choose tools → 3 Assign Start from Read-only See and fetch, but never change anything. Everyday work Read and make routine changes — no destructi",
+      "chromeLen": 983,
+      "candidates": [
+        "New access profile",
+        "Start from",
+        "Command Palette"
+      ],
+      "currentExpect": "rofile",
+      "currentExpectIsChrome": false
+    },
+    {
+      "id": "skills-studio",
+      "path": "/skills/studio",
+      "finalPath": "/NOR/skills/studio",
+      "title": "Studio • Skills • Northwind Robotics • Paperclip",
+      "mainLen": 295,
+      "headings": [
+        "Recently updated",
+        "Command Palette"
+      ],
+      "mainSample": "Select skill New skill RECENTLY UPDATED S summarize-status updated 7m ago R reflection-coach updated 7m ago P para-memory-files updated 7m ago P paperclip-create-agent updated 7m ago P paperclip-converting-plans-to-tasks updated 7m ago P paperclip-board update",
+      "chromeLen": 535,
+      "candidates": [
+        "Recently updated",
+        "Command Palette"
+      ],
+      "currentExpect": "kill",
+      "currentExpectIsChrome": true
+    },
+    {
+      "id": "skills-studio-new",
+      "path": "/skills/studio/new",
+      "finalPath": "/NOR/skills/studio/new",
+      "title": "New skill • Studio • Skills • Northwind Robotics • Paperclip",
+      "mainLen": 472,
+      "headings": [
+        "Create a new skill",
+        "Basics",
+        "Appearance",
+        "Sharing",
+        "Command Palette"
+      ],
+      "mainSample": "New skill Create a new skill Create an editable company skill and open it directly in Studio. Basics Name the skill and set the route-safe slug. Name Slug Tagline Appearance Tune how the skill appears in the store and Studio switcher. S New Skill No tagline ye",
+      "chromeLen": 532,
+      "candidates": [
+        "Create a new skill",
+        "Basics",
+        "Appearance",
+        "Sharing"
+      ],
+      "currentExpect": "kill",
+      "currentExpectIsChrome": true
+    },
+    {
+      "id": "company-settings",
+      "path": "/company/settings",
+      "finalPath": "/NOR/company/settings",
+      "title": "Settings • Northwind Robotics • Northwind Robotics • Paperclip",
+      "mainLen": 875,
+      "headings": [
+        "Company Settings",
+        "Command Palette"
+      ],
+      "mainSample": "Company Settings GENERAL Company name Description APPEARANCE N Logo Brand color Attachment size limit MiB HIRING Require board approval for new hires INTERACTION GOVERNANCE Control who may resolve each kind of thread interaction. Default policy is the resolver",
+      "chromeLen": 878,
+      "candidates": [
+        "Company Settings",
+        "Command Palette"
+      ],
+      "currentExpect": "Northwind Robotics",
+      "currentExpectIsChrome": true
+    },
+    {
+      "id": "company-members",
+      "path": "/company/settings/members",
+      "finalPath": "/NOR/company/settings/members",
+      "title": "Members • Settings • Northwind Robotics • Northwind Robotics • Paperclip",
+      "mainLen": 381,
+      "headings": [
+        "Company Members",
+        "Humans",
+        "Command Palette"
+      ],
+      "mainSample": "Company Members Manage the people who can work in Northwind Robotics. Members can collaborate across the company by default. Core keeps this page focused on membership, invite approvals, and safe member removal. Humans Manage human company memberships and stat",
+      "chromeLen": 886,
+      "candidates": [
+        "Company Members",
+        "Humans",
+        "Command Palette"
+      ],
+      "currentExpect": "ember",
+      "currentExpectIsChrome": false
+    },
+    {
+      "id": "company-invites",
+      "path": "/company/settings/invites",
+      "finalPath": "/NOR/company/settings/invites",
+      "title": "Invites • Settings • Northwind Robotics • Northwind Robotics • Paperclip",
+      "mainLen": 1070,
+      "headings": [
+        "Company Invites",
+        "Invite a person",
+        "Invite history",
+        "Command Palette"
+      ],
+      "mainSample": "Company Invites Invite people to request access to this company. New invite links are copied to your clipboard when they are generated. Invite a person Generate a human invite link and choose the default access it should request. Choose a role Viewer Can view ",
+      "chromeLen": 886,
+      "candidates": [
+        "Company Invites",
+        "Invite a person",
+        "Invite history",
+        "Command Palette"
+      ],
+      "currentExpect": "nvite",
+      "currentExpectIsChrome": false
+    },
+    {
+      "id": "company-import",
+      "path": "/company/import",
+      "finalPath": "/NOR/company/import",
+      "title": "Import • Settings • Northwind Robotics • Northwind Robotics • Paperclip",
+      "mainLen": 321,
+      "headings": [
+        "Import source",
+        "Command Palette"
+      ],
+      "mainSample": "Import source Choose a GitHub repo or upload a local Paperclip zip package. GitHub repo Local zip GitHub URL Target Create new company Existing company: Northwind Robotics New company name Collision strategy Rename on conflict Skip on conflict Replace existing",
+      "chromeLen": 563,
+      "candidates": [
+        "Import source",
+        "Command Palette"
+      ],
+      "currentExpect": "mport",
+      "currentExpectIsChrome": false
+    },
+    {
+      "id": "company-secrets",
+      "path": "/company/settings/secrets",
+      "finalPath": "/NOR/company/settings/secrets",
+      "title": "Secrets • Northwind Robotics • Paperclip",
+      "mainLen": 623,
+      "headings": [
+        "Secrets",
+        "Secrets",
+        "Command Palette"
+      ],
+      "mainSample": "Secrets Secrets My secrets Provider vaults Proposals Use secrets by binding them to runtime environment variables. Create or link a secret here, then open an agent's Environment variables or a project's Env field. Add the env key the process expects, for examp",
+      "chromeLen": 850,
+      "candidates": [
+        "Secrets",
+        "Secrets",
+        "Command Palette"
+      ],
+      "currentExpect": "ecret",
+      "currentExpectIsChrome": false
+    },
+    {
+      "id": "inst-profile",
+      "path": "/company/settings/instance/profile",
+      "finalPath": "/NOR/company/settings/instance/profile",
+      "title": "Profile • Instance settings • Settings • Northwind Robotics • Paperclip",
+      "mainLen": 788,
+      "headings": [
+        "Profile",
+        "Board",
+        "Let agents tidy my inbox",
+        "Command Palette"
+      ],
+      "mainSample": "Profile Control how your account appears in the sidebar and other board surfaces. BO Upload photo Board local@paperclip.local Click the avatar to upload a new image. Stored in Paperclip file storage for Northwind Robotics. Display name Shown in the sidebar acc",
+      "chromeLen": 885,
+      "candidates": [
+        "Profile",
+        "Let agents tidy my inbox",
+        "Command Palette"
+      ],
+      "currentExpect": "rofile",
+      "currentExpectIsChrome": false
+    },
+    {
+      "id": "inst-general",
+      "path": "/company/settings/instance/general",
+      "finalPath": "/NOR/company/settings/instance/general",
+      "title": "General • Instance settings • Settings • Northwind Robotics • Paperclip",
+      "mainLen": 1806,
+      "headings": [
+        "General",
+        "Deployment and auth",
+        "Censor username in logs",
+        "Keyboard shortcuts",
+        "Backup retention",
+        "Daily",
+        "Weekly",
+        "Monthly"
+      ],
+      "mainSample": "General Configure instance-wide preferences including log display, keyboard shortcuts, backup retention, and data sharing. Deployment and auth Local trusted Local trusted mode is optimized for a local operator. Browser requests run as local board context and n",
+      "chromeLen": 885,
+      "candidates": [
+        "General",
+        "Deployment and auth",
+        "Censor username in logs",
+        "Keyboard shortcuts"
+      ],
+      "currentExpect": "eneral",
+      "currentExpectIsChrome": false
+    },
+    {
+      "id": "inst-environments",
+      "path": "/company/settings/instance/environments",
+      "finalPath": "/NOR/company/settings/instance/environments",
+      "title": "Environments • Instance settings • Settings • Northwind Robotics • Paperclip",
+      "mainLen": 143,
+      "headings": [
+        "Command Palette"
+      ],
+      "mainSample": "Default Local Add environment Local · local Default execution environment for Paperclip runs on this machine. Runs on this Paperclip host. Edit",
+      "chromeLen": 890,
+      "candidates": [
+        "Command Palette"
+      ],
+      "currentExpect": "nvironment",
+      "currentExpectIsChrome": false
+    },
+    {
+      "id": "inst-environments-new",
+      "path": "/company/settings/instance/environments/new",
+      "finalPath": "/NOR/company/settings/instance/environments/new",
+      "title": "Add environment • Environments • Instance settings • Settings • Northwind Robotics • Paperclip",
+      "mainLen": 610,
+      "headings": [
+        "Add environment",
+        "Command Palette"
+      ],
+      "mainSample": "Environments Add environment Configure a reusable execution target for your agents. Saved changes affect future runs; Paperclip may start fresh sessions or sandbox leases after environment config changes. Name Description Driver SSH Host Port Username Remote w",
+      "chromeLen": 906,
+      "candidates": [
+        "Add environment",
+        "Command Palette"
+      ],
+      "currentExpect": "nvironment",
+      "currentExpectIsChrome": false
+    },
+    {
+      "id": "inst-access",
+      "path": "/company/settings/instance/access",
+      "finalPath": "/NOR/company/settings/instance/access",
+      "title": "Access • Instance settings • Settings • Northwind Robotics • Paperclip",
+      "mainLen": 441,
+      "headings": [
+        "Instance Access",
+        "Company access",
+        "Current memberships",
+        "Command Palette"
+      ],
+      "mainSample": "Instance Access Search users, manage instance-admin status, and control which companies they can access. Search users Board local@paperclip.local 1 active company memberships Board local@paperclip.local Remove instance admin Company access Toggle company membe",
+      "chromeLen": 884,
+      "candidates": [
+        "Instance Access",
+        "Company access",
+        "Current memberships",
+        "Command Palette"
+      ],
+      "currentExpect": "ccess",
+      "currentExpectIsChrome": false
+    },
+    {
+      "id": "inst-heartbeats",
+      "path": "/company/settings/instance/heartbeats",
+      "finalPath": "/NOR/company/settings/instance/heartbeats",
+      "title": "Heartbeats • Instance settings • Settings • Northwind Robotics • Paperclip",
+      "mainLen": 432,
+      "headings": [
+        "Scheduler Heartbeats",
+        "Command Palette"
+      ],
+      "mainSample": "Scheduler Heartbeats Agents with a timer heartbeat enabled across all of your companies. 0 active 4 disabled 1 company NORTHWIND ROBOTICS Off Ada Chen Chief Technology Officer 0s 8m ago Enable Timer Heartbeat Off Leo Fontaine Senior Manipulation Engineer 0s 8m",
+      "chromeLen": 888,
+      "candidates": [
+        "Scheduler Heartbeats",
+        "Command Palette"
+      ],
+      "currentExpect": "eartbeat",
+      "currentExpectIsChrome": false
+    },
+    {
+      "id": "inst-experimental",
+      "path": "/company/settings/instance/experimental",
+      "finalPath": "/NOR/company/settings/instance/experimental",
+      "title": "Experimental • Instance settings • Settings • Northwind Robotics • Paperclip",
+      "mainLen": 4142,
+      "headings": [
+        "Experimental",
+        "Apps",
+        "Auto-Create Recovery Tasks",
+        "Auto-Restart Dev Server When Idle",
+        "Beta skills",
+        "Built-in Agents",
+        "Cases",
+        "Chat-Style Tasks"
+      ],
+      "mainSample": "Experimental Opt into features that are still being evaluated before they become default behavior. Experimental features may break at any time. These features are opt-in and come with no compatibility guarantees. They may change, break, or be removed without n",
+      "chromeLen": 890,
+      "candidates": [
+        "Experimental",
+        "Auto-Create Recovery Tasks",
+        "Auto-Restart Dev Server When Idle",
+        "Beta skills"
+      ],
+      "currentExpect": "xperimental",
+      "currentExpectIsChrome": false
+    },
+    {
+      "id": "inst-plugins",
+      "path": "/company/settings/instance/plugins",
+      "finalPath": "/NOR/company/settings/instance/plugins",
+      "title": "Plugins • Instance settings • Settings • Northwind Robotics • Northwind Robotics • Paperclip",
+      "mainLen": 3614,
+      "headings": [
+        "Plugin Manager",
+        "Available Plugins",
+        "Installed Plugins",
+        "Command Palette"
+      ],
+      "mainSample": "Plugin Manager Install Plugin Plugins are alpha. The plugin runtime and API surface are still changing. Expect breaking changes while this feature settles. Available Plugins Bundled Cloudflare Sandbox Provider First-party Experimental Not installed First-party",
+      "chromeLen": 904,
+      "candidates": [
+        "Plugin Manager",
+        "Available Plugins",
+        "Installed Plugins",
+        "Command Palette"
+      ],
+      "currentExpect": "lugin",
+      "currentExpectIsChrome": false
+    },
+    {
+      "id": "inst-adapters",
+      "path": "/company/settings/instance/adapters",
+      "finalPath": "/NOR/company/settings/instance/adapters",
+      "title": "Adapters • Instance settings • Settings • Northwind Robotics • Northwind Robotics • Paperclip",
+      "mainLen": 929,
+      "headings": [
+        "Adapters",
+        "External Adapters",
+        "Built-in Adapters",
+        "Command Palette"
+      ],
+      "mainSample": "Adapters Alpha Install Adapter External adapters are alpha. The adapter plugin system is under active development. APIs and storage format may change. Use the power icon to hide adapters from agent menus without removing them. External Adapters No external ada",
+      "chromeLen": 905,
+      "candidates": [
+        "Adapters",
+        "External Adapters",
+        "Built-in Adapters",
+        "Command Palette"
+      ],
+      "currentExpect": "dapter",
+      "currentExpectIsChrome": false
+    },
+    {
+      "id": "instance-adapters-alt",
+      "path": "/instance/settings/adapters",
+      "finalPath": "/NOR/instance/settings/adapters",
+      "title": "Adapters • Instance settings • Settings • Northwind Robotics • Northwind Robotics • Paperclip",
+      "mainLen": 929,
+      "headings": [
+        "Adapters",
+        "External Adapters",
+        "Built-in Adapters",
+        "Command Palette"
+      ],
+      "mainSample": "Adapters Alpha Install Adapter External adapters are alpha. The adapter plugin system is under active development. APIs and storage format may change. Use the power icon to hide adapters from agent menus without removing them. External Adapters No external ada",
+      "chromeLen": 583,
+      "candidates": [
+        "Adapters",
+        "External Adapters",
+        "Built-in Adapters",
+        "Command Palette"
+      ],
+      "currentExpect": "dapter",
+      "currentExpectIsChrome": false
+    },
+    {
+      "id": "onboarding",
+      "path": "/onboarding",
+      "finalPath": "/NOR/onboarding",
+      "title": "Northwind Robotics • Paperclip",
+      "mainLen": 0,
+      "headings": [
+        "Command Palette",
+        "Name your company"
+      ],
+      "mainSample": "",
+      "chromeLen": 528,
+      "candidates": [
+        "Command Palette",
+        "Name your company"
+      ],
+      "currentExpect": "ompany",
+      "currentExpectIsChrome": true
+    },
+    {
+      "id": "issue-detail",
+      "path": "/issues/b299a645-effd-4bfd-94da-b93ee9c7bcd0",
+      "finalPath": "/NOR/issues/NOR-1",
+      "title": "Arm stalls when the dish rack is over-filled • Tasks • Northwind Robotics • Paperclip",
+      "mainLen": 1543,
+      "headings": [
+        "Arm stalls when the dish rack is over-filled",
+        "Command Palette"
+      ],
+      "mainSample": "NOR-1 Kitchen Autonomy AC BO Arm stalls when the dish rack is over-filled Reproducible when more than 14 plates are racked; torque limiter trips and the grasp planner never retries. New Sub-task Upload attachment New document Chat Activity Related work Jump to",
+      "chromeLen": 1446,
+      "candidates": [
+        "Arm stalls when the dish rack is over-filled",
+        "Command Palette"
+      ],
+      "currentExpect": "Arm stalls",
+      "currentExpectIsChrome": false
+    },
+    {
+      "id": "project-detail",
+      "path": "/projects/b927344a-8cad-471b-b57b-dba69c88d032",
+      "finalPath": "/NOR/projects/kitchen-autonomy/issues",
+      "title": "Kitchen Autonomy • Projects • Northwind Robotics • Paperclip",
+      "mainLen": 1387,
+      "headings": [
+        "Kitchen Autonomy",
+        "Project summary",
+        "Command Palette"
+      ],
+      "mainSample": "Kitchen Autonomy Project summary Summarizer keeps the latest project status, next step, and operator-needed items here. Summarizer is paused Existing summaries remain readable, but new summaries will not be generated until the agent resumes. Resume agent Tasks",
+      "chromeLen": 554,
+      "candidates": [
+        "Kitchen Autonomy",
+        "Project summary",
+        "Command Palette"
+      ],
+      "currentExpect": "Kitchen Autonomy",
+      "currentExpectIsChrome": false
+    },
+    {
+      "id": "project-issues",
+      "path": "/projects/b927344a-8cad-471b-b57b-dba69c88d032/issues",
+      "finalPath": "/NOR/projects/kitchen-autonomy/issues",
+      "title": "Kitchen Autonomy • Projects • Northwind Robotics • Paperclip",
+      "mainLen": 1387,
+      "headings": [
+        "Kitchen Autonomy",
+        "Project summary",
+        "Command Palette"
+      ],
+      "mainSample": "Kitchen Autonomy Project summary Summarizer keeps the latest project status, next step, and operator-needed items here. Summarizer is paused Existing summaries remain readable, but new summaries will not be generated until the agent resumes. Resume agent Tasks",
+      "chromeLen": 554,
+      "candidates": [
+        "Kitchen Autonomy",
+        "Project summary",
+        "Command Palette"
+      ],
+      "currentExpect": "Kitchen Autonomy",
+      "currentExpectIsChrome": false
+    },
+    {
+      "id": "project-workspaces",
+      "path": "/projects/b927344a-8cad-471b-b57b-dba69c88d032/workspaces",
+      "finalPath": "/NOR/projects/kitchen-autonomy/issues",
+      "title": "Kitchen Autonomy • Projects • Northwind Robotics • Paperclip",
+      "mainLen": 1387,
+      "headings": [
+        "Kitchen Autonomy",
+        "Project summary",
+        "Command Palette"
+      ],
+      "mainSample": "Kitchen Autonomy Project summary Summarizer keeps the latest project status, next step, and operator-needed items here. Summarizer is paused Existing summaries remain readable, but new summaries will not be generated until the agent resumes. Resume agent Tasks",
+      "chromeLen": 554,
+      "candidates": [
+        "Kitchen Autonomy",
+        "Project summary",
+        "Command Palette"
+      ],
+      "currentExpect": "Kitchen Autonomy",
+      "currentExpectIsChrome": false
+    },
+    {
+      "id": "project-config",
+      "path": "/projects/b927344a-8cad-471b-b57b-dba69c88d032/configuration",
+      "finalPath": "/NOR/projects/kitchen-autonomy/configuration",
+      "title": "Kitchen Autonomy • Projects • Northwind Robotics • Paperclip",
+      "mainLen": 1194,
+      "headings": [
+        "Kitchen Autonomy",
+        "Project summary",
+        "Command Palette"
+      ],
+      "mainSample": "Kitchen Autonomy Project summary Summarizer keeps the latest project status, next step, and operator-needed items here. Summarizer is paused Existing summaries remain readable, but new summaries will not be generated until the agent resumes. Resume agent Tasks",
+      "chromeLen": 554,
+      "candidates": [
+        "Kitchen Autonomy",
+        "Project summary",
+        "Command Palette"
+      ],
+      "currentExpect": "Kitchen Autonomy",
+      "currentExpectIsChrome": false
+    },
+    {
+      "id": "project-budget",
+      "path": "/projects/b927344a-8cad-471b-b57b-dba69c88d032/budget",
+      "finalPath": "/NOR/projects/kitchen-autonomy/budget",
+      "title": "Kitchen Autonomy • Projects • Northwind Robotics • Paperclip",
+      "mainLen": 450,
+      "headings": [
+        "Kitchen Autonomy",
+        "Project summary",
+        "Command Palette"
+      ],
+      "mainSample": "Kitchen Autonomy Project summary Summarizer keeps the latest project status, next step, and operator-needed items here. Summarizer is paused Existing summaries remain readable, but new summaries will not be generated until the agent resumes. Resume agent Tasks",
+      "chromeLen": 554,
+      "candidates": [
+        "Kitchen Autonomy",
+        "Project summary",
+        "Command Palette"
+      ],
+      "currentExpect": "Kitchen Autonomy",
+      "currentExpectIsChrome": false
+    },
+    {
+      "id": "agent-detail",
+      "path": "/agents/61290893-2f95-47fe-a51f-a2d7dd18a645",
+      "finalPath": "/NOR/agents/ada-chen/dashboard",
+      "title": "Ada Chen • Agents • Northwind Robotics • Paperclip",
+      "mainLen": 873,
+      "headings": [
+        "Ada Chen",
+        "Latest Run· 8a49c5e3",
+        "Run Activity",
+        "Tasks by Status",
+        "Success Rate",
+        "Recent Tasks",
+        "Costs",
+        "Command Palette"
+      ],
+      "mainSample": "Ada Chen CTO - Chief Technology Officer Assign Task Run Heartbeat Clear error error Dashboard Instructions Skills Configuration Tools Runs Audit Budget Latest Run · 8a49c5e3 failed NOR-8 Grasp planner drops slippery utensils in humid kitchens 9m ago Process ad",
+      "chromeLen": 544,
+      "candidates": [
+        "Latest Run· 8a49c5e3",
+        "Run Activity",
+        "Tasks by Status",
+        "Success Rate"
+      ],
+      "currentExpect": "Ada Chen",
+      "currentExpectIsChrome": true
+    },
+    {
+      "id": "goal-detail",
+      "path": "/goals/ddcfc6c7-2ef7-40be-b741-1d82a1967b16",
+      "finalPath": "/NOR/goals/ddcfc6c7-2ef7-40be-b741-1d82a1967b16",
+      "title": "Ship the v3 home robot to 5,000 retail units • Goals • Northwind Robotics • Paperclip",
+      "mainLen": 212,
+      "headings": [
+        "Ship the v3 home robot to 5,000 retail units",
+        "Command Palette"
+      ],
+      "mainSample": "COMPANY active Ship the v3 home robot to 5,000 retail units Retail launch gate: manipulation reliability at 99.2%, sub-45-minute unboxing, fleet OTA channel live. Sub-Goals (0) Projects (1) Sub Goal No sub-goals.",
+      "chromeLen": 675,
+      "candidates": [
+        "Ship the v3 home robot to 5,000 retail units",
+        "Command Palette"
+      ],
+      "currentExpect": "Ship the v3 home robot",
+      "currentExpectIsChrome": false
+    },
+    {
+      "id": "auth",
+      "path": "/auth",
+      "finalPath": "/NOR/dashboard",
+      "title": "Dashboard • Northwind Robotics • Paperclip",
+      "mainLen": 2181,
+      "headings": [
+        "Dashboard",
+        "Agents",
+        "Run Activity",
+        "Tasks by Status",
+        "Success Rate",
+        "Recent Activity",
+        "Recent Tasks",
+        "Command Palette"
+      ],
+      "mainSample": "AGENTS AC Ada Chen Finished 9m ago NOR-8 - Grasp planner drops slippery utensils in humid kitchens Recovery needed AC Ada Chen failed after 1 second 8m ago AC Ada Chen Finished 9m ago NOR-5 - Battery dock alignment drifts after firmware 3.4.1 Recovery needed A",
+      "chromeLen": 528,
+      "candidates": [
+        "Run Activity",
+        "Tasks by Status",
+        "Success Rate",
+        "Recent Activity"
+      ],
+      "currentExpect": "aperclip",
+      "currentExpectIsChrome": false
+    },
+    {
+      "id": "ux-lab-bootstrap",
+      "path": "/ux-lab/bootstrap-setup",
+      "finalPath": "/ux-lab/bootstrap-setup",
+      "title": "Northwind Robotics • Paperclip",
+      "mainLen": 2623,
+      "headings": [
+        "Bootstrap-pending setup states",
+        "1 · authenticated/private — signed out (browser claim available)",
+        "Finish setting up this Paperclip",
+        "2 · authenticated/private — signed in (claim CTA primary)",
+        "Finish setting up this Paperclip",
+        "3 · authenticated/private — claim in flight",
+        "Finish setting up this Paperclip",
+        "4 · authenticated/private — claim error (e.g. 409 already claimed)"
+      ],
+      "mainSample": "1 · AUTHENTICATED/PRIVATE — SIGNED OUT (BROWSER CLAIM AVAILABLE) Finish setting up this Paperclip No admin has claimed this instance yet. Sign in or create your Paperclip account to become the first admin from this browser. Sign in / Create account Prefer to f",
+      "chromeLen": 296,
+      "candidates": [
+        "Bootstrap-pending setup states",
+        "1 · authenticated/private — signed out (browser claim available)",
+        "Finish setting up this Paperclip",
+        "2 · authenticated/private — signed in (claim CTA primary)"
+      ],
+      "currentExpect": "etup",
+      "currentExpectIsChrome": false
+    },
+    {
+      "id": "ux-lab-denial",
+      "path": "/ux-lab/responsible-user-denial",
+      "finalPath": "/ux-lab/responsible-user-denial",
+      "title": "Northwind Robotics • Paperclip",
+      "mainLen": 0,
+      "headings": [
+        "Run \"on behalf of\" surfacing + denial copy",
+        "1 · Run identity — “on behalf of {user}”",
+        "2 · Denial state — responsible user not authorized",
+        "3 · Denial state — agent lacks permission (unchanged)",
+        "4 · Denial state — responsible user unavailable",
+        "In-context — denial inside a failed run ledger row"
+      ],
+      "mainSample": "",
+      "chromeLen": 131,
+      "candidates": [
+        "Run \"on behalf of\" surfacing + denial copy",
+        "1 · Run identity — “on behalf of {user}”",
+        "2 · Denial state — responsible user not authorized",
+        "3 · Denial state — agent lacks permission (unchanged)"
+      ],
+      "currentExpect": "enial",
+      "currentExpectIsChrome": false
+    },
+    {
+      "id": "ux-lab-crossissue",
+      "path": "/ux-lab/cross-issue-collaboration",
+      "finalPath": "/ux-lab/cross-issue-collaboration",
+      "title": "Northwind Robotics • Paperclip",
+      "mainLen": 0,
+      "headings": [
+        "Open cross-task collaboration — attribution, audit, and denial copy",
+        "“Fable · for Dotta” on a cross-task agent comment",
+        "Every PATCH says who changed what, and under which authorization",
+        "Every wall names the boundary, who can act, and the sanctioned path"
+      ],
+      "mainSample": "",
+      "chromeLen": 330,
+      "candidates": [
+        "Open cross-task collaboration — attribution, audit, and denial copy",
+        "“Fable · for Dotta” on a cross-task agent comment",
+        "Every PATCH says who changed what, and under which authorization",
+        "Every wall names the boundary, who can act, and the sanctioned path"
+      ],
+      "currentExpect": "ollaborat",
+      "currentExpectIsChrome": false
+    },
+    {
+      "id": "perf-long-thread",
+      "path": "/tests/perf/long-thread",
+      "finalPath": "/tests/perf/long-thread",
+      "title": "Northwind Robotics • Paperclip",
+      "mainLen": 4579,
+      "headings": [
+        "Long-thread rendering baseline fixture",
+        "Baseline note 1",
+        "Baseline note 2",
+        "Baseline note 3",
+        "Baseline note 4",
+        "Baseline note 5",
+        "Baseline note 6",
+        "Baseline note 7"
+      ],
+      "mainSample": "Issue documents Implementation Plan Profiler Notes Release Checklist QA Readout Sub-issues #1 Phase 1: Add long-thread perf fixture and baseline #2 Phase 2: Isolate issue-thread row rendering and Markdown work #3 Phase 3: Apply virtualization and guard scroll ",
+      "chromeLen": 210,
+      "candidates": [
+        "Long-thread rendering baseline fixture",
+        "Baseline note 1",
+        "Baseline note 2",
+        "Baseline note 3"
+      ],
+      "currentExpect": "hread",
+      "currentExpectIsChrome": false
+    },
+    {
+      "id": "notfound",
+      "path": "/this-route-does-not-exist-xyz",
+      "finalPath": "/this-route-does-not-exist-xyz/dashboard",
+      "title": "Not Found • Northwind Robotics • Paperclip",
+      "mainLen": 156,
+      "headings": [
+        "Not Found",
+        "Company not found",
+        "Command Palette"
+      ],
+      "mainSample": "Company not found No company matches prefix \"THIS-ROUTE-DOES-NOT-EXIST-XYZ\". Requested path: /this-route-does-not-exist-xyz/dashboard Open dashboard Go home",
+      "chromeLen": 528,
+      "candidates": [
+        "Not Found",
+        "Company not found",
+        "Command Palette"
+      ],
+      "currentExpect": "ot",
+      "currentExpectIsChrome": true
+    }
+  ]
+}

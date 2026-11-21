@@ -9,6 +9,11 @@ export function resolveGitLocalEnvironmentVariableNames({
     env,
     encoding: "utf8",
     windowsHide: true,
+    stdio: ["ignore", "pipe", "pipe"],
+    shell: false,
+    timeout: 15000,
+    killSignal: "SIGKILL",
+    maxBuffer: 1024 * 1024,
   });
   if (result.error) {
     throw new Error(`Failed to enumerate Git repository-local environment variables: ${result.error.message}`);
@@ -34,8 +39,11 @@ export function resolveGitLocalEnvironmentVariableNames({
 
 export function sanitizeGitLocalEnvironment(env, names) {
   const sanitized = { ...env };
-  for (const name of names) {
-    delete sanitized[name];
+  const localNames = new Set(names.map((name) => name.toUpperCase()));
+  for (const name of Object.keys(sanitized)) {
+    if (localNames.has(name.toUpperCase()) || /^GIT_CONFIG_(?:KEY|VALUE)_\d+$/i.test(name)) {
+      delete sanitized[name];
+    }
   }
   return sanitized;
 }

@@ -1,5 +1,6 @@
 import fs from "node:fs/promises";
 import os from "node:os";
+import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AdapterExecutionTarget } from "@paperclipai/adapter-utils/execution-target";
 
@@ -64,7 +65,7 @@ const {
     prepareManagedCodexHome: vi.fn(async () => {
       // Return a real managed home seeded with credentials so the probe's
       // minimal-home copy step (auth.json/config.toml) has something to read.
-      const dir = await fs.mkdtemp(`${os.tmpdir()}/paperclip-managed-codex-home-`);
+      const dir = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-managed-codex-home-"));
       await fs.writeFile(`${dir}/auth.json`, JSON.stringify({ OPENAI_API_KEY: "sk-managed" }));
       await fs.writeFile(`${dir}/config.toml`, "model = \"gpt-5\"\n");
       return dir;
@@ -149,9 +150,9 @@ describe("codex remote environment diagnostics", () => {
     // The probe must upload only a minimal credentials-only home, never the
     // full managed CODEX_HOME (which can be hundreds of MB of session history).
     const homeAsset = runtimeInput?.assets?.find((asset) => asset.key === "home");
-    expect(homeAsset?.localDir).toContain(`${os.tmpdir()}/paperclip-codex-probe-home-`);
+    expect(homeAsset?.localDir).toContain(path.join(os.tmpdir(), "paperclip-codex-probe-home-"));
     expect(capturedHomeAssetFiles.value).toEqual(["auth.json", "config.toml"]);
-    expect(runtimeInput?.workspaceLocalDir).toContain(`${os.tmpdir()}/paperclip-codex-envtest-`);
+    expect(runtimeInput?.workspaceLocalDir).toContain(path.join(os.tmpdir(), "paperclip-codex-envtest-"));
     expect(runtimeInput?.workspaceLocalDir).not.toBe("/remote/workspace");
     expect(await fs.stat(runtimeInput!.workspaceLocalDir).catch(() => null)).toBeNull();
     expect(runtimeInput?.target?.remoteCwd).toBe("/remote/workspace");
@@ -219,12 +220,66 @@ describe("codex remote environment diagnostics", () => {
     expect(probeCall?.[3]).toContain("--skip-git-repo-check");
   });
 
+  it("emits the canonical adapter_auth_missing check when a sandbox hello probe reports missing auth", async () => {
+    // The sandbox has no seedable credentials, so the hello probe returns an
+    // authentication-required error. The Test must emit the neutral canonical
+    // check code. The user interface reads this code to decide login
+    // eligibility; it does not parse the message text or the top-level status.
+    prepareManagedCodexHome.mockImplementationOnce(async () => {
+      const dir = await fs.mkdtemp(`${os.tmpdir()}/paperclip-managed-codex-home-noauth-`);
+      await fs.writeFile(`${dir}/config.toml`, "model = \"gpt-5\"\n");
+      return dir;
+    });
+    runAdapterExecutionTargetProcess.mockResolvedValueOnce({
+      exitCode: 1,
+      signal: null,
+      timedOut: false,
+      stdout: "",
+      stderr: "Not logged in. Please run `codex login` to authenticate.",
+      pid: 321,
+      startedAt: new Date().toISOString(),
+    });
+
+    const remoteTarget: AdapterExecutionTarget = {
+      kind: "remote",
+      transport: "sandbox",
+      providerKey: "daytona",
+      remoteCwd: "/remote/workspace",
+      runner: {
+        execute: async () => ({
+          exitCode: 0,
+          signal: null,
+          timedOut: false,
+          stdout: "",
+          stderr: "",
+          pid: null,
+          startedAt: new Date().toISOString(),
+        }),
+      },
+    };
+
+    const result = await testEnvironment({
+      companyId: "company-1",
+      adapterType: "codex_local",
+      config: { engine: "cli", command: "codex" },
+      executionTarget: remoteTarget,
+      environmentName: "QA Daytona",
+    });
+
+    // A missing-auth probe is a warning, not a failure, so the environment stays
+    // testable and the user interface can offer login.
+    expect(result.status).toBe("warn");
+    expect(result.checks.some((check) => check.code === "adapter_auth_missing")).toBe(true);
+    // The descriptive probe check stays, so existing diagnostics keep working.
+    expect(result.checks.some((check) => check.code === "codex_hello_probe_auth_required")).toBe(true);
+  });
+
   it("does not override CODEX_HOME when the host has no credentials to seed", async () => {
     // Custom-image flow: the login lives inside the captured snapshot, and the
     // host has no Codex auth.json. The probe must not upload an empty home or
     // set CODEX_HOME, so Codex falls back to the sandbox's baked-in login.
     prepareManagedCodexHome.mockImplementationOnce(async () => {
-      const dir = await fs.mkdtemp(`${os.tmpdir()}/paperclip-managed-codex-home-noauth-`);
+      const dir = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-managed-codex-home-noauth-"));
       // No auth.json — only a config file.
       await fs.writeFile(`${dir}/config.toml`, "model = \"gpt-5\"\n");
       return dir;

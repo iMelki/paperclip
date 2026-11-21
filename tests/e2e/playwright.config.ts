@@ -7,10 +7,7 @@ import { defineConfig } from "@playwright/test";
 // even when the dev server is running on :3100 in authenticated mode.
 const PORT = Number(process.env.PAPERCLIP_E2E_PORT ?? 3199);
 const BASE_URL = `http://127.0.0.1:${PORT}`;
-// CI passes the job's owned home (scripts/ci/e2e-owned-cleanup.sh) so its
-// cleanup deletes exactly this dir; local runs get a fresh temp dir.
-const PAPERCLIP_HOME =
-  process.env.PAPERCLIP_E2E_HOME || fs.mkdtempSync(path.join(os.tmpdir(), "paperclip-e2e-home-"));
+const PAPERCLIP_HOME = fs.mkdtempSync(path.join(os.tmpdir(), "paperclip-e2e-home-"));
 const PAPERCLIP_INSTANCE_ID = "playwright-e2e";
 const PAPERCLIP_CONFIG = path.join(PAPERCLIP_HOME, "instances", PAPERCLIP_INSTANCE_ID, "config.json");
 const PAPERCLIP_AGENT_JWT_SECRET = process.env.PAPERCLIP_AGENT_JWT_SECRET ?? "playwright-e2e-agent-jwt-secret";
@@ -22,6 +19,10 @@ const PLAYWRIGHT_CHANNEL = process.env.PAPERCLIP_PLAYWRIGHT_CHANNEL;
 
 process.env.PAPERCLIP_HOME = PAPERCLIP_HOME;
 process.env.PAPERCLIP_CONFIG = PAPERCLIP_CONFIG;
+// Specs that mint agent JWTs in-process (via createLocalAgentJwt) must derive
+// the same per-instance signing key as the webServer, or verification fails
+// with a 401 instead of authenticating as the agent.
+process.env.PAPERCLIP_INSTANCE_ID = PAPERCLIP_INSTANCE_ID;
 process.env.PAPERCLIP_AGENT_JWT_SECRET = PAPERCLIP_AGENT_JWT_SECRET;
 process.env.PAPERCLIP_DECISION_SIGNING_SECRET = PAPERCLIP_DECISION_SIGNING_SECRET;
 process.env.PAPERCLIP_TOOL_ACTION_SIGNING_SECRET = PAPERCLIP_TOOL_ACTION_SIGNING_SECRET;
@@ -55,10 +56,9 @@ export default defineConfig({
     },
   ],
   // The webServer directive bootstraps a throwaway instance and then starts it.
-  // Save the throwaway setup first so onboarding cannot force a browser open.
-  // Plain run then starts that same instance with browser opening disabled.
+  // `onboard --yes --run` works in a non-interactive temp PAPERCLIP_HOME.
   webServer: {
-    command: `pnpm paperclipai onboard --yes --no-run --no-install-service && pnpm paperclipai run`,
+    command: `pnpm paperclipai onboard --yes --run`,
     url: `${BASE_URL}/api/health`,
     // Always boot a dedicated throwaway instance for e2e so browser tests
     // never attach to the developer's active Paperclip home/server.
@@ -69,7 +69,6 @@ export default defineConfig({
     env: {
       ...process.env,
       NODE_ENV: "test",
-      PAPERCLIP_OPEN_ON_LISTEN: "false",
       PORT: String(PORT),
       PAPERCLIP_HOME,
       PAPERCLIP_INSTANCE_ID,

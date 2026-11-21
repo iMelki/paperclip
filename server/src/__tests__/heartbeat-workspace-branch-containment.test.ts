@@ -1,10 +1,10 @@
 import { execFile } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
-import { and, eq, inArray } from "drizzle-orm";
+import { and, eq, inArray, sql } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   activityLog,
@@ -124,15 +124,17 @@ type Heartbeat = ReturnType<typeof heartbeatService>;
 type BranchContainmentCallSite = "fresh_realize" | "persisted_restore" | "finalize";
 
 async function runGit(cwd: string, args: string[]) {
-  await execFileAsync("git", args, { cwd });
+  await execFileAsync("git", args, { cwd, windowsHide: true });
 }
 
 async function readGit(cwd: string, args: string[]) {
-  return (await execFileAsync("git", args, { cwd })).stdout.trim();
+  return (await execFileAsync("git", args, { cwd, windowsHide: true })).stdout.trim();
 }
 
 async function createGitRepo() {
-  const repoRoot = await mkdtemp(path.join(os.tmpdir(), "paperclip-branch-containment-repo-"));
+  // realpath: on macOS os.tmpdir() is a symlink (/tmp -> /private/tmp) and the
+  // runtime persists resolved worktree paths, so unresolved fixtures never match.
+  const repoRoot = await realpath(await mkdtemp(path.join(os.tmpdir(), "paperclip-branch-containment-repo-")));
   await runGit(repoRoot, ["init"]);
   await runGit(repoRoot, ["config", "user.email", "paperclip-test@example.com"]);
   await runGit(repoRoot, ["config", "user.name", "Paperclip Test"]);
@@ -163,13 +165,12 @@ async function createForwardBranchMismatch(input: {
   await runGit(input.worktreePath, ["commit", "-m", "Add actual branch work"]);
 }
 
-async function waitForRunToFinish(heartbeat: Heartbeat, runId: string, timeoutMs = 10_000) {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    const run = await heartbeat.getRun(runId);
-    if (run && run.status !== "queued" && run.status !== "running") return run;
-    await new Promise((resolve) => setTimeout(resolve, 50));
-  }
+// A terminal run row is written before agent status, recovery notices, and
+// the finally block settle. Await the tracked executions, including follow-up
+// wakeups, before reading their durable result. The enclosing test timeout
+// remains the bound for genuinely hung work; no separate polling budget races it.
+async function waitForRunToSettle(heartbeat: Heartbeat, runId: string) {
+  await heartbeat.drainActiveRunExecutions();
   return heartbeat.getRun(runId);
 }
 
@@ -187,66 +188,6 @@ async function deleteHeartbeatRunsForCleanup(db: Db) {
     }
   }
   throw lastError;
-}
-
-async function waitForContainmentSideEffects(input: {
-  db: Db;
-  companyId: string;
-  sourceIssueId: string;
-  sameWorkspaceSiblingId: string;
-  otherWorkspaceSiblingId: string;
-  timeoutMs?: number;
-}) {
-  const issueIds = [
-    input.sourceIssueId,
-    input.sameWorkspaceSiblingId,
-    input.otherWorkspaceSiblingId,
-  ];
-  const deadline = Date.now() + (input.timeoutMs ?? 10_000);
-  let latest: {
-    issueRows: Awaited<ReturnType<typeof readContainmentIssueRows>>;
-    actionRows: Awaited<ReturnType<typeof readContainmentActionRows>>;
-    comments: Awaited<ReturnType<typeof readContainmentComments>>;
-  } | null = null;
-  while (Date.now() < deadline) {
-    const [issueRows, actionRows, comments] = await Promise.all([
-      readContainmentIssueRows(input.db, issueIds),
-      readContainmentActionRows(input.db, input.companyId, issueIds),
-      readContainmentComments(input.db, issueIds),
-    ]);
-    latest = { issueRows, actionRows, comments };
-    const issueById = new Map(issueRows.map((issue) => [issue.id, issue]));
-    const source = issueById.get(input.sourceIssueId);
-    const sameWorkspaceSibling = issueById.get(input.sameWorkspaceSiblingId);
-    const otherWorkspaceSibling = issueById.get(input.otherWorkspaceSiblingId);
-    const recoveryActionId = actionRows.length === 1 ? actionRows[0]?.id : null;
-    const hasRecoveryActionComment = recoveryActionId
-      ? comments.some((comment) =>
-          comment.issueId === input.sourceIssueId &&
-          noticeMetadataReferencesRecoveryAction(comment.metadata, recoveryActionId))
-      : false;
-    if (
-      source?.status === "blocked" &&
-      source.executionRunId === null &&
-      source.checkoutRunId === null &&
-      sameWorkspaceSibling?.status === "in_progress" &&
-      sameWorkspaceSibling.executionRunId === null &&
-      sameWorkspaceSibling.checkoutRunId === null &&
-      otherWorkspaceSibling?.status === "in_progress" &&
-      otherWorkspaceSibling.executionRunId === null &&
-      otherWorkspaceSibling.checkoutRunId === null &&
-      actionRows.length === 1 &&
-      hasRecoveryActionComment
-    ) {
-      return latest;
-    }
-    await new Promise((resolve) => setTimeout(resolve, 50));
-  }
-  return latest ?? {
-    issueRows: await readContainmentIssueRows(input.db, issueIds),
-    actionRows: await readContainmentActionRows(input.db, input.companyId, issueIds),
-    comments: await readContainmentComments(input.db, issueIds),
-  };
 }
 
 function readContainmentIssueRows(db: Db, issueIds: string[]) {
@@ -409,6 +350,10 @@ async function seedBranchContainmentRun(
       branchName: expectedBranch,
       providerType: "git_worktree",
       providerRef: worktreePath,
+      metadata: {
+        createdByRuntime: true,
+        gitBranchOwnershipVersion: 1,
+      },
       lastUsedAt: now,
       openedAt: now,
       createdAt: now,
@@ -590,7 +535,7 @@ async function expectContainedWorkspaceBranchFailure(input: {
   expectedBranch: string;
   actualBranch: string;
 }) {
-  const finishedRun = await waitForRunToFinish(input.heartbeat, input.runId, 10_000);
+  const finishedRun = await waitForRunToSettle(input.heartbeat, input.runId);
   expect(finishedRun).toMatchObject({
     status: "failed",
     errorCode: "workspace_validation_failed",
@@ -628,19 +573,20 @@ async function expectContainedWorkspaceBranchFailure(input: {
   expect(provenance.expectedHeadSha).not.toBe(provenance.actualHeadSha);
   expect(provenance.plainLanguageReason).toEqual(expect.stringContaining("cannot prove a forward-only reconciliation"));
 
-  const { issueRows, actionRows, comments } = await waitForContainmentSideEffects({
-    db: input.db,
-    companyId: input.companyId,
-    sourceIssueId: input.sourceIssueId,
-    sameWorkspaceSiblingId: input.sameWorkspaceSiblingId,
-    otherWorkspaceSiblingId: input.otherWorkspaceSiblingId,
-  });
+  const issueIds = [input.sourceIssueId, input.sameWorkspaceSiblingId, input.otherWorkspaceSiblingId];
+  const [issueRows, actionRows, comments] = await Promise.all([
+    readContainmentIssueRows(input.db, issueIds),
+    readContainmentActionRows(input.db, input.companyId, issueIds),
+    readContainmentComments(input.db, issueIds),
+  ]);
   const issueById = new Map(issueRows.map((issue) => [issue.id, issue]));
   expect(issueById.get(input.sourceIssueId)).toMatchObject({
     status: "blocked",
     executionRunId: null,
     checkoutRunId: null,
   });
+  const sourceAssigneeAgentId = issueById.get(input.sourceIssueId)?.assigneeAgentId;
+  expect(sourceAssigneeAgentId).toEqual(expect.any(String));
   expect(issueById.get(input.sameWorkspaceSiblingId)).toMatchObject({
     status: "in_progress",
     executionRunId: null,
@@ -659,6 +605,11 @@ async function expectContainedWorkspaceBranchFailure(input: {
     kind: "workspace_validation",
     cause: "workspace_validation_failed",
     status: "active",
+    ownerType: "board",
+    ownerAgentId: null,
+    ownerUserId: null,
+    previousOwnerAgentId: sourceAssigneeAgentId,
+    returnOwnerAgentId: sourceAssigneeAgentId,
     fingerprint: expect.stringContaining(String(workspaceValidation.fingerprint)),
     attemptCount: 1,
     evidence: expect.objectContaining({
@@ -666,6 +617,7 @@ async function expectContainedWorkspaceBranchFailure(input: {
       latestRunId: input.runId,
       latestRunErrorCode: "workspace_validation_failed",
       recoveryCause: "workspace_validation_failed",
+      routingPolicy: "board_escalation_no_takeover_v1",
       workspaceValidation: expect.objectContaining({
         fingerprint: workspaceValidation.fingerprint,
         expectedBranch: input.expectedBranch,
@@ -681,9 +633,9 @@ async function expectContainedWorkspaceBranchFailure(input: {
     }),
     nextAction: expect.stringContaining("choose a new execution workspace"),
     wakePolicy: expect.objectContaining({
-      type: "wake_owner",
-      reason: "source_scoped_recovery_action",
-      ownerAgentId: expect.any(String),
+      type: "board_escalation",
+      reason: "workspace_validation_failed",
+      preservesSourceAssignee: true,
     }),
   });
 
@@ -711,7 +663,7 @@ async function expectForwardBranchReconciled(input: {
   expectsExistingRecordUpdate: boolean;
   expectedResolvedRecoveryActionFingerprint?: string | null;
 }) {
-  const finishedRun = await waitForRunToFinish(input.heartbeat, input.runId, 10_000);
+  const finishedRun = await waitForRunToSettle(input.heartbeat, input.runId);
   expect(finishedRun).toMatchObject({
     status: "succeeded",
     errorCode: null,
@@ -857,8 +809,20 @@ describeEmbeddedPostgres("heartbeat workspace branch containment", () => {
   const tempRoots: string[] = [];
 
   beforeAll(async () => {
+    // A temporary folder inside a checkout must not inherit its parent's Git repository.
+    vi.stubEnv("GIT_CEILING_DIRECTORIES", os.tmpdir());
     tempDb = await startEmbeddedPostgresTestDatabase("paperclip-branch-containment-");
     db = createDb(tempDb.connectionString);
+    // Reproduce a slow final status write without adding host CPU pressure.
+    // Only the marked invalid-workspace fixtures take this 1.5 s delay; this
+    // exceeds vi.waitFor's old 1 s default even on an otherwise idle host.
+    await db.execute(sql`create function containment_test_delay_idle() returns trigger as $$
+      begin perform pg_sleep(1.5); return new; end;
+    $$ language plpgsql`);
+    await db.execute(sql`create trigger containment_test_delay_idle before update on agents
+      for each row when (old.status = 'running' and new.status = 'idle'
+        and new.metadata->>'containmentFinalizationDelay' = 'true')
+      execute function containment_test_delay_idle()`);
   }, EMBEDDED_POSTGRES_TEST_SETUP_TIMEOUT_MS);
 
   afterEach(async () => {
@@ -912,7 +876,67 @@ describeEmbeddedPostgres("heartbeat workspace branch containment", () => {
   afterAll(async () => {
     await db.$client.end();
     await tempDb?.cleanup();
+    vi.unstubAllEnvs();
   }, 60_000);
+
+  it.each(["project_primary", "git_worktree"] as const)("keeps the agent idle after a %s workspace configuration failure", async (strategy) => {
+    const cwd = await mkdtemp(path.join(os.tmpdir(), "paperclip-missing-git-"));
+    tempRoots.push(cwd);
+    expect(await readGit(cwd, ["rev-parse", "--show-toplevel"]).catch(() => null)).toBeNull();
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    const projectId = randomUUID();
+    const projectWorkspaceId = randomUUID();
+    const issueId = randomUUID();
+    const issuePrefix = `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`;
+    await instanceSettingsService(db).updateExperimental({ enableIsolatedWorkspaces: true });
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Workspace validation",
+      issuePrefix,
+      defaultResponsibleUserId: "board",
+    });
+    await db.insert(projects).values({ id: projectId, companyId, name: "Workspace validation" });
+    await db.insert(projectWorkspaces).values({
+      id: projectWorkspaceId, companyId, projectId, name: "Primary", cwd, isPrimary: true,
+    });
+    await db.insert(agents).values({
+      id: agentId,
+      companyId,
+      name: "Executor",
+      role: "engineer",
+      metadata: { containmentFinalizationDelay: true },
+      status: "idle",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: { heartbeat: { wakeOnDemand: true, maxConcurrentRuns: 1 } },
+    });
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      projectId,
+      projectWorkspaceId,
+      title: "Missing repository",
+      status: "todo",
+      assigneeAgentId: agentId,
+      responsibleUserId: "board",
+      issueNumber: 1,
+      identifier: `${issuePrefix}-1`,
+      executionWorkspaceSettings: strategy === "git_worktree"
+        ? { mode: "isolated_workspace", workspaceStrategy: { type: "git_worktree" } }
+        : { mode: "project_primary" },
+    });
+    const heartbeat = heartbeatService(db);
+    const run = await heartbeat.invoke(agentId, "assignment", { issueId, wakeReason: "issue_assigned" }, "system");
+    expect(run).not.toBeNull();
+    const finished = await waitForRunToSettle(heartbeat, run!.id);
+    expect(finished).toMatchObject({ status: "failed", errorCode: "workspace_validation_failed" });
+    expect(adapterExecute).not.toHaveBeenCalled();
+    const [agent] = await db.select({ status: agents.status, errorReason: agents.errorReason })
+      .from(agents).where(eq(agents.id, agentId));
+    expect(agent).toEqual({ status: "idle", errorReason: null });
+    expect(finished?.error).toContain("Attach a repository or execution workspace to the project");
+  }, 15_000);
 
   it("blocks projectless isolated git-worktree issues before dispatch", async () => {
     const companyId = randomUUID();

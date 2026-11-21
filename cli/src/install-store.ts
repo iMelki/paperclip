@@ -160,7 +160,11 @@ export async function withInstallStoreLock<T>(
     }
   };
   const acquire = (): void => {
-    const temporaryPath = `${paths.lockPath}.${token}.tmp`;
+    // The token stays colon-delimited: the stale-owner check below parses its
+    // pid out of the lock file's contents. A colon is illegal in a Windows
+    // filename (NTFS reads it as an alternate data stream), so the temp path
+    // gets a path-safe rendering of the same token. See #136.
+    const temporaryPath = `${paths.lockPath}.${token.replaceAll(":", "-")}.tmp`;
     try {
       fs.writeFileSync(temporaryPath, `${token}\n`, { mode: 0o600, flag: "wx" });
       try {
@@ -260,34 +264,299 @@ function assertPayloadPath(payloadPath: string, paths: InstallStorePaths): void 
   }
 }
 
-export function flipCurrentAtomic(
-  payloadPath: string,
-  paths = resolveInstallStorePaths(),
-  hooks: { beforeRename?: () => void } = {},
-): void {
-  assertPayloadPath(payloadPath, paths);
-  ensurePrivateDirectory(paths.cliRoot);
+export type FlipCurrentErrorCode =
+  | "current-flip-concurrent"
+  | "current-flip-step-failed"
+  | "current-flip-double-fault"
+  | "current-flip-unsafe-prev"
+  | "current-flip-ambiguous-recovery";
+
+export type FlipCurrentStep = "recover-prev" | "move-aside" | "rename-in" | "rollback" | "remove-prev";
+
+export class FlipCurrentError extends Error {
+  constructor(
+    readonly code: FlipCurrentErrorCode,
+    message: string,
+    readonly step: FlipCurrentStep | null = null,
+    options?: { cause?: unknown },
+  ) {
+    super(`[${code}] ${message}`, options);
+    this.name = "FlipCurrentError";
+  }
+}
+
+export type FlipCurrentHooks = {
+  /** win32 only: runs before each attempt to move the old link aside. */
+  beforeMoveAside?: () => void;
+  /** Runs before each attempt to rename the new link onto `current`. */
+  beforeRename?: () => void;
+  /** Runs before each attempt to rename the previous link back (rollback). */
+  beforeRollback?: () => void;
+  /** Runs once, just before the previous link is checked and removed. */
+  beforeRemovePrev?: (prevPath: string) => void;
+  /** Test seam only: exercise the win32 strategy on another platform. */
+  platform?: NodeJS.Platform;
+};
+
+export type FlipCurrentResult = {
+  strategy: "atomic-rename" | "rename-aside";
+  /** A previous link that could not be removed after a successful flip. */
+  leftoverPrevPath: string | null;
+};
+
+const PREV_LINK_PREFIX = "current.prev-";
+const RETRYABLE_FLIP_CODES = new Set(["EPERM", "EBUSY", "EACCES"]);
+// About one second in total: Windows reports EPERM/EBUSY/EACCES transiently
+// while another process (commonly an antivirus scanner) holds a handle.
+const FLIP_RETRY_DELAYS_MS = [50, 100, 200, 300, 350];
+
+function sleepSync(ms: number): void {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+function errorCode(error: unknown): string | undefined {
+  return (error as NodeJS.ErrnoException | undefined)?.code;
+}
+
+/** Runs one flip step, retrying only transient Windows sharing errors. */
+function runFlipStep(step: FlipCurrentStep, action: () => void): void {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      action();
+      return;
+    } catch (error) {
+      const delay = FLIP_RETRY_DELAYS_MS[attempt];
+      if (!RETRYABLE_FLIP_CODES.has(errorCode(error) ?? "") || delay === undefined) {
+        throw Object.assign(error instanceof Error ? error : new Error(String(error)), {
+          flipStep: step,
+        });
+      }
+      sleepSync(delay);
+    }
+  }
+}
+
+function listPrevLinks(paths: InstallStorePaths): string[] {
+  let entries: string[];
   try {
-    const currentStat = fs.lstatSync(paths.currentPath);
-    if (!currentStat.isSymbolicLink()) {
+    entries = fs.readdirSync(paths.cliRoot);
+  } catch (error) {
+    if (errorCode(error) === "ENOENT") return [];
+    throw error;
+  }
+  return entries
+    .filter((entry) => entry.startsWith(PREV_LINK_PREFIX))
+    .map((entry) => path.join(paths.cliRoot, entry))
+    .filter((entryPath) => {
+      try {
+        return fs.lstatSync(entryPath).isSymbolicLink();
+      } catch {
+        return false;
+      }
+    });
+}
+
+/** Exported so doctor reports exactly what the flip would recover. */
+export function findStrandedPrevLinks(paths = resolveInstallStorePaths()): string[] {
+  return listPrevLinks(paths);
+}
+
+export function manualCurrentRecoveryCommand(prevPath: string, paths: InstallStorePaths): string {
+  return process.platform === "win32"
+    ? `Rename-Item -LiteralPath '${prevPath}' -NewName 'current'`
+    : `mv ${shellQuote(prevPath)} ${shellQuote(paths.currentPath)}`;
+}
+
+function currentExists(paths: InstallStorePaths): boolean {
+  try {
+    const stat = fs.lstatSync(paths.currentPath);
+    if (!stat.isSymbolicLink()) {
       throw new Error(`Refusing to replace non-symlink ${paths.currentPath}.`);
     }
+    return true;
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    if (errorCode(error) === "ENOENT") return false;
+    throw error;
   }
+}
 
-  const temporaryLink = path.join(
-    paths.cliRoot,
-    `.current-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`,
-  );
+/**
+ * A crash between moving `current` aside and renaming the new link in leaves
+ * no `current` at all, which also breaks the shim (it hard-codes
+ * <cliRoot>/current/...). If exactly one previous link survives, it is the
+ * last good `current`: restore it before doing anything else. More than one is
+ * ambiguous, so refuse rather than guess.
+ */
+function recoverStrandedCurrent(paths: InstallStorePaths): void {
+  if (currentExists(paths)) return;
+  const prevLinks = listPrevLinks(paths);
+  if (prevLinks.length === 0) return;
+  if (prevLinks.length > 1) {
+    throw new FlipCurrentError(
+      "current-flip-ambiguous-recovery",
+      `${paths.currentPath} is missing and ${prevLinks.length} previous links exist `
+        + `(${prevLinks.join(", ")}); refusing to guess which to restore. Restore the right one `
+        + `manually, e.g. ${manualCurrentRecoveryCommand(prevLinks[0]!, paths)}`,
+    );
+  }
+  try {
+    runFlipStep("recover-prev", () => fs.renameSync(prevLinks[0]!, paths.currentPath));
+  } catch (error) {
+    throw new FlipCurrentError(
+      "current-flip-step-failed",
+      `step recover-prev failed restoring ${prevLinks[0]} to ${paths.currentPath}: `
+        + `${error instanceof Error ? error.message : String(error)}`,
+      "recover-prev",
+      { cause: error },
+    );
+  }
+}
+
+/**
+ * Point `current` at `payloadPath`.
+ *
+ * POSIX: atomic. A new symlink is renamed over `current` in one rename(2), so
+ * `current` always exists and always names a complete payload.
+ *
+ * win32: rename-aside, with a brief gap. MoveFileEx cannot replace an existing
+ * directory reparse point (the rename fails with EPERM), so the old link is
+ * renamed aside to `current.prev-<nonce>`, the new link is renamed in, and the
+ * old link is removed. Between the two renames `current` does not exist. The
+ * on-disk contract is unchanged: `current` is still a directory symlink.
+ *
+ * The removal never traverses: the previous entry must still be a symlink
+ * (lstat), and it is removed with unlink, never recursively. A failed
+ * rename-in is rolled back; if the rollback also fails, the error names both
+ * paths and the manual recovery. Transient EPERM/EBUSY/EACCES are retried for
+ * about one second, and every failure names the step that failed.
+ */
+export function flipCurrent(
+  payloadPath: string,
+  paths = resolveInstallStorePaths(),
+  hooks: FlipCurrentHooks = {},
+): FlipCurrentResult {
+  assertPayloadPath(payloadPath, paths);
+  ensurePrivateDirectory(paths.cliRoot);
+  const platform = hooks.platform ?? process.platform;
+  if (platform === "win32") recoverStrandedCurrent(paths);
+  const hadCurrent = currentExists(paths);
+
+  const nonce = `${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  const temporaryLink = path.join(paths.cliRoot, `.current-${nonce}`);
   const relativeTarget = path.relative(paths.cliRoot, payloadPath);
   try {
     fs.symlinkSync(relativeTarget, temporaryLink, "dir");
-    hooks.beforeRename?.();
-    fs.renameSync(temporaryLink, paths.currentPath);
+    if (platform !== "win32") {
+      hooks.beforeRename?.();
+      fs.renameSync(temporaryLink, paths.currentPath);
+      return { strategy: "atomic-rename", leftoverPrevPath: null };
+    }
+    return renameAside(paths, temporaryLink, `${PREV_LINK_PREFIX}${nonce}`, hadCurrent, hooks);
   } finally {
     fs.rmSync(temporaryLink, { force: true });
   }
+}
+
+function renameAside(
+  paths: InstallStorePaths,
+  temporaryLink: string,
+  prevName: string,
+  hadCurrent: boolean,
+  hooks: FlipCurrentHooks,
+): FlipCurrentResult {
+  const prevPath = hadCurrent ? path.join(paths.cliRoot, prevName) : null;
+
+  // Step 2: move the old link aside. ENOENT means another process moved it
+  // first: stop, never roll back, and never touch its previous link.
+  if (prevPath) {
+    try {
+      runFlipStep("move-aside", () => {
+        hooks.beforeMoveAside?.();
+        fs.renameSync(paths.currentPath, prevPath);
+      });
+    } catch (error) {
+      if (errorCode(error) === "ENOENT") {
+        throw new FlipCurrentError(
+          "current-flip-concurrent",
+          `${paths.currentPath} disappeared before it could be moved aside; another flip is in `
+            + "progress. Nothing was rolled back.",
+          "move-aside",
+          { cause: error },
+        );
+      }
+      throw stepFailed("move-aside", error, `moving ${paths.currentPath} aside to ${prevPath}`);
+    }
+  }
+
+  // Step 3: rename the new link in. On failure, step 5: roll back.
+  try {
+    runFlipStep("rename-in", () => {
+      hooks.beforeRename?.();
+      fs.renameSync(temporaryLink, paths.currentPath);
+    });
+  } catch (renameError) {
+    if (!prevPath) throw stepFailed("rename-in", renameError, `renaming the new link to ${paths.currentPath}`);
+    try {
+      runFlipStep("rollback", () => {
+        hooks.beforeRollback?.();
+        fs.renameSync(prevPath, paths.currentPath);
+      });
+    } catch (rollbackError) {
+      throw new FlipCurrentError(
+        "current-flip-double-fault",
+        `renaming the new link to ${paths.currentPath} failed (${describe(renameError)}) AND the `
+          + `rollback from ${prevPath} failed (${describe(rollbackError)}). ${paths.currentPath} is `
+          + `missing and the last good link is ${prevPath}. Recover manually: `
+          + manualCurrentRecoveryCommand(prevPath, paths),
+        "rollback",
+        { cause: rollbackError },
+      );
+    }
+    throw stepFailed("rename-in", renameError, `renaming the new link to ${paths.currentPath}; rolled back`);
+  }
+
+  if (!prevPath) return { strategy: "rename-aside", leftoverPrevPath: null };
+
+  // Step 4: remove the previous link. NEVER traverse: it must still be a
+  // symlink, and it is unlinked, never removed recursively.
+  hooks.beforeRemovePrev?.(prevPath);
+  let prevStat: fs.Stats;
+  try {
+    prevStat = fs.lstatSync(prevPath);
+  } catch (error) {
+    if (errorCode(error) === "ENOENT") return { strategy: "rename-aside", leftoverPrevPath: null };
+    throw error;
+  }
+  if (!prevStat.isSymbolicLink()) {
+    throw new FlipCurrentError(
+      "current-flip-unsafe-prev",
+      `Refusing to remove non-symlink ${prevPath}; it was not created by this flip. `
+        + `${paths.currentPath} already points to the new payload.`,
+      "remove-prev",
+    );
+  }
+  try {
+    runFlipStep("remove-prev", () => fs.unlinkSync(prevPath));
+  } catch {
+    // The flip itself succeeded; a leftover link is harmless and doctor reports it.
+    return { strategy: "rename-aside", leftoverPrevPath: prevPath };
+  }
+  return { strategy: "rename-aside", leftoverPrevPath: null };
+}
+
+function describe(error: unknown): string {
+  const code = errorCode(error);
+  const message = error instanceof Error ? error.message : String(error);
+  return code ? `${code}: ${message}` : message;
+}
+
+function stepFailed(step: FlipCurrentStep, error: unknown, doing: string): FlipCurrentError {
+  return new FlipCurrentError(
+    "current-flip-step-failed",
+    `step ${step} failed while ${doing}: ${describe(error)}`,
+    step,
+    { cause: error },
+  );
 }
 
 export function buildNextManifest(

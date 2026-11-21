@@ -1,0 +1,7 @@
+import { spawnSync } from "node:child_process";
+
+const shell = "/usr/bin/zsh";
+const binary = "node";
+const argv = ["-ec", `which ${binary}`];
+
+spawnSync(shell, argv);

@@ -25,10 +25,20 @@ function dedupeModels(models: AdapterModel[]): AdapterModel[] {
 }
 
 function mergedWithFallback(models: AdapterModel[]): AdapterModel[] {
+  const fallback = dedupeModels(codexFallbackModels);
+  const declaredOrder = new Map(fallback.map((model, index) => [model.id, index]));
   return dedupeModels([
     ...models,
-    ...codexFallbackModels,
-  ]).sort((a, b) => a.id.localeCompare(b.id, "en", { numeric: true, sensitivity: "base" }));
+    ...fallback,
+  ]).sort((a, b) => {
+    const aIndex = declaredOrder.get(a.id);
+    const bIndex = declaredOrder.get(b.id);
+    if (aIndex !== undefined && bIndex !== undefined) return aIndex - bIndex;
+    if (aIndex !== undefined) return -1;
+    if (bIndex !== undefined) return 1;
+    const compared = a.id.localeCompare(b.id, "en", { numeric: true, sensitivity: "base" });
+    return compared || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
+  });
 }
 
 function resolveOpenAiApiKey(): string | null {

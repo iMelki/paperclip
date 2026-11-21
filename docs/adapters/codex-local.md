@@ -22,7 +22,7 @@ The `codex_local` adapter runs OpenAI's Codex CLI locally. It supports session p
 | `model` | string | No | Model to use |
 | `promptTemplate` | string | No | Prompt used for all runs |
 | `env` | object | No | Environment variables (supports secret refs) |
-| `timeoutSec` | number | No | Process timeout (0 = no timeout) |
+| `timeoutSec` | number | No | Process timeout in seconds. Default 14400. Missing, 0, and negative values use that default. |
 | `graceSec` | number | No | Grace period before force-kill |
 | `fastMode` | boolean | No | Enables Codex Fast mode for supported or explicitly configured models; burns credits faster |
 | `sandboxMode` | string | No | Structured Codex sandbox mode: `read-only`, `workspace-write` (new-agent default), or `danger-full-access` |
@@ -49,8 +49,9 @@ When `fastMode` is enabled, Paperclip adds Codex config overrides equivalent to:
 -c 'service_tier="fast"' -c 'features.fast_mode=true'
 ```
 
-Paperclip applies that to GPT-5.6 (`sol`, `terra`, and `luna`), GPT-5.5,
-GPT-5.4, and manually configured model IDs. Known unsupported built-in models
+Paperclip applies that to GPT-6 (`astra`, `sol`, and `luna`), GPT-6.1 Sol
+(`gpt-6.1-sol`), GPT-5.6 (`sol`, `terra`, and `luna`), GPT-5.5, GPT-5.4, and
+manually configured model IDs. Known unsupported built-in models
 keep the toggle in config but omit the runtime override.
 
 ## Managed `CODEX_HOME`
@@ -139,17 +140,17 @@ fleet with ChatGPT-subscription credentials.
   classification in rather than making `codex-home.ts` inspect execution
   targets on its own.
 
-Because the warning touches authentication behavior, implementation must go
-through the security-review gate. Treat this docs section as the follow-up
-implementation spec, not as authorization to add the warning in a docs-only
-change.
+Because the warning touches authentication behavior, its implementation
+needs a maintainer security review before merge. Treat this docs section as
+the follow-up implementation spec, not as authorization to add the warning in
+a docs-only change.
 
 ## Manual Local CLI
 
 For manual local CLI usage outside heartbeat runs (for example running as `codexcoder` directly), use:
 
 ```sh
-pnpm paperclipai agent local-cli codexcoder --company-id <company-id>
+npx paperclipai agent local-cli codexcoder --company-id <company-id>
 ```
 
 This installs any missing skills, creates an agent API key, and prints shell exports to run as that agent.

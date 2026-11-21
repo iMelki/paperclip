@@ -5,7 +5,7 @@ import { flushSync } from "react-dom";
 import { createRoot, type Root } from "react-dom/client";
 import type { HeartbeatRun } from "@paperclipai/shared";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { RunActivityChart, SuccessRateChart } from "./ActivityCharts";
+import { RunActivityChart, SpendBreakdownChart, SpendChart, SuccessRateChart } from "./ActivityCharts";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
@@ -131,5 +131,68 @@ describe("ActivityCharts", () => {
     expect(container.textContent).toContain("Recovered");
     const dayCell = container.querySelector("[title*='recovered: 4']");
     expect(dayCell).not.toBeNull();
+  });
+
+  it("stacks billed and estimated spend per day and labels the estimate", () => {
+    render(
+      <SpendChart
+        days={[
+          { date: "2026-04-19", billedCents: 0, estimatedCents: 0, tokens: 0, unpricedTokens: 0 },
+          { date: "2026-04-20", billedCents: 250, estimatedCents: 1_200, tokens: 3_000_000, unpricedTokens: 0 },
+        ]}
+      />,
+    );
+
+    expect(container.textContent).toContain("Billed");
+    expect(container.textContent).toContain("Estimated (API prices)");
+    const dayCell = container.querySelector("[title^='2026-04-20']");
+    expect(dayCell?.getAttribute("title")).toContain("estimated: ~$12.00 at API prices");
+  });
+
+  it("keeps token-only unpriced days visible as their own category", () => {
+    render(
+      <SpendChart
+        days={[
+          { date: "2026-04-19", billedCents: 0, estimatedCents: 0, tokens: 0, unpricedTokens: 0 },
+          { date: "2026-04-20", billedCents: 0, estimatedCents: 0, tokens: 1_500_000, unpricedTokens: 1_500_000 },
+        ]}
+      />,
+    );
+    expect(container.textContent).not.toContain("No spend recorded");
+    expect(container.textContent).toContain("Unpriced usage");
+    expect(container.querySelector("[data-testid='spend-unpriced-strip'] [title='2026-04-20: 1.5M tokens unpriced']")).not.toBeNull();
+    expect(container.querySelector("[title^='2026-04-20']")?.getAttribute("title")).toContain("unpriced: 1.5M tokens");
+  });
+
+  it("shows sub-cent estimates instead of $0.00", () => {
+    render(<SpendChart days={[{ date: "2026-04-20", billedCents: 0, estimatedCents: 0.1, tokens: 1_000, unpricedTokens: 0 }]} />);
+    expect(container.querySelector("[title^='2026-04-20']")?.getAttribute("title")).toContain("estimated: ~<$0.01");
+    expect(container.querySelector("[data-testid='spend-unpriced-strip']")).toBeNull();
+  });
+
+  it("says when nothing was spent or used", () => {
+    render(<SpendChart days={[{ date: "2026-04-20", billedCents: 0, estimatedCents: 0, tokens: 0, unpricedTokens: 0 }]} />);
+    expect(container.textContent).toContain("No spend recorded");
+  });
+
+  it("ranks the spend breakdown and marks estimated totals", () => {
+    render(
+      <SpendBreakdownChart
+        rows={[
+          { key: "a", label: "CEO", billedCents: 0, estimatedCents: 900, tokens: 10, unpricedTokens: 0 },
+          { key: "b", label: "Engineer", billedCents: 500, estimatedCents: 0, tokens: 10, unpricedTokens: 0 },
+          { key: "c", label: "Researcher", billedCents: 0, estimatedCents: 0, tokens: 2_000, unpricedTokens: 2_000 },
+        ]}
+      />,
+    );
+    expect(container.textContent).toContain("~$9.00");
+    expect(container.textContent).toContain("$5.00");
+    expect(container.textContent).not.toContain("~$5.00");
+    expect(container.textContent).toContain("Researcher");
+    expect(container.textContent).toContain("2.0k tok unpriced");
+    expect(container.textContent).toContain("Unpriced usage");
+
+    render(<SpendBreakdownChart rows={[]} />);
+    expect(container.textContent).toContain("No spend this month");
   });
 });

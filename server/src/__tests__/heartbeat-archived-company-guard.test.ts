@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { eq } from "drizzle-orm";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   agents,
   agentWakeupRequests,
@@ -133,6 +134,52 @@ describeEmbeddedPostgres("heartbeat archived-company guard", () => {
 
     return { companyId, managerId, childId };
   }
+
+  it("gives the timer claim back when the wakeup cannot be queued, so a retry still wakes the agent", async () => {
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    const lastHeartbeatAt = new Date("2026-06-04T00:00:00Z");
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Active Co",
+      status: "active",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+      defaultResponsibleUserId: "timer-test-user",
+    });
+    await db.insert(agents).values({
+      id: agentId,
+      companyId,
+      name: "Timer Agent",
+      role: "engineer",
+      status: "idle",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: { heartbeat: { enabled: true, intervalSec: 60, wakeOnDemand: true } },
+      permissions: {},
+      lastHeartbeatAt,
+    });
+    const heartbeat = heartbeatService(db);
+    const now = new Date("2026-06-04T00:10:00Z");
+    const timeout = Object.assign(new Error("write CONNECT_TIMEOUT 127.0.0.1:54329"), { code: "CONNECT_TIMEOUT" });
+    // The claim is a plain update; queueing the wakeup opens a transaction.
+    const txSpy = vi.spyOn(db, "transaction").mockImplementation((async () => {
+      throw timeout;
+    }) as unknown as typeof db.transaction);
+
+    try {
+      await expect(heartbeat.tickTimers(now)).rejects.toThrow(/CONNECT_TIMEOUT/);
+    } finally {
+      txSpy.mockRestore();
+    }
+
+    const [afterFailure] = await db.select({ lastHeartbeatAt: agents.lastHeartbeatAt }).from(agents).where(eq(agents.id, agentId));
+    expect(afterFailure?.lastHeartbeatAt?.toISOString()).toBe(lastHeartbeatAt.toISOString());
+
+    // Still due: the next tick's elapsed-interval check passes again.
+    const [row] = await db.select({ lastHeartbeatAt: agents.lastHeartbeatAt }).from(agents).where(eq(agents.id, agentId));
+    expect(now.getTime() - (row?.lastHeartbeatAt?.getTime() ?? 0)).toBeGreaterThanOrEqual(60_000);
+  });
 
   it("does not iterate archived-company agents in tickTimers", async () => {
     const { agentId } = await insertArchivedAgent();

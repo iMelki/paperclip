@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { createServer } from "node:http";
 import { WebSocketServer } from "ws";
 import { execute, testEnvironment } from "@paperclipai/adapter-openclaw-gateway/server";
@@ -507,6 +507,37 @@ describe("openclaw gateway adapter execute", () => {
 
       expect(logs.some((entry) => entry.includes("[openclaw-gateway:event] run=run-123 stream=assistant"))).toBe(true);
     } finally {
+      await gateway.close();
+    }
+  });
+
+  it("keeps every request timer within the setTimeout limit for a very long timeoutSec", async () => {
+    const gateway = await createMockGatewayServer();
+    const delays: number[] = [];
+    const realSetTimeout = globalThis.setTimeout;
+    const spy = vi.spyOn(globalThis, "setTimeout").mockImplementation(((
+      handler: Parameters<typeof setTimeout>[0],
+      delay?: number,
+      ...args: unknown[]
+    ) => {
+      if (typeof delay === "number") delays.push(delay);
+      return realSetTimeout(handler as () => void, delay, ...(args as []));
+    }) as typeof setTimeout);
+
+    try {
+      const result = await execute(
+        buildContext({
+          url: gateway.url,
+          headers: { "x-openclaw-token": "gateway-token" },
+          payloadTemplate: { message: "wake now" },
+          timeoutSec: 2_592_000,
+        }),
+      );
+      expect(result.exitCode).toBe(0);
+      expect(delays.length).toBeGreaterThan(0);
+      expect(Math.max(...delays)).toBeLessThanOrEqual(2_147_483_647);
+    } finally {
+      spy.mockRestore();
       await gateway.close();
     }
   });

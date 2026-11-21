@@ -1,4 +1,5 @@
-import { describe, expect, it } from "vitest";
+import { afterAll, describe, expect, it } from "vitest";
+import { ADAPTER_DEFAULT_TIMEOUT_SEC } from "@paperclipai/adapter-utils/adapter-timeout";
 import {
   buildHeartbeatRunStopMetadata,
   mergeHeartbeatRunStopMetadata,
@@ -6,22 +7,51 @@ import {
 } from "./heartbeat-stop-metadata.js";
 
 describe("heartbeat stop metadata", () => {
-  it("keeps local coding adapters at no timeout by default", () => {
-    for (const adapterType of [
-      "codex_local",
-      "claude_local",
-      "cursor",
-      "gemini_local",
-      "opencode_local",
-      "pi_local",
-      "process",
-    ]) {
-      expect(resolveHeartbeatRunTimeoutPolicy(adapterType, {})).toEqual({
-        effectiveTimeoutSec: 0,
-        timeoutConfigured: false,
-        timeoutSource: "default",
-      });
+  const previousEnv = process.env.PAPERCLIP_ADAPTER_TIMEOUT_SEC;
+  delete process.env.PAPERCLIP_ADAPTER_TIMEOUT_SEC;
+  afterAll(() => {
+    if (previousEnv === undefined) delete process.env.PAPERCLIP_ADAPTER_TIMEOUT_SEC;
+    else process.env.PAPERCLIP_ADAPTER_TIMEOUT_SEC = previousEnv;
+  });
+
+  it("uses a non-zero default when timeoutSec is missing, 0, or negative", () => {
+    const cases: Array<[string, number]> = [
+      ["codex_local", ADAPTER_DEFAULT_TIMEOUT_SEC.codex_local],
+      ["claude_local", ADAPTER_DEFAULT_TIMEOUT_SEC.claude_local],
+      ["cursor", ADAPTER_DEFAULT_TIMEOUT_SEC.cursor],
+      ["gemini_local", ADAPTER_DEFAULT_TIMEOUT_SEC.gemini_local],
+      ["opencode_local", ADAPTER_DEFAULT_TIMEOUT_SEC.opencode_local],
+      ["pi_local", ADAPTER_DEFAULT_TIMEOUT_SEC.pi_local],
+      ["process", ADAPTER_DEFAULT_TIMEOUT_SEC.process],
+      ["hermes_local", ADAPTER_DEFAULT_TIMEOUT_SEC.hermes_local],
+      ["hermes_gateway", ADAPTER_DEFAULT_TIMEOUT_SEC.hermes_gateway],
+      ["openclaw_gateway", ADAPTER_DEFAULT_TIMEOUT_SEC.openclaw_gateway],
+      ["cursor_cloud", ADAPTER_DEFAULT_TIMEOUT_SEC.cursor_cloud],
+      ["paperclip_runner", ADAPTER_DEFAULT_TIMEOUT_SEC.paperclip_runner],
+    ];
+    for (const [adapterType, timeoutSec] of cases) {
+      for (const adapterConfig of [{}, { timeoutSec: 0 }, { timeoutSec: -1 }]) {
+        expect(resolveHeartbeatRunTimeoutPolicy(adapterType, adapterConfig)).toEqual({
+          effectiveTimeoutSec: timeoutSec,
+          timeoutConfigured: false,
+          timeoutSource: "default",
+        });
+      }
     }
+  });
+
+  it("reports the timeout the paperclip_runner coordinator enforces, not the raw value", () => {
+    expect(resolveHeartbeatRunTimeoutPolicy("paperclip_runner", { timeoutSec: 0.2 })).toEqual({
+      effectiveTimeoutSec: 1,
+      timeoutConfigured: true,
+      timeoutSource: "config",
+    });
+    expect(resolveHeartbeatRunTimeoutPolicy("paperclip_runner", { timeoutSec: 100_000 })).toEqual({
+      effectiveTimeoutSec: 86_400,
+      timeoutConfigured: true,
+      timeoutSource: "config",
+    });
+    expect(resolveHeartbeatRunTimeoutPolicy("process", { timeoutSec: 100_000 }).effectiveTimeoutSec).toBe(100_000);
   });
 
   it("records configured timeout policy and timeout stop reason", () => {
@@ -124,7 +154,7 @@ describe("heartbeat stop metadata", () => {
       summary: "done",
       stopReason: "completed",
       effectiveTimeoutSec: 120,
-      timeoutConfigured: true,
+      timeoutConfigured: false,
       timeoutSource: "default",
       timeoutFired: false,
     });

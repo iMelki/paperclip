@@ -112,6 +112,15 @@ export function prepareBundledPackage(sourceDir, destinationDir) {
     throw new Error("staged acpx runtime is missing the repository patch");
   }
 
+  if (
+    bundledDependencies.includes("postgres") &&
+    !readFileSync(resolve(destinationDir, "node_modules/postgres/src/connection.js"), "utf8").includes(
+      "function settleFinal(",
+    )
+  ) {
+    throw new Error("staged postgres driver is missing the repository patch");
+  }
+
   if (bundledDependencies.includes("embedded-postgres")) {
     const embeddedPostgresSource = readFileSync(
       resolve(destinationDir, "node_modules/embedded-postgres/dist/index.js"),

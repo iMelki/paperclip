@@ -1,0 +1,94 @@
+diff --git a/src/connection.js b/src/connection.js
+index 1b1cccde43b4570d5d071d6ffaab2669b3c2065a..1a2d00bc965db5191c9d1b3a0427e8fc003f0215 100644
+--- a/src/connection.js
++++ b/src/connection.js
+@@ -79,6 +79,7 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+   let socket = null
+     , cancelMessage
+     , errorResponse = null
++    , copyErrorReceived = false
+     , result = new Result()
+     , incoming = Buffer.alloc(0)
+     , needsTypes = options.fetch_types
+@@ -388,11 +389,18 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+   }
+ 
+   function errored(err) {
++    settleFinal(err)
+     stream && (stream.destroy(err), stream = null)
+     query && queryError(query, err)
+     initial && (queryError(initial, err), initial = null)
+   }
+ 
++  function settleFinal(err) {
++    const callback = final
++    final = null
++    callback && callback(err)
++  }
++
+   function queryError(query, err) {
+     if (query.reserve)
+       return query.reject(err)
+@@ -600,7 +608,7 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+       }
+     }
+ 
+-    final && (final(), final = null)
++    settleFinal()
+ 
+     if (result.command === 'BEGIN' && max !== 1 && !connection.reserved)
+       return errored(Errors.generic('UNSAFE_TRANSACTION', 'Only use sql.begin, sql.reserved or max: 1'))
+@@ -810,6 +818,7 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+   }
+ 
+   function ErrorResponse(x) {
++    stream && (copyErrorReceived = true)
+     if (query) {
+       (query.cursorFn || query.describeFirst) && write(Sync)
+       errorResponse = Errors.postgres(parseError(x))
+@@ -855,6 +864,8 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+   }
+ 
+   function CopyInResponse() {
++    copyErrorReceived = false
++    let copyDoneSent = false
+     stream = new Stream.Writable({
+       autoDestroy: true,
+       write(chunk, encoding, callback) {
+@@ -862,10 +873,12 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+       },
+       destroy(error, callback) {
+         callback(error)
+-        socket.write(b().f().str(error + b.N).end())
++        if (!copyDoneSent && !copyErrorReceived)
++          socket.write(b().f().str(error + b.N).end())
+         stream = null
+       },
+       final(callback) {
++        copyDoneSent = true
+         socket.write(b().c().end())
+         final = callback
+         stream = null
+@@ -883,6 +896,8 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+ 
+   /* c8 ignore next 3 */
+   function CopyBothResponse() {
++    copyErrorReceived = false
++    let copyDoneSent = false
+     stream = new Stream.Duplex({
+       autoDestroy: true,
+       read() { socket.resume() },
+@@ -892,10 +907,12 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+       },
+       destroy(error, callback) {
+         callback(error)
+-        socket.write(b().f().str(error + b.N).end())
++        if (!copyDoneSent && !copyErrorReceived)
++          socket.write(b().f().str(error + b.N).end())
+         stream = null
+       },
+       final(callback) {
++        copyDoneSent = true
+         socket.write(b().c().end())
+         final = callback
+       }

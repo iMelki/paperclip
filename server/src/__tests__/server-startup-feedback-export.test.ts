@@ -1,7 +1,80 @@
+import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { effectiveDatabasePoolMax, ensurePostgresDatabase, getPostgresDataDirectory } from "@paperclipai/db";
+import { decisionService } from "../services/index.js";
+import { logger } from "../middleware/logger.js";
+
+// Only the captured-shutdown regression bypasses shutdown I/O. Keep the real
+// scheduler shutdown coordinator and its wait-for-idle behavior in every test.
+const capturedShutdownTest = vi.hoisted(() => ({
+  enabled: false,
+  stoppingNotify: null as (() => Promise<boolean>) | null,
+}));
+
+vi.mock("../shutdown.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../shutdown.js")>();
+  return {
+    ...actual,
+    finalizeServerShutdown: vi.fn(async (...args: Parameters<typeof actual.finalizeServerShutdown>) => {
+      if (capturedShutdownTest.enabled) return;
+      return actual.finalizeServerShutdown(...args);
+    }),
+  };
+});
+
+vi.mock("../services/systemd-notify.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../services/systemd-notify.js")>();
+  return {
+    ...actual,
+    systemdNotify: vi.fn((...args: Parameters<typeof actual.systemdNotify>) => {
+      if (!capturedShutdownTest.enabled) return actual.systemdNotify(...args);
+      return args[0].includes("--stopping") && capturedShutdownTest.stoppingNotify
+        ? capturedShutdownTest.stoppingNotify()
+        : Promise.resolve(false);
+    }),
+  };
+});
+
+vi.mock("../services/run-log-store.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../services/run-log-store.js")>();
+  return {
+    ...actual,
+    flushInFlightRunLogMirrors: vi.fn(async (...args: Parameters<typeof actual.flushInFlightRunLogMirrors>) => {
+      if (capturedShutdownTest.enabled) return;
+      return actual.flushInFlightRunLogMirrors(...args);
+    }),
+  };
+});
+
+vi.mock("../telemetry.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../telemetry.js")>();
+  return {
+    ...actual,
+    getTelemetryClient: vi.fn((...args: Parameters<typeof actual.getTelemetryClient>) => (
+      capturedShutdownTest.enabled ? null : actual.getTelemetryClient(...args)
+    )),
+  };
+});
+
+const { pgStartMock, pgCtorMock } = vi.hoisted(() => {
+  const pgStartMock = vi.fn(async () => {});
+  const pgCtorMock = vi.fn(function () {
+    // Upstream's embedded-postgres supervisor (#11651) monitors the child
+    // process; give it one that never exits so it does not report exhaustion.
+    return {
+      initialise: vi.fn(async () => {}),
+      start: pgStartMock,
+      stop: vi.fn(async () => {}),
+      process: { once: vi.fn() },
+    };
+  });
+  return { pgStartMock, pgCtorMock };
+});
+
+vi.mock("embedded-postgres", () => ({ default: pgCtorMock }));
 
 const ORIGINAL_PAPERCLIP_API_URL = process.env.PAPERCLIP_API_URL;
 const ORIGINAL_PAPERCLIP_RUNTIME_API_URL = process.env.PAPERCLIP_RUNTIME_API_URL;
@@ -40,7 +113,7 @@ const {
       from: vi.fn(() => ({ where: vi.fn(async () => []) })),
     })),
   }) as never);
-  const detectPortMock = vi.fn(async (port: number) => port);
+  const detectPortMock = vi.fn(async ({ port }: { port: number; hostname: string }) => port);
   const deriveAuthTrustedOriginsMock = vi.fn(() => []);
   const resolveHeartbeatSchedulingSuppressionMock = vi.fn(() => ({
     suppressed: false,
@@ -49,6 +122,7 @@ const {
   const heartbeatServiceMock = {
     resolveSchedulingSuppression: resolveHeartbeatSchedulingSuppressionMock,
     reconcileHotRestartAdoption: vi.fn(async () => ({ mode: "none" })),
+    drainRunningRunsForShutdown: vi.fn(async () => ({ drained: 0 })),
     reapOrphanedRuns: vi.fn(async () => ({ reaped: 0, runIds: [] })),
     promoteDueScheduledRetries: vi.fn(async () => ({ promoted: 0, runIds: [] })),
     resumeQueuedRuns: vi.fn(async () => undefined),
@@ -68,6 +142,7 @@ const {
     reconcileTaskWatchdogs: vi.fn(async () => ({ triggered: 0 })),
     scanSilentActiveRuns: vi.fn(async () => ({ created: 0, escalated: 0 })),
     sweepStaleIssueLocks: vi.fn(async () => ({ cleared: 0 })),
+    sweepPendingCleanupLeases: vi.fn(async () => ({ swept: 0, destroyed: 0, capped: 0 })),
     reconcileProductivityReviews: vi.fn(async () => ({ created: 0, updated: 0, failed: 0 })),
     sweepExpiredRuntimeStatuses: vi.fn(() => 0),
     tickTimers: vi.fn(async () => ({ checked: 0, enqueued: 0, skipped: 0 })),
@@ -113,6 +188,7 @@ const {
   };
   const feedbackServiceFactoryMock = vi.fn(() => feedbackExportServiceMock);
   const fakeServer = {
+    on: vi.fn().mockReturnThis(),
     once: vi.fn().mockReturnThis(),
     off: vi.fn().mockReturnThis(),
     listen: vi.fn((_port: number, _host: string, callback?: () => void) => {
@@ -157,6 +233,7 @@ function buildTestConfig(overrides: Record<string, unknown> = {}) {
     customBindHost: undefined,
     host: "127.0.0.1",
     port: 3210,
+    strictPort: false,
     allowedHostnames: [],
     authBaseUrlMode: "auto",
     authPublicBaseUrl: undefined,
@@ -200,8 +277,14 @@ vi.mock("detect-port", () => ({
 
 vi.mock("@paperclipai/db", () => ({
   createDb: createDbMock,
+  // startServer sizes the heartbeat sweep gate from this export. The real
+  // helper reads DATABASE_POOL_MAX and otherwise returns the driver default.
+  effectiveDatabasePoolMax: vi.fn(() => 10),
+  closeAllRegisteredClients: vi.fn(async () => {}),
   ensurePostgresDatabase: vi.fn(),
   getPostgresDataDirectory: vi.fn(),
+  prepareEmbeddedPostgresNativeRuntime: vi.fn(async () => {}),
+  createEmbeddedPostgresLogBuffer: vi.fn(() => ({ append: vi.fn(), getRecentLogs: () => [] })),
   inspectMigrations: vi.fn(async () => ({ status: "upToDate" })),
   applyPendingMigrations: vi.fn(),
   reconcilePendingMigrationHistory: vi.fn(async () => ({ repairedMigrations: [] })),
@@ -222,6 +305,7 @@ vi.mock("../config.js", () => ({
 }));
 
 vi.mock("../middleware/logger.js", () => ({
+  resolveServerLogDir: () => "/configured/log/dir",
   logger: {
     child: vi.fn(function child() {
       return this;
@@ -312,6 +396,18 @@ vi.mock("../services/index.js", () => ({
   })),
 }));
 
+vi.mock("../services/question-response-delivery.js", () => ({
+  questionResponseDeliveryService: vi.fn(() => ({
+    sweepPending: vi.fn(async () => ({
+      scanned: 0,
+      steered: 0,
+      coalesced: 0,
+      wakeFallback: 0,
+      failed: 0,
+    })),
+  })),
+}));
+
 vi.mock("../services/secret-proposals.js", () => ({
   createSecretProposalsService: vi.fn(() => ({
     sweepExpired: vi.fn(async () => 0),
@@ -349,7 +445,481 @@ vi.mock("../auth/better-auth.js", () => ({
 
 import { startServer } from "../index.ts";
 
+describe("startServer embedded PostgreSQL identity", () => {
+  let dataDir: string;
+  let pidFile: string;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    dataDir = mkdtempSync(path.join(tmpdir(), "server-pg-identity-"));
+    pidFile = path.join(dataDir, "postmaster.pid");
+    writeFileSync(path.join(dataDir, "PG_VERSION"), "18\n");
+    writeFileSync(pidFile, `${process.pid}\n${dataDir}\n1700000000\n55432\n`);
+    process.env.PAPERCLIP_DECISION_SIGNING_SECRET = "test-only-signing-fixture".repeat(2);
+    loadConfigMock.mockReturnValue(buildTestConfig({
+      databaseMode: "embedded-postgres",
+      databaseUrl: undefined,
+      embeddedPostgresDataDir: dataDir,
+      embeddedPostgresPort: 55432,
+    }));
+    detectPortMock.mockResolvedValue(55432);
+    vi.mocked(getPostgresDataDirectory).mockReset().mockResolvedValue(null);
+    // Stop after the database lifecycle decision, before constructing the app.
+    vi.mocked(ensurePostgresDatabase).mockReset().mockRejectedValue(new Error("database phase reached"));
+  });
+
+  afterEach(() => {
+    detectPortMock.mockReset().mockImplementation(async ({ port }: { port: number; hostname: string }) => port);
+    vi.mocked(getPostgresDataDirectory).mockReset();
+    vi.mocked(ensurePostgresDatabase).mockReset();
+  });
+
+  // A stale lock is moved aside, never deleted; the moved file keeps its contents.
+  const staleLocks = () => readdirSync(dataDir).filter((name) => name.startsWith("postmaster.pid.stale-"));
+
+  it("starts PostgreSQL and moves the recycled-PID lock aside instead of reusing node", async () => {
+    expect(process.kill(process.pid, 0)).toBe(true);
+    const lockBefore = readFileSync(pidFile);
+    await expect(startServer()).rejects.toThrow("database phase reached");
+    expect(pgStartMock).toHaveBeenCalledOnce();
+    expect(existsSync(pidFile)).toBe(false);
+    expect(staleLocks()).toHaveLength(1);
+    expect(readFileSync(path.join(dataDir, staleLocks()[0])).equals(lockBefore)).toBe(true);
+    expect(process.kill(process.pid, 0)).toBe(true);
+  });
+
+  it("holds the start lock for this process while PostgreSQL starts, and releases it afterwards", async () => {
+    const startLock = `${dataDir}.paperclip-start.lock`;
+    let heldWhileStarting: string | null = null;
+    pgStartMock.mockImplementationOnce(async () => {
+      heldWhileStarting = existsSync(startLock) ? readFileSync(startLock, "utf8") : null;
+    });
+    await expect(startServer()).rejects.toThrow("database phase reached");
+    expect(pgStartMock).toHaveBeenCalledOnce();
+    expect(heldWhileStarting).not.toBeNull();
+    expect(JSON.parse(heldWhileStarting as unknown as string).pid).toBe(process.pid);
+    expect(existsSync(startLock)).toBe(false);
+  });
+
+  it("refuses with exit 75 and leaves the start lock of a process that is gone untouched", async () => {
+    const startLock = `${dataDir}.paperclip-start.lock`;
+    const dead = JSON.stringify({ pid: 424242, token: "dead" });
+    writeFileSync(startLock, dead);
+    const kill = vi.spyOn(process, "kill").mockImplementation((pid) => {
+      if (pid === 424242) throw Object.assign(new Error("no such process"), { code: "ESRCH" });
+      return true;
+    });
+    try {
+      const rejection = await startServer().catch((error) => error);
+      expect(rejection).toMatchObject({ name: "EmbeddedPostgresLockRefusal", exitCode: 75 });
+    } finally {
+      kill.mockRestore();
+    }
+    expect(readFileSync(startLock, "utf8")).toBe(dead);
+    expect(pgCtorMock).not.toHaveBeenCalled();
+    expect(pgStartMock).not.toHaveBeenCalled();
+    expect(readdirSync(path.dirname(dataDir)).filter((name) => name.startsWith(`${path.basename(startLock)}.`))).toEqual([]);
+    // The server's own lock file is not touched either.
+    expect(existsSync(pidFile)).toBe(true);
+  });
+
+  describe("a second start writes the lock while this one initialises", () => {
+    // No lock exists at the first check; it appears during port detection, before start().
+    const lockAppearsDuringStart = (content: string) => {
+      rmSync(pidFile);
+      // The embedded path calls detectPort(configuredPort) with a number; the HTTP path passes options.
+      detectPortMock.mockImplementation(async (requested: number | { port: number; hostname: string }) => {
+        writeFileSync(pidFile, content);
+        return typeof requested === "number" ? requested : requested.port;
+      });
+    };
+
+    it("reuses a live server instead of moving its lock aside", async () => {
+      lockAppearsDuringStart(`424242\n${dataDir}\n1700000000\n55433\n`);
+      vi.mocked(getPostgresDataDirectory)
+        .mockReset()
+        .mockRejectedValueOnce(new Error("not reachable yet"))
+        .mockResolvedValue(dataDir);
+      const kill = vi.spyOn(process, "kill").mockImplementation(() => true);
+      try {
+        await expect(startServer()).rejects.toThrow("database phase reached");
+      } finally {
+        kill.mockRestore();
+      }
+      expect(pgStartMock).not.toHaveBeenCalled();
+      expect(existsSync(pidFile)).toBe(true);
+      expect(staleLocks()).toHaveLength(0);
+      expect(ensurePostgresDatabase).toHaveBeenCalledWith(
+        "postgres://paperclip:paperclip@127.0.0.1:55433/postgres", "paperclip",
+      );
+    });
+
+    it("refuses and keeps the lock when the live owner is still starting", async () => {
+      const content = `424242\n${dataDir}\n1700000000\n55432\n`;
+      lockAppearsDuringStart(content);
+      vi.mocked(getPostgresDataDirectory).mockReset().mockResolvedValue(null);
+      const kill = vi.spyOn(process, "kill").mockImplementation(() => true);
+      try {
+        await expect(startServer()).rejects.toThrow("identity could not be verified");
+      } finally {
+        kill.mockRestore();
+      }
+      expect(readFileSync(pidFile, "utf8")).toBe(content);
+      expect(staleLocks()).toHaveLength(0);
+      expect(pgStartMock).not.toHaveBeenCalled();
+    });
+
+    it("still moves a lock aside that is dead at the second check", async () => {
+      const content = `424242\n${dataDir}\n1700000000\n55432\n`;
+      lockAppearsDuringStart(content);
+      const kill = vi.spyOn(process, "kill").mockImplementation(() => {
+        throw Object.assign(new Error("no such process"), { code: "ESRCH" });
+      });
+      try {
+        await expect(startServer()).rejects.toThrow("database phase reached");
+      } finally {
+        kill.mockRestore();
+      }
+      expect(pgStartMock).toHaveBeenCalledOnce();
+      expect(staleLocks()).toHaveLength(1);
+      expect(readFileSync(path.join(dataDir, staleLocks()[0]), "utf8")).toBe(content);
+    });
+
+    it("keeps a live lock that replaces the examined stale one before the lock is moved", async () => {
+      // Dead at the second check (verdict: stale) ...
+      const staleContent = `424242\n${dataDir}\n1700000000\n55432\n`;
+      const liveContent = `434343\n${dataDir}\n1700000001\n55432\npostmaster-started-later\n`;
+      lockAppearsDuringStart(staleContent);
+      // ... and replaced by another server's lock after the verdict, before the rename.
+      const kill = vi.spyOn(process, "kill").mockImplementation((pid) => {
+        if (pid === 424242) {
+          rmSync(pidFile);
+          writeFileSync(pidFile, liveContent);
+          throw Object.assign(new Error("no such process"), { code: "ESRCH" });
+        }
+        return true;
+      });
+      try {
+        await expect(startServer()).rejects.toThrow("was replaced while it was being checked");
+      } finally {
+        kill.mockRestore();
+      }
+      expect(pgStartMock).not.toHaveBeenCalled();
+      expect(readFileSync(pidFile, "utf8")).toBe(liveContent);
+      expect(staleLocks()).toHaveLength(0);
+    });
+  });
+
+  it("writes the PostgreSQL log into the configured server log directory", async () => {
+    await expect(startServer()).rejects.toThrow("database phase reached");
+    expect(pgCtorMock).toHaveBeenCalledWith(expect.objectContaining({
+      logFile: expect.stringMatching(new RegExp(`^${path.resolve("/configured/log/dir").replace(/[\\^$.*+?()[\]{}|]/g, "\\$&")}[\\\\/]postgres-[0-9a-f]{8}\\.log$`)),
+      // The leftover lock means crash recovery, which gets the longer wait.
+      startTimeoutSeconds: 600,
+    }));
+  });
+
+  it("keeps reusing verified live PostgreSQL on the recorded port", async () => {
+    writeFileSync(pidFile, `${process.pid}\n${dataDir}\n1700000000\n55433\n`);
+    vi.mocked(getPostgresDataDirectory).mockResolvedValue(dataDir);
+    await expect(startServer()).rejects.toThrow("database phase reached");
+    expect(pgCtorMock).not.toHaveBeenCalled();
+    expect(pgStartMock).not.toHaveBeenCalled();
+    expect(ensurePostgresDatabase).toHaveBeenCalledWith(
+      "postgres://paperclip:paperclip@127.0.0.1:55433/postgres", "paperclip",
+    );
+    expect(existsSync(pidFile)).toBe(true);
+  });
+
+  it("starts PostgreSQL and moves the dead-PID lock aside", async () => {
+    const lockBefore = readFileSync(pidFile);
+    const kill = vi.spyOn(process, "kill").mockImplementation(() => {
+      throw Object.assign(new Error("no such process"), { code: "ESRCH" });
+    });
+    try {
+      await expect(startServer()).rejects.toThrow("database phase reached");
+      expect(pgStartMock).toHaveBeenCalledOnce();
+      expect(existsSync(pidFile)).toBe(false);
+      expect(staleLocks()).toHaveLength(1);
+      expect(readFileSync(path.join(dataDir, staleLocks()[0])).equals(lockBefore)).toBe(true);
+    } finally {
+      kill.mockRestore();
+    }
+  });
+
+  const foreignLiveness: Array<[string, () => true]> = [
+    ["live", () => true],
+    ["EPERM", () => { throw Object.assign(new Error("permission denied"), { code: "EPERM" }); }],
+    ["EIO", () => { throw Object.assign(new Error("i/o error"), { code: "EIO" }); }],
+  ];
+  const identityFailures: Array<[string, () => void]> = [
+    ["unreachable/null", () => vi.mocked(getPostgresDataDirectory).mockResolvedValue(null)],
+    ["recovery", () => vi.mocked(getPostgresDataDirectory).mockRejectedValue(new Error("the database system is in recovery mode"))],
+    ["permission", () => vi.mocked(getPostgresDataDirectory).mockRejectedValue(new Error("password authentication failed"))],
+  ];
+  for (const [livenessName, killOutcome] of foreignLiveness) {
+    for (const [failureName, failIdentity] of identityFailures) {
+      it(`keeps the lock and refuses a second start for a foreign ${livenessName} PID with a failed identity query (${failureName})`, async () => {
+        writeFileSync(pidFile, `424242\n${dataDir}\n1700000000\n55432\n\nlocalhost\n\nready\n`);
+        const lockBefore = readFileSync(pidFile);
+        failIdentity();
+        const kill = vi.spyOn(process, "kill").mockImplementation(killOutcome);
+        try {
+          await expect(startServer()).rejects.toThrow("identity could not be verified");
+        } finally {
+          kill.mockRestore();
+        }
+        expect(readFileSync(pidFile).equals(lockBefore)).toBe(true);
+        expect(pgCtorMock).not.toHaveBeenCalled();
+        expect(pgStartMock).not.toHaveBeenCalled();
+        expect(ensurePostgresDatabase).not.toHaveBeenCalled();
+        expect(createDbMock).not.toHaveBeenCalled();
+      });
+    }
+  }
+
+  it("reuses verified PostgreSQL reached through a symlinked data directory", async () => {
+    const root = realpathSync(mkdtempSync(path.join(tmpdir(), "server-pg-alias-")));
+    const physical = path.join(root, "physical");
+    const alias = path.join(root, "alias");
+    mkdirSync(physical);
+    symlinkSync(physical, alias, "dir");
+    writeFileSync(path.join(physical, "PG_VERSION"), "18\n");
+    writeFileSync(path.join(physical, "postmaster.pid"), `${process.pid}\n${physical}\n1700000000\n55432\n`);
+    loadConfigMock.mockReturnValue(buildTestConfig({
+      databaseMode: "embedded-postgres",
+      databaseUrl: undefined,
+      embeddedPostgresDataDir: alias,
+      embeddedPostgresPort: 55432,
+    }));
+    vi.mocked(getPostgresDataDirectory).mockResolvedValue(physical);
+    await expect(startServer()).rejects.toThrow("database phase reached");
+    expect(pgCtorMock).not.toHaveBeenCalled();
+    expect(pgStartMock).not.toHaveBeenCalled();
+    expect(existsSync(path.join(physical, "postmaster.pid"))).toBe(true);
+  });
+
+  it("reuses a verified PID-less server through a symlinked data directory", async () => {
+    const root = realpathSync(mkdtempSync(path.join(tmpdir(), "server-pg-alias-")));
+    const physical = path.join(root, "physical");
+    const alias = path.join(root, "alias");
+    mkdirSync(physical);
+    symlinkSync(physical, alias, "dir");
+    writeFileSync(path.join(physical, "PG_VERSION"), "18\n");
+    loadConfigMock.mockReturnValue(buildTestConfig({
+      databaseMode: "embedded-postgres",
+      databaseUrl: undefined,
+      embeddedPostgresDataDir: alias,
+      embeddedPostgresPort: 55432,
+    }));
+    vi.mocked(getPostgresDataDirectory).mockResolvedValue(physical);
+    vi.mocked(ensurePostgresDatabase).mockReset()
+      .mockResolvedValueOnce("exists")
+      .mockRejectedValue(new Error("database phase reached"));
+    await expect(startServer()).rejects.toThrow("database phase reached");
+    expect(pgCtorMock).not.toHaveBeenCalled();
+    expect(pgStartMock).not.toHaveBeenCalled();
+  });
+
+  describe.skipIf(process.platform === "win32")("a postmaster whose -D names another cluster", () => {
+    // A real process named `postgres` whose working directory is the target, like a postmaster that
+    // chdirs into its data directory. Its command line names a different, initialised cluster.
+    let child: ChildProcess | null = null;
+    afterEach(() => {
+      child?.kill();
+      child = null;
+    });
+
+    const startPostmaster = async (commandLine: string[]) => {
+      // A shell script named `postgres`: the kernel names such a process after the script. A symlink
+      // to node would not do, because Node 24 renames its main thread ("MainThread") and `ps` would
+      // no longer list the process as `postgres`.
+      const bin = path.join(mkdtempSync(path.join(tmpdir(), "pg-bin-")), "postgres");
+      writeFileSync(bin, "#!/bin/sh\nwhile :; do sleep 1; done\n");
+      chmodSync(bin, 0o755);
+      child = spawn(bin, ["--stand-in-postmaster", "--", ...commandLine], { cwd: dataDir, stdio: "ignore" });
+      // Wait until `ps` lists it as `postgres` with its arguments; a loaded CI runner needs longer than a fixed delay.
+      const listed = () => {
+        const row = spawnSync("ps", ["-p", String(child?.pid), "-o", "comm=,args="], { encoding: "utf8" }).stdout;
+        return /(?:^|\/)postgres\s/.test(row.trim()) && row.includes("--stand-in-postmaster");
+      };
+      for (let waited = 0; !listed(); waited += 50) {
+        if (waited > 15_000) throw new Error("the stand-in postgres process was never listed by ps");
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+    };
+    const clusterWithVersion = (prefix: string) => {
+      const dir = mkdtempSync(path.join(tmpdir(), prefix));
+      writeFileSync(path.join(dir, "PG_VERSION"), "18\n");
+      return dir;
+    };
+
+    it.each([
+      ["-c data_directory", (target: string, other: string) => ["-D", other, "-c", `data_directory=${target}`]],
+      ["a configuration include", (_target: string, other: string) => ["-D", other]],
+      ["an external config_file", (_target: string, other: string) => ["-D", other, "-c", "config_file=/etc/external/pg.conf"]],
+    ])("refuses with exit 75 and keeps the lock byte for byte (%s)", async (_name, argsFor) => {
+      const other = clusterWithVersion("pg-config-cluster-");
+      writeFileSync(path.join(other, "postgresql.conf"), "include 'hidden.conf'\n");
+      await startPostmaster(argsFor(dataDir, other));
+      writeFileSync(pidFile, "1oops"); // a lock that cannot name its owner
+      const before = readFileSync(pidFile);
+      const rejection = await startServer().catch((error) => error);
+      expect(rejection).toMatchObject({ name: "EmbeddedPostgresLockRefusal", exitCode: 75 });
+      expect(readFileSync(pidFile).equals(before)).toBe(true);
+      expect(staleLocks()).toHaveLength(0);
+      expect(readdirSync(path.dirname(dataDir)).filter((name) => name.startsWith(`${path.basename(dataDir)}.postmaster.pid`))).toEqual([]);
+      expect(pgCtorMock).not.toHaveBeenCalled();
+      expect(pgStartMock).not.toHaveBeenCalled();
+      expect(ensurePostgresDatabase).not.toHaveBeenCalled();
+      // The start lock is released even though startup refused.
+      expect(existsSync(`${dataDir}.paperclip-start.lock`)).toBe(false);
+    });
+  });
+
+  it("probes identity with the same login it uses to open the database", async () => {
+    vi.mocked(getPostgresDataDirectory).mockResolvedValue(dataDir);
+    await expect(startServer()).rejects.toThrow("database phase reached");
+    const probeUrl = vi.mocked(getPostgresDataDirectory).mock.calls[0]?.[0];
+    expect(probeUrl).toBe(vi.mocked(ensurePostgresDatabase).mock.calls[0]?.[0]);
+  });
+
+  it("refuses another PostgreSQL instance without removing the lock or starting", async () => {
+    vi.mocked(getPostgresDataDirectory).mockResolvedValue(path.resolve(dataDir, "another-instance"));
+    await expect(startServer()).rejects.toThrow("data directory belongs to another instance");
+    expect(pgStartMock).not.toHaveBeenCalled();
+    expect(existsSync(pidFile)).toBe(true);
+  });
+});
+
 describe("startServer feedback export wiring", () => {
+
+  it("skips queued sweeps after shutdown while draining the sweep already running", async () => {
+    loadConfigMock.mockReturnValue(buildTestConfig({ heartbeatSchedulerEnabled: true }));
+    vi.mocked(effectiveDatabasePoolMax).mockReturnValueOnce(2);
+    let releaseHeld!: () => void;
+    const held = new Promise<{ expired: number }>((resolve) => {
+      releaseHeld = () => resolve({ expired: 0 });
+    });
+    const heldSweep = vi.fn().mockResolvedValueOnce({ expired: 0 }).mockImplementation(() => held);
+    vi.mocked(decisionService).mockReturnValueOnce({ sweepExpired: heldSweep } as unknown as ReturnType<typeof decisionService>);
+    let tick: (() => void) | undefined;
+    let stop: (() => void) | undefined;
+    let releaseNotify!: () => void;
+    const pendingNotify = new Promise<boolean>((resolve) => {
+      releaseNotify = () => resolve(false);
+    });
+    const stoppingNotify = vi.fn(() => pendingNotify);
+    let shutdownRequested = false;
+    let markShutdownComplete!: () => void;
+    const shutdownComplete = new Promise<void>((resolve) => {
+      markShutdownComplete = resolve;
+    });
+    const originalOnce = process.once;
+    const onceSpy = vi.spyOn(process, "once").mockImplementation(((event, listener) => {
+      if (event === "SIGTERM") { stop = listener as () => void; return process; }
+      if (event === "SIGINT") return process;
+      return originalOnce.call(process, event, listener);
+    }) as typeof process.once);
+    const intervalSpy = vi.spyOn(globalThis, "setInterval").mockImplementation(((callback: () => void) => {
+      tick = callback;
+      return 1 as unknown as ReturnType<typeof setInterval>;
+    }) as typeof setInterval);
+    const clearSpy = vi.spyOn(globalThis, "clearInterval").mockImplementation(() => {});
+    const exitSpy = vi.spyOn(process, "exit").mockImplementation((() => {
+      markShutdownComplete();
+      return undefined;
+    }) as never);
+    capturedShutdownTest.enabled = true;
+    capturedShutdownTest.stoppingNotify = stoppingNotify;
+    try {
+      await startServer();
+      const routineBefore = routineServiceMock.tickScheduledTriggers.mock.calls.length;
+      const timerBefore = heartbeatServiceMock.tickTimers.mock.calls.length;
+      const externalBefore = externalObjectsServiceMock.refreshDueObjectsForActiveCompanies.mock.calls.length;
+      expect(tick).toBeTypeOf("function");
+      expect(stop).toBeTypeOf("function");
+      tick!();
+      await vi.waitFor(() => expect(heldSweep).toHaveBeenCalledTimes(2));
+      expect(routineServiceMock.tickScheduledTriggers).toHaveBeenCalledTimes(routineBefore);
+      shutdownRequested = true;
+      stop!(); // Only this startServer's captured callback; never emit a real signal.
+      expect(clearSpy).toHaveBeenCalled(); // No await before scheduler quiescence.
+      await vi.waitFor(() => expect(stoppingNotify).toHaveBeenCalledOnce());
+      expect(exitSpy).not.toHaveBeenCalled();
+      releaseHeld();
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      // The external notification is still pending while the queued slot drains.
+      expect(routineServiceMock.tickScheduledTriggers).toHaveBeenCalledTimes(routineBefore);
+      expect(heartbeatServiceMock.tickTimers).toHaveBeenCalledTimes(timerBefore);
+      expect(externalObjectsServiceMock.refreshDueObjectsForActiveCompanies).toHaveBeenCalledTimes(externalBefore);
+      expect(exitSpy).not.toHaveBeenCalled();
+      releaseNotify();
+      await shutdownComplete;
+      expect(exitSpy).toHaveBeenCalledWith(0);
+      expect(routineServiceMock.tickScheduledTriggers).toHaveBeenCalledTimes(routineBefore);
+      expect(heartbeatServiceMock.tickTimers).toHaveBeenCalledTimes(timerBefore);
+      expect(externalObjectsServiceMock.refreshDueObjectsForActiveCompanies).toHaveBeenCalledTimes(externalBefore);
+    } finally {
+      releaseHeld();
+      releaseNotify();
+      // Even a failed assertion must drain this captured shutdown before the real
+      // process.exit is restored. Shutdown I/O doubles are scoped to this case.
+      if (shutdownRequested) await shutdownComplete;
+      capturedShutdownTest.stoppingNotify = null;
+      capturedShutdownTest.enabled = false;
+      vi.mocked(effectiveDatabasePoolMax).mockReset().mockReturnValue(10);
+      exitSpy.mockRestore();
+      clearSpy.mockRestore();
+      intervalSpy.mockRestore();
+      onceSpy.mockRestore();
+    }
+  });
+
+  it("logs an unhandled recovery suppression rejection once without values and frees the sweep name", async () => {
+    loadConfigMock.mockReturnValue(buildTestConfig({ heartbeatSchedulerEnabled: true }));
+    let tick: (() => void) | undefined;
+    const originalOnce = process.once;
+    const onceSpy = vi.spyOn(process, "once").mockImplementation(((event, listener) => {
+      if (event === "SIGTERM" || event === "SIGINT") return process;
+      return originalOnce.call(process, event, listener);
+    }) as typeof process.once);
+    const intervalSpy = vi.spyOn(globalThis, "setInterval").mockImplementation(((callback: () => void) => {
+      tick = callback;
+      return 1 as unknown as ReturnType<typeof setInterval>;
+    }) as typeof setInterval);
+    try {
+      await startServer();
+      const recoveryBefore = heartbeatServiceMock.reapOrphanedRuns.mock.calls.length;
+      vi.mocked(logger.error).mockClear();
+      const syntheticSecret = "not-for-logs-synthetic-credential";
+      resolveHeartbeatSchedulingSuppressionMock
+        .mockImplementationOnce(() => ({ suppressed: true, reason: null }))
+        .mockImplementationOnce(() => { throw new Error("CONNECT_TIMEOUT " + syntheticSecret); });
+      expect(tick).toBeTypeOf("function");
+      tick!();
+      await vi.waitFor(() => expect(logger.error).toHaveBeenCalledWith(
+        { sweep: "heartbeat-recovery" }, "heartbeat scheduler sweep rejected",
+      ));
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      const boundedLogs = vi.mocked(logger.error).mock.calls.filter((args) => args[1] === "heartbeat scheduler sweep rejected");
+      expect(boundedLogs).toEqual([[{ sweep: "heartbeat-recovery" }, "heartbeat scheduler sweep rejected"]]);
+      expect(JSON.stringify(boundedLogs)).not.toContain(syntheticSecret);
+      expect(heartbeatServiceMock.reapOrphanedRuns).toHaveBeenCalledTimes(recoveryBefore);
+      heartbeatServiceMock.tickTimers.mockRejectedValueOnce(new Error("locally handled timer fixture"));
+      tick!();
+      await vi.waitFor(() => expect(heartbeatServiceMock.reapOrphanedRuns).toHaveBeenCalledTimes(recoveryBefore + 1));
+      expect(vi.mocked(logger.error).mock.calls.filter((args) => args[1] === "heartbeat timer tick failed")).toHaveLength(1);
+      expect(vi.mocked(logger.error).mock.calls.filter((args) => args[1] === "heartbeat scheduler sweep rejected")).toHaveLength(1);
+    } finally {
+      resolveHeartbeatSchedulingSuppressionMock.mockReset().mockReturnValue({ suppressed: false, reason: null });
+      heartbeatServiceMock.tickTimers.mockReset().mockResolvedValue({ checked: 0, enqueued: 0, skipped: 0 });
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      intervalSpy.mockRestore();
+      onceSpy.mockRestore();
+    }
+  });
+
   beforeEach(() => {
     vi.clearAllMocks();
     process.env.PAPERCLIP_DECISION_SIGNING_SECRET = "fedcba9876543210fedcba9876543210";
@@ -492,8 +1062,11 @@ describe("startServer feedback export wiring", () => {
 
       expect(intervalCallback).not.toBeNull();
       intervalCallback?.();
-      await Promise.resolve();
-      await Promise.resolve();
+      // The sweep gate runs at most poolMax-1 sweeps at once, so a tick's
+      // later sweeps start after the first wave releases its slots.
+      await vi.waitFor(() => {
+        expect(routineServiceMock.tickScheduledTriggers).toHaveBeenCalledTimes(1);
+      });
 
       expect(heartbeatServiceMock.tickTimers).not.toHaveBeenCalled();
       expect(externalObjectsServiceMock.refreshDueObjectsForActiveCompanies).toHaveBeenCalledTimes(1);
@@ -522,7 +1095,11 @@ describe("startServer feedback export wiring", () => {
     try {
       await startServer();
 
-      expect(heartbeatServiceFactoryMock).not.toHaveBeenCalled();
+      // The disabled path still creates one heartbeat runtime. This runtime owns
+      // the orphan-sandbox cleanup sweep, so a leaked provider sandbox is still
+      // reaped at startup and on the interval.
+      expect(heartbeatServiceFactoryMock).toHaveBeenCalledTimes(1);
+      expect(heartbeatServiceMock.sweepPendingCleanupLeases).toHaveBeenCalled();
       expect(intervalCallback).not.toBeNull();
       intervalCallback?.();
       await Promise.resolve();
@@ -590,6 +1167,31 @@ describe("startServer authenticated auth origin setup", () => {
     createBetterAuthInstanceMock.mockReturnValue({});
     deriveAuthTrustedOriginsMock.mockReturnValue([]);
     process.env.BETTER_AUTH_SECRET = "test-secret";
+  });
+
+  it("checks port availability on the configured bind host", async () => {
+    loadConfigMock.mockReturnValue(buildTestConfig({
+      host: "127.0.0.1",
+      port: 3210,
+    }));
+
+    await startServer();
+
+    expect(detectPortMock).toHaveBeenCalledWith({
+      port: 3210,
+      hostname: "127.0.0.1",
+    });
+  });
+
+  it("refuses to move to another port when strict port mode is on", async () => {
+    loadConfigMock.mockReturnValue(buildTestConfig({
+      host: "127.0.0.1",
+      port: 3210,
+      strictPort: true,
+    }));
+    detectPortMock.mockResolvedValueOnce(3211);
+
+    await expect(startServer()).rejects.toThrow("Port 3210 is busy on 127.0.0.1");
   });
 
   it("derives trusted origins from the detected listen port before auth initializes", async () => {
@@ -693,7 +1295,7 @@ describe("startServer PAPERCLIP_API_URL handling", () => {
     );
   });
 
-  it("rewrites explicit-port auth public URLs when detect-port selects a new port", async () => {
+  it("preserves explicit-port external auth public URLs when detect-port selects a new port", async () => {
     loadConfigMock.mockReturnValueOnce(buildTestConfig({
       port: 3100,
       authBaseUrlMode: "explicit",
@@ -703,9 +1305,12 @@ describe("startServer PAPERCLIP_API_URL handling", () => {
 
     const started = await startServer();
 
+    // The server listens internally on 3110, but an explicit *external* base URL must keep
+    // its advertised port. Rewriting it to the internal listen port produced an unreachable
+    // URL that leaked to spawned agents as a dead PAPERCLIP_API_URL. (BRO-1558)
     expect(started.listenPort).toBe(3110);
-    expect(started.apiUrl).toBe("http://my-host.ts.net:3110");
-    expect(process.env.PAPERCLIP_RUNTIME_API_URL).toBe("http://my-host.ts.net:3110");
+    expect(started.apiUrl).toBe("http://my-host.ts.net:3100");
+    expect(process.env.PAPERCLIP_RUNTIME_API_URL).toBe("http://my-host.ts.net:3100");
   });
 
   it("keeps no-port auth public URLs stable when detect-port selects a new port", async () => {

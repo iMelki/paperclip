@@ -31,6 +31,7 @@ import {
 } from "../../api/secrets";
 import { useToastActions } from "../../context/ToastContext";
 import { queryKeys } from "../../lib/queryKeys";
+import { useConfirmDialog } from "@/hooks/useConfirmDialog";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -340,6 +341,7 @@ export function ImportFromVaultDialog({
 }: ImportFromVaultDialogProps) {
   const queryClient = useQueryClient();
   const toast = useToastActions();
+  const { confirm: confirmDiscard, confirmDialog } = useConfirmDialog();
   const awsVaults = useMemo(() => awsVaultOptions(providerConfigs), [providerConfigs]);
   const eligible = useMemo(() => eligibleVaults(providerConfigs), [providerConfigs]);
   const noEligibleVaults = eligible.length === 0;
@@ -613,10 +615,23 @@ export function ImportFromVaultDialog({
   function handleClose(force = false) {
     if (importMutation.isPending) return;
     if (!force && step !== "result" && selection.size > 0 && !importResult) {
-      const ok = window.confirm(
-        `Discard ${selection.size} pending import${selection.size === 1 ? "" : "s"}?`,
-      );
-      if (!ok) return;
+      const count = selection.size;
+      void (async () => {
+        const ok = await confirmDiscard({
+          title: `Discard ${count} pending import${count === 1 ? "" : "s"}?`,
+          tone: "destructive",
+          confirmLabel: "Discard imports",
+          consequences: {
+            immediateEffect: "Your selected import drafts are discarded and this dialog closes.",
+            confirmedEffect: "Nothing is imported; no secret references are created in Paperclip.",
+            resultLocation: "The vault's secrets stay available to import again later.",
+            willNotHappen: "Secrets already in Paperclip are not changed, and the vault is not modified.",
+          },
+        });
+        if (!ok) return;
+        onOpenChange(false);
+      })();
+      return;
     }
     onOpenChange(false);
   }
@@ -778,6 +793,7 @@ export function ImportFromVaultDialog({
             )}
           </div>
         </footer>
+        {confirmDialog}
       </DialogContent>
     </Dialog>
   );

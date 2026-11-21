@@ -9,6 +9,9 @@
  */
 
 import { describe, expect, it, vi, beforeEach } from "vitest";
+import os from "node:os";
+import path from "node:path";
+import * as fs from "node:fs/promises";
 
 // Mock the adapter-utils server-utils module that execute.ts imports from.
 // We intercept runChildProcess so we can inspect its opts without spawning
@@ -36,6 +39,14 @@ vi.mock("node:fs/promises", () => ({
   access: vi.fn(async () => undefined),
   readdir: vi.fn(async () => []),
   stat: vi.fn(async () => ({ isFile: () => true, isDirectory: () => false })),
+  realpath: vi.fn(async (input: string) => input),
+  lstat: vi.fn(async (input: string) => {
+    if (input.endsWith("auth.json")) throw Object.assign(new Error("missing fixture auth"), { code: "ENOENT" });
+    return {
+      isFile: () => input.endsWith("profile.yaml"),
+      isSymbolicLink: () => false,
+    };
+  }),
 }));
 
 import { execute } from "./execute.js";
@@ -61,6 +72,7 @@ function makeCtx(overrides: Record<string, unknown> = {}) {
       },
       config: {
         command: "/usr/bin/hermes",
+        model: "anthropic/claude-haiku-5.5",
         timeoutSec: 60,
         graceSec: 5,
         ...overrides,
@@ -102,6 +114,7 @@ describe("hermes-local adapter onSpawn forwarding", () => {
     const lastCall = mocked.mock.calls[mocked.mock.calls.length - 1];
     const opts = lastCall[3] as Record<string, unknown>;
     expect(opts.onSpawn).toBe(onSpawn);
+    expect(opts.inheritEnv).toBe(true);
   });
 
   it("runChildProcess opts type includes onSpawn", () => {
@@ -117,6 +130,74 @@ describe("hermes-local adapter onSpawn forwarding", () => {
       onSpawn: async () => undefined,
     };
     expect(opts.onSpawn).toBeDefined();
+  });
+
+  it("preserves a specific stderr diagnostic for a nonzero exit", async () => {
+    vi.mocked(serverUtils.runChildProcess).mockResolvedValueOnce({
+      exitCode: 1,
+      signal: null,
+      timedOut: false,
+      stdout: "",
+      stderr: "Error: provider unavailable\n",
+      pid: null,
+      startedAt: null,
+    });
+
+    const { ctx } = makeCtx();
+    const result = await execute(ctx as any);
+
+    expect(result.errorMessage).toBe("Error: provider unavailable");
+  });
+
+  it("reports the exit code when a nonzero exit has no diagnostic", async () => {
+    vi.mocked(serverUtils.runChildProcess).mockResolvedValueOnce({
+      exitCode: 130,
+      signal: null,
+      timedOut: false,
+      stdout: "",
+      stderr: "",
+      pid: null,
+      startedAt: null,
+    });
+
+    const { ctx } = makeCtx();
+    const result = await execute(ctx as any);
+
+    expect(result.errorMessage).toBe("Hermes exited with code 130");
+  });
+
+  it("leaves timeout diagnostics to the heartbeat timeout path", async () => {
+    vi.mocked(serverUtils.runChildProcess).mockResolvedValueOnce({
+      exitCode: 143,
+      signal: "SIGTERM",
+      timedOut: true,
+      stdout: "",
+      stderr: "",
+      pid: null,
+      startedAt: null,
+    });
+
+    const { ctx } = makeCtx();
+    const result = await execute(ctx as any);
+
+    expect(result.errorMessage).toBeUndefined();
+  });
+
+  it("does not label signal cancellation as a silent nonzero exit", async () => {
+    vi.mocked(serverUtils.runChildProcess).mockResolvedValueOnce({
+      exitCode: null,
+      signal: "SIGTERM",
+      timedOut: false,
+      stdout: "",
+      stderr: "",
+      pid: null,
+      startedAt: null,
+    });
+
+    const { ctx } = makeCtx();
+    const result = await execute(ctx as any);
+
+    expect(result.errorMessage).toBeUndefined();
   });
 
   it("does not inherit PAPERCLIP_API_KEY without a harness token", async () => {
@@ -135,5 +216,121 @@ describe("hermes-local adapter onSpawn forwarding", () => {
       if (previousApiKey === undefined) delete process.env.PAPERCLIP_API_KEY;
       else process.env.PAPERCLIP_API_KEY = previousApiKey;
     }
+  });
+
+  it("pins a strict named profile, scrubs host credentials, and never passes --yolo", async () => {
+    const previous = process.env.OPENAI_API_KEY;
+    process.env.OPENAI_API_KEY = "host-only-canary";
+    try {
+      const hermesHome = path.join(os.tmpdir(), "paperclip-hermes-strict-fixture");
+      const { ctx } = makeCtx({
+        strictIsolation: true,
+        hermesHome,
+        hermesProfile: "research",
+        hermesCommand: path.join(hermesHome, "bin", "hermes"),
+        paperclipApiUrl: "http://127.0.0.1:3100/api",
+        model: "gpt-5.5",
+        provider: "openai-codex",
+        timeoutSec: 900,
+        maxTurnsPerRun: 3,
+        persistSession: false,
+      });
+      await execute(ctx as any);
+      const [,, args, opts] = vi.mocked(serverUtils.runChildProcess).mock.calls.at(-1)!;
+      expect(args.slice(0, 3)).toEqual(["--profile", "research", "chat"]);
+      expect(args).not.toContain("--yolo");
+      expect(opts.timeoutSec).toBe(900);
+      expect(opts.inheritEnv).toBe(false);
+      expect(opts.env.HERMES_HOME).toBe(hermesHome);
+      expect(opts.env.OPENAI_API_KEY).toBeUndefined();
+    } finally {
+      if (previous === undefined) delete process.env.OPENAI_API_KEY;
+      else process.env.OPENAI_API_KEY = previous;
+    }
+  });
+
+  it("rejects strict root auth before invoking the child-process helper", async () => {
+    const hermesHome = path.join(os.tmpdir(), "paperclip-hermes-strict-fixture");
+    const { ctx } = makeCtx({
+      strictIsolation: true,
+      hermesHome,
+      hermesProfile: "research",
+      hermesCommand: path.join(hermesHome, "bin", "hermes"),
+      paperclipApiUrl: "http://127.0.0.1:3100/api",
+      model: "gpt-5.5",
+      provider: "openai-codex",
+      timeoutSec: 900,
+      maxTurnsPerRun: 3,
+      persistSession: false,
+    });
+    vi.mocked(fs.lstat).mockResolvedValueOnce({
+      isFile: () => true, isSymbolicLink: () => false,
+    } as Awaited<ReturnType<typeof fs.lstat>>);
+    await expect(execute(ctx as any)).rejects.toThrow(/root auth.json/);
+    expect(fs.lstat).toHaveBeenCalledWith(path.join(hermesHome, "auth.json"));
+    expect(serverUtils.runChildProcess).not.toHaveBeenCalled();
+  });
+
+  it("starts a fresh strict session with the full brief when stale runtime state has a session ID", async () => {
+    const hermesHome = path.join(os.tmpdir(), "paperclip-hermes-strict-fixture");
+    const { ctx } = makeCtx({
+      strictIsolation: true,
+      hermesHome,
+      hermesProfile: "research",
+      hermesCommand: path.join(hermesHome, "bin", "hermes"),
+      paperclipApiUrl: "http://127.0.0.1:3100/api",
+      model: "gpt-5.5",
+      provider: "openai-codex",
+      timeoutSec: 900,
+      maxTurnsPerRun: 3,
+      persistSession: false,
+    });
+    const staleCtx = {
+      ...ctx,
+      runtime: { ...ctx.runtime, sessionParams: { sessionId: "prior-session" } },
+      context: {
+        ...ctx.context,
+        paperclipWake: {
+          reason: "issue_commented",
+          issue: { id: "issue-1", identifier: "ASS-1", title: "Continue the task", status: "in_progress" },
+          commentWindow: { requestedCount: 1, includedCount: 1, missingCount: 0 },
+          comments: [{ id: "comment-1", body: "Please continue.", createdAt: "2026-09-28T00:00:00.000Z" }],
+          fallbackFetchNeeded: false,
+        },
+        paperclipTaskMarkdown: "Full task brief with the issue description.",
+        paperclipTaskMarkdownCompact: "Compact task brief without the description.",
+      },
+    };
+
+    await execute(staleCtx as any);
+
+    const [,, args] = vi.mocked(serverUtils.runChildProcess).mock.calls.at(-1)!;
+    const prompt = args[args.indexOf("-q") + 1];
+    expect(args).not.toContain("--resume");
+    expect(prompt).toContain("Full task brief with the issue description.");
+    expect(prompt).not.toContain("Compact task brief without the description.");
+    expect(prompt).not.toContain("## Paperclip Resume Delta");
+    expect(staleCtx.onLog).not.toHaveBeenCalledWith(
+      "stdout", expect.stringContaining("Resuming session"),
+    );
+  });
+
+  it.each(["--yolo", "--yol", "--yol=1"])(
+    "rejects extraArgs approval bypass %s before spawn",
+    async (flag) => {
+      const { ctx } = makeCtx({ extraArgs: [flag] });
+      await expect(execute(ctx as any)).rejects.toThrow(/forbids --yolo/);
+      expect(serverUtils.runChildProcess).not.toHaveBeenCalled();
+    },
+  );
+
+  it("scrubs every case variant of the YOLO environment override", async () => {
+    const { ctx } = makeCtx({
+      env: { hermes_yolo_mode: "1", HeRmEs_YoLo_MoDe: "1" },
+    });
+    await execute(ctx as any);
+    const [,,, opts] = vi.mocked(serverUtils.runChildProcess).mock.calls.at(-1)!;
+    expect(Object.keys(opts.env).filter((key) => key.toUpperCase() === "HERMES_YOLO_MODE"))
+      .toEqual([]);
   });
 });

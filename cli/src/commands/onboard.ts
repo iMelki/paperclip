@@ -52,7 +52,11 @@ import {
   trackInstallStarted,
   trackInstallCompleted,
 } from "../telemetry.js";
-import { handleOnboardService } from "../onboard-service.js";
+import {
+  handleOnboardService,
+  handoffToOnboardedService,
+  shouldOfferForegroundStart,
+} from "../onboard-service.js";
 import { readInstallManifest, isManagedExecutable } from "../install-store.js";
 
 type SetupMode = "quickstart" | "advanced";
@@ -68,6 +72,8 @@ type OnboardOptions = {
 
 type OnboardDefaults = Pick<PaperclipConfig, "database" | "logging" | "server" | "auth" | "storage" | "secrets">;
 
+// Fork contract (dev 9e37ea19): kept as thin wrappers over upstream's
+// shouldOfferForegroundStart so the start decision has one implementation.
 export function shouldStartAfterOnboard(opts: Pick<OnboardOptions, "run" | "yes">): boolean {
   return opts.run ?? (opts.yes === true);
 }
@@ -80,10 +86,12 @@ export function shouldPromptToStartAfterOnboard(
 ): boolean {
   return (
     opts.run === undefined &&
-    !shouldRunNow &&
-    !opts.invokedByRun &&
-    stdinIsTTY === true &&
-    stdoutIsTTY === true
+    shouldOfferForegroundStart({
+      serviceInstalled: false,
+      startAlreadyDecided: shouldRunNow,
+      invokedByRun: opts.invokedByRun === true,
+      interactive: stdinIsTTY === true && stdoutIsTTY === true,
+    })
   );
 }
 
@@ -476,9 +484,12 @@ export async function onboard(opts: OnboardOptions): Promise<void> {
 
     printManagedInstallHint();
     const serviceInstalled = await handleOnboardService(opts);
+    if (serviceInstalled) {
+      await handoffToOnboardedService(existingConfig);
+    }
 
-    let shouldRunNow = !serviceInstalled && shouldStartAfterOnboard(opts);
-    if (!serviceInstalled && shouldPromptToStartAfterOnboard(opts, shouldRunNow)) {
+      let shouldRunNow = !serviceInstalled && (opts.run ?? opts.yes === true);
+      if (opts.run === undefined && shouldOfferForegroundStart({ serviceInstalled, startAlreadyDecided: shouldRunNow, invokedByRun: opts.invokedByRun === true, interactive: Boolean(process.stdin.isTTY && process.stdout.isTTY) })) {
       const answer = await p.confirm({
         message: "Start Paperclip now?",
         initialValue: true,
@@ -742,9 +753,12 @@ export async function onboard(opts: OnboardOptions): Promise<void> {
   }
 
   const serviceInstalled = await handleOnboardService(opts);
+  if (serviceInstalled) {
+    await handoffToOnboardedService(config);
+  }
 
-  let shouldRunNow = !serviceInstalled && shouldStartAfterOnboard(opts);
-  if (!serviceInstalled && shouldPromptToStartAfterOnboard(opts, shouldRunNow)) {
+  let shouldRunNow = !serviceInstalled && (opts.run ?? opts.yes === true);
+  if (opts.run === undefined && shouldOfferForegroundStart({ serviceInstalled, startAlreadyDecided: shouldRunNow, invokedByRun: opts.invokedByRun === true, interactive: Boolean(process.stdin.isTTY && process.stdout.isTTY) })) {
     const answer = await p.confirm({
       message: "Start Paperclip now?",
       initialValue: true,

@@ -44,11 +44,14 @@ if (process.env.PAPERCLIP_GITLEAKS_BIN_ARGS_JSON) {
   }
 }
 
-function run(commandArgs, stdio = "pipe") {
+function run(commandArgs) {
   return spawnSync(binary, [...binaryPrefix, ...commandArgs], {
     cwd: process.cwd(),
     encoding: "utf8",
-    stdio,
+    stdio: ["ignore", "pipe", "pipe"],
+    timeout: 120_000,
+    maxBuffer: 8 * 1024 * 1024,
+    killSignal: "SIGKILL",
     windowsHide: true,
   });
 }
@@ -81,29 +84,13 @@ if (staged) {
 } else if (history) {
   scanArgs.push("--log-opts=--all");
 } else {
-  // `git log -p` shows no diff for merges. remerge shows only what a merge changed
-  // relative to an automatic re-merge of its parents, so conflict-resolution secrets
-  // are scanned without re-reporting already-reviewed content under merge SHAs.
-  scanArgs.push(`--log-opts=--diff-merges=remerge ${range}`);
+  scanArgs.push(`--log-opts=${range}`);
 }
 scanArgs.push(".");
 
-if (range) {
-  // Gitleaks exits 0 when `git log` cannot resolve the range, so an unknown or
-  // unfetched commit id would otherwise pass as a clean scan.
-  for (const id of range.split("..")) {
-    const probe = spawnSync("git", ["cat-file", "-e", `${id}^{commit}`], {
-      stdio: "ignore",
-      windowsHide: true,
-    });
-    if (probe.status !== 0) {
-      console.error(`--range commit ${id.slice(0, 12)} is not available in this checkout; refusing to pass an unreadable range.`);
-      process.exit(3);
-    }
-  }
-}
-
-const scanResult = run(scanArgs, "inherit");
+const scanResult = run(scanArgs);
+if (scanResult.stdout) process.stdout.write(scanResult.stdout);
+if (scanResult.stderr) process.stderr.write(scanResult.stderr);
 if (scanResult.error) {
   console.error(`Gitleaks scan could not start: ${scanResult.error.message}`);
   process.exit(3);

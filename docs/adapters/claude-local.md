@@ -20,7 +20,7 @@ The `claude_local` adapter runs Anthropic's Claude Code CLI locally. It supports
 | `model` | string | No | Claude model to use (e.g. `claude-opus-4-6`) |
 | `promptTemplate` | string | No | Prompt used for all runs |
 | `env` | object | No | Environment variables (supports secret refs) |
-| `timeoutSec` | number | No | Process timeout (0 = no timeout) |
+| `timeoutSec` | number | No | Process timeout in seconds. Default 14400. Missing, 0, and negative values use that default. |
 | `graceSec` | number | No | Grace period before force-kill |
 | `maxTurnsPerRun` | number | No | Max agentic turns per heartbeat (defaults to `300`) |
 | `dangerouslySkipPermissions` | boolean | No | Skip permission prompts. New UI-created agents default to `false` and require explicit opt-in. Legacy configurations that omit the field retain the runtime fallback of `true` for unattended compatibility. |
@@ -102,7 +102,7 @@ therefore shadows any Codex login already present inside the sandbox image.
 For manual local CLI usage outside heartbeat runs (for example running as `claudecoder` directly), use:
 
 ```sh
-pnpm paperclipai agent local-cli claudecoder --company-id <company-id>
+npx paperclipai agent local-cli claudecoder --company-id <company-id>
 ```
 
 This installs Paperclip skills in `~/.claude/skills`, creates an agent API key, and prints shell exports to run as that agent.

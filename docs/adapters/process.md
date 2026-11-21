@@ -23,7 +23,7 @@ The `process` adapter executes arbitrary shell commands. Use it for simple scrip
 | `command` | string | Yes | Shell command to execute |
 | `cwd` | string | No | Working directory |
 | `env` | object | No | Environment variables |
-| `timeoutSec` | number | No | Process timeout |
+| `timeoutSec` | number | No | Process timeout in seconds. Default 1800. Missing, 0, and negative values use that default. |
 
 ## How It Works
 

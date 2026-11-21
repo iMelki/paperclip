@@ -1,9 +1,10 @@
-import { and, desc, eq, gte, isNotNull, isNull, lt, lte, sql } from "drizzle-orm";
+import { and, desc, eq, gte, isNotNull, isNull, lte, sql } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
 import type { Db } from "@paperclipai/db";
 import { activityLog, agents, companies, costEvents, heartbeatRuns, issues, projects } from "@paperclipai/db";
-import { notFound, unprocessable } from "../errors.js";
-import { budgetService, type BudgetServiceHooks } from "./budgets.js";
+import { notFound } from "../errors.js";
+import type { BudgetServiceHooks } from "./budgets.js";
+import { costEventIngestion } from "./cost-event-ingestion.js";
 import { visibleIssueCondition } from "./issue-visibility.js";
 
 export interface CostDateRange {
@@ -18,89 +19,9 @@ function sumAsNumber(column: typeof costEvents.costCents | typeof costEvents.inp
   return sql<number>`coalesce(sum(${column}), 0)::double precision`;
 }
 
-function currentUtcMonthWindow(now = new Date()) {
-  const year = now.getUTCFullYear();
-  const month = now.getUTCMonth();
-  return {
-    start: new Date(Date.UTC(year, month, 1, 0, 0, 0, 0)),
-    end: new Date(Date.UTC(year, month + 1, 1, 0, 0, 0, 0)),
-  };
-}
-
-async function getMonthlySpendTotal(
-  db: Db,
-  scope: { companyId: string; agentId?: string | null },
-) {
-  const { start, end } = currentUtcMonthWindow();
-  const conditions = [
-    eq(costEvents.companyId, scope.companyId),
-    gte(costEvents.occurredAt, start),
-    lt(costEvents.occurredAt, end),
-  ];
-  if (scope.agentId) {
-    conditions.push(eq(costEvents.agentId, scope.agentId));
-  }
-  const [row] = await db
-    .select({
-      total: sumAsNumber(costEvents.costCents),
-    })
-    .from(costEvents)
-    .where(and(...conditions));
-  return Number(row?.total ?? 0);
-}
-
 export function costService(db: Db, budgetHooks: BudgetServiceHooks = {}) {
-  const budgets = budgetService(db, budgetHooks);
   return {
-    createEvent: async (companyId: string, data: Omit<typeof costEvents.$inferInsert, "companyId">) => {
-      const agent = await db
-        .select()
-        .from(agents)
-        .where(eq(agents.id, data.agentId))
-        .then((rows) => rows[0] ?? null);
-
-      if (!agent) throw notFound("Agent not found");
-      if (agent.companyId !== companyId) {
-        throw unprocessable("Agent does not belong to company");
-      }
-
-      const event = await db
-        .insert(costEvents)
-        .values({
-          ...data,
-          companyId,
-          biller: data.biller ?? data.provider,
-          billingType: data.billingType ?? "unknown",
-          cachedInputTokens: data.cachedInputTokens ?? 0,
-        })
-        .returning()
-        .then((rows) => rows[0]);
-
-      const [agentMonthSpend, companyMonthSpend] = await Promise.all([
-        getMonthlySpendTotal(db, { companyId, agentId: event.agentId }),
-        getMonthlySpendTotal(db, { companyId }),
-      ]);
-
-      await db
-        .update(agents)
-        .set({
-          spentMonthlyCents: agentMonthSpend,
-          updatedAt: new Date(),
-        })
-        .where(eq(agents.id, event.agentId));
-
-      await db
-        .update(companies)
-        .set({
-          spentMonthlyCents: companyMonthSpend,
-          updatedAt: new Date(),
-        })
-        .where(eq(companies.id, companyId));
-
-      await budgets.evaluateCostEvent(event);
-
-      return event;
-    },
+    ...costEventIngestion(db, budgetHooks),
 
     summary: async (companyId: string, range?: CostDateRange) => {
       const company = await db

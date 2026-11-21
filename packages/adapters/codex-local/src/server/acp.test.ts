@@ -1,12 +1,30 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AdapterExecutionContext, AdapterInvocationMeta } from "@paperclipai/adapter-utils";
 import { runChildProcess } from "@paperclipai/adapter-utils/server-utils";
+
+// Every test in this file needs a real teardown, so the mock below delegates
+// to the actual factory by default. Only the wiring test further down reads
+// the call arguments; it does not change this behavior.
+const mockCreateWorkspaceRestoreTeardown = vi.hoisted(() => vi.fn());
+
+vi.mock("@paperclipai/adapter-utils/workspace-restore-teardown", async (importOriginal) => {
+  const actual = await importOriginal<Record<string, unknown>>();
+  mockCreateWorkspaceRestoreTeardown.mockImplementation(
+    actual.createWorkspaceRestoreTeardown as (...args: unknown[]) => unknown,
+  );
+  return {
+    ...actual,
+    createWorkspaceRestoreTeardown: mockCreateWorkspaceRestoreTeardown,
+  };
+});
+
 import {
   buildCodexAcpConfig,
   createCodexAcpExecutor,
+  detectCodexAcpProviderErrorReply,
   nodeVersionMeetsCodexAcpMinimum,
   resolveCodexAcpBillingIdentity,
   resolveCodexExecutionEngine,
@@ -276,7 +294,7 @@ describe("codex_local ACP lane", () => {
     const commandPath = path.join(root, "bin", "codex-acp");
     await fs.mkdir(path.dirname(commandPath), { recursive: true });
     await fs.writeFile(commandPath, "#!/usr/bin/env sh\n", "utf8");
-    setNodeVersion("v22.13.0");
+    setNodeVersion("v24.11.0");
 
     expect(resolveCodexExecutionEngine({})).toEqual({ engine: "acp", explicit: false });
     await expect(
@@ -296,7 +314,7 @@ describe("codex_local ACP lane", () => {
       explicit: true,
     });
 
-    setNodeVersion("v22.12.0");
+    setNodeVersion("v24.10.0");
     await expect(
       resolveCodexExecutionEngineForRun({
         config: { agentCommand: commandPath },
@@ -375,7 +393,7 @@ describe("codex_local ACP lane", () => {
   });
 
   it("uses ACP for bridged sandbox auto runs when the ACP command is configured as a shell command", async () => {
-    setNodeVersion("v22.13.0");
+    setNodeVersion("v24.11.0");
     await expect(
       resolveCodexExecutionEngineForRun({
         config: { agentCommand: "codex-acp" },
@@ -401,7 +419,7 @@ describe("codex_local ACP lane", () => {
   });
 
   it("falls back to the CLI lane for one-shot sandbox auto runs", async () => {
-    setNodeVersion("v22.13.0");
+    setNodeVersion("v24.11.0");
     await expect(
       resolveCodexExecutionEngineForRun({
         config: {},
@@ -420,7 +438,7 @@ describe("codex_local ACP lane", () => {
   });
 
   it("falls back to the CLI lane for non-sandbox remote auto runs", async () => {
-    setNodeVersion("v22.13.0");
+    setNodeVersion("v24.11.0");
     await expect(
       resolveCodexExecutionEngineForRun({
         config: {},
@@ -479,9 +497,9 @@ describe("codex_local ACP lane", () => {
   });
 
   it("checks the Node version required by the ACPX runtime", () => {
-    setNodeVersion("v22.12.0");
+    setNodeVersion("v24.10.0");
     expect(nodeVersionMeetsCodexAcpMinimum()).toBe(false);
-    setNodeVersion("v22.13.0");
+    setNodeVersion("v24.11.0");
     expect(nodeVersionMeetsCodexAcpMinimum()).toBe(true);
   });
 
@@ -490,7 +508,7 @@ describe("codex_local ACP lane", () => {
     const commandPath = path.join(root, "bin", "codex-acp");
     await fs.mkdir(path.dirname(commandPath), { recursive: true });
     await fs.writeFile(commandPath, "#!/usr/bin/env sh\n", "utf8");
-    setNodeVersion("v22.13.0");
+    setNodeVersion("v24.11.0");
 
     const result = await testCodexAcpEnvironment({
       adapterType: "codex_local",
@@ -543,7 +561,7 @@ describe("codex_local ACP lane", () => {
     await fs.writeFile(commandPath, "#!/usr/bin/env sh\n", "utf8");
     await fs.mkdir(sharedCodexHome, { recursive: true });
     await fs.writeFile(path.join(sharedCodexHome, "auth.json"), '{"OPENAI_API_KEY":"sk-shared"}', "utf8");
-    setNodeVersion("v22.13.0");
+    setNodeVersion("v24.11.0");
     process.env.CODEX_HOME = sharedCodexHome;
     delete process.env.OPENAI_API_KEY;
 
@@ -591,7 +609,7 @@ describe("codex_local ACP lane", () => {
     await fs.mkdir(path.dirname(commandPath), { recursive: true });
     await fs.writeFile(commandPath, "#!/usr/bin/env sh\n", "utf8");
     await fs.mkdir(sharedCodexHome, { recursive: true });
-    setNodeVersion("v22.13.0");
+    setNodeVersion("v24.11.0");
     process.env.CODEX_HOME = sharedCodexHome;
     delete process.env.OPENAI_API_KEY;
 
@@ -613,6 +631,65 @@ describe("codex_local ACP lane", () => {
         level: "warn",
         message: expect.stringContaining("Paperclip server"),
         hint: expect.stringContaining("separate Codex/chat session"),
+      }),
+    );
+  });
+
+  it("emits the canonical adapter_auth_missing check for a missing-auth sandbox target", async () => {
+    const root = await makeTempRoot("paperclip-codex-acp-sandbox-missing-auth-");
+    const sharedCodexHome = path.join(root, "shared-codex-home");
+    const managedAgentHome = path.join(
+      root,
+      "paperclip-home",
+      "instances",
+      "test",
+      "companies",
+      "company-1",
+      "agents",
+      "agent-1",
+      "codex-home",
+    );
+    await fs.mkdir(sharedCodexHome, { recursive: true });
+    setNodeVersion("v24.11.0");
+    process.env.CODEX_HOME = sharedCodexHome;
+    delete process.env.OPENAI_API_KEY;
+
+    const result = await testCodexAcpEnvironment({
+      adapterType: "codex_local",
+      companyId: "company-1",
+      config: {
+        engine: "acp",
+        cwd: root,
+        // A shell-style command resolves without a real binary in the sandbox.
+        agentCommand: "node ./fake-acp.js",
+        env: { CODEX_HOME: managedAgentHome, OPENAI_API_KEY: "" },
+      },
+      executionTarget: {
+        kind: "remote",
+        transport: "sandbox",
+        providerKey: "fake-plugin",
+        remoteCwd: "/work",
+        runner: {
+          execute: async () => ({
+            exitCode: 0,
+            signal: null,
+            timedOut: false,
+            stdout: "",
+            stderr: "",
+            pid: null,
+            startedAt: new Date().toISOString(),
+          }),
+        },
+      } as never,
+    });
+
+    // A missing-auth sandbox is a warning, not a failure, and it carries the
+    // neutral canonical check code for the user interface.
+    expect(result.status).toBe("warn");
+    expect(result.checks).toContainEqual(
+      expect.objectContaining({
+        code: "adapter_auth_missing",
+        level: "warn",
       }),
     );
   });
@@ -860,9 +937,13 @@ describe("codex_local ACP lane", () => {
     const hostAuth = JSON.parse(await fs.readFile(path.join(sharedHostHome, "auth.json"), "utf8"));
     expect(hostAuth.last_refresh).toBe(NEWER_REFRESH);
     expect(hostAuth.tokens.refresh_token).toBe("ref-sandbox-newer");
-    // Mode preserved at 0600 by the atomic same-directory rename.
-    const mode = (await fs.stat(path.join(sharedHostHome, "auth.json"))).mode & 0o777;
-    expect(mode).toBe(0o600);
+    // POSIX hosts expose the 0600 guard through stat. Windows does not model
+    // those permission bits, so the credential/content assertions above remain
+    // the portable copy-back contract there.
+    if (process.platform !== "win32") {
+      const mode = (await fs.stat(path.join(sharedHostHome, "auth.json"))).mode & 0o777;
+      expect(mode).toBe(0o600);
+    }
   });
 
   it("keeps the shared host Codex auth when the sandbox copy is not strictly newer", async () => {
@@ -1076,8 +1157,61 @@ describe("codex_local ACP lane", () => {
     expect(hostAuth.tokens.refresh_token).toBe("ref-sandbox-newer");
   });
 
+  it("passes the Codex-specific teardown messages to the shared workspace-restore-teardown factory", async () => {
+    // Wiring test only: `createWorkspaceRestoreTeardown` owns the
+    // classify-and-redact contract, proven once for all three adapters by its
+    // own table-driven test in `packages/adapter-utils`. This test proves only
+    // that the Codex adapter passes its own two message strings to it.
+    // Clear the shared, hoisted mock first: earlier tests in this file also
+    // call through it, and a leftover call could hide a real wiring bug.
+    mockCreateWorkspaceRestoreTeardown.mockClear();
+    const root = await makeTempRoot("paperclip-codex-acp-teardown-wiring-");
+    const localCwd = path.join(root, "worktree");
+    const remoteCwd = path.join(root, "remote-workspace");
+    await fs.mkdir(localCwd, { recursive: true });
+    await fs.mkdir(remoteCwd, { recursive: true });
+
+    const execute = createCodexAcpExecutor({
+      createRuntime: (options: FakeRuntimeOptions) => new FakeRuntime(options) as never,
+      stagedRuntimes: new Map(),
+      stagingLocks: new Map(),
+    });
+    const result = await execute(
+      buildContext(localCwd, {
+        config: {
+          engine: "acp",
+          cwd: localCwd,
+          agentCommand: "node ./fake-acp.js",
+          stateDir: path.join(root, "state"),
+          env: { CODEX_HOME: path.join(root, "codex-home") },
+          promptTemplate: "Do the assigned work.",
+        },
+        context: {
+          issueId: "issue-1",
+          paperclipWorkspace: { cwd: localCwd, source: "project_workspace", workspaceId: "workspace-1" },
+        },
+        executionTarget: {
+          kind: "remote",
+          transport: "sandbox",
+          providerKey: "fake-plugin",
+          remoteCwd,
+          runner: createLocalSandboxRunner(),
+        } as never,
+        authToken: "real-run-jwt",
+      }),
+    );
+
+    expect(result.exitCode).toBe(0);
+    expect(mockCreateWorkspaceRestoreTeardown).toHaveBeenCalledWith(
+      expect.objectContaining({
+        startMessage: "[paperclip] Restoring workspace changes and Codex auth from the sandbox.\n",
+        failurePrefix: "[paperclip] Codex ACP teardown restore/copy-back failed",
+      }),
+    );
+  });
+
   it("falls back to the CLI lane for a runner-less sandbox even when the ACP command is set", async () => {
-    setNodeVersion("v22.13.0");
+    setNodeVersion("v24.11.0");
     // Isolate the missing bidirectional runner as the sole fallback cause:
     // provide a valid ACP command and Node version so the only difference from
     // the runner-backed ACP case is the absent `runner`.
@@ -1118,6 +1252,98 @@ describe("codex_local ACP lane", () => {
     expect(result.errorFamily).toBe("refresh_token_invalidated");
     expect(result.resultJson?.errorFamily).toBe("refresh_token_invalidated");
     expect(result.resultJson).not.toHaveProperty("codexCredentialTelemetry");
+  });
+
+  describe("error-only provider replies", () => {
+    // Captured reply text from codex-acp 1.1.14 (codex 0.160.0) when the
+    // configured model id is rejected by the ChatGPT-account backend.
+    const METADATA_WARNING =
+      "Warning: Model metadata for gpt-nonexistent-test not found. Defaulting to fallback metadata; this can degrade performance and cause issues.";
+    const PROVIDER_ERROR_JSON =
+      "{\"type\":\"error\",\"status\":400,\"error\":{\"type\":\"invalid_request_error\",\"message\":\"The 'gpt-nonexistent-test' model is not supported when using Codex with a ChatGPT account.\"}}";
+
+    async function runWithReply(prefix: string, chunks: string[]) {
+      const root = await makeTempRoot(prefix);
+      const execute = createCodexAcpExecutor({
+        createRuntime: (options: FakeRuntimeOptions) => new FakeRuntime(
+          options,
+          chunks.map((text) => ({ type: "text_delta", text, stream: "output", tag: "agent_message_chunk" })),
+        ) as never,
+      });
+      return execute(buildContext(root));
+    }
+
+    it("fails the run when the whole reply is a provider error object", async () => {
+      const result = await runWithReply("paperclip-codex-acp-provider-error-", [
+        `${METADATA_WARNING}\n\n`,
+        `${PROVIDER_ERROR_JSON}\n\n`,
+      ]);
+
+      expect(result.exitCode).toBe(1);
+      expect(result.errorCode).toBe("codex_provider_error_reply");
+      expect(result.errorMessage).toBe(
+        "Codex provider error (400 invalid_request_error): The 'gpt-nonexistent-test' model is not supported when using Codex with a ChatGPT account.",
+      );
+      expect(result.summary).toBe(result.errorMessage);
+      expect(result.resultJson).toMatchObject({
+        status: "failed",
+        stopReason: "end_turn",
+        providerError: {
+          status: 400,
+          type: "invalid_request_error",
+          message: "The 'gpt-nonexistent-test' model is not supported when using Codex with a ChatGPT account.",
+        },
+      });
+    });
+
+    it("fails the run when the warning and the error object share one line", async () => {
+      const result = await runWithReply("paperclip-codex-acp-provider-error-inline-", [
+        `${METADATA_WARNING} ${PROVIDER_ERROR_JSON}`,
+      ]);
+
+      expect(result.exitCode).toBe(1);
+      expect(result.errorCode).toBe("codex_provider_error_reply");
+    });
+
+    it("keeps a normal reply successful", async () => {
+      const result = await runWithReply("paperclip-codex-acp-plain-reply-", ["OK"]);
+
+      expect(result.exitCode).toBe(0);
+      expect(result.errorCode).toBeNull();
+      expect(result.errorMessage).toBeNull();
+      expect(result.summary).toBe("OK");
+    });
+
+    it("keeps prose that quotes a provider error successful", async () => {
+      const reply = `The last run failed with this provider error:\n${PROVIDER_ERROR_JSON}\nI switched the agent to a supported model.`;
+      const result = await runWithReply("paperclip-codex-acp-quoted-error-", [reply]);
+
+      expect(result.exitCode).toBe(0);
+      expect(result.errorCode).toBeNull();
+      expect(result.summary).toBe(reply);
+    });
+
+    it("keeps the existing behaviour for a warning-only or empty reply", async () => {
+      const warningOnly = await runWithReply("paperclip-codex-acp-warning-only-", [METADATA_WARNING]);
+      expect(warningOnly.exitCode).toBe(0);
+      expect(warningOnly.errorCode).toBeNull();
+      expect(warningOnly.summary).toBe(METADATA_WARNING);
+
+      const empty = await runWithReply("paperclip-codex-acp-empty-reply-", []);
+      expect(empty.exitCode).toBe(0);
+      expect(empty.errorCode).toBeNull();
+      expect(empty.summary).toBe("end_turn");
+    });
+
+    it("does not flag a JSON object that is not an error", () => {
+      expect(detectCodexAcpProviderErrorReply("{\"status\":\"ok\",\"result\":42}")).toBeNull();
+      expect(detectCodexAcpProviderErrorReply("{\"error\":{\"message\":\"x\"},\"status\":200}")).toBeNull();
+      expect(detectCodexAcpProviderErrorReply("[{\"type\":\"error\"}]")).toBeNull();
+      expect(detectCodexAcpProviderErrorReply("")).toBeNull();
+      expect(
+        detectCodexAcpProviderErrorReply("{\"error\":{\"type\":\"server_error\",\"message\":\"boom\"},\"status\":503}"),
+      ).toEqual({ status: 503, type: "server_error", message: "boom" });
+    });
   });
 
   it("resumes compatible ACP sessions on later Codex ACP runs", async () => {

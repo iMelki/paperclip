@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
-import { agents, companies, createDb, heartbeatRuns } from "@paperclipai/db";
+import { agents, companies, costEvents, createDb, heartbeatRuns } from "@paperclipai/db";
 import {
   EMBEDDED_POSTGRES_TEST_SETUP_TIMEOUT_MS,
   getEmbeddedPostgresTestSupport,
@@ -48,6 +48,7 @@ describeEmbeddedPostgres("dashboard service", () => {
   }, EMBEDDED_POSTGRES_TEST_SETUP_TIMEOUT_MS);
 
   afterEach(async () => {
+    await db.delete(costEvents);
     await db.delete(heartbeatRuns);
     await db.delete(agents);
     await db.delete(companies);
@@ -237,5 +238,182 @@ describeEmbeddedPostgres("dashboard service", () => {
     });
     // process_lost kills that recovered must not leak into the failed breakdown.
     expect(bucket?.failedByErrorCode.process_lost).toBeUndefined();
+  });
+
+  it("estimates subscription token usage at API prices without counting it as billed spend", async () => {
+    const companyId = randomUUID();
+    const claudeAgentId = randomUUID();
+    const codexAgentId = randomUUID();
+    const today = utcDay(0);
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+      budgetMonthlyCents: 10_000,
+    });
+    await db.insert(agents).values(
+      [
+        { id: claudeAgentId, name: "ClaudeCoder", adapterType: "claude_local" },
+        { id: codexAgentId, name: "CodexCoder", adapterType: "codex_local" },
+      ].map((agent) => ({
+        ...agent,
+        companyId,
+        role: "engineer",
+        status: "idle",
+        adapterConfig: {},
+        runtimeConfig: {},
+        permissions: {},
+      })),
+    );
+
+    const event = {
+      companyId,
+      provider: "anthropic",
+      biller: "anthropic",
+      occurredAt: today,
+    };
+    await db.insert(costEvents).values([
+      // Subscription run: tokens recorded, booked at 0 cents.
+      {
+        ...event,
+        agentId: claudeAgentId,
+        billingType: "subscription_included",
+        model: "claude-sonnet-4-6",
+        inputTokens: 1_000_000,
+        cachedInputTokens: 10_000_000,
+        outputTokens: 100_000,
+        costCents: 0,
+      },
+      // Metered run: real billed cents, must not be estimated again.
+      {
+        ...event,
+        agentId: codexAgentId,
+        provider: "openai",
+        biller: "openai",
+        billingType: "metered_api",
+        model: "gpt-5",
+        inputTokens: 500_000,
+        cachedInputTokens: 0,
+        outputTokens: 50_000,
+        costCents: 250,
+      },
+      // Subscription run on a model with no known rate.
+      {
+        ...event,
+        agentId: codexAgentId,
+        provider: "openai",
+        biller: "chatgpt",
+        billingType: "subscription_included",
+        model: "gpt-9-experimental",
+        inputTokens: 40,
+        cachedInputTokens: 0,
+        outputTokens: 2,
+        costCents: 0,
+      },
+    ]);
+
+    const summary = await dashboardService(db).summary(companyId);
+
+    // Sonnet 4.6: 1M * $3 + 10M * $0.30 + 0.1M * $15 = $7.50
+    expect(summary.costs.monthSpendCents).toBe(250);
+    expect(summary.costs.monthUtilizationPercent).toBe(2.5);
+    expect(summary.costs.monthEstimatedCents).toBeCloseTo(750, 6);
+    expect(summary.costs.monthEstimatedTokens).toBe(11_100_000);
+    expect(summary.costs.monthUnpricedTokens).toBe(42);
+    expect(summary.costs.monthInputTokens).toBe(1_500_040);
+    // The Codex rows report 0 cached tokens, so normalization leaves them as is.
+    expect(summary.costs.monthCachedInputTokens).toBe(10_000_000);
+    expect(summary.costs.monthOutputTokens).toBe(150_002);
+
+    const todayBucket = summary.costs.spendDays.find((day) => day.date === utcDateKey(today));
+    expect(todayBucket).toMatchObject({ billedCents: 250, estimatedCents: 750 });
+    expect(summary.costs.spendDays).toHaveLength(14);
+
+    expect(summary.costs.byAgent.map((row) => [row.label, row.billedCents, row.estimatedCents])).toEqual([
+      ["ClaudeCoder", 0, 750],
+      ["CodexCoder", 250, 0],
+    ]);
+    expect(summary.costs.byModel[0]).toMatchObject({ key: "claude-sonnet-4-6", estimatedCents: 750 });
+  });
+
+  it("normalizes Codex inclusive input, keeps sub-cent estimates and only estimates subscription rows", async () => {
+    const companyId = randomUUID();
+    const claudeAgentId = randomUUID();
+    const codexAgentId = randomUUID();
+    const today = utcDay(0);
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values(
+      [
+        { id: claudeAgentId, name: "ClaudeCoder", adapterType: "claude_local" },
+        { id: codexAgentId, name: "CodexCoder", adapterType: "codex_local" },
+      ].map((agent) => ({
+        ...agent,
+        companyId,
+        role: "engineer",
+        status: "idle",
+        adapterConfig: {},
+        runtimeConfig: {},
+        permissions: {},
+      })),
+    );
+
+    const claude = { companyId, agentId: claudeAgentId, provider: "anthropic", biller: "anthropic", occurredAt: today, costCents: 0 };
+    const zero = { inputTokens: 0, cachedInputTokens: 0, outputTokens: 0 };
+    await db.insert(costEvents).values([
+      // Codex subscription: input_tokens INCLUDES the 900k cached reads.
+      {
+        ...claude,
+        agentId: codexAgentId,
+        provider: "openai",
+        biller: "chatgpt",
+        billingType: "subscription_included",
+        costStatus: "unpriced",
+        model: "gpt-5",
+        ...zero,
+        inputTokens: 1_000_000,
+        cachedInputTokens: 900_000,
+      },
+      // Claude subscription: input is exclusive of cache. 1k Haiku 4.5 input = 0.1 cent.
+      { ...claude, billingType: "subscription_included", model: "claude-haiku-4-5", ...zero, inputTokens: 1_000 },
+      // Subscription on an unlisted variant: unpriced, not guessed from claude-opus-4.
+      { ...claude, billingType: "subscription_included", model: "claude-opus-4-99", ...zero, inputTokens: 10 },
+      // Fixed-fee and unknown-billing rows reported at $0: no estimate, not unpriced.
+      { ...claude, billingType: "fixed", model: "claude-sonnet-4-6", ...zero, inputTokens: 5_000 },
+      { ...claude, billingType: "unknown", model: "claude-sonnet-4-6", ...zero, inputTokens: 50 },
+      // Credits and metered rows the ledger marks unpriced: visible as unpriced usage.
+      { ...claude, billingType: "credits", costStatus: "unpriced", model: "claude-sonnet-4-6", ...zero, inputTokens: 300 },
+      { ...claude, billingType: "metered_api", costStatus: "unpriced", model: "claude-opus-4-8", ...zero, outputTokens: 200 },
+    ]);
+
+    const { costs } = await dashboardService(db).summary(companyId);
+
+    // gpt-5: 100k fresh * $1.25 + 900k cached * $0.125 = $0.2375; Haiku adds 0.1 cent.
+    expect(costs.monthSpendCents).toBe(0);
+    expect(costs.monthEstimatedCents).toBeCloseTo(23.85, 6);
+    expect(costs.monthEstimatedTokens).toBe(1_001_000);
+    expect(costs.monthUnpricedTokens).toBe(510);
+    expect(costs.monthInputTokens).toBe(100_000 + 1_000 + 10 + 5_000 + 50 + 300);
+    expect(costs.monthCachedInputTokens).toBe(900_000);
+    expect(costs.monthOutputTokens).toBe(200);
+
+    const todayBucket = costs.spendDays.find((day) => day.date === utcDateKey(today));
+    expect(todayBucket?.estimatedCents).toBeCloseTo(23.85, 6);
+    expect(todayBucket?.unpricedTokens).toBe(510);
+
+    const haiku = costs.byModel.find((row) => row.key === "claude-haiku-4-5");
+    expect(haiku?.estimatedCents).toBeCloseTo(0.1, 6);
+    expect(costs.byModel.find((row) => row.key === "claude-opus-4-99")).toMatchObject({
+      estimatedCents: 0,
+      unpricedTokens: 10,
+    });
+    expect(costs.byAgent.find((row) => row.label === "CodexCoder")).toMatchObject({ tokens: 1_000_000, unpricedTokens: 0 });
   });
 });

@@ -3,6 +3,10 @@ import type { BillingType, CostStatus } from "../constants.js";
 export interface CostEvent {
   id: string;
   companyId: string;
+  /** Stable import identity; all three fields are absent/null for legacy reports. */
+  sourceSystem?: string | null;
+  sourceAccountId?: string | null;
+  sourceEventId?: string | null;
   agentId: string;
   issueId: string | null;
   projectId: string | null;

@@ -1,0 +1,129 @@
+{
+  "recordedAtUtc": "2026-10-08T00:53:33.547174+00:00",
+  "baseHead": "c0e4bd7280b15376c6ca87d0f0efe58aa606ffab",
+  "proofs": [
+    {
+      "label": "original-workflow",
+      "file": ".github/workflows/refresh-lockfile.yml",
+      "brokenSha256": "9c5baf3bfa2f0a174369409a792e285fae90940b6b1d13ddfcdf52c20238fef8",
+      "restoredSha256": "ab56c84ec3688fddd3f7695883fb55d19ab522f5b427dab2ae5ab8f17b9002dc",
+      "failed": {
+        "command": "node --test --test-reporter=tap scripts/refresh-lockfile.test.mjs .github/scripts/tests/check-pr-lockfile.test.mjs",
+        "exitCode": 1,
+        "counts": {
+          "tests": 21,
+          "pass": 14,
+          "fail": 7,
+          "skipped": 0
+        },
+        "artifactPath": "doc/evidence/lockfile-refresh-164/original-workflow.log"
+      },
+      "restored": {
+        "command": "node --test --test-reporter=tap scripts/refresh-lockfile.test.mjs .github/scripts/tests/check-pr-lockfile.test.mjs",
+        "exitCode": 0,
+        "counts": {
+          "tests": 21,
+          "pass": 21,
+          "fail": 0,
+          "skipped": 0
+        },
+        "artifactPath": "doc/evidence/lockfile-refresh-164/original-workflow-restored.log"
+      }
+    },
+    {
+      "label": "original-lockfile-gate",
+      "file": ".github/scripts/check-pr-lockfile.mjs",
+      "brokenSha256": "f7783aca6cbc24c9c7cf78712f7af7682d02d5959c7cebae205ea3520fd22dea",
+      "restoredSha256": "b3aa32f56c0a0265a457a4974f36da6a73514a69f89abed715f7d6040ae3e888",
+      "failed": {
+        "command": "node --test --test-reporter=tap .github/scripts/tests/check-pr-lockfile.test.mjs",
+        "exitCode": 1,
+        "counts": {
+          "tests": 11,
+          "pass": 8,
+          "fail": 3,
+          "skipped": 0
+        },
+        "artifactPath": "doc/evidence/lockfile-refresh-164/original-lockfile-gate.log"
+      },
+      "restored": {
+        "command": "node --test --test-reporter=tap .github/scripts/tests/check-pr-lockfile.test.mjs",
+        "exitCode": 0,
+        "counts": {
+          "tests": 11,
+          "pass": 11,
+          "fail": 0,
+          "skipped": 0
+        },
+        "artifactPath": "doc/evidence/lockfile-refresh-164/original-lockfile-gate-restored.log"
+      }
+    },
+    {
+      "label": "loosened-lockfile-gate",
+      "file": ".github/scripts/check-pr-lockfile.mjs",
+      "brokenSha256": "be965b38e415de4bb0b78c12acc1aacb84354703fc1cbc39d4d129cb0d6beb44",
+      "restoredSha256": "b3aa32f56c0a0265a457a4974f36da6a73514a69f89abed715f7d6040ae3e888",
+      "failed": {
+        "command": "node --test --test-reporter=tap .github/scripts/tests/check-pr-lockfile.test.mjs",
+        "exitCode": 1,
+        "counts": {
+          "tests": 11,
+          "pass": 7,
+          "fail": 4,
+          "skipped": 0
+        },
+        "artifactPath": "doc/evidence/lockfile-refresh-164/loosened-lockfile-gate.log"
+      },
+      "restored": {
+        "command": "node --test --test-reporter=tap .github/scripts/tests/check-pr-lockfile.test.mjs",
+        "exitCode": 0,
+        "counts": {
+          "tests": 11,
+          "pass": 11,
+          "fail": 0,
+          "skipped": 0
+        },
+        "artifactPath": "doc/evidence/lockfile-refresh-164/loosened-lockfile-gate-restored.log"
+      }
+    },
+    {
+      "label": "loosened-pr-policy",
+      "file": ".github/workflows/pr.yml",
+      "brokenSha256": "792e19d07719dbc60ca33f7b6001605e442ce9c74cdc4d46496560b253ea620b",
+      "restoredSha256": "befa0a2708e6b875aff8cee3addc62b06cf9a02a57ed6896efbc759e2413db26",
+      "failed": {
+        "command": "node --test --test-reporter=tap scripts/refresh-lockfile.test.mjs",
+        "exitCode": 1,
+        "counts": {
+          "tests": 10,
+          "pass": 9,
+          "fail": 1,
+          "skipped": 0
+        },
+        "artifactPath": "doc/evidence/lockfile-refresh-164/loosened-pr-policy.log"
+      },
+      "restored": {
+        "command": "node --test --test-reporter=tap scripts/refresh-lockfile.test.mjs",
+        "exitCode": 0,
+        "counts": {
+          "tests": 10,
+          "pass": 10,
+          "fail": 0,
+          "skipped": 0
+        },
+        "artifactPath": "doc/evidence/lockfile-refresh-164/loosened-pr-policy-restored.log"
+      }
+    }
+  ],
+  "final": {
+    "command": "node --test --test-reporter=tap scripts/refresh-lockfile.test.mjs .github/scripts/tests/check-pr-lockfile.test.mjs .github/scripts/tests/run-quality-gates.test.mjs scripts/check-pr-workflow-trigger.test.mjs",
+    "exitCode": 0,
+    "counts": {
+      "tests": 37,
+      "pass": 37,
+      "fail": 0,
+      "skipped": 0
+    },
+    "artifactPath": "doc/evidence/lockfile-refresh-164/final-focused.log"
+  }
+}

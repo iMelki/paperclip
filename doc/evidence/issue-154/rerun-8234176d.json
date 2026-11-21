@@ -1,0 +1,88 @@
+{
+  "schema": "paperclip.issue-154.rerun.v1",
+  "head": "8234176dd645ee572114832c8bc768981c918b49",
+  "testFileSha256": "9b492deaf7e54a061d2c6262d99003db6aeef2a2759dd6bcf9af116a280c57c7",
+  "testFileSha256Basis": "LF Git blob as committed at 8234176dd645ee572114832c8bc768981c918b49 (eol=lf); CRLF rendering 2cf0d200cae8a59c8591c2b545c2b5ee9876d74eb1d6b057b0af7ce2fc935427",
+  "command": "(from server) node ../node_modules/vitest/vitest.mjs run src/__tests__/heartbeat-workspace-branch-containment.test.ts --maxWorkers=1 --reporter=default --reporter=json --outputFile.json=<run-report>",
+  "environment": "Independent clone, pnpm frozen-lockfile install, one worker, per-run temporary directories, native Windows, disposable embedded PostgreSQL, no Docker.",
+  "population": "Three exact-head focused runs plus one old-waits scratch reversion; no whole-suite execution.",
+  "summary": {
+    "fixedRuns": 3,
+    "fixedPassed": 24,
+    "fixedFailed": 0,
+    "fixedSkipped": 0,
+    "negativePassed": 5,
+    "negativeFailed": 3,
+    "negativeExitCode": 1
+  },
+  "runs": [
+    {
+      "run": "fixed-01",
+      "testFile": "server/src/__tests__/heartbeat-workspace-branch-containment.test.ts",
+      "testSha256": "9b492deaf7e54a061d2c6262d99003db6aeef2a2759dd6bcf9af116a280c57c7",
+      "total": 8,
+      "passed": 8,
+      "failed": 0,
+      "skipped": 0,
+      "exitCode": 0,
+      "durationSeconds": 122.688,
+      "startedAt": "2026-10-12T14:41:51.433557+00:00",
+      "finishedAt": "2026-10-12T14:43:54.122063+00:00",
+      "hostRamUsedPercentAtStart": 87.41,
+      "reportSha256": "f24020ebe20d6f89083233180672226bd4d2b2bb6feed629f4481dc72a654f80",
+      "failedAssertions": []
+    },
+    {
+      "run": "fixed-02",
+      "testFile": "server/src/__tests__/heartbeat-workspace-branch-containment.test.ts",
+      "testSha256": "9b492deaf7e54a061d2c6262d99003db6aeef2a2759dd6bcf9af116a280c57c7",
+      "total": 8,
+      "passed": 8,
+      "failed": 0,
+      "skipped": 0,
+      "exitCode": 0,
+      "durationSeconds": 112.078,
+      "startedAt": "2026-10-12T14:45:09.883776+00:00",
+      "finishedAt": "2026-10-12T14:47:01.958396+00:00",
+      "hostRamUsedPercentAtStart": 86.65,
+      "reportSha256": "47cc26307a95d62965617399ae1b6d471900b513f0ee2536785c99731e003344",
+      "failedAssertions": []
+    },
+    {
+      "run": "negative-old-waits",
+      "testFile": "untracked scratch copy with merge-base polling helpers and status wait restored (1.5-second trigger kept)",
+      "testSha256": null,
+      "total": 8,
+      "passed": 5,
+      "failed": 3,
+      "skipped": 0,
+      "exitCode": 1,
+      "durationSeconds": 137.859,
+      "startedAt": "2026-10-12T14:48:02.507756+00:00",
+      "finishedAt": "2026-10-12T14:50:20.364214+00:00",
+      "hostRamUsedPercentAtStart": 88.78,
+      "reportSha256": "b3afd64f6db54fc3f60cb96ae91d5add2e80fd013a7a746a2b60ff9ba18b1250",
+      "failedAssertions": [
+        "heartbeat workspace branch containment keeps the agent idle after a project_primary workspace configuration failure",
+        "heartbeat workspace branch containment auto-reconciles forward branch divergence at workspace-runtime fresh worktree reuse when the flag is enabled",
+        "heartbeat workspace branch containment auto-reconciles forward branch divergence at heartbeat finalization when the flag is enabled"
+      ]
+    },
+    {
+      "run": "fixed-03",
+      "testFile": "server/src/__tests__/heartbeat-workspace-branch-containment.test.ts",
+      "testSha256": "9b492deaf7e54a061d2c6262d99003db6aeef2a2759dd6bcf9af116a280c57c7",
+      "total": 8,
+      "passed": 8,
+      "failed": 0,
+      "skipped": 0,
+      "exitCode": 0,
+      "durationSeconds": 133.281,
+      "startedAt": "2026-10-12T14:54:38.445997+00:00",
+      "finishedAt": "2026-10-12T14:56:51.729279+00:00",
+      "hostRamUsedPercentAtStart": 88.75,
+      "reportSha256": "97f1fc3b50faab47a631bf87a7f7fc55843600ee25e454b94452c72c196336c3",
+      "failedAssertions": []
+    }
+  ]
+}

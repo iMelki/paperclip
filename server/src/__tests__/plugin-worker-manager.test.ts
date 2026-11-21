@@ -9,10 +9,29 @@ import {
   type HostServices,
   type HostToWorkerMethods,
 } from "@paperclipai/plugin-sdk";
+
+// Mock the shared logger, so a test reads the exact calls the manager makes
+// when it logs a route event. The child logger returns the same mock object,
+// so `log.warn`/`log.error` inside the manager are this mock's `warn`/`error`.
+vi.mock("../middleware/logger.js", () => {
+  const mockLogger: Record<string, unknown> = {
+    trace: vi.fn(),
+    debug: vi.fn(),
+    info: vi.fn(),
+    warn: vi.fn(),
+    error: vi.fn(),
+    fatal: vi.fn(),
+    child: vi.fn(() => mockLogger),
+  };
+  return { logger: mockLogger, httpLogger: vi.fn() };
+});
+
+import { logger } from "../middleware/logger.js";
 import {
   appendStderrExcerpt,
   createPluginWorkerHandle,
   formatWorkerFailureMessage,
+  getTimedOutWorkerSettled,
   resolveRpcCallTimeoutMs,
 } from "../services/plugin-worker-manager.js";
 
@@ -283,7 +302,7 @@ describe("plugin-worker-manager stderr failure context", () => {
       });
       expect(companiesGet).toHaveBeenCalledWith(
         { companyId: "company-a" },
-        { invocationScope: { companyId: "company-a" } },
+        { invocationScope: { companyId: "company-a", actor: { type: "agent", userId: null } } },
       );
     } finally {
       await handle.stop().catch(() => undefined);
@@ -472,6 +491,236 @@ describe("plugin-worker-manager stderr failure context", () => {
 });
 
 
+describe("plugin job company context", () => {
+  function makeJobHandle(companyIds: string[]) {
+    const configGet = vi.fn(async (params: { companyId?: string }) => ({ companyId: params.companyId }));
+    const hostHandlers = createHostClientHandlers({
+      pluginId: "test.plugin",
+      capabilities: [],
+      services: { config: { get: configGet } } as unknown as HostServices,
+    });
+    const configCall = vi.fn(hostHandlers["config.get"]);
+    const handle = createPluginWorkerHandle("test.plugin", {
+      entrypointPath: INVOCATION_SCOPE_WORKER_ENTRYPOINT,
+      manifest: TEST_MANIFEST,
+      config: {},
+      instanceInfo: { instanceId: "instance-1", hostVersion: "1.0.0" },
+      apiVersion: 1,
+      hostHandlers: { ...hostHandlers, "config.get": configCall },
+      proactiveCompanyScopes: companyIds,
+    });
+    return { handle, configGet, configCall };
+  }
+
+  function jobProbe(trigger: "schedule" | "manual" | "retry", params: Record<string, unknown> = {}) {
+    return {
+      job: { jobKey: "sync.issues", runId: "run-1", trigger, scheduledAt: new Date().toISOString() },
+      // Fixture-only probe controls; the job envelope matches the scheduler.
+      params: { mode: "echo", hostMethod: "config.get", omitCompanyId: true, ...params },
+    } as HostToWorkerMethods["runJob"][0];
+  }
+
+  it.each(["schedule", "manual", "retry"] as const)(
+    "scopes a %s job's argumentless config read to its sole configured company",
+    async (trigger) => {
+      const { handle, configGet } = makeJobHandle(["company-a"]);
+      try {
+        await handle.start();
+        await expect(handle.call("runJob", jobProbe(trigger))).resolves.toEqual({ companyId: "company-a" });
+        expect(configGet).toHaveBeenCalledWith(
+          { companyId: "company-a" },
+          { invocationScope: { companyId: "company-a" } },
+        );
+      } finally {
+        await handle.stop().catch(() => undefined);
+      }
+    },
+  );
+
+  it.each([{ companyIds: [] }])(
+    "does not select a company from $companyIds", async ({ companyIds }) => {
+      const { handle, configGet } = makeJobHandle(companyIds);
+      try {
+        await handle.start();
+        await expect(handle.call("runJob", jobProbe("schedule"))).rejects.toMatchObject({
+          code: PLUGIN_RPC_ERROR_CODES.INVOCATION_SCOPE_DENIED,
+          message: expect.stringContaining("company context is required"),
+        });
+        expect(configGet).not.toHaveBeenCalled();
+      } finally {
+        await handle.stop().catch(() => undefined);
+      }
+    },
+  );
+
+  it.each(["schedule", "manual", "retry"] as const)(
+    "runs an instance-scoped %s job once, unscoped, when several companies are configured",
+    async (trigger) => {
+      // Fan-out for company-scoped jobs belongs to the job scheduler, which
+      // creates a run record per company. The worker handle must not multiply
+      // an instance job: one call is one execution.
+      const { handle, configGet, configCall } = makeJobHandle(["company-b", "company-a"]);
+      try {
+        await handle.start();
+        await expect(handle.call("runJob", jobProbe(trigger))).rejects.toMatchObject({
+          code: PLUGIN_RPC_ERROR_CODES.INVOCATION_SCOPE_DENIED,
+          message: expect.stringContaining("company context is required"),
+        });
+        expect(configCall).toHaveBeenCalledTimes(1);
+        expect(configGet).not.toHaveBeenCalled();
+      } finally {
+        await handle.stop().catch(() => undefined);
+      }
+    },
+  );
+
+  it("reports the configured company set sorted for the scheduler's per-company fan-out", () => {
+    const { handle } = makeJobHandle(["company-b", " company-a ", ""]);
+    expect(handle.getProactiveCompanyScopes()).toEqual(["company-a", "company-b"]);
+  });
+
+  it("lets a caller wait for a timed-out job handler to actually finish in the worker", async () => {
+    const { handle } = makeJobHandle(["company-a", "company-b"]);
+    try {
+      await handle.start();
+      const startedAt = Date.now();
+      const err = await handle
+        .call("runJob", { ...jobProbe("schedule", { mode: "slow", slowDelayMs: 400 }), companyId: "company-a" } as HostToWorkerMethods["runJob"][0], 50)
+        .catch((error: unknown) => error);
+      expect(err).toMatchObject({ code: PLUGIN_RPC_ERROR_CODES.TIMEOUT });
+      const workerSettled = getTimedOutWorkerSettled(err);
+      expect(workerSettled).toBeInstanceOf(Promise);
+      let finished = false;
+      void workerSettled!.then(() => {
+        finished = true;
+      });
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      expect(finished).toBe(false);
+      await workerSettled;
+      expect(Date.now() - startedAt).toBeGreaterThanOrEqual(380);
+    } finally {
+      await handle.stop().catch(() => undefined);
+    }
+  });
+
+  it("settles a timed-out job handler's wait when the worker stops", async () => {
+    const { handle } = makeJobHandle(["company-a"]);
+    await handle.start();
+    const err = await handle
+      .call("runJob", jobProbe("schedule", { mode: "slow", slowDelayMs: 60_000 }), 50)
+      .catch((error: unknown) => error);
+    const workerSettled = getTimedOutWorkerSettled(err);
+    expect(workerSettled).toBeInstanceOf(Promise);
+    await handle.stop().catch(() => undefined);
+    await expect(workerSettled).resolves.toBeUndefined();
+  });
+
+  it("returns no worker-settled wait for errors that are not timeouts", () => {
+    expect(getTimedOutWorkerSettled(new Error("boom"))).toBeNull();
+    expect(getTimedOutWorkerSettled(undefined)).toBeNull();
+  });
+
+  it("scopes a job run to the company the scheduler names", async () => {
+    const { handle, configGet } = makeJobHandle(["company-a", "company-b"]);
+    try {
+      await handle.start();
+      await expect(handle.call("runJob", {
+        ...jobProbe("schedule"),
+        companyId: "company-b",
+      } as HostToWorkerMethods["runJob"][0])).resolves.toEqual({ companyId: "company-b" });
+      expect(configGet).toHaveBeenCalledTimes(1);
+      expect(configGet).toHaveBeenCalledWith(
+        { companyId: "company-b" },
+        { invocationScope: { companyId: "company-b" } },
+      );
+    } finally {
+      await handle.stop().catch(() => undefined);
+    }
+  });
+
+  it.each(["omit", "unknown"])("denies a job config read with an %s invocation id", async (mode) => {
+    const { handle, configGet } = makeJobHandle(["company-a"]);
+    try {
+      await handle.start();
+      await expect(handle.call("runJob", jobProbe("schedule", { mode }))).rejects.toMatchObject({
+        code: PLUGIN_RPC_ERROR_CODES.INVOCATION_SCOPE_DENIED,
+        message: expect.stringContaining("unknown invocation scope"),
+      });
+      expect(configGet).not.toHaveBeenCalled();
+    } finally {
+      await handle.stop().catch(() => undefined);
+    }
+  });
+
+  it("denies a job config read for another company", async () => {
+    const { handle, configGet } = makeJobHandle(["company-a"]);
+    try {
+      await handle.start();
+      await expect(handle.call("runJob", jobProbe("schedule", {
+        omitCompanyId: false, requestedCompanyId: "company-b",
+      }))).rejects.toMatchObject({
+        code: PLUGIN_RPC_ERROR_CODES.INVOCATION_SCOPE_DENIED,
+        message: expect.stringContaining('requested company "company-b"'),
+      });
+      expect(configGet).not.toHaveBeenCalled();
+    } finally {
+      await handle.stop().catch(() => undefined);
+    }
+  });
+
+  it("uses the current configured company for the next job after config changes", async () => {
+    const { handle, configGet } = makeJobHandle(["company-a"]);
+    try {
+      await handle.start();
+      await expect(handle.call("runJob", jobProbe("schedule"))).resolves.toEqual({ companyId: "company-a" });
+      handle.setProactiveCompanyScopes(["company-b"]);
+      await expect(handle.call("runJob", jobProbe("schedule"))).resolves.toEqual({ companyId: "company-b" });
+      handle.setProactiveCompanyScopes([]);
+      await expect(handle.call("runJob", jobProbe("schedule"))).rejects.toMatchObject({
+        code: PLUGIN_RPC_ERROR_CODES.INVOCATION_SCOPE_DENIED,
+        message: expect.stringContaining("company context is required"),
+      });
+      expect(configGet).toHaveBeenCalledTimes(2);
+    } finally {
+      await handle.stop().catch(() => undefined);
+    }
+  });
+
+  it("keeps a job config read scoped while another action scope is retained", async () => {
+    const { handle, configGet, configCall } = makeJobHandle(["company-a"]);
+    try {
+      await handle.start();
+      await expect(handle.call("performAction", {
+        key: "queue-work",
+        params: { mode: "late", hostMethod: "config.get", omitCompanyId: true },
+        actorContext: { type: "agent", userId: null, agentId: "agent-1", runId: "action-1", companyId: "company-a" },
+        renderEnvironment: null,
+      })).resolves.toEqual({ queued: true });
+      await expect(handle.call("runJob", jobProbe("schedule"))).resolves.toEqual({ companyId: "company-a" });
+      await vi.waitFor(() => expect(configCall).toHaveBeenCalledTimes(2));
+      expect(configGet).toHaveBeenCalledTimes(2);
+    } finally {
+      await handle.stop().catch(() => undefined);
+    }
+  });
+
+  it("denies a detached job config read after the job invocation completes", async () => {
+    const { handle, configGet, configCall } = makeJobHandle(["company-a"]);
+    try {
+      await handle.start();
+      await expect(handle.call("runJob", jobProbe("schedule", { mode: "late" }))).resolves.toEqual({ queued: true });
+      await vi.waitFor(() => expect(configCall).toHaveBeenCalledTimes(1));
+      await expect(configCall.mock.results[0].value).rejects.toMatchObject({
+        code: PLUGIN_RPC_ERROR_CODES.INVOCATION_SCOPE_DENIED,
+        message: expect.stringContaining("unknown invocation scope"),
+      });
+      expect(configGet).not.toHaveBeenCalled();
+    } finally {
+      await handle.stop().catch(() => undefined);
+    }
+  });
+});
+
 describe("plugin host company context guards", () => {
   it("rejects config and secret calls without host-issued company context before host services run", async () => {
     const configGet = vi.fn(async () => ({ apiKey: "unreachable" }));
@@ -582,15 +831,18 @@ describe("plugin proactive company scope (LOOA-629)", () => {
   // worker manager's context resolution, not just the SDK gate in isolation.
   function makeHandle(overrides?: {
     companiesGet?: ReturnType<typeof vi.fn>;
+    configGet?: ReturnType<typeof vi.fn>;
     stateGet?: ReturnType<typeof vi.fn>;
   }) {
     const companiesGet = overrides?.companiesGet ?? vi.fn(async () => ({ id: "company-1", name: "Co" }));
+    const configGet = overrides?.configGet ?? vi.fn(async () => ({ enabled: true }));
     const stateGet = overrides?.stateGet ?? vi.fn(async () => ({ value: "ok" }));
     const hostHandlers = createHostClientHandlers({
       pluginId: "test.plugin",
       capabilities: ["companies.read", "plugin.state.read"],
       services: {
         companies: { get: companiesGet },
+        config: { get: configGet },
         state: { get: stateGet },
       } as unknown as HostServices,
     });
@@ -602,7 +854,7 @@ describe("plugin proactive company scope (LOOA-629)", () => {
       apiVersion: 1,
       hostHandlers,
     });
-    return { handle, companiesGet, stateGet };
+    return { handle, companiesGet, configGet, stateGet };
   }
 
   it("denies a proactive company-scoped call when no company is authorized", async () => {
@@ -686,6 +938,266 @@ describe("plugin proactive company scope (LOOA-629)", () => {
         code: PLUGIN_RPC_ERROR_CODES.INVOCATION_SCOPE_DENIED,
       });
       expect(companiesGet).toHaveBeenCalledTimes(1);
+    } finally {
+      await handle.stop().catch(() => undefined);
+    }
+  });
+
+  it("admits a successful detached action continuation for its original company", async () => {
+    const { handle, companiesGet } = makeHandle();
+    try {
+      await handle.start();
+
+      await expect(handle.call("performAction", {
+        key: "queue-work",
+        params: {
+          mode: "late",
+          hostMethod: "companies.get",
+          requestedCompanyId: "company-1",
+        },
+        actorContext: {
+          type: "agent",
+          userId: null,
+          agentId: "agent-1",
+          runId: "run-1",
+          companyId: "company-1",
+        },
+        renderEnvironment: null,
+      })).resolves.toEqual({ queued: true });
+
+      await vi.waitFor(() => {
+        expect(companiesGet).toHaveBeenCalledTimes(1);
+      });
+    } finally {
+      await handle.stop().catch(() => undefined);
+    }
+  });
+
+  it("denies a detached action continuation that switches between configured companies", async () => {
+    const { handle, companiesGet } = makeHandle();
+    try {
+      await handle.start();
+      handle.setProactiveCompanyScopes(["company-a", "company-b"]);
+
+      await expect(handle.call("performAction", {
+        key: "queue-work",
+        params: {
+          mode: "late",
+          hostMethod: "companies.get",
+          requestedCompanyId: "company-b",
+        },
+        actorContext: {
+          type: "agent",
+          userId: null,
+          agentId: "agent-1",
+          runId: "run-1",
+          companyId: "company-a",
+        },
+        renderEnvironment: null,
+      })).resolves.toEqual({ queued: true });
+
+      // The fixture sends its detached nested request after 10ms. Wait past
+      // that point, then prove the governed host service was never reached.
+      const noEarlierThan = Date.now() + 50;
+      await vi.waitFor(() => {
+        if (Date.now() < noEarlierThan) {
+          throw new Error("waiting for detached nested request");
+        }
+        expect(companiesGet).not.toHaveBeenCalled();
+      }, { interval: 10, timeout: 250 });
+    } finally {
+      await handle.stop().catch(() => undefined);
+    }
+  });
+
+  it("denies a headerless detached continuation while a retained action scope exists", async () => {
+    const { handle, companiesGet } = makeHandle();
+    try {
+      await handle.start();
+      handle.setProactiveCompanyScopes(["company-a", "company-b"]);
+
+      await expect(handle.call("performAction", {
+        key: "queue-work",
+        params: {
+          mode: "late-omit",
+          hostMethod: "companies.get",
+          requestedCompanyId: "company-b",
+        },
+        actorContext: {
+          type: "agent",
+          userId: null,
+          agentId: "agent-1",
+          runId: "run-1",
+          companyId: "company-a",
+        },
+        renderEnvironment: null,
+      })).resolves.toEqual({ queued: true });
+
+      const noEarlierThan = Date.now() + 50;
+      await vi.waitFor(() => {
+        if (Date.now() < noEarlierThan) {
+          throw new Error("waiting for headerless detached nested request");
+        }
+        expect(companiesGet).not.toHaveBeenCalled();
+      }, { interval: 10, timeout: 250 });
+    } finally {
+      await handle.stop().catch(() => undefined);
+    }
+  });
+
+  it("denies a detached action continuation with a forged invocation id", async () => {
+    const { handle, companiesGet } = makeHandle();
+    try {
+      await handle.start();
+      handle.setProactiveCompanyScopes(["company-a", "company-b"]);
+
+      await expect(handle.call("performAction", {
+        key: "queue-work",
+        params: {
+          mode: "late-forged",
+          hostMethod: "companies.get",
+          requestedCompanyId: "company-b",
+        },
+        actorContext: {
+          type: "agent",
+          userId: null,
+          agentId: "agent-1",
+          runId: "run-1",
+          companyId: "company-a",
+        },
+        renderEnvironment: null,
+      })).resolves.toEqual({ queued: true });
+
+      const noEarlierThan = Date.now() + 50;
+      await vi.waitFor(() => {
+        if (Date.now() < noEarlierThan) {
+          throw new Error("waiting for forged detached nested request");
+        }
+        expect(companiesGet).not.toHaveBeenCalled();
+      }, { interval: 10, timeout: 250 });
+    } finally {
+      await handle.stop().catch(() => undefined);
+    }
+  });
+
+  it("denies a detached action continuation after its retained scope expires", async () => {
+    const { handle, companiesGet } = makeHandle();
+    try {
+      await handle.start();
+
+      await expect(handle.call("performAction", {
+        key: "queue-work",
+        params: {
+          mode: "late",
+          hostMethod: "companies.get",
+          requestedCompanyId: "company-a",
+          lateDelayMs: 550,
+        },
+        actorContext: {
+          type: "agent",
+          userId: null,
+          agentId: "agent-1",
+          runId: "run-1",
+          companyId: "company-a",
+        },
+        renderEnvironment: null,
+      })).resolves.toEqual({ queued: true });
+
+      const noEarlierThan = Date.now() + 600;
+      await vi.waitFor(() => {
+        if (Date.now() < noEarlierThan) {
+          throw new Error("waiting for retained scope to expire");
+        }
+        expect(companiesGet).not.toHaveBeenCalled();
+      }, { interval: 20, timeout: 900 });
+    } finally {
+      await handle.stop().catch(() => undefined);
+    }
+  });
+
+  it("denies a detached continuation from a failed action", async () => {
+    const { handle, companiesGet } = makeHandle();
+    try {
+      await handle.start();
+
+      await expect(handle.call("performAction", {
+        key: "queue-work",
+        params: {
+          mode: "late-failed",
+          hostMethod: "companies.get",
+          requestedCompanyId: "company-a",
+        },
+        actorContext: {
+          type: "agent",
+          userId: null,
+          agentId: "agent-1",
+          runId: "run-1",
+          companyId: "company-a",
+        },
+        renderEnvironment: null,
+      })).rejects.toMatchObject({
+        code: -32000,
+        message: "simulated action failure",
+      });
+
+      const noEarlierThan = Date.now() + 50;
+      await vi.waitFor(() => {
+        if (Date.now() < noEarlierThan) {
+          throw new Error("waiting for failed detached nested request");
+        }
+        expect(companiesGet).not.toHaveBeenCalled();
+      }, { interval: 10, timeout: 250 });
+    } finally {
+      await handle.stop().catch(() => undefined);
+    }
+  });
+
+  it("uses the retained action scope for config.get without a company argument", async () => {
+    const { handle, configGet } = makeHandle();
+    try {
+      await handle.start();
+
+      await expect(handle.call("performAction", {
+        key: "queue-work",
+        params: {
+          mode: "late",
+          hostMethod: "config.get",
+          omitCompanyId: true,
+        },
+        actorContext: {
+          type: "agent",
+          userId: null,
+          agentId: "agent-1",
+          runId: "run-1",
+          companyId: "company-a",
+        },
+        renderEnvironment: null,
+      })).resolves.toEqual({ queued: true });
+
+      await vi.waitFor(() => {
+        expect(configGet).toHaveBeenCalledWith(
+          { companyId: "company-a" },
+          { invocationScope: { companyId: "company-a", actor: { type: "agent", userId: null } } },
+        );
+      });
+    } finally {
+      await handle.stop().catch(() => undefined);
+    }
+  });
+
+  it("does not guess a company for proactive config.get without a company argument", async () => {
+    const { handle, configGet } = makeHandle();
+    try {
+      await handle.start();
+      handle.setProactiveCompanyScopes(["company-a", "company-b"]);
+
+      await expect(handle.call("getData", {
+        params: { mode: "omit", hostMethod: "config.get", omitCompanyId: true },
+      } as unknown as HostToWorkerMethods["getData"][0])).rejects.toMatchObject({
+        code: PLUGIN_RPC_ERROR_CODES.INVOCATION_SCOPE_DENIED,
+        message: expect.stringContaining("company context is required"),
+      });
+      expect(configGet).not.toHaveBeenCalled();
     } finally {
       await handle.stop().catch(() => undefined);
     }
@@ -1049,6 +1561,822 @@ describe("plugin worker manager execute.log route", () => {
         executeParams({ logs: [{ stream: "stdout", chunk: "no-sink" }] }),
       );
       expect(result).toMatchObject({ exitCode: 0 });
+    } finally {
+      await handle.stop().catch(() => undefined);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Host-owned setup-token login pseudo-terminal route gate
+// ---------------------------------------------------------------------------
+
+const LOGIN_PTY_WORKER_ENTRYPOINT = path.join(
+  FIXTURES_DIR,
+  "plugin-worker-login-pty.cjs",
+);
+
+function makeLoginPtyHandle(extra?: Record<string, unknown>) {
+  return createPluginWorkerHandle("test.plugin", {
+    entrypointPath: LOGIN_PTY_WORKER_ENTRYPOINT,
+    manifest: TEST_MANIFEST,
+    config: {},
+    instanceInfo: { instanceId: "instance-1", hostVersion: "1.0.0" },
+    apiVersion: 1,
+    hostHandlers: {},
+    ...extra,
+  });
+}
+
+// One valid session home. The shape is the fixed root, one slash, and one UUID.
+const PTY_SESSION_HOME = "/tmp/paperclip-adapter-login/11111111-2222-4333-8444-555555555555";
+
+function ptyOpenInput(directive: unknown) {
+  return {
+    driverKey: "daytona",
+    companyId: "company-1",
+    environmentId: "env-1",
+    // The test directive rides in `providerLeaseId`, an opaque field the manager
+    // forwards to the worker unchanged. The manager carries the closed command
+    // key and the validated session home; it carries no command string.
+    providerLeaseId: JSON.stringify(directive),
+    loginCommandKey: "claude" as const,
+    sessionHome: PTY_SESSION_HOME,
+  };
+}
+
+describe("plugin worker manager setup-token pty route gate", () => {
+  it("rejects a command key that is not in the closed set before the worker call", async () => {
+    const handle = makeLoginPtyHandle();
+    try {
+      await handle.start();
+      // The provider driver key routes the worker; it confers no command
+      // authority. A key outside the closed set rejects with one fixed non-secret
+      // error before the worker call, so a caller cannot select an arbitrary
+      // command in the sandbox pseudo-terminal.
+      await expect(
+        handle.openLoginPtySession({
+          driverKey: "daytona",
+          companyId: "company-1",
+          environmentId: "env-1",
+          providerLeaseId: JSON.stringify({ mode: "normal" }),
+          loginCommandKey: "gemini" as unknown as "claude",
+          sessionHome: PTY_SESSION_HOME,
+        }),
+      ).rejects.toThrow("LOGIN_PTY_COMMAND_NOT_ALLOWED");
+      // The rejected open never consumed the single route, so a later open with a
+      // closed key still succeeds.
+      const session = await handle.openLoginPtySession(
+        ptyOpenInput({ mode: "normal" }),
+      );
+      expect(session).toBeDefined();
+      await session.close();
+    } finally {
+      await handle.stop().catch(() => undefined);
+    }
+  });
+
+  it("rejects a malformed session home before the worker call", async () => {
+    const handle = makeLoginPtyHandle();
+    try {
+      await handle.start();
+      // The host revalidates the server-controlled session home shape before the
+      // worker RPC. A traversal candidate fails closed at the last host gate.
+      await expect(
+        handle.openLoginPtySession({
+          driverKey: "daytona",
+          companyId: "company-1",
+          environmentId: "env-1",
+          providerLeaseId: JSON.stringify({ mode: "normal" }),
+          loginCommandKey: "claude" as const,
+          sessionHome: "/tmp/paperclip-adapter-login/../etc",
+        }),
+      ).rejects.toThrow("LOGIN_PTY_INVALID_SESSION_HOME");
+      // The rejected open never consumed the single route.
+      const session = await handle.openLoginPtySession(
+        ptyOpenInput({ mode: "normal" }),
+      );
+      expect(session).toBeDefined();
+      await session.close();
+    } finally {
+      await handle.stop().catch(() => undefined);
+    }
+  });
+
+  it("permits one active credential pseudo-terminal per worker", async () => {
+    const handle = makeLoginPtyHandle();
+    try {
+      await handle.start();
+      const first = await handle.openLoginPtySession(
+        ptyOpenInput({ mode: "normal" }),
+      );
+      // A second open while the first route is not closed rejects with one fixed
+      // non-secret error before it reaches the worker.
+      await expect(
+        handle.openLoginPtySession(ptyOpenInput({ mode: "normal" })),
+      ).rejects.toThrow("LOGIN_PTY_ROUTE_BUSY");
+      await first.close();
+      // After the first route closes and the worker acknowledges the close, a new
+      // open is admitted.
+      const second = await handle.openLoginPtySession(
+        ptyOpenInput({ mode: "normal" }),
+      );
+      await second.close();
+    } finally {
+      await handle.stop().catch(() => undefined);
+    }
+  });
+
+  it("delivers output only for the exact bound worker session id and drops a mismatch", async () => {
+    const handle = makeLoginPtyHandle();
+    try {
+      await handle.start();
+      const session = await handle.openLoginPtySession(
+        ptyOpenInput({
+          workerSessionId: "ws-A",
+          outputs: [
+            { chunk: "good-1" },
+            { chunk: "forged", sid: "ws-EVIL" },
+            { chunk: "good-2" },
+          ],
+          exitCode: 0,
+        }),
+      );
+      const chunks: string[] = [];
+      session.onData((chunk) => chunks.push(chunk));
+      await expect(session.wait()).resolves.toEqual({ exitCode: 0 });
+      // The forged notification carries a wrong worker session id, so the host
+      // drops it. Only the two bound chunks reach the listener, in order.
+      expect(chunks).toEqual(["good-1", "good-2"]);
+      await session.close();
+    } finally {
+      await handle.stop().catch(() => undefined);
+    }
+  });
+
+  it("routes delayed input to the worker and back to the listener", async () => {
+    const handle = makeLoginPtyHandle();
+    try {
+      await handle.start();
+      const session = await handle.openLoginPtySession(
+        ptyOpenInput({ workerSessionId: "ws-A" }),
+      );
+      const chunks: string[] = [];
+      session.onData((chunk) => chunks.push(chunk));
+      session.write("browser-code");
+      // The worker echoes the input as one output notification for the bound
+      // session, so the listener receives it.
+      await vi.waitFor(() => expect(chunks).toContain("echo:browser-code"));
+      await session.close();
+    } finally {
+      await handle.stop().catch(() => undefined);
+    }
+  });
+
+  it("terminalizes the route when the cumulative output passes the per-route bound", async () => {
+    const handle = makeLoginPtyHandle({
+      loginPtyLimits: { maxTotalChars: 10 },
+    });
+    try {
+      await handle.start();
+      const session = await handle.openLoginPtySession(
+        ptyOpenInput({
+          outputs: [
+            { chunk: "aaaaa" }, // total 5 → delivered
+            { chunk: "bbbbb" }, // total 10 → delivered
+            { chunk: "ccccc" }, // total 15 > 10 → terminalize
+          ],
+        }),
+      );
+      const chunks: string[] = [];
+      session.onData((chunk) => chunks.push(chunk));
+      // The per-route bound terminalizes the route, so the login wait resolves
+      // with a null exit code and the third chunk never reaches the listener.
+      await expect(session.wait()).resolves.toEqual({ exitCode: null });
+      expect(chunks).toEqual(["aaaaa", "bbbbb"]);
+    } finally {
+      await handle.stop().catch(() => undefined);
+    }
+  });
+
+  it("terminalizes and fails closed on a malformed open reply, then admits a later open", async () => {
+    const handle = makeLoginPtyHandle();
+    try {
+      await handle.start();
+      await expect(
+        handle.openLoginPtySession(ptyOpenInput({ mode: "malformed-open" })),
+      ).rejects.toThrow("LOGIN_PTY_OPEN_FAILED");
+      // The terminalize closed the route by the host route id and the worker
+      // acknowledged the close, so a later open is admitted.
+      const session = await handle.openLoginPtySession(
+        ptyOpenInput({ mode: "normal" }),
+      );
+      expect(session).toBeDefined();
+      await session.close();
+    } finally {
+      await handle.stop().catch(() => undefined);
+    }
+  });
+
+  it("terminalizes the route on an open timeout", async () => {
+    const handle = makeLoginPtyHandle({
+      loginPtyLimits: { openTimeoutMs: 200 },
+    });
+    try {
+      await handle.start();
+      await expect(
+        handle.openLoginPtySession(ptyOpenInput({ mode: "no-open-reply" })),
+      ).rejects.toThrow();
+    } finally {
+      await handle.stop().catch(() => undefined);
+    }
+  });
+
+  it("binds the worker session id one time and ignores a duplicate open reply", async () => {
+    const handle = makeLoginPtyHandle();
+    try {
+      await handle.start();
+      const session = await handle.openLoginPtySession(
+        ptyOpenInput({
+          mode: "duplicate-open-reply",
+          workerSessionId: "ws-A",
+          outputs: [{ chunk: "hello" }],
+          exitCode: 0,
+        }),
+      );
+      const chunks: string[] = [];
+      session.onData((chunk) => chunks.push(chunk));
+      // The duplicate open reply never rebinds or reopens the route, so the
+      // session runs normally on the one bind.
+      await expect(session.wait()).resolves.toEqual({ exitCode: 0 });
+      expect(chunks).toEqual(["hello"]);
+      await session.close();
+    } finally {
+      await handle.stop().catch(() => undefined);
+    }
+  });
+
+  it("closes the route with a fixed exit when the worker exits", async () => {
+    const handle = makeLoginPtyHandle();
+    try {
+      await handle.start();
+      const session = await handle.openLoginPtySession(
+        ptyOpenInput({ mode: "normal" }),
+      );
+      const waitResult = session.wait();
+      await handle.stop();
+      // A worker exit closes the one route and resolves the login wait with the
+      // fixed non-secret exit.
+      await expect(waitResult).resolves.toEqual({ exitCode: null });
+    } finally {
+      await handle.stop().catch(() => undefined);
+    }
+  });
+
+  it("retires the worker on an unconfirmed close acknowledgement", async () => {
+    const handle = makeLoginPtyHandle({
+      loginPtyLimits: { closeTimeoutMs: 200 },
+    });
+    try {
+      await handle.start();
+      const exited = new Promise<void>((resolve) => {
+        handle.on("exit", () => resolve());
+      });
+      const session = await handle.openLoginPtySession(
+        ptyOpenInput({ mode: "normal", closeMode: "bad-ack" }),
+      );
+      await session.close();
+      // The close acknowledgement carried a mismatched host route id, so the host
+      // fails closed and retires the worker before any reuse.
+      await exited;
+      await expect(
+        handle.openLoginPtySession(ptyOpenInput({ mode: "normal" })),
+      ).rejects.toThrow();
+    } finally {
+      await handle.stop().catch(() => undefined);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Login pseudo-terminal pre-bind queue (GH #12122 / PAP-5132)
+// ---------------------------------------------------------------------------
+// The host reads the worker pipe and `readline` dispatches every line of one
+// chunk synchronously. The route only becomes `open` inside the `await`
+// continuation of the `loginPtyOpen` reply, which runs as a microtask after
+// the whole synchronous line loop. So a worker that batches an output or an
+// exit notification with the open reply floods the host before the bind. The
+// tests below prove the host queues these pre-bind records and replays them
+// through the live router right after the bind, instead of dropping them.
+// The host holds every pre-bind record — output and exit alike — in one
+// arrival-ordered queue, and it replays each record through the live router
+// in that exact order. A replayed exit that carries the bound worker session
+// identifier settles the route, so a record that arrived behind it — a real
+// worker process cannot emit output after it exits, so this only matters for
+// a forged or a queued record — replays into a route that already settled
+// and is dropped.
+
+describe("plugin worker manager login pseudo-terminal pre-bind queue", () => {
+  it("queues and replays a coalesced output notification that arrives before the bind", async () => {
+    const handle = makeLoginPtyHandle();
+    try {
+      await handle.start();
+      // The fixture writes the open reply and the output notification in one
+      // stdout write, so the host reads both before the route binds.
+      const session = await handle.openLoginPtySession(
+        ptyOpenInput({
+          batchWithOpenReply: true,
+          workerSessionId: "ws-A",
+          outputs: [{ chunk: "batched-output" }],
+        }),
+      );
+      const chunks: string[] = [];
+      session.onData((chunk) => chunks.push(chunk));
+      // The bind already replayed the queued record into `buffered`, so
+      // `onData` drains it synchronously with no wait.
+      expect(chunks).toEqual(["batched-output"]);
+      await session.close();
+    } finally {
+      await handle.stop().catch(() => undefined);
+    }
+  });
+
+  it("delivers a coalesced output before the coalesced exit settles the wait", async () => {
+    const handle = makeLoginPtyHandle();
+    try {
+      await handle.start();
+      const session = await handle.openLoginPtySession(
+        ptyOpenInput({
+          batchWithOpenReply: true,
+          workerSessionId: "ws-A",
+          outputs: [{ chunk: "batched-output" }],
+          exitCode: 0,
+        }),
+      );
+      const chunks: string[] = [];
+      session.onData((chunk) => chunks.push(chunk));
+      // Both the output and the exit arrived before the bind and queued in
+      // order. The replay preserves that order, so the output reaches the
+      // listener before the wait settles.
+      await expect(session.wait()).resolves.toEqual({ exitCode: 0 });
+      expect(chunks).toEqual(["batched-output"]);
+      await session.close();
+    } finally {
+      await handle.stop().catch(() => undefined);
+    }
+  });
+
+  it("settles the wait with a valid pre-bind exit that a later mismatched exit cannot displace", async () => {
+    const handle = makeLoginPtyHandle();
+    try {
+      await handle.start();
+      // The worker batches a valid exit for the real worker session id, then a
+      // second exit for a forged worker session id, both before the open
+      // reply. The bind still verifies the real session id, so the held valid
+      // exit settles the wait, and the mismatched exit that arrived after it
+      // never displaces it.
+      const session = await handle.openLoginPtySession(
+        ptyOpenInput({
+          batchWithOpenReply: true,
+          workerSessionId: "ws-A",
+          exitCode: 0,
+          extraExits: [{ exitCode: 1, sid: "ws-EVIL" }],
+        }),
+      );
+      await expect(session.wait()).resolves.toEqual({ exitCode: 0 });
+      await session.close();
+    } finally {
+      await handle.stop().catch(() => undefined);
+    }
+  });
+
+  it("delivers a pre-bind output, then the exit, and drops output that arrives behind the exit", async () => {
+    const handle = makeLoginPtyHandle();
+    try {
+      await handle.start();
+      // The worker batches an output, then a valid exit, then a further
+      // output, all before the open reply. The host replays the three held
+      // records in this exact arrival order. The exit settles the route
+      // right after the first output, so the record behind the exit finds a
+      // route that already settled and never reaches the listener.
+      const session = await handle.openLoginPtySession(
+        ptyOpenInput({
+          batchWithOpenReply: true,
+          workerSessionId: "ws-A",
+          outputs: [{ chunk: "before-exit" }],
+          exitCode: 0,
+          outputsAfterExit: [{ chunk: "after-exit" }],
+        }),
+      );
+      const chunks: string[] = [];
+      session.onData((chunk) => chunks.push(chunk));
+      await expect(session.wait()).resolves.toEqual({ exitCode: 0 });
+      expect(chunks).toEqual(["before-exit"]);
+      await session.close();
+    } finally {
+      await handle.stop().catch(() => undefined);
+    }
+  });
+
+  it("drops output that arrives behind a valid pre-bind exit", async () => {
+    const handle = makeLoginPtyHandle();
+    try {
+      await handle.start();
+      const session = await handle.openLoginPtySession(
+        ptyOpenInput({
+          batchWithOpenReply: true,
+          workerSessionId: "ws-A",
+          exitCode: 0,
+          // The worker batched this output behind the exit. The replay sends
+          // the exit first, in arrival order, which settles the route. The
+          // output record behind it then finds a route that is no longer
+          // `open`, the same drop the live path applies to output a real
+          // worker process could never emit after its own exit.
+          outputsAfterExit: [{ chunk: "late-output" }],
+        }),
+      );
+      const chunks: string[] = [];
+      session.onData((chunk) => chunks.push(chunk));
+      await expect(session.wait()).resolves.toEqual({ exitCode: 0 });
+      expect(chunks).toEqual([]);
+      await session.close();
+    } finally {
+      await handle.stop().catch(() => undefined);
+    }
+  });
+
+  it("settles the wait with the valid exit code and drops output behind it, even past the total-chars bound", async () => {
+    const handle = makeLoginPtyHandle({
+      loginPtyLimits: { maxTotalChars: 10, maxPreBindFrames: 1000, maxPreBindChars: 1000 },
+    });
+    try {
+      await handle.start();
+      // The worker batches a valid exit with the open reply, then an output
+      // record that would push the cumulative delivered total past the
+      // 10-character bound. The replay sends the exit first, in arrival
+      // order. The exit settles the route, so the replay drops the output
+      // record behind it before the total-chars check ever runs — the
+      // bound violation the check exists to catch never reaches it, because
+      // a real worker process could never emit that output in the first
+      // place.
+      const session = await handle.openLoginPtySession(
+        ptyOpenInput({
+          batchWithOpenReply: true,
+          workerSessionId: "ws-A",
+          exitCode: 0,
+          outputsAfterExit: [{ chunk: "aaaaaaaaaaaa" }],
+        }),
+      );
+      const chunks: string[] = [];
+      session.onData((chunk) => chunks.push(chunk));
+      await expect(session.wait()).resolves.toEqual({ exitCode: 0 });
+      expect(chunks).toEqual([]);
+      await session.close();
+    } finally {
+      await handle.stop().catch(() => undefined);
+    }
+  });
+
+  it("delivers output that arrived behind a mismatched pre-bind exit and settles with the later valid exit", async () => {
+    const handle = makeLoginPtyHandle();
+    try {
+      await handle.start();
+      // The worker batches a mismatched exit, then a genuine output, then
+      // the valid exit, all before the open reply. The mismatched exit
+      // arrives first, but the exact-match gate fails it, so it changes no
+      // state and the replay continues. The output that follows it still
+      // reaches the listener, and the valid exit that follows the output
+      // settles the wait.
+      const session = await handle.openLoginPtySession(
+        ptyOpenInput({
+          batchWithOpenReply: true,
+          workerSessionId: "ws-A",
+          sequence: [
+            { type: "exit", exitCode: 1, sid: "ws-EVIL" },
+            { type: "output", chunk: "genuine-output" },
+            { type: "exit", exitCode: 0 },
+          ],
+        }),
+      );
+      const chunks: string[] = [];
+      session.onData((chunk) => chunks.push(chunk));
+      await expect(session.wait()).resolves.toEqual({ exitCode: 0 });
+      expect(chunks).toEqual(["genuine-output"]);
+      await session.close();
+    } finally {
+      await handle.stop().catch(() => undefined);
+    }
+  });
+
+  it("drops a forged pre-bind worker session id sent before the valid bind", async () => {
+    const handle = makeLoginPtyHandle();
+    try {
+      await handle.start();
+      const session = await handle.openLoginPtySession(
+        ptyOpenInput({
+          batchWithOpenReply: true,
+          workerSessionId: "ws-A",
+          outputs: [
+            { chunk: "forged", sid: "ws-EVIL" },
+            { chunk: "good" },
+          ],
+        }),
+      );
+      const chunks: string[] = [];
+      session.onData((chunk) => chunks.push(chunk));
+      // Both records queued before the bind, since the host cannot yet check
+      // a worker session id against a route that has not bound one. The
+      // replay applies the exact-match gate against the real bind ("ws-A"),
+      // so the forged record never reaches the listener.
+      expect(chunks).toEqual(["good"]);
+      await session.close();
+    } finally {
+      await handle.stop().catch(() => undefined);
+    }
+  });
+
+  it("terminalizes the route when batched pre-bind records pass the frame-count bound", async () => {
+    const handle = makeLoginPtyHandle({
+      loginPtyLimits: { maxPreBindFrames: 2 },
+    });
+    try {
+      await handle.start();
+      // The worker batches three output notifications with the open reply, so
+      // all three arrive, and queue, before the bind. The third record passes
+      // the frame-count bound, so the host terminalizes the route before the
+      // bind can complete, and the open call itself fails.
+      await expect(
+        handle.openLoginPtySession(
+          ptyOpenInput({
+            batchWithOpenReply: true,
+            outputs: [{ chunk: "a" }, { chunk: "b" }, { chunk: "c" }],
+          }),
+        ),
+      ).rejects.toThrow("LOGIN_PTY_OPEN_FAILED");
+    } finally {
+      await handle.stop().catch(() => undefined);
+    }
+  });
+
+  it("terminalizes the route when batched pre-bind output passes the character bound", async () => {
+    const handle = makeLoginPtyHandle({
+      loginPtyLimits: { maxPreBindChars: 10 },
+    });
+    try {
+      await handle.start();
+      await expect(
+        handle.openLoginPtySession(
+          ptyOpenInput({
+            batchWithOpenReply: true,
+            // 5 + 5 = 10 admits; the third record brings the queued total to
+            // 15, past the 10-character bound, so the host terminalizes the
+            // route before the bind can complete.
+            outputs: [{ chunk: "aaaaa" }, { chunk: "bbbbb" }, { chunk: "ccccc" }],
+          }),
+        ),
+      ).rejects.toThrow("LOGIN_PTY_OPEN_FAILED");
+    } finally {
+      await handle.stop().catch(() => undefined);
+    }
+  });
+
+  it("charges the retained worker session id characters on the pre-bind output path", async () => {
+    const handle = makeLoginPtyHandle({
+      loginPtyLimits: { maxPreBindChars: 10 },
+    });
+    try {
+      await handle.start();
+      // A 6-character worker session id and one 5-character chunk charge 11
+      // characters against the 10-character bound on the very first record,
+      // even though the chunk alone is under the bound. Without the identifier
+      // charge, this single record would pass.
+      await expect(
+        handle.openLoginPtySession(
+          ptyOpenInput({
+            batchWithOpenReply: true,
+            workerSessionId: "ABCDEF",
+            outputs: [{ chunk: "aaaaa" }],
+          }),
+        ),
+      ).rejects.toThrow("LOGIN_PTY_OPEN_FAILED");
+    } finally {
+      await handle.stop().catch(() => undefined);
+    }
+  });
+
+  it("terminalizes the route when batched pre-bind exit notifications with a large worker session id pass the character bound", async () => {
+    const handle = makeLoginPtyHandle({
+      loginPtyLimits: { maxPreBindChars: 10 },
+    });
+    try {
+      await handle.start();
+      await expect(
+        handle.openLoginPtySession(
+          ptyOpenInput({
+            batchWithOpenReply: true,
+            // An exit record carries no chunk, but it still retains the worker
+            // session id. This 5-character id makes 5 + 5 = 10 admit the first
+            // two exits; the third brings the queued total to 15, past the
+            // 10-character bound, so the host terminalizes the route before
+            // the bind can complete.
+            workerSessionId: "AAAAA",
+            sequence: [
+              { type: "exit", exitCode: 1 },
+              { type: "exit", exitCode: 2 },
+              { type: "exit", exitCode: 3 },
+            ],
+          }),
+        ),
+      ).rejects.toThrow("LOGIN_PTY_OPEN_FAILED");
+    } finally {
+      await handle.stop().catch(() => undefined);
+    }
+  });
+
+  it("settles with the first exit code against a repeated pre-bind exit for the same session, behind a filled output queue", async () => {
+    const handle = makeLoginPtyHandle({
+      loginPtyLimits: { maxPreBindFrames: 50 },
+    });
+    try {
+      await handle.start();
+      // Fill the pre-bind queue with 40 output records, then repeat the exit
+      // for the same worker session id after more output arrives. The first
+      // exit settles the route during the replay, so the repeat exit and the
+      // output around it never reach the listener.
+      const fillerOutputs = Array.from({ length: 40 }, (_, index) => ({
+        type: "output" as const,
+        chunk: `filler-${index}`,
+      }));
+      const session = await handle.openLoginPtySession(
+        ptyOpenInput({
+          batchWithOpenReply: true,
+          workerSessionId: "ws-A",
+          sequence: [
+            ...fillerOutputs,
+            { type: "exit", exitCode: 1 },
+            { type: "output", chunk: "between-exits" },
+            { type: "exit", exitCode: 2 },
+            { type: "output", chunk: "after-repeat" },
+          ],
+        }),
+      );
+      const chunks: string[] = [];
+      session.onData((chunk) => chunks.push(chunk));
+      // The wait settles with the FIRST exit code, and the exit drops every
+      // output that arrived behind it, so neither "between-exits" nor
+      // "after-repeat" reaches the listener.
+      await expect(session.wait()).resolves.toEqual({ exitCode: 1 });
+      expect(chunks).toEqual(fillerOutputs.map((entry) => entry.chunk));
+      await session.close();
+    } finally {
+      await handle.stop().catch(() => undefined);
+    }
+  });
+
+  it("settles with the first exit code against N repeated pre-bind exits for the same session", async () => {
+    const handle = makeLoginPtyHandle();
+    try {
+      await handle.start();
+      // The worker sends five repeat exits for the same session before the
+      // bind. The first exit settles the route during the replay, so every
+      // repeat drops there and the wait still settles with the first code.
+      const session = await handle.openLoginPtySession(
+        ptyOpenInput({
+          batchWithOpenReply: true,
+          workerSessionId: "ws-A",
+          exitCode: 1,
+          extraExits: [
+            { exitCode: 2 },
+            { exitCode: 3 },
+            { exitCode: 4 },
+            { exitCode: 5 },
+          ],
+        }),
+      );
+      await expect(session.wait()).resolves.toEqual({ exitCode: 1 });
+      await session.close();
+    } finally {
+      await handle.stop().catch(() => undefined);
+    }
+  });
+
+  it("clears the pre-bind queue on a malformed open reply", async () => {
+    const handle = makeLoginPtyHandle();
+    try {
+      await handle.start();
+      // The malformed reply carries no worker session id, so the host cannot
+      // bind. It terminalizes the route and clears the queued output before
+      // it ever reaches a listener.
+      await expect(
+        handle.openLoginPtySession(
+          ptyOpenInput({
+            mode: "malformed-open",
+            batchWithOpenReply: true,
+            outputs: [{ chunk: "leaked" }],
+          }),
+        ),
+      ).rejects.toThrow("LOGIN_PTY_OPEN_FAILED");
+      // A later open on the same worker starts a fresh route and receives
+      // only its own scripted output, never the cleared queue.
+      const session = await handle.openLoginPtySession(
+        ptyOpenInput({ mode: "normal", outputs: [{ chunk: "fresh" }] }),
+      );
+      const chunks: string[] = [];
+      session.onData((chunk) => chunks.push(chunk));
+      await vi.waitFor(() => expect(chunks).toContain("fresh"));
+      expect(chunks).not.toContain("leaked");
+      await session.close();
+    } finally {
+      await handle.stop().catch(() => undefined);
+    }
+  });
+
+  it("clears the pre-bind queue when the worker exits during the open window", async () => {
+    const handle = makeLoginPtyHandle({ autoRestart: false });
+    try {
+      await handle.start();
+      // The fixture emits one output notification, then exits before it ever
+      // sends the open reply. The route never binds. The worker-exit path
+      // must clear the queued output along with the route.
+      await expect(
+        handle.openLoginPtySession(
+          ptyOpenInput({
+            mode: "exit-before-open-reply",
+            outputs: [{ chunk: "queued-before-exit" }],
+          }),
+        ),
+      ).rejects.toThrow();
+    } finally {
+      await handle.stop().catch(() => undefined);
+    }
+  });
+
+  it("terminalizes at replay when the queued output would pass the cumulative total-chars bound", async () => {
+    const handle = makeLoginPtyHandle({
+      loginPtyLimits: { maxTotalChars: 10, maxPreBindFrames: 1000, maxPreBindChars: 1000 },
+    });
+    try {
+      await handle.start();
+      // The generous pre-bind bounds admit all three records at intake, so
+      // the bind completes and the replay runs. The replay sends each record
+      // through the same live router an open route uses, so the cumulative
+      // `maxTotalChars` gate still applies: the third record would bring the
+      // delivered total to 15, past the 10-character bound, so the replay
+      // terminalizes the route partway through. The directive carries no exit
+      // notification, so only a mid-replay terminalize can settle the wait;
+      // without the cumulative gate applying during replay, this call would
+      // hang.
+      const session = await handle.openLoginPtySession(
+        ptyOpenInput({
+          batchWithOpenReply: true,
+          outputs: [{ chunk: "aaaaa" }, { chunk: "bbbbb" }, { chunk: "ccccc" }],
+        }),
+      );
+      const chunks: string[] = [];
+      session.onData((chunk) => chunks.push(chunk));
+      await expect(session.wait()).resolves.toEqual({ exitCode: null });
+      // The terminalize clears `route.buffered` by design (a terminalized
+      // login route settles with a null exit code, so buffered data has no
+      // consumer), so even the two records the replay delivered before the
+      // bound tripped never reach the listener.
+      expect(chunks).toEqual([]);
+    } finally {
+      await handle.stop().catch(() => undefined);
+    }
+  });
+
+  it("never logs the raw chunk content, including on the pre-bind overflow path", async () => {
+    const handle = makeLoginPtyHandle({
+      loginPtyLimits: { maxPreBindFrames: 1 },
+    });
+    const secretMarker = "super-secret-login-code-must-never-reach-a-log-line";
+    vi.mocked(logger.warn).mockClear();
+    vi.mocked(logger.error).mockClear();
+    vi.mocked(logger.info).mockClear();
+    vi.mocked(logger.debug).mockClear();
+    try {
+      await handle.start();
+      // The first record admits, then the second passes the frame-count
+      // bound and terminalizes the route. The overflow path logs a fixed
+      // warning that must never carry the chunk text.
+      await expect(
+        handle.openLoginPtySession(
+          ptyOpenInput({
+            batchWithOpenReply: true,
+            outputs: [{ chunk: secretMarker }, { chunk: "overflow" }],
+          }),
+        ),
+      ).rejects.toThrow("LOGIN_PTY_OPEN_FAILED");
+      const loggedText = [
+        ...vi.mocked(logger.warn).mock.calls,
+        ...vi.mocked(logger.error).mock.calls,
+        ...vi.mocked(logger.info).mock.calls,
+        ...vi.mocked(logger.debug).mock.calls,
+      ]
+        .flat()
+        .map((arg) => JSON.stringify(arg))
+        .join("\n");
+      expect(loggedText).not.toContain(secretMarker);
     } finally {
       await handle.stop().catch(() => undefined);
     }

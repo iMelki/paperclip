@@ -17,6 +17,7 @@ import {
   resolvePaperclipInstanceId,
 } from "../config/home.js";
 import { assertForegroundRunAllowed } from "../services/service-manager.js";
+import { removeRuntimeInfoForPid, writeRuntimeInfo } from "../runtime-info.js";
 import { printUpdateNotice } from "../update-notice.js";
 import { ensureWorktreeSeeded } from "./worktree.js";
 
@@ -93,6 +94,16 @@ export async function runCommand(opts: RunOptions): Promise<void> {
 
   p.log.step("Starting Paperclip server...");
   const startedServer = await importServerEntry();
+  writeRuntimeInfo({
+    schemaVersion: 1,
+    instanceId,
+    pid: process.pid,
+    host: startedServer.host,
+    port: startedServer.listenPort,
+    dashboardUrl: startedServer.apiUrl.replace(/\/api\/?$/, ""),
+    startedAt: new Date().toISOString(),
+  });
+  process.once("exit", () => removeRuntimeInfoForPid(process.pid, instanceId));
 
   if (shouldGenerateBootstrapInviteAfterStart(config)) {
     p.log.step("Generating bootstrap CEO invite");
@@ -182,6 +193,16 @@ function ensureDevWorkspaceBuildDeps(projectRoot: string): void {
   }
 }
 
+/**
+ * The server refuses to start (exit 75) when an existing PostgreSQL may own the data
+ * directory. The class lives in the server package, so match it by shape.
+ */
+export function startupRefusalExitCode(err: unknown): number | null {
+  if (!(err instanceof Error) || err.name !== "EmbeddedPostgresLockRefusal") return null;
+  const code = (err as { exitCode?: unknown }).exitCode;
+  return typeof code === "number" && Number.isInteger(code) && code > 0 && code < 256 ? code : null;
+}
+
 async function importServerEntry(): Promise<StartedServer> {
   // Dev mode: try local workspace path (monorepo with tsx)
   const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
@@ -198,6 +219,7 @@ async function importServerEntry(): Promise<StartedServer> {
     const mod = await import("@paperclipai/server");
     return await startServerFromModule(mod, "@paperclipai/server");
   } catch (err) {
+    if (startupRefusalExitCode(err) !== null) throw err;
     const missingSpecifier = getMissingModuleSpecifier(err);
     const missingServerEntrypoint = !missingSpecifier || missingSpecifier === "@paperclipai/server";
     if (isModuleNotFoundError(err) && missingServerEntrypoint) {

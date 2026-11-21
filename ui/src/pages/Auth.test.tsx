@@ -147,6 +147,36 @@ describe("AuthPage", () => {
     });
   });
 
+  it("toggles password visibility with an accessible button that does not submit", async () => {
+    const { root } = await mount();
+
+    const passwordInput = container.querySelector('input[name="password"]') as HTMLInputElement;
+    const toggle = container.querySelector('button[aria-label="Show password"]') as HTMLButtonElement;
+    expect(passwordInput.getAttribute("type")).toBe("password");
+    expect(toggle).not.toBeNull();
+    expect(toggle.type).toBe("button");
+    expect(toggle.getAttribute("aria-pressed")).toBe("false");
+    expect(toggle.getAttribute("aria-controls")).toBe("password");
+
+    await act(async () => {
+      toggle.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+
+    expect(passwordInput.getAttribute("type")).toBe("text");
+    expect(toggle.getAttribute("aria-label")).toBe("Hide password");
+    expect(toggle.getAttribute("aria-pressed")).toBe("true");
+    expect(signInEmailMock).not.toHaveBeenCalled();
+
+    await act(async () => {
+      toggle.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    expect(passwordInput.getAttribute("type")).toBe("password");
+
+    await act(async () => {
+      root.unmount();
+    });
+  });
+
   it("uses new-password autocomplete in sign-up mode", async () => {
     const { root } = await mount();
 

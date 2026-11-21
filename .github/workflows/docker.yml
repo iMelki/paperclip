@@ -6,9 +6,12 @@ on:
       - "master"
     tags:
       - "v*"
-  # Manual re-run of the default-branch build. Only master is accepted: the
-  # jobs below skip a dispatch on any other ref, and the box runner's
-  # job-start guard refuses it as well.
+      - "nightly/v*"
+      - "beta/v*"
+  # Release workflows push lane tags with GITHUB_TOKEN, and GitHub suppresses
+  # push-triggered runs for those, so release.yml dispatches this workflow at
+  # the new tag ref instead. The tag mapping below keys off github.ref either
+  # way.
   workflow_dispatch:
 
 permissions:
@@ -24,22 +27,17 @@ concurrency:
 
 jobs:
   build-and-push:
-    # Post-merge default-branch builds (push to master, or a manual dispatch on
-    # master) run on the isolated box image-build runner (label box-img:
-    # rootless Docker, its own disk, 4 CPU / 4 GB cap). Release tag (v*)
-    # builds never use box-img and stay on the GitHub-hosted runner.
-    # The box runner only accepts push/workflow_dispatch on master of
-    # iMelki/paperclip; pull_request, pull_request_target, forks and tags are
-    # refused before any step runs.
-    if: github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/master'
+    # Post-merge default-branch builds (push to master, or a manual dispatch
+    # on master) run on the isolated box image-build runner (label box-img).
+    # Release tag (v*) builds stay on the GitHub-hosted runner.
+    if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && (github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/tags/nightly/v') || startsWith(github.ref, 'refs/tags/beta/v'))
     runs-on: ${{ github.ref == 'refs/heads/master' && fromJSON('["self-hosted","box-img"]') || 'ubuntu-latest' }}
-    # The box runner has 4 CPUs and emulates arm64 with QEMU, so give it more
-    # headroom than the hosted runner.
     timeout-minutes: ${{ github.ref == 'refs/heads/master' && 120 || 60 }}
     steps:
       - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
+          persist-credentials: false
           # Full history and tags so `git describe` below can compute the
           # release version to stamp into the image.
           fetch-depth: 0
@@ -54,7 +52,19 @@ jobs:
         id: build-version
         run: |
           set -euo pipefail
-          version="$(git describe --tags --match 'v*' --long --dirty 2>/dev/null || true)"
+          case "${GITHUB_REF}" in
+            refs/tags/nightly/v*)
+              # Lane tags carry the exact published version; stamp it verbatim
+              # instead of describing drift from the nearest stable tag.
+              version="${GITHUB_REF#refs/tags/nightly/v}"
+              ;;
+            refs/tags/beta/v*)
+              version="${GITHUB_REF#refs/tags/beta/v}"
+              ;;
+            *)
+              version="$(git describe --tags --match 'v*' --long --dirty 2>/dev/null || true)"
+              ;;
+          esac
           echo "version=${version}" >> "$GITHUB_OUTPUT"
           echo "Stamping build version: ${version:-<none>}"
 
@@ -66,7 +76,7 @@ jobs:
         run: echo "epoch=$(date -u +%G-W%V)" >> "$GITHUB_OUTPUT"
 
       - name: Setup pnpm
-        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
         with:
           version: 9.15.4
           run_install: false
@@ -75,9 +85,9 @@ jobs:
       # restoring a shared Actions cache into the build inputs would let a
       # poisoned cache entry reach the published artifact.
       - name: Setup Node.js
-        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
-          node-version: 20
+          node-version: 24
 
       - name: Refresh lockfile for Docker build context
         run: |
@@ -98,8 +108,6 @@ jobs:
 
           echo "Using refreshed pnpm-lock.yaml in the Docker build context."
 
-      # Hosted-runner cleanup only: the box runner has no sudo and its own
-      # disk, so it prunes old Docker data in the next step instead.
       - name: Free runner disk
         if: runner.environment == 'github-hosted'
         run: |
@@ -124,23 +132,16 @@ jobs:
           echo "Disk after cleanup:"
           df -h
 
-      - name: Prune old Docker data (box runner)
-        if: runner.environment == 'self-hosted'
-        run: |
-          set -euo pipefail
-          docker system prune -af --filter "until=168h" || true
-          df -h "$HOME"
-          docker system df || true
 
       - name: Login to GitHub Container Registry
-        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4
         with:
           registry: ghcr.io
           username: ${{ github.repository_owner }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
 
       # Deployment tooling reads these labels from the registry to verify an
       # image's schema expectations against a migrator before deploying it,
@@ -156,22 +157,36 @@ jobs:
           echo "last=${last}" >> "$GITHUB_OUTPUT"
           echo "count=${count}" >> "$GITHUB_OUTPUT"
 
+      # GHCR image paths must be lowercase. github.repository keeps the
+      # owner's original case, so compute the name once and reuse it for
+      # metadata tags and the registry build cache.
+      - name: Set GHCR image name
+        run: |
+          set -euo pipefail
+          echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
+
+      # Lane tag mapping: master pushes publish `:canary`, nightly/v* tags
+      # publish `:nightly`, and only stable v* tags move `:latest` and the
+      # versioned tags. `:sha-<short>` is published on every build.
       - name: Docker meta
         id: meta
-        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6
         with:
-          images: ghcr.io/${{ github.repository }}
+          images: ${{ env.IMAGE }}
           tags: |
-            type=raw,value=latest,enable={{is_default_branch}}
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=canary,enable=${{ github.ref == 'refs/heads/master' }}
+            type=raw,value=nightly,enable=${{ startsWith(github.ref, 'refs/tags/nightly/v') }}
+            type=raw,value=beta,enable=${{ startsWith(github.ref, 'refs/tags/beta/v') }}
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+            type=semver,pattern={{version}},enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+            type=semver,pattern={{major}}.{{minor}},enable=${{ startsWith(github.ref, 'refs/tags/v') }}
             type=sha
           labels: |
             io.github.paperclipai.schema.last-migration=${{ steps.schema.outputs.last }}
             io.github.paperclipai.schema.migration-count=${{ steps.schema.outputs.count }}
 
       - name: Build and push
-        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
         with:
           context: .
           # Pin the self-hosted image to the production stage explicitly:
@@ -189,10 +204,29 @@ jobs:
           # evict each other, so most builds ran effectively cold. The cache
           # ref lives in ghcr next to the image and is written only by this
           # workflow (docker.yml runs on master/tag pushes, never on PRs).
-          cache-from: type=registry,ref=ghcr.io/${{ github.repository }}:buildcache
-          cache-to: type=registry,ref=ghcr.io/${{ github.repository }}:buildcache,mode=max
+          cache-from: type=registry,ref=${{ env.IMAGE }}:buildcache
+          cache-to: type=registry,ref=${{ env.IMAGE }}:buildcache,mode=max
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+
+      # PID 1 must be an init that reaps adopted orphans. With node there, the
+      # orphans agent runs leave behind are never wait()ed and pin as zombies
+      # until the cgroup pid limit is exhausted and every fork() in the
+      # container fails. Run against the pushed image rather than a local
+      # build: the step above is multi-arch with `push: true`, so nothing is
+      # loaded into the runner's daemon. The cloud variant is FROM production
+      # and inherits the same ENTRYPOINT, so checking this image covers both.
+      - name: Verify PID 1 reaps orphaned processes
+        env:
+          # Through the environment, not interpolated into the script body, so
+          # the tag text is data rather than shell.
+          IMAGE_TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          set -euo pipefail
+          image="$(printf '%s\n' "$IMAGE_TAGS" | head -n 1)"
+          test -n "$image"
+          echo "Verifying orphan reaping in $image"
+          docker run --rm -i --pull always "$image" sh -s < scripts/assert-orphan-reaping.sh
 
   # The cloud variant carries built bundled plugins for managed deployments
   # (see the `cloud` stage in the Dockerfile). It runs as its own job with no
@@ -202,22 +236,17 @@ jobs:
   # separate runner, so this one carries its own copy of the prep steps
   # (checkout through schema labels) — the accepted cost of that isolation.
   build-and-push-cloud:
-    # Post-merge default-branch builds (push to master, or a manual dispatch on
-    # master) run on the isolated box image-build runner (label box-img:
-    # rootless Docker, its own disk, 4 CPU / 4 GB cap). Release tag (v*)
-    # builds never use box-img and stay on the GitHub-hosted runner.
-    # The box runner only accepts push/workflow_dispatch on master of
-    # iMelki/paperclip; pull_request, pull_request_target, forks and tags are
-    # refused before any step runs.
-    if: github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/master'
+    # Post-merge default-branch builds (push to master, or a manual dispatch
+    # on master) run on the isolated box image-build runner (label box-img).
+    # Release tag (v*) builds stay on the GitHub-hosted runner.
+    if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && (github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/tags/nightly/v') || startsWith(github.ref, 'refs/tags/beta/v'))
     runs-on: ${{ github.ref == 'refs/heads/master' && fromJSON('["self-hosted","box-img"]') || 'ubuntu-latest' }}
-    # The box runner has 4 CPUs and emulates arm64 with QEMU, so give it more
-    # headroom than the hosted runner.
     timeout-minutes: ${{ github.ref == 'refs/heads/master' && 120 || 60 }}
     steps:
       - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
+          persist-credentials: false
           # Full history and tags so `git describe` below can compute the
           # release version to stamp into the image.
           fetch-depth: 0
@@ -232,7 +261,19 @@ jobs:
         id: build-version
         run: |
           set -euo pipefail
-          version="$(git describe --tags --match 'v*' --long --dirty 2>/dev/null || true)"
+          case "${GITHUB_REF}" in
+            refs/tags/nightly/v*)
+              # Lane tags carry the exact published version; stamp it verbatim
+              # instead of describing drift from the nearest stable tag.
+              version="${GITHUB_REF#refs/tags/nightly/v}"
+              ;;
+            refs/tags/beta/v*)
+              version="${GITHUB_REF#refs/tags/beta/v}"
+              ;;
+            *)
+              version="$(git describe --tags --match 'v*' --long --dirty 2>/dev/null || true)"
+              ;;
+          esac
           echo "version=${version}" >> "$GITHUB_OUTPUT"
           echo "Stamping build version: ${version:-<none>}"
 
@@ -244,7 +285,7 @@ jobs:
         run: echo "epoch=$(date -u +%G-W%V)" >> "$GITHUB_OUTPUT"
 
       - name: Setup pnpm
-        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
         with:
           version: 9.15.4
           run_install: false
@@ -253,9 +294,9 @@ jobs:
       # restoring a shared Actions cache into the build inputs would let a
       # poisoned cache entry reach the published artifact.
       - name: Setup Node.js
-        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
-          node-version: 20
+          node-version: 24
 
       - name: Refresh lockfile for Docker build context
         run: |
@@ -276,8 +317,6 @@ jobs:
 
           echo "Using refreshed pnpm-lock.yaml in the Docker build context."
 
-      # Hosted-runner cleanup only: the box runner has no sudo and its own
-      # disk, so it prunes old Docker data in the next step instead.
       - name: Free runner disk
         if: runner.environment == 'github-hosted'
         run: |
@@ -302,23 +341,16 @@ jobs:
           echo "Disk after cleanup:"
           df -h
 
-      - name: Prune old Docker data (box runner)
-        if: runner.environment == 'self-hosted'
-        run: |
-          set -euo pipefail
-          docker system prune -af --filter "until=168h" || true
-          df -h "$HOME"
-          docker system df || true
 
       - name: Login to GitHub Container Registry
-        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4
         with:
           registry: ghcr.io
           username: ${{ github.repository_owner }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
 
       # Deployment tooling reads these labels from the registry to verify an
       # image's schema expectations against a migrator before deploying it,
@@ -334,33 +366,49 @@ jobs:
           echo "last=${last}" >> "$GITHUB_OUTPUT"
           echo "count=${count}" >> "$GITHUB_OUTPUT"
 
-      # Published under the same tag set with a `-cloud` suffix
-      # (sha-<short>-cloud, latest-cloud, <version>-cloud).
+      # GHCR image paths must be lowercase. github.repository keeps the
+      # owner's original case, so compute the name once and reuse it for
+      # metadata tags and the registry build cache.
+      - name: Set GHCR image name
+        run: |
+          set -euo pipefail
+          echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
+
+      # Published under the same lane tag set as the self-hosted image, with a
+      # `-cloud` suffix (canary-cloud, nightly-cloud, latest-cloud,
+      # <version>-cloud, sha-<short>-cloud).
       - name: Docker meta (cloud)
         id: meta-cloud
-        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6
         with:
-          images: ghcr.io/${{ github.repository }}
+          images: ${{ env.IMAGE }}
           flavor: |
             suffix=-cloud,onlatest=true
           tags: |
-            type=raw,value=latest,enable={{is_default_branch}}
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=canary,enable=${{ github.ref == 'refs/heads/master' }}
+            type=raw,value=nightly,enable=${{ startsWith(github.ref, 'refs/tags/nightly/v') }}
+            type=raw,value=beta,enable=${{ startsWith(github.ref, 'refs/tags/beta/v') }}
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+            type=semver,pattern={{version}},enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+            type=semver,pattern={{major}}.{{minor}},enable=${{ startsWith(github.ref, 'refs/tags/v') }}
             type=sha
           labels: |
             io.github.paperclipai.schema.last-migration=${{ steps.schema.outputs.last }}
             io.github.paperclipai.schema.migration-count=${{ steps.schema.outputs.count }}
 
       - name: Build and push (cloud)
-        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
         with:
           context: .
           target: cloud
           # Space-separated sandbox-provider directory names to build into
           # the variant; add here when managed deployments need another.
+          # CLOUD_BUNDLED_SERVER_DEPS names the optional peer packages the
+          # variant installs from server/package.json's declared version;
+          # add another name there when a managed tenant needs it.
           build-args: |
             CLOUD_BUNDLED_PLUGINS=daytona
+            CLOUD_BUNDLED_SERVER_DEPS=@sentry/node
             PAPERCLIP_BUILD_VERSION=${{ steps.build-version.outputs.version }}
             PAPERCLIP_BUILD_COMMIT=${{ github.sha }}
             CLI_TOOLS_CACHE_EPOCH=${{ steps.tools-epoch.outputs.epoch }}
@@ -373,7 +421,35 @@ jobs:
           # Registry-backed BuildKit cache, separate ref from the self-hosted
           # job so the two parallel builds never clobber each other's cache
           # manifest (see the rationale on the job above).
-          cache-from: type=registry,ref=ghcr.io/${{ github.repository }}:buildcache-cloud
-          cache-to: type=registry,ref=ghcr.io/${{ github.repository }}:buildcache-cloud,mode=max
+          cache-from: type=registry,ref=${{ env.IMAGE }}:buildcache-cloud
+          cache-to: type=registry,ref=${{ env.IMAGE }}:buildcache-cloud,mode=max
           tags: ${{ steps.meta-cloud.outputs.tags }}
           labels: ${{ steps.meta-cloud.outputs.labels }}
+
+      # The cloud target installs @sentry/node at the version
+      # server/package.json declares, into a directory the server's own
+      # module resolution walks. Verify the image this job just pushed, not
+      # a local build, so a build-cache or layer-ordering regression is
+      # caught before any tenant runs the image.
+      - name: Verify the pushed image resolves the declared Sentry version
+        env:
+          IMAGE_TAGS: ${{ steps.meta-cloud.outputs.tags }}
+        run: |
+          set -euo pipefail
+          image="$(printf '%s\n' "$IMAGE_TAGS" | head -n 1)"
+          test -n "$image"
+
+          expected="$(node -e "process.stdout.write(require('./server/package.json').peerDependencies['@sentry/node'])")"
+          test -n "$expected"
+
+          installed="$(docker run --rm --pull always \
+            -v "$PWD/scripts/assert-cloud-image-sentry.mjs:/app/server/.ci-sentry-probe.mjs:ro" \
+            --entrypoint node "$image" /app/server/.ci-sentry-probe.mjs)"
+
+          echo "Declared optional peer version: $expected"
+          echo "Installed in the pushed image: $installed"
+          if [ "$installed" != "$expected" ]; then
+            echo "ERROR: the pushed image resolves @sentry/node@$installed, expected @sentry/node@$expected" >&2
+            exit 1
+          fi
+          echo "The pushed image resolves the declared @sentry/node version."

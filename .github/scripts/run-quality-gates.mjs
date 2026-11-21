@@ -16,17 +16,16 @@ import { checkDedupSearch } from './check-pr-dedup-search.mjs';
 import { checkTestCoverage } from './check-pr-test-coverage.mjs';
 import { checkLockfile } from './check-pr-lockfile.mjs';
 import { checkDependencies } from './check-pr-dependencies.mjs';
+import { checkReleaseBootstrap } from './check-pr-release-bootstrap.mjs';
+import { checkCoauthors, fetchAllPullRequestCommits } from './check-pr-coauthors.mjs';
 
 const COMMENT_SIGNATURE = '— commitperclip';
-const REVIEW_COMMENT_AUTHORS = new Set([
-  'commitperclip[bot]',
-  'commitperclip',
-  'github-actions[bot]',
-]);
 
-function buildComment(author, failures, informational) {
+export function buildComment(author, failures, informational) {
   if (failures.length === 0 && informational.length === 0) {
-    return `✅ All checks passing — ready for Greptile review and maintainer approval.\n\n${COMMENT_SIGNATURE}`;
+    return `✅ All commitperclip policy checks pass — ready for automated review ` +
+      `(CodeRabbit, or Cursor when CodeRabbit is unavailable) and maintainer approval.\n\n` +
+      COMMENT_SIGNATURE;
   }
 
   const lines = [
@@ -60,7 +59,7 @@ export async function findExistingComment(fetchFromGitHub, token, repo, prNumber
     );
 
     const existing = comments.find(
-      c => REVIEW_COMMENT_AUTHORS.has(c.user.login) &&
+      c => (c.user.login === 'commitperclip[bot]' || c.user.login === 'commitperclip') &&
            c.body.includes(COMMENT_SIGNATURE)
     );
     if (existing) return existing;
@@ -110,21 +109,34 @@ async function main() {
     fetchAllPullRequestFiles(ghFetch, GH_REPO, prNumber, GH_TOKEN),
   ]);
 
+  // Separate, and allowed to fail. The co-author note is informational: it
+  // cannot fail a PR by design, so it must not be able to fail the workflow by
+  // accident either. Sharing the Promise.all above would let one transient
+  // 5xx on this request take down every gate, including the ones that block.
+  let commits = [];
+  try {
+    commits = await fetchAllPullRequestCommits(ghFetch, GH_REPO, prNumber, GH_TOKEN);
+  } catch (error) {
+    console.error(`co-author lookup skipped: ${error.message}`);
+  }
+
   const prBody = pr.body ?? '';
   const author = PR_AUTHOR ?? pr.user.login;
   const branch = PR_BRANCH ?? pr.head.ref;
 
   // Run all quality gates (pure functions run sync, deps check is async)
   const prTitle = pr.title ?? '';
-  const [templateResult, issueResult, dedupResult, testResult, lockfileResult, depsResult] =
+  const [templateResult, issueResult, dedupResult, testResult, lockfileResult, depsResult, bootstrapResult] =
     await Promise.all([
       Promise.resolve(checkTemplate(prBody)),
       Promise.resolve(checkLinkedIssue(prBody, prTitle)),
       Promise.resolve(checkDedupSearch(prBody, prTitle)),
       Promise.resolve(checkTestCoverage(files, prTitle)),
-      Promise.resolve(checkLockfile(files, author, branch)),
+      Promise.resolve(checkLockfile(files, author, branch, pr.base?.ref)),
       checkDependencies(files, GH_TOKEN, GH_REPO, prNumber, pr.base?.ref),
+      checkReleaseBootstrap(files, GH_TOKEN, GH_REPO, prNumber, pr.base?.ref),
     ]);
+  const coauthorResult = checkCoauthors(commits, author);
 
   const allFailures = [
     ...templateResult.failures,
@@ -133,7 +145,11 @@ async function main() {
     ...testResult.failures,
     ...lockfileResult.failures,
   ];
-  const informational = depsResult.informational ?? [];
+  const informational = [
+    ...(depsResult.informational ?? []),
+    ...(bootstrapResult.informational ?? []),
+    ...coauthorResult.informational,
+  ];
   const allPassed = allFailures.length === 0;
 
   const commentBody = buildComment(author, allFailures, informational);

@@ -4,6 +4,9 @@ import {
   parseClaudeStreamJson,
   detectClaudeLoginRequired,
   extractClaudeRetryNotBefore,
+  describeClaudeFailure,
+  extractClaudeRetryNotBeforeWithSource,
+  findClaudeProviderQuotaEvidenceSource,
   isClaudeProviderQuotaError,
   isClaudeTransientUpstreamError,
   isClaudePoisonedPreviousMessageIdError,
@@ -30,6 +33,118 @@ describe("detectClaudeLoginRequired", () => {
         parsed: null,
         stdout: "",
         stderr: "Invalid API key",
+      }).requiresLogin,
+    ).toBe(false);
+  });
+
+  it("classifies an invalid or expired OAuth bearer token as login required", () => {
+    // Grounded on the real Claude CLI output for CLAUDE_CODE_OAUTH_TOKEN=invalid:
+    // the result event carries a 401 authentication failure and an "Invalid
+    // bearer token" message. This is an auth failure, not a probe that could not
+    // run, so the detector must classify it as login required.
+    const parsed = {
+      is_error: true,
+      subtype: "success",
+      api_error_status: 401,
+      error: "authentication_failed",
+      result: "Failed to authenticate. API Error: 401 Invalid bearer token",
+    };
+    expect(
+      detectClaudeLoginRequired({
+        parsed,
+        stdout:
+          '{"type":"assistant","message":{"content":[{"type":"text","text":"Failed to authenticate. API Error: 401 Invalid bearer token"}]},"error":"authentication_failed"}',
+        stderr: "",
+      }).requiresLogin,
+    ).toBe(true);
+  });
+
+  it("does not route an invalid token to the transient or quota classifiers", () => {
+    // An auth failure must win over the transient and quota lanes, so a run
+    // surfaces login required instead of a retry.
+    const input = {
+      parsed: {
+        is_error: true,
+        result: "Failed to authenticate. API Error: 401 Invalid bearer token",
+      },
+      stdout: "",
+      stderr: "",
+    };
+    expect(isClaudeTransientUpstreamError(input)).toBe(false);
+    expect(isClaudeProviderQuotaError(input)).toBe(false);
+  });
+
+  it("classifies an expired or revoked token in the parsed result as login required", () => {
+    // The result event marks the run as a failure and reports an expired token.
+    // This is a token failure, so the detector classifies it as login required.
+    const parsed = {
+      is_error: true,
+      subtype: "success",
+      result: "Failed to authenticate. Your OAuth access token is expired.",
+    };
+    expect(
+      detectClaudeLoginRequired({ parsed, stdout: "", stderr: "" }).requiresLogin,
+    ).toBe(true);
+  });
+
+  it("does not classify a successful probe whose assistant text repeats a token phrase", () => {
+    // A healthy run can print an auth phrase in its answer text. The parsed
+    // result is a success, so the token-failure markers must not fire on the raw
+    // stdout assistant event.
+    const parsed = {
+      is_error: false,
+      subtype: "success",
+      result: "hello",
+    };
+    expect(
+      detectClaudeLoginRequired({
+        parsed,
+        stdout:
+          '{"type":"assistant","message":{"content":[{"type":"text","text":"The phrase authentication_failed means an invalid bearer token."}]}}',
+        stderr: "",
+      }).requiresLogin,
+    ).toBe(false);
+  });
+
+  it("does not classify a success whose result text repeats a token phrase", () => {
+    // The model's own answer repeats a token phrase, so the phrase lands in the
+    // parsed result. The run is a success, so the failure gate keeps it healthy.
+    const parsed = {
+      is_error: false,
+      subtype: "success",
+      result: "Sure. An invalid bearer token means authentication_failed.",
+    };
+    expect(
+      detectClaudeLoginRequired({ parsed, stdout: "", stderr: "" }).requiresLogin,
+    ).toBe(false);
+  });
+
+  it("keeps a transient failure with an assistant token phrase on the transient lane", () => {
+    // The run fails on a 503 transient error. The token phrase appears only in
+    // the raw stdout assistant event, not the parsed result, so the run stays
+    // transient and never classifies as login required.
+    const input = {
+      parsed: {
+        is_error: true,
+        subtype: "error_during_execution",
+        result: "API Error: 503 service unavailable",
+      },
+      stdout:
+        '{"type":"assistant","message":{"content":[{"type":"text","text":"authentication_failed: the bearer token is invalid"}]}}',
+      stderr: "",
+    };
+    expect(detectClaudeLoginRequired(input).requiresLogin).toBe(false);
+    expect(isClaudeTransientUpstreamError(input)).toBe(true);
+  });
+
+  it("does not treat a bare token phrase in raw stdout with no parsed result as login required", () => {
+    // Untrusted stdout alone must not satisfy a token-failure marker. Only the
+    // parsed terminal result fields of a failed run can trip the token markers.
+    expect(
+      detectClaudeLoginRequired({
+        parsed: null,
+        stdout: "authentication_failed while the assistant called a tool",
+        stderr: "",
       }).requiresLogin,
     ).toBe(false);
   });
@@ -85,6 +200,82 @@ describe("isClaudeTransientUpstreamError", () => {
     expect(extractClaudeRetryNotBefore({ errorMessage }, now)?.toISOString()).toBe(
       "2026-04-22T21:00:00.000Z",
     );
+  });
+
+  describe("only provider error evidence counts", () => {
+    const quoted = "You've hit your session limit · resets 9am (UTC)";
+    const now = new Date("2026-04-22T06:00:00.000Z");
+
+    it("ignores raw stdout and the result of a result event that is not an error", () => {
+      const input = {
+        parsed: { type: "result", subtype: "success", is_error: false, result: `Summary: ${quoted}` },
+        stdout: `{"type":"assistant","text":"${quoted}"}\n`,
+        stderr: "",
+        errorMessage: `Claude run failed: ${quoted}`,
+      };
+      expect(isClaudeProviderQuotaError(input)).toBe(false);
+      expect(isClaudeTransientUpstreamError({ ...input, stdout: "HTTP 429 Too Many Requests" })).toBe(false);
+      expect(extractClaudeRetryNotBefore(input, now)).toBeNull();
+      expect(findClaudeProviderQuotaEvidenceSource(input)).toBeNull();
+    });
+
+    it("ignores stdout when no result event was parsed", () => {
+      const input = { parsed: null, stdout: quoted, stderr: "segmentation fault", errorMessage: "Claude exited with code 1: segmentation fault" };
+      expect(isClaudeProviderQuotaError(input)).toBe(false);
+      expect(extractClaudeRetryNotBefore(input, now)).toBeNull();
+    });
+
+    it("skips an invalid statement and uses a later valid one in the same source", () => {
+      const stderr = "You've hit your session limit · resets 13pm (UTC)\nYou've hit your session limit · resets 9am (UTC)";
+      expect(extractClaudeRetryNotBeforeWithSource({ stderr }, now)).toEqual({
+        retryAt: new Date("2026-04-22T09:00:00.000Z"),
+        source: "stderr",
+      });
+      expect(extractClaudeRetryNotBefore({ stderr: "You've hit your session limit · resets 9:000am (UTC)" }, now)).toBeNull();
+    });
+
+    it("requires a complete clock token: text glued to the meridiem makes the statement invalid", () => {
+      for (const glued of ["9:00pm:30 (UTC)", "9pm30 (UTC)", "9:00pm:30", "9:00pm.30 (UTC)", "9pm.30", "9:00pm.30"]) {
+        const stderr = `You've hit your session limit · resets ${glued}`;
+        expect(extractClaudeRetryNotBefore({ stderr }, now)).toBeNull();
+        // The quota verdict is unchanged; only the clock is refused.
+        expect(isClaudeProviderQuotaError({ stderr, errorMessage: stderr })).toBe(true);
+      }
+      expect(
+        extractClaudeRetryNotBeforeWithSource(
+          { stderr: "You've hit your session limit · resets 9:00pm:30 (UTC)\nYou've hit your session limit · resets 9am (UTC)" },
+          now,
+        ),
+      ).toEqual({ retryAt: new Date("2026-04-22T09:00:00.000Z"), source: "stderr" });
+    });
+
+    it("does not read a clock in the server's timezone when the named timezone is unknown", () => {
+      expect(extractClaudeRetryNotBefore({ stderr: "You've hit your session limit · resets 9am (Foo/Bar)" }, now)).toBeNull();
+      expect(
+        extractClaudeRetryNotBefore(
+          { stderr: "You've hit your session limit · resets 9am (Foo/Bar)\nYou've hit your session limit · resets 9am (UTC)" },
+          now,
+        )?.toISOString(),
+      ).toBe("2026-04-22T09:00:00.000Z");
+    });
+
+    it("keeps the text of a result that is not an error out of a trusted failure message", () => {
+      const parsed = { subtype: "error_during_execution", is_error: false, result: `Quoted: ${quoted}`, errors: [] };
+      expect(describeClaudeFailure(parsed, { trustedOnly: true })).toBe("Claude run failed: subtype=error_during_execution");
+      expect(describeClaudeFailure(parsed)).toContain(quoted);
+      expect(describeClaudeFailure({ ...parsed, is_error: true }, { trustedOnly: true })).toContain(quoted);
+    });
+
+    it("reads an error result, its errors list and stderr, and names the source", () => {
+      expect(
+        extractClaudeRetryNotBeforeWithSource({ parsed: { is_error: true, result: quoted } }, now),
+      ).toEqual({ retryAt: new Date("2026-04-22T09:00:00.000Z"), source: "result_error" });
+      expect(
+        findClaudeProviderQuotaEvidenceSource({ parsed: { is_error: true, result: "", errors: [{ message: quoted }] } }),
+      ).toBe("errors");
+      expect(findClaudeProviderQuotaEvidenceSource({ stderr: quoted })).toBe("stderr");
+      expect(findClaudeProviderQuotaEvidenceSource({ parsed: null, errorMessage: quoted })).toBe("error_message");
+    });
   });
 
   it("classifies Anthropic API rate_limit_error and overloaded_error as transient", () => {

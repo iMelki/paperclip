@@ -31,6 +31,11 @@ export function SetupPanel({
   const oauth = connection.config?.oauth;
   const hasOAuthSignIn = Boolean(oauth && typeof oauth === "object" && !Array.isArray(oauth));
   const isSmokeLabFixture = connection.config?.smokeLabFixture === "oauth-http";
+  const isGitHubOAuth = connection.transport === "rest_api" && connection.config?.sourceTemplateKey === "github"
+    && connection.config?.methodKey === "rest-oauth";
+  const gitHubLastVerified = isGitHubOAuth && ["ok", "healthy"].includes(connection.healthStatus ?? "")
+    && connection.status === "active" && connection.enabled !== false
+    && Date.parse(String((oauth as Record<string, unknown> | undefined)?.expiresAt ?? "")) > Date.now();
   return (
     <div className="space-y-6">
       {description && (
@@ -45,8 +50,9 @@ export function SetupPanel({
       )}
       {hasOAuthSignIn && (
         <OAuthConnectionSection
-          connected={Boolean((oauth as Record<string, unknown>).connectedAt)}
-          providerName={appDefinitionSlug(galleryEntry) === "notion" ? "Notion" : isSmokeLabFixture ? "Smoke OAuth" : "OAuth"}
+          connected={isGitHubOAuth ? gitHubLastVerified : Boolean((oauth as Record<string, unknown>).connectedAt)}
+          lastVerificationOnly={isGitHubOAuth}
+          providerName={isGitHubOAuth ? "GitHub" : appDefinitionSlug(galleryEntry) === "notion" ? "Notion" : isSmokeLabFixture ? "Smoke OAuth" : "OAuth"}
           disabled={oauthStartDisabled}
           onStart={onStartOAuth}
         />
@@ -61,21 +67,26 @@ function OAuthConnectionSection({
   providerName,
   disabled,
   onStart,
+  lastVerificationOnly = false,
 }: {
   connected: boolean;
   providerName: string;
   disabled: boolean;
   onStart: () => void;
+  lastVerificationOnly?: boolean;
 }) {
   return (
     <section className="rounded-xl border border-border bg-card px-5 py-4">
       <div className="flex flex-wrap items-center justify-between gap-4">
         <div>
           <h2 className="text-sm font-bold text-foreground">
-            {connected ? `${providerName} connected` : `Connect with ${providerName}`}
+            {lastVerificationOnly ? connected ? "GitHub last verified" : "GitHub needs verification or reconnecting"
+              : connected ? `${providerName} connected` : `Connect with ${providerName}`}
           </h2>
           <p className="mt-0.5 text-sm text-muted-foreground">
-            {connected
+            {lastVerificationOnly
+              ? "Saved authorization is not live access proof. Recheck the connection or reconnect to verify current permissions."
+              : connected
               ? "Your workspace authorization is active. Reconnect any time to replace it."
               : "Open the provider's consent page to finish connecting this app."}
           </p>

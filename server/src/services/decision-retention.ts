@@ -345,9 +345,12 @@ export function decisionRetentionService(
     const cutoff = new Date(now.getTime() - DEFAULT_DECISION_ARCHIVE_DAYS * DAY_MS);
     const candidates = input.items.filter((item) => new Date(item.activityAt) <= cutoff && !item.keep && !item.archivedAt);
     let archived = 0;
-    await db.transaction(async (tx) => {
-      const txDb = tx as unknown as Db;
-      for (const item of candidates) {
+    // One transaction per item. A single transaction for the whole feed holds
+    // its pooled connection (and any row locks) until the last item commits.
+    // The next item starts only after the previous transaction has released.
+    for (const item of candidates) {
+      const didArchive = await db.transaction(async (tx) => {
+        const txDb = tx as unknown as Db;
         const updated = await txDb.update(decisionRetention).set({
           archivedAt: now,
           archivedReason: "idle_ttl",
@@ -367,8 +370,7 @@ export function decisionRetentionService(
           isNull(decisionRetention.archivedAt),
           lte(decisionRetention.sourceActivityAt, cutoff),
         )).returning().then((rows) => rows[0] ?? null);
-        if (!updated) continue;
-        archived += 1;
+        if (!updated) return false;
         const origin = await resolveOrigin(txDb, input.companyId, item.sourceKind, item.subject.id);
         if (origin) {
           await txDb.insert(decisionArchiveNotificationOutbox).values({
@@ -389,8 +391,10 @@ export function decisionRetentionService(
           entityId: item.subject.id,
           details: { sourceKind: item.sourceKind, archiveVersion: updated.archiveVersion },
         });
-      }
-    });
+        return true;
+      });
+      if (didArchive) archived += 1;
+    }
     return archived;
   }
 

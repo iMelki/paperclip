@@ -5,6 +5,7 @@ import { readFile, readdir } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import postgres from "postgres";
 import * as schema from "./schema/index.js";
+import { withTransientWriteRetry } from "./transient-write-retry.js";
 
 const MIGRATIONS_FOLDER = fileURLToPath(new URL("./migrations", import.meta.url));
 const DRIZZLE_MIGRATIONS_TABLE = "__drizzle_migrations";
@@ -12,6 +13,94 @@ const MIGRATIONS_JOURNAL_JSON = fileURLToPath(new URL("./migrations/meta/_journa
 
 function createUtilitySql(url: string) {
   return postgres(url, { max: 1, onnotice: () => {} });
+}
+
+type RegisteredPostgresClient = ReturnType<typeof postgres>;
+
+/**
+ * Derives a registry key from a connection URL's host and port only. We must
+ * not retain or log the full URL, because it carries credentials.
+ */
+function hostPortKey(url: string): string {
+  const parsed = new URL(url);
+  return `${parsed.hostname}:${parsed.port || "5432"}`;
+}
+
+/**
+ * Same as `hostPortKey`, but returns `null` instead of throwing when the URL
+ * does not parse. `postgres(url)` tolerates a value `new URL()` rejects (an
+ * empty string falls back to the `PG*` environment variables), so `createDb`
+ * must tolerate it too: skip the registry entry and let the driver decide
+ * the outcome, instead of throwing an error the driver itself would not.
+ */
+function hostPortKeyOrNull(url: string): string | null {
+  try {
+    return hostPortKey(url);
+  } catch (error) {
+    if (error instanceof TypeError && (error as NodeJS.ErrnoException).code === "ERR_INVALID_URL") return null;
+    throw error;
+  }
+}
+
+// Tracks every client `createDb` hands out, keyed by host and port, so a test
+// fixture can end them before it stops the Postgres cluster they point at. A
+// `WeakRef` plus `FinalizationRegistry` means a long-lived process (a real
+// server) retains nothing extra: an unreferenced client is pruned on its own.
+const clientsByHostPort = new Map<string, Set<WeakRef<RegisteredPostgresClient>>>();
+const clientFinalizer = new FinalizationRegistry<{ hostPortKey: string; ref: WeakRef<RegisteredPostgresClient> }>(
+  ({ hostPortKey, ref }) => {
+    const refs = clientsByHostPort.get(hostPortKey);
+    if (!refs) return;
+    refs.delete(ref);
+    if (refs.size === 0) clientsByHostPort.delete(hostPortKey);
+  },
+);
+
+function registerClient(key: string, client: RegisteredPostgresClient): void {
+  const ref = new WeakRef(client);
+  let refs = clientsByHostPort.get(key);
+  if (!refs) {
+    refs = new Set();
+    clientsByHostPort.set(key, refs);
+  }
+  refs.add(ref);
+  clientFinalizer.register(client, { hostPortKey: key, ref }, ref);
+}
+
+/**
+ * Ends every live client `createDb` handed out for the given URL's host and
+ * port, then forgets them. Call this before stopping a Postgres cluster: a
+ * client that outlives the cluster it points at can crash the process (a
+ * reserved connection's deferred write firing after the socket is gone).
+ * Swallows individual `end()` errors so one bad client cannot block the rest.
+ */
+export async function closeRegisteredClients(url: string): Promise<void> {
+  await closeRegisteredClientsByKey(hostPortKey(url));
+}
+
+/**
+ * Ends every live client `createDb` handed out, for every host and port. The
+ * server calls this during SIGINT/SIGTERM shutdown so a restart does not leave
+ * idle backends behind until the OS reaps the sockets.
+ */
+export async function closeAllRegisteredClients(): Promise<void> {
+  const keys = [...clientsByHostPort.keys()];
+  await Promise.all(keys.map((key) => closeRegisteredClientsByKey(key)));
+}
+
+async function closeRegisteredClientsByKey(key: string): Promise<void> {
+  const refs = clientsByHostPort.get(key);
+  if (!refs) return;
+
+  clientsByHostPort.delete(key);
+  const clients: RegisteredPostgresClient[] = [];
+  for (const ref of refs) {
+    clientFinalizer.unregister(ref);
+    const client = ref.deref();
+    if (client) clients.push(client);
+  }
+
+  await Promise.all(clients.map((client) => client.end({ timeout: 1 }).catch(() => {})));
 }
 
 function isSafeIdentifier(value: string): boolean {
@@ -35,13 +124,20 @@ function splitMigrationStatements(content: string): string[] {
 }
 
 export type MigrationState =
-  | { status: "upToDate"; tableCount: number; availableMigrations: string[]; appliedMigrations: string[] }
+  | {
+      status: "upToDate";
+      tableCount: number;
+      availableMigrations: string[];
+      appliedMigrations: string[];
+      journalEntryCount: number;
+    }
   | {
       status: "needsMigrations";
       tableCount: number;
       availableMigrations: string[];
       appliedMigrations: string[];
       pendingMigrations: string[];
+      journalEntryCount: number;
       reason: "no-migration-journal-empty-db" | "no-migration-journal-non-empty-db" | "pending-migrations";
     };
 
@@ -60,6 +156,46 @@ export interface DatabaseClientOptions {
   idleTimeoutSeconds?: number;
   /** postgres.js `connect_timeout` in seconds (driver default: 30). */
   connectTimeoutSeconds?: number;
+  /**
+   * postgres.js `max_lifetime` in seconds. Bounds how long one pooled
+   * connection is reused before the client replaces it (driver default: a
+   * random value between 30 and 60 minutes).
+   */
+  maxLifetimeSeconds?: number;
+  /**
+   * postgres.js `connection.application_name`, shown in
+   * `pg_stat_activity.application_name`. Lets an operator tell Paperclip's
+   * pool apart from other clients of the same database (driver default:
+   * `postgres.js`).
+   */
+  applicationName?: string;
+}
+
+/**
+ * Idle pooled connections close after this many seconds unless
+ * `DATABASE_IDLE_TIMEOUT_SECONDS` says otherwise. The driver default keeps an
+ * idle connection open forever, so a process that stops issuing queries still
+ * holds every backend it ever opened. Set `DATABASE_IDLE_TIMEOUT_SECONDS=0`
+ * to restore the driver default.
+ */
+export const DEFAULT_DATABASE_IDLE_TIMEOUT_SECONDS = 60;
+/** `application_name` reported to PostgreSQL unless `DATABASE_APPLICATION_NAME` overrides it. */
+export const DEFAULT_DATABASE_APPLICATION_NAME = "paperclip";
+/**
+ * postgres.js pool size when `DATABASE_POOL_MAX` is unset. The driver opens
+ * one backend per concurrent query until this cap, then queues.
+ */
+export const POSTGRES_JS_DEFAULT_POOL_MAX = 10;
+
+/**
+ * Pool size `createDb` actually gives postgres.js. An explicit
+ * `maxConnections` wins. Otherwise the driver default applies, because
+ * `postgresJsOptions` omits `max` and postgres.js uses 10.
+ */
+export function effectiveDatabasePoolMax(
+  options: DatabaseClientOptions = resolveDatabaseClientOptions(databaseClientOptionsFromEnv()),
+): number {
+  return options.maxConnections ?? POSTGRES_JS_DEFAULT_POOL_MAX;
 }
 
 function envBoolean(env: NodeJS.ProcessEnv, name: string): boolean | undefined {
@@ -79,12 +215,28 @@ function envPositiveInteger(env: NodeJS.ProcessEnv, name: string): number | unde
   return Number.parseInt(value, 10);
 }
 
+function envNonNegativeInteger(env: NodeJS.ProcessEnv, name: string): number | undefined {
+  const value = env[name]?.trim();
+  if (value === undefined || value === "") return undefined;
+  if (!/^(?:0|[1-9]\d*)$/.test(value)) {
+    throw new Error(`${name} must be a non-negative integer, got: ${env[name]}`);
+  }
+  return Number.parseInt(value, 10);
+}
+
+function envNonEmptyString(env: NodeJS.ProcessEnv, name: string): string | undefined {
+  const value = env[name]?.trim();
+  if (value === undefined || value === "") return undefined;
+  return value;
+}
+
 /**
  * Database client tuning from the environment, so hosted deployments can
  * adapt to their connection topology (pooled endpoints, network latency)
- * without editing source. Every variable is optional; when unset the
- * driver defaults apply and behavior is identical to a bare
- * `postgres(url)` — self-hosted setups need none of these.
+ * without editing source. Every variable is optional. This function returns
+ * only the values the environment sets; `resolveDatabaseClientOptions` adds
+ * Paperclip's own defaults on top, and the driver defaults apply to the rest
+ * — self-hosted setups need none of these.
  */
 export function databaseClientOptionsFromEnv(env: NodeJS.ProcessEnv = process.env): DatabaseClientOptions {
   const options: DatabaseClientOptions = {};
@@ -92,11 +244,31 @@ export function databaseClientOptionsFromEnv(env: NodeJS.ProcessEnv = process.en
   if (prepare !== undefined) options.prepare = prepare;
   const maxConnections = envPositiveInteger(env, "DATABASE_POOL_MAX");
   if (maxConnections !== undefined) options.maxConnections = maxConnections;
-  const idleTimeoutSeconds = envPositiveInteger(env, "DATABASE_IDLE_TIMEOUT_SECONDS");
+  // `0` is allowed here: it disables idle reaping (the driver default).
+  const idleTimeoutSeconds = envNonNegativeInteger(env, "DATABASE_IDLE_TIMEOUT_SECONDS");
   if (idleTimeoutSeconds !== undefined) options.idleTimeoutSeconds = idleTimeoutSeconds;
   const connectTimeoutSeconds = envPositiveInteger(env, "DATABASE_CONNECT_TIMEOUT_SECONDS");
   if (connectTimeoutSeconds !== undefined) options.connectTimeoutSeconds = connectTimeoutSeconds;
+  const maxLifetimeSeconds = envPositiveInteger(env, "DATABASE_MAX_LIFETIME_SECONDS");
+  if (maxLifetimeSeconds !== undefined) options.maxLifetimeSeconds = maxLifetimeSeconds;
+  const applicationName = envNonEmptyString(env, "DATABASE_APPLICATION_NAME");
+  if (applicationName !== undefined) options.applicationName = applicationName;
   return options;
+}
+
+/**
+ * Fills in Paperclip's defaults for the options the caller left unset: idle
+ * connections are reaped after `DEFAULT_DATABASE_IDLE_TIMEOUT_SECONDS`, and the
+ * pool identifies itself as `DEFAULT_DATABASE_APPLICATION_NAME`. Everything
+ * else stays at the driver default. An explicit value (including
+ * `idleTimeoutSeconds: 0`) always wins over the default.
+ */
+export function resolveDatabaseClientOptions(options: DatabaseClientOptions): DatabaseClientOptions {
+  return {
+    ...options,
+    idleTimeoutSeconds: options.idleTimeoutSeconds ?? DEFAULT_DATABASE_IDLE_TIMEOUT_SECONDS,
+    applicationName: options.applicationName ?? DEFAULT_DATABASE_APPLICATION_NAME,
+  };
 }
 
 export function postgresJsOptions(options: DatabaseClientOptions): Record<string, unknown> {
@@ -105,13 +277,20 @@ export function postgresJsOptions(options: DatabaseClientOptions): Record<string
   if (options.maxConnections !== undefined) driverOptions.max = options.maxConnections;
   if (options.idleTimeoutSeconds !== undefined) driverOptions.idle_timeout = options.idleTimeoutSeconds;
   if (options.connectTimeoutSeconds !== undefined) driverOptions.connect_timeout = options.connectTimeoutSeconds;
+  if (options.maxLifetimeSeconds !== undefined) driverOptions.max_lifetime = options.maxLifetimeSeconds;
+  if (options.applicationName !== undefined) {
+    driverOptions.connection = { application_name: options.applicationName };
+  }
   return driverOptions;
 }
 
 export function createDb(url: string, options?: DatabaseClientOptions) {
-  const resolved = options ?? databaseClientOptionsFromEnv();
+  const resolved = resolveDatabaseClientOptions(options ?? databaseClientOptionsFromEnv());
   const sql = postgres(url, postgresJsOptions(resolved));
-  return drizzlePg(sql, { schema });
+  const key = hostPortKeyOrNull(url);
+  if (key) registerClient(key, sql);
+  // A pooler-recycled socket replays the query instead of failing the request that drew it.
+  return drizzlePg(withTransientWriteRetry(sql), { schema });
 }
 
 export async function getPostgresDataDirectory(url: string): Promise<string | null> {
@@ -325,6 +504,9 @@ async function applyPendingMigrationsManually(
 
       await runInTransaction(sql, async () => {
         for (const statement of splitMigrationStatements(migrationContent)) {
+          if (await migrationStatementAlreadyApplied(sql, statement)) {
+            continue;
+          }
           await sql.unsafe(statement);
         }
 
@@ -404,6 +586,25 @@ async function columnExists(
   return rows[0]?.exists ?? false;
 }
 
+async function columnHasDataType(
+  sql: ReturnType<typeof postgres>,
+  tableName: string,
+  columnName: string,
+  dataType: string,
+): Promise<boolean> {
+  const rows = await sql<{ dataType: string; udtName: string }[]>`
+    SELECT data_type AS "dataType", udt_name AS "udtName"
+    FROM information_schema.columns
+    WHERE table_schema = 'public'
+      AND table_name = ${tableName}
+      AND column_name = ${columnName}
+  `;
+  const expected = dataType.toLowerCase();
+  return rows.some((row) => (
+    row.dataType.toLowerCase() === expected || row.udtName.toLowerCase() === expected
+  ));
+}
+
 async function indexExists(
   sql: ReturnType<typeof postgres>,
   indexName: string,
@@ -437,11 +638,65 @@ async function constraintExists(
   return rows[0]?.exists ?? false;
 }
 
+async function functionExists(
+  sql: ReturnType<typeof postgres>,
+  functionName: string,
+): Promise<boolean> {
+  const rows = await sql<{ exists: boolean }[]>`
+    SELECT EXISTS (
+      SELECT 1
+      FROM pg_proc p
+      JOIN pg_namespace n ON n.oid = p.pronamespace
+      WHERE n.nspname = 'public'
+        AND p.proname = ${functionName}
+    ) AS exists
+  `;
+  return rows[0]?.exists ?? false;
+}
+
+async function triggerExists(
+  sql: ReturnType<typeof postgres>,
+  triggerName: string,
+): Promise<boolean> {
+  const rows = await sql<{ exists: boolean }[]>`
+    SELECT EXISTS (
+      SELECT 1
+      FROM pg_trigger t
+      JOIN pg_class c ON c.oid = t.tgrelid
+      JOIN pg_namespace n ON n.oid = c.relnamespace
+      WHERE n.nspname = 'public'
+        AND t.tgname = ${triggerName}
+        AND NOT t.tgisinternal
+    ) AS exists
+  `;
+  return rows[0]?.exists ?? false;
+}
+
+async function heartbeatNextEventSequencesAreCurrent(
+  sql: ReturnType<typeof postgres>,
+): Promise<boolean> {
+  const rows = await sql<{ current: boolean }[]>`
+    SELECT NOT EXISTS (
+      SELECT 1
+      FROM heartbeat_runs run
+      WHERE run.next_event_seq IS DISTINCT FROM COALESCE((
+        SELECT max(event.seq) + 1
+        FROM heartbeat_run_events event
+        WHERE event.run_id = run.id
+      ), 1)
+    ) AS current
+  `;
+  return rows[0]?.current ?? false;
+}
+
 async function migrationStatementAlreadyApplied(
   sql: ReturnType<typeof postgres>,
   statement: string,
 ): Promise<boolean> {
-  const normalized = statement.replace(/\s+/g, " ").trim();
+  const normalized = statement
+    .replace(/--[^\n]*/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
 
   const createTableMatch = normalized.match(/^CREATE TABLE(?: IF NOT EXISTS)? "([^"]+)"/i);
   if (createTableMatch) {
@@ -455,14 +710,83 @@ async function migrationStatementAlreadyApplied(
     return columnExists(sql, addColumnMatch[1], addColumnMatch[2]);
   }
 
-  const createIndexMatch = normalized.match(/^CREATE (?:UNIQUE )?INDEX(?: IF NOT EXISTS)? "([^"]+)"/i);
+  const alterColumnTypeMatch = normalized.match(
+    /^ALTER TABLE "([^"]+)" ALTER COLUMN "([^"]+)" SET DATA TYPE ([A-Za-z0-9_]+)/i,
+  );
+  if (alterColumnTypeMatch) {
+    return columnHasDataType(
+      sql,
+      alterColumnTypeMatch[1],
+      alterColumnTypeMatch[2],
+      alterColumnTypeMatch[3],
+    );
+  }
+
+  const createIndexMatch = normalized.match(
+    /^CREATE (?:UNIQUE )?INDEX(?: IF NOT EXISTS)? "([^"]+)" ON "([^"]+)"/i,
+  );
   if (createIndexMatch) {
-    return indexExists(sql, createIndexMatch[1]);
+    if (await indexExists(sql, createIndexMatch[1])) return true;
+    const tableName = createIndexMatch[2];
+    const onIndex = normalized.toUpperCase().indexOf(" ON ");
+    const afterOn = onIndex >= 0 ? normalized.slice(onIndex) : "";
+    const columnNames = [...afterOn.matchAll(/"([^"]+)"/g)]
+      .map((match) => match[1])
+      .filter((name) => name !== tableName);
+    for (const columnName of columnNames) {
+      if (!(await columnExists(sql, tableName, columnName))) return true;
+    }
+    return false;
   }
 
   const addConstraintMatch = normalized.match(/^ALTER TABLE "([^"]+)" ADD CONSTRAINT "([^"]+)"/i);
   if (addConstraintMatch) {
-    return constraintExists(sql, addConstraintMatch[2]);
+    if (await constraintExists(sql, addConstraintMatch[2])) return true;
+    const fkColumnMatch = normalized.match(/FOREIGN KEY \("([^"]+)"\)/i);
+    if (fkColumnMatch && !(await columnExists(sql, addConstraintMatch[1], fkColumnMatch[1]))) {
+      return true;
+    }
+    return false;
+  }
+
+  const dropColumnMatch = normalized.match(
+    /^ALTER TABLE "([^"]+)" DROP COLUMN(?: IF EXISTS)? "([^"]+)"/i,
+  );
+  if (dropColumnMatch) return !(await columnExists(sql, dropColumnMatch[1], dropColumnMatch[2]));
+
+  const dropConstraintMatch = normalized.match(
+    /^ALTER TABLE "([^"]+)" DROP CONSTRAINT(?: IF EXISTS)? "([^"]+)"/i,
+  );
+  if (dropConstraintMatch) return !(await constraintExists(sql, dropConstraintMatch[2]));
+
+  const dropTableMatch = normalized.match(/^DROP TABLE(?: IF EXISTS)? "([^"]+)"/i);
+  if (dropTableMatch) return !(await tableExists(sql, dropTableMatch[1]));
+
+  const dropIndexMatch = normalized.match(/^DROP (?:UNIQUE )?INDEX(?: IF EXISTS)? "([^"]+)"/i);
+  if (dropIndexMatch) return !(await indexExists(sql, dropIndexMatch[1]));
+
+  const createFunctionMatch = normalized.match(
+    /^CREATE OR REPLACE FUNCTION "?([A-Za-z_][A-Za-z0-9_]*)"?\s*\(/i,
+  );
+  if (createFunctionMatch) {
+    return functionExists(sql, createFunctionMatch[1]);
+  }
+
+  const createTriggerMatch = normalized.match(
+    /^CREATE TRIGGER "?([A-Za-z_][A-Za-z0-9_]*)"?/i,
+  );
+  if (createTriggerMatch) {
+    return triggerExists(sql, createTriggerMatch[1]);
+  }
+
+  // This native-runner cursor backfill has a persistent postcondition. Verify it
+  // instead of replaying it when a restored database is missing only the
+  // migration-history row.
+  if (
+    normalized.startsWith('UPDATE "heartbeat_runs" AS run')
+    && normalized.includes('SET "next_event_seq" = COALESCE')
+  ) {
+    return heartbeatNextEventSequencesAreCurrent(sql);
   }
 
   // If we cannot reason about a statement safely, require manual migration.
@@ -683,6 +1007,7 @@ export async function inspectMigrations(url: string): Promise<MigrationState> {
           availableMigrations,
           appliedMigrations: [],
           pendingMigrations: availableMigrations,
+          journalEntryCount: 0,
           reason: "no-migration-journal-non-empty-db",
         };
       }
@@ -693,10 +1018,16 @@ export async function inspectMigrations(url: string): Promise<MigrationState> {
         availableMigrations,
         appliedMigrations: [],
         pendingMigrations: availableMigrations,
+        journalEntryCount: 0,
         reason: "no-migration-journal-empty-db",
       };
     }
 
+    const qualifiedMigrationTable = `${quoteIdentifier(migrationTableSchema)}.${quoteIdentifier(DRIZZLE_MIGRATIONS_TABLE)}`;
+    const journalCountRows = await sql.unsafe<{ count: number }[]>(
+      `SELECT count(*)::int AS count FROM ${qualifiedMigrationTable}`,
+    );
+    const journalEntryCount = journalCountRows[0]?.count ?? 0;
     const appliedMigrations = await loadAppliedMigrations(sql, migrationTableSchema, availableMigrations);
     const pendingMigrations = availableMigrations.filter((name) => !appliedMigrations.includes(name));
     if (pendingMigrations.length === 0) {
@@ -705,6 +1036,7 @@ export async function inspectMigrations(url: string): Promise<MigrationState> {
         tableCount,
         availableMigrations,
         appliedMigrations,
+        journalEntryCount,
       };
     }
 
@@ -714,6 +1046,7 @@ export async function inspectMigrations(url: string): Promise<MigrationState> {
       availableMigrations,
       appliedMigrations,
       pendingMigrations,
+      journalEntryCount,
       reason: "pending-migrations",
     };
   } finally {

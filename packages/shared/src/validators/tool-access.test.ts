@@ -3,15 +3,64 @@ import {
   connectToolAppSchema,
   connectionTokenRequestSchema,
   createToolConnectionSchema,
+  createToolProfileSchema,
+  createToolProfileEntryForProfileSchema,
+  createToolMcpGatewaySchema,
+  createToolPolicySchema,
   putToolConnectionInstallsSchema,
   reviewToolConnectionCatalogSchema,
   startConnectionAuthorizationSchema,
   toolCredentialSecretRefSchema,
   toolRedactedValueSummarySchema,
   toolTransportConfigSchema,
+  updateToolConnectionSchema,
+  updateToolProfileSchema,
+  updateToolProfileWithEntriesSchema,
+  updateToolProfileEntrySchema,
+  updateToolMcpGatewaySchema,
+  updateToolPolicySchema,
 } from "./tool-access.js";
 
 describe("tool access validators", () => {
+  it.each([
+    ["connection", updateToolConnectionSchema, { enabled: false }],
+    ["profile", updateToolProfileSchema, { name: "Renamed" }],
+    ["profile with entries", updateToolProfileWithEntriesSchema, { name: "Renamed" }],
+    ["profile entry", updateToolProfileEntrySchema, { toolName: "read_notes" }],
+    ["gateway", updateToolMcpGatewaySchema, { name: "Renamed" }],
+    ["policy", updateToolPolicySchema, { name: "Renamed" }],
+  ] as const)("preserves omitted %s PATCH fields and rejects an empty PATCH", (_name, schema, input) => {
+    // Creation defaults must not clear credentials/config, activate a disabled
+    // policy/profile, broaden selectors, or turn an exclusion into an inclusion.
+    expect(schema.parse(input)).toEqual(input);
+    expect(schema.safeParse({}).success).toBe(false);
+  });
+
+  it("still permits an explicit credential-reference clear in a connection PATCH", () => {
+    expect(updateToolConnectionSchema.parse({ credentialSecretRefs: [] })).toEqual({ credentialSecretRefs: [] });
+  });
+
+  it.each([
+    [createToolConnectionSchema, { name: "Connection" }, {
+      authKind: "none", ownership: "customer", connectionKind: "managed",
+      transportConfig: {}, credentialSecretRefs: [],
+    }],
+    [createToolProfileSchema, { profileKey: "test", name: "Profile" }, {
+      status: "active", defaultAction: "deny",
+    }],
+    [createToolProfileEntryForProfileSchema, { selectorType: "tool_name", toolName: "read_notes" }, {
+      effect: "include",
+    }],
+    [createToolMcpGatewaySchema, { name: "Gateway", profileId: "11111111-1111-4111-8111-111111111111" }, {
+      defaultProfileMode: "gateway_only", contextScopeType: "none",
+    }],
+    [createToolPolicySchema, { name: "Policy", policyType: "block" }, {
+      enabled: true, priority: 100, selectors: {},
+    }],
+  ] as const)("retains creation defaults %#", (schema, input, defaults) => {
+    expect(schema.parse(input)).toMatchObject(defaults);
+  });
+
   it("defaults connection token subjects to app", () => {
     expect(connectionTokenRequestSchema.parse({})).toEqual({ subject: { type: "app" } });
   });

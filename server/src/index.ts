@@ -4,15 +4,19 @@
 // instrumentationReady before opening DB connections or constructing the
 // HTTP server, so trace coverage does not depend on incidental timing.
 import { instrumentationReady, shutdownInstrumentation } from "./instrumentation.js";
-import { existsSync, readFileSync, rmSync } from "node:fs";
+import { sentryReady, shutdownSentry, captureException } from "./sentry.js";
+import { existsSync } from "node:fs";
+import { readFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { stdin, stdout } from "node:process";
 import { pathToFileURL } from "node:url";
 import type { Request as ExpressRequest, RequestHandler } from "express";
+import { warnIfUnsupportedNodeVersion } from "@paperclipai/shared/node-version";
 import { and, eq } from "drizzle-orm";
 import {
+  closeAllRegisteredClients,
   createDb,
   ensurePostgresDatabase,
   formatEmbeddedPostgresError,
@@ -28,17 +32,37 @@ import {
   companies,
   companyMemberships,
   instanceUserRoles,
+  effectiveDatabasePoolMax,
 } from "@paperclipai/db";
 import detectPort from "detect-port";
 import { createApp } from "./app.js";
 import { loadConfig } from "./config.js";
-import { logger } from "./middleware/logger.js";
+import { resolveListenPort } from "./listen-port.js";
+import { resolveEmbeddedPostgresLogFile } from "./embedded-postgres-log-file.js";
+import {
+  createNamedSweepScheduler,
+  runHeartbeatTickWithConnectRetry,
+  schedulerSweepConcurrency,
+} from "./services/heartbeat-scheduler-sweeps.js";
+import {
+  embeddedPostgresServerLogPath,
+  isPostmasterPidAlive,
+  readinessProbeUrl,
+  type RecoveryWaitInfo,
+  resolveRecoveryWaitPolicy,
+  startEmbeddedPostgresFollowingRecovery,
+} from "./embedded-postgres-start-wait.js";
+import { EmbeddedPostgresLockRefusal, acquireEmbeddedStartLock, isSameDataDirectory, moveStaleLockAside, readLockIdentity, readRunningEmbeddedPostgres } from "./embedded-postgres-reuse.js";
+import { logger, resolveServerLogDir } from "./middleware/logger.js";
 import {
   getManagedInstanceConfig,
   type ManagedInstanceConfig,
 } from "./services/managed-config.js";
+import { getOperatorSettingDefaults } from "./services/setting-defaults.js";
 import { setupEnvironmentCustomImageTerminalWebSocketServer } from "./realtime/environment-custom-image-terminal-ws.js";
 import { setupLiveEventsWebSocketServer } from "./realtime/live-events-ws.js";
+import { setupRunnerPrpWebSocketServer } from "./realtime/runner-prp-ws.js";
+import { cloudActorHeaderSourceFromHeaders, resolveCloudTenantActor } from "./middleware/auth.js";
 import {
   feedbackService,
   applyManagedEnvironments,
@@ -61,9 +85,18 @@ import {
   routineService,
   statusCardService,
   toolAccessService,
+  workspaceOperationService,
 } from "./services/index.js";
+import { questionResponseDeliveryService } from "./services/question-response-delivery.js";
 import { queueIssueAssignmentWakeup } from "./services/issue-assignment-wakeup.js";
 import { createSecretProposalsService } from "./services/secret-proposals.js";
+import { environmentRuntimeService } from "./services/environment-runtime.js";
+import { createDbAdapterAuthSessionStore } from "./services/codex-device-login-service.js";
+import {
+  createCodexDeviceLoginReaper,
+  createProductionLoginSessionReaperRuntime,
+} from "./services/codex-device-login-reaper.js";
+import { createProductionSetupTokenReaper } from "./services/setup-token-reaper.js";
 import { resolveWorktreeRunExecutionActivationState } from "./services/instance-settings.js";
 import {
   parseAdapterRegistryEnv,
@@ -71,7 +104,15 @@ import {
 } from "./services/adapter-registry-bootstrap.js";
 import { createFeedbackTraceShareClientFromConfig } from "./services/feedback-share-client.js";
 import { buildRuntimeApiCandidateUrls, choosePrimaryRuntimeApiUrl } from "./runtime-api.js";
+import { isLoopbackHost, rewriteLoopbackUrlPort } from "./url-utils.js";
 import { createPluginWorkerManager } from "./services/plugin-worker-manager.js";
+import {
+  createDuplexAggregateByteLedgerTelemetry,
+  DuplexAggregateByteLedger,
+  type DuplexAggregateByteLedgerMetricSink,
+} from "@paperclipai/adapter-utils/duplex-aggregate-byte-ledger";
+import { resolveDuplexAggregateCeilingBytesFromEnv } from "./duplex-aggregate-ceiling-env.js";
+import { DUPLEX_COUNTER_AGGREGATE_BYTE_ACCOUNTING_UNDERFLOW_TOTAL } from "@paperclipai/adapter-utils/duplex-observability";
 import { createStorageServiceFromConfig } from "./storage/index.js";
 import { printStartupBanner } from "./startup-banner.js";
 import { getBoardClaimWarningUrl, initializeBoardClaimChallenge } from "./board-claim.js";
@@ -82,10 +123,16 @@ import { ensureDecisionSigningSecret } from "./services/decision-signing.js";
 import { createDecisionRetentionNotifyOriginAgent, createDecisionWakeOriginAgent } from "./services/decision-wakeup.js";
 import {
   coordinateHeartbeatSchedulerShutdown,
+  finalizeServerShutdown,
   loadWithoutCoordinatedShutdownSignalHooks,
 } from "./shutdown.js";
 import { systemdNotify } from "./services/systemd-notify.js";
 import { flushInFlightRunLogMirrors } from "./services/run-log-store.js";
+import {
+  createEmbeddedPostgresSupervisor,
+  type EmbeddedPostgresSupervisor,
+  type SupervisedEmbeddedPostgres,
+} from "./embedded-postgres-supervisor.js";
 import type {
   InstanceDatabaseBackupRunResult,
   InstanceDatabaseBackupTrigger,
@@ -102,10 +149,13 @@ type BetterAuthSessionResult = {
   user: BetterAuthSessionUser | null;
 };
 
-type EmbeddedPostgresInstance = {
+type EmbeddedPostgresInstance = SupervisedEmbeddedPostgres & {
   initialise(): Promise<void>;
   start(): Promise<void>;
   stop(): Promise<void>;
+  /** Vendor fields the crash-recovery start wait reads and disarms. */
+  process?: unknown;
+  options?: { logFile?: unknown };
 };
 
 type EmbeddedPostgresCtor = new (opts: {
@@ -114,10 +164,36 @@ type EmbeddedPostgresCtor = new (opts: {
   password: string;
   port: number;
   persistent: boolean;
+  /** Windows: how long pg_ctl waits for the server to start. Unset = the dependency default. */
+  startTimeoutSeconds?: number;
   initdbFlags?: string[];
+  /** Windows: where pg_ctl writes the server log. Unset = the dependency default. */
+  logFile?: string;
   onLog?: (message: unknown) => void;
   onError?: (message: unknown) => void;
 }) => EmbeddedPostgresInstance;
+
+/** Constructor options that do not depend on the selected port. */
+type EmbeddedPostgresFixedOptions = Omit<ConstructorParameters<EmbeddedPostgresCtor>[0], "port">;
+
+/** One log line per crash-recovery wait event: the policy when it starts, then progress and heartbeats. */
+function logRecoveryWait(
+  info: RecoveryWaitInfo,
+  serverLogPath: string,
+  policy: { maxWaitMs: number; stallMs: number },
+): void {
+  const fields = { ...info, serverLogPath };
+  if (info.event === "started") {
+    logger.warn(
+      { ...fields, maxWaitMs: policy.maxWaitMs, stallMs: policy.stallMs },
+      "Embedded PostgreSQL start timed out during crash recovery; waiting while the server log shows progress",
+    );
+  } else if (info.event === "heartbeat") {
+    logger.warn(fields, "Embedded PostgreSQL crash recovery: still waiting, no new progress line yet");
+  } else {
+    logger.warn(fields, "Embedded PostgreSQL crash recovery in progress; waiting");
+  }
+}
 
 
 export interface StartedServer {
@@ -129,9 +205,14 @@ export interface StartedServer {
 }
 
 export async function startServer(): Promise<StartedServer> {
+  warnIfUnsupportedNodeVersion(process.versions.node, (message) => logger.warn(message));
+
   // Tracing must be active (or have failed and logged) before the first DB
   // connection or the HTTP server exists — see instrumentation.ts.
   await instrumentationReady;
+  // Error monitoring must be ready before the first request can fail — see
+  // sentry.ts.
+  await sentryReady;
   ensureDecisionSigningSecret();
   let config = loadConfig();
   initTelemetry({ enabled: config.telemetryEnabled });
@@ -228,11 +309,6 @@ export async function startServer(): Promise<StartedServer> {
     return "applied (pending migrations)";
   }
   
-  function isLoopbackHost(host: string): boolean {
-    const normalized = host.trim().toLowerCase();
-    return normalized === "127.0.0.1" || normalized === "localhost" || normalized === "::1";
-  }
-
   function isPostgresConnectionString(connectionString: string): boolean {
     try {
       const parsed = new URL(connectionString);
@@ -258,19 +334,6 @@ export async function startServer(): Promise<StartedServer> {
     }
   }
 
-  function rewriteLocalUrlPort(rawUrl: string | undefined, port: number): string | undefined {
-    if (!rawUrl) return undefined;
-    try {
-      const parsed = new URL(rawUrl);
-      // The URL API normalizes default ports like :80/:443 to "", so treat them as stable URLs.
-      if (!parsed.port) return rawUrl;
-      parsed.port = String(port);
-      return parsed.toString();
-    } catch {
-      return rawUrl;
-    }
-  }
-  
   const LOCAL_BOARD_USER_ID = "local-board";
   const LOCAL_BOARD_USER_EMAIL = "local@paperclip.local";
   const LOCAL_BOARD_USER_NAME = "Board";
@@ -334,6 +397,7 @@ export async function startServer(): Promise<StartedServer> {
   let db;
   let pluginMigrationDb;
   let embeddedPostgres: EmbeddedPostgresInstance | null = null;
+  let embeddedPostgresSupervisor: EmbeddedPostgresSupervisor | null = null;
   let embeddedPostgresStartedByThisProcess = false;
   let migrationSummary: MigrationSummary = "skipped";
   let activeDatabaseConnectionString: string;
@@ -412,101 +476,194 @@ export async function startServer(): Promise<StartedServer> {
     const clusterVersionFile = resolve(dataDir, "PG_VERSION");
     const clusterAlreadyInitialized = existsSync(clusterVersionFile);
     const postmasterPidFile = resolve(dataDir, "postmaster.pid");
-    const isPidRunning = (pid: number): boolean => {
-      try {
-        process.kill(pid, 0);
-        return true;
-      } catch {
-        return false;
-      }
+    // Recorded before anything inspects or removes the lock (the reuse check can move a
+    // stale one aside), so the crash-recovery wait below sees what the last shutdown left.
+    const leftoverLockAtStart = existsSync(postmasterPidFile);
+    // One embedded login for init, identity probes, and database access.
+    const embeddedPostgresUser = "paperclip";
+    const embeddedPostgresPassword = "paperclip";
+    const embeddedPostgresUrl = (targetPort: number, database: string) =>
+      `postgres://${encodeURIComponent(embeddedPostgresUser)}:${encodeURIComponent(embeddedPostgresPassword)}@127.0.0.1:${targetPort}/${database}`;
+    const embeddedAdminUrl = (targetPort: number) => embeddedPostgresUrl(targetPort, "postgres");
+    const embeddedPostgresOptions: EmbeddedPostgresFixedOptions = {
+      databaseDir: dataDir,
+      user: embeddedPostgresUser,
+      password: embeddedPostgresPassword,
+      persistent: true,
+      // Windows: pg_ctl keeps this file open, so it must stay outside the data
+      // directory or crash recovery cannot fsync it (sharing violation). It uses the server
+      // log directory; a data directory that contains it gets a sibling log file.
+      logFile: resolveEmbeddedPostgresLogFile(dataDir, resolveServerLogDir()),
+      // A leftover lock means the last shutdown was unclean, so start-up runs crash
+      // recovery. The lock is removed just before start(), which would hide that from
+      // the patch, so the wait is decided from the flag recorded at the top.
+      ...(leftoverLockAtStart ? { startTimeoutSeconds: 600 } : {}),
+      initdbFlags: ["--encoding=UTF8", "--locale=C", "--lc-messages=C"],
+      onLog: appendEmbeddedPostgresLog,
+      onError: appendEmbeddedPostgresLog,
     };
-  
-    const getRunningPid = (): number | null => {
-      if (!existsSync(postmasterPidFile)) return null;
-      try {
-        const pidLine = readFileSync(postmasterPidFile, "utf8").split("\n")[0]?.trim();
-        const pid = Number(pidLine);
-        if (!Number.isInteger(pid) || pid <= 0) return null;
-        if (!isPidRunning(pid)) return null;
-        return pid;
-      } catch {
-        return null;
-      }
-    };
-  
-    const runningPid = getRunningPid();
-    if (runningPid) {
-      logger.warn(`Embedded PostgreSQL already running; reusing existing process (pid=${runningPid}, port=${port})`);
-    } else {
-      const configuredAdminConnectionString = `postgres://paperclip:paperclip@127.0.0.1:${configuredPort}/postgres`;
-      try {
-        const actualDataDir = await getPostgresDataDirectory(configuredAdminConnectionString);
-        if (
-          typeof actualDataDir !== "string" ||
-          resolve(actualDataDir) !== resolve(dataDir)
-        ) {
-          throw new Error("reachable postgres does not use the expected embedded data directory");
-        }
-        await ensurePostgresDatabase(configuredAdminConnectionString, "paperclip");
-        logger.warn(
-          `Embedded PostgreSQL appears to already be reachable without a pid file; reusing existing server on configured port ${configuredPort}`,
-        );
-      } catch {
-        const detectedPort = await detectPort(configuredPort);
-        if (detectedPort !== configuredPort) {
-          logger.warn(`Embedded PostgreSQL port is in use; using next free port (requestedPort=${configuredPort}, selectedPort=${detectedPort})`);
-        }
-        port = detectedPort;
-        logger.info(`Using embedded PostgreSQL because no DATABASE_URL set (dataDir=${dataDir}, port=${port})`);
-        embeddedPostgres = new EmbeddedPostgres({
-          databaseDir: dataDir,
-          user: "paperclip",
-          password: "paperclip",
-          port,
-          persistent: true,
-          initdbFlags: ["--encoding=UTF8", "--locale=C", "--lc-messages=C"],
-          onLog: appendEmbeddedPostgresLog,
-          onError: appendEmbeddedPostgresLog,
-        });
+    // Resolved once from the options the instance is built with: the lock refusals and the
+    // crash-recovery start wait must read the same server log.
+    const serverLogPath = embeddedPostgresServerLogPath({ options: embeddedPostgresOptions }, dataDir);
+    // One start at a time on this data directory: the lock check, the stale-lock move and start()
+    // below must not interleave with another Paperclip start on the same directory.
+    const releaseStartLock = await acquireEmbeddedStartLock(dataDir);
+    try {
+      const runningPostgres = await readRunningEmbeddedPostgres(dataDir, configuredPort, embeddedAdminUrl, {
+        startLockHeld: true,
+        serverLogPath,
+      });
+      if (runningPostgres) {
+        port = runningPostgres.port;
+        logger.warn(`Embedded PostgreSQL already running; reusing existing process (pid=${runningPostgres.pid}, port=${port})`);
+      } else {
+        const configuredAdminConnectionString = embeddedAdminUrl(configuredPort);
+        try {
+          const actualDataDir = await getPostgresDataDirectory(configuredAdminConnectionString);
+          if (
+            typeof actualDataDir !== "string" ||
+            !(await isSameDataDirectory(actualDataDir, dataDir))
+          ) {
+            throw new Error("reachable postgres does not use the expected embedded data directory");
+          }
+          await ensurePostgresDatabase(configuredAdminConnectionString, "paperclip");
+          logger.warn(
+            `Embedded PostgreSQL appears to already be reachable without a pid file; reusing existing server on configured port ${configuredPort}`,
+          );
+        } catch {
+          const detectedPort = await detectPort(configuredPort);
+          if (detectedPort !== configuredPort) {
+            logger.warn(`Embedded PostgreSQL port is in use; using next free port (requestedPort=${configuredPort}, selectedPort=${detectedPort})`);
+          }
+          port = detectedPort;
+          logger.info(`Using embedded PostgreSQL because no DATABASE_URL set (dataDir=${dataDir}, port=${port})`);
+          embeddedPostgres = new EmbeddedPostgres({ ...embeddedPostgresOptions, port });
 
-        if (!clusterAlreadyInitialized) {
-          try {
-            await embeddedPostgres.initialise();
-          } catch (err) {
-            logEmbeddedPostgresFailure("initialise", err);
-            throw formatEmbeddedPostgresError(err, {
-              fallbackMessage: `Failed to initialize embedded PostgreSQL cluster in ${dataDir} on port ${port}`,
-              recentLogs: logBuffer.getRecentLogs(),
+          if (!clusterAlreadyInitialized) {
+            try {
+              await embeddedPostgres.initialise();
+            } catch (err) {
+              logEmbeddedPostgresFailure("initialise", err);
+              throw formatEmbeddedPostgresError(err, {
+                fallbackMessage: `Failed to initialize embedded PostgreSQL cluster in ${dataDir} on port ${port}`,
+                recentLogs: logBuffer.getRecentLogs(),
+              });
+            }
+          } else {
+            logger.info(`Embedded PostgreSQL cluster already exists (${clusterVersionFile}); skipping init`);
+          }
+
+          // Port detection and initialise() can take seconds, so a second start on this data directory
+          // may have written a live lock since the check above. Verify it again; only a lock that is
+          // still affirmatively stale is moved aside, and a live owner is reused or refused instead.
+          let racingPostgres: { pid: number; port: number } | null = null;
+          if (existsSync(postmasterPidFile)) {
+            // The lock that is examined is the lock that may be moved: a file that replaces it in
+            // between is put back and startup refuses.
+            const examinedLock = readLockIdentity(postmasterPidFile);
+            racingPostgres = await readRunningEmbeddedPostgres(dataDir, configuredPort, embeddedAdminUrl, {
+              startLockHeld: true,
+              serverLogPath,
+            });
+            if (!racingPostgres && existsSync(postmasterPidFile)) {
+              const aside = moveStaleLockAside(postmasterPidFile, examinedLock);
+              logger.warn({ aside }, "Moved stale embedded PostgreSQL lock file aside");
+            }
+          }
+          if (racingPostgres) {
+            embeddedPostgres = null;
+            port = racingPostgres.port;
+            logger.warn(
+              `Embedded PostgreSQL was started concurrently; reusing it (pid=${racingPostgres.pid}, port=${port})`,
+            );
+          } else {
+            try {
+              // pg_ctl on Windows stops waiting after 60 s, but crash recovery after an unclean
+              // shutdown can take longer on a loaded host. Keep waiting while the server log shows
+              // recovery progress, and never stop PostgreSQL in the middle of recovery.
+              const readyPort = port;
+              const recoveryPolicy = resolveRecoveryWaitPolicy();
+              const startWait = await startEmbeddedPostgresFollowingRecovery({
+                instance: embeddedPostgres,
+                serverLogPath,
+                policy: recoveryPolicy,
+                readServerLog: () => readFile(serverLogPath, "utf8"),
+                isPostmasterAlive: () => isPostmasterPidAlive(postmasterPidFile),
+                isReady: async (timeoutMs) => {
+                  const probeUrl = readinessProbeUrl(embeddedAdminUrl(readyPort), timeoutMs);
+                  const actual = await getPostgresDataDirectory(probeUrl);
+                  return typeof actual === "string" && (await isSameDataDirectory(actual, dataDir));
+                },
+                onRecoveryWait: (info) => logRecoveryWait(info, serverLogPath, recoveryPolicy),
+              });
+              if (startWait.followedRecovery) {
+                logger.warn({ waitedMs: startWait.waitedMs }, "Embedded PostgreSQL became ready after crash recovery");
+              }
+            } catch (err) {
+              logEmbeddedPostgresFailure("start", err);
+              throw formatEmbeddedPostgresError(err, {
+                fallbackMessage: `Failed to start embedded PostgreSQL on port ${port}`,
+                recentLogs: logBuffer.getRecentLogs(),
+              });
+            }
+            embeddedPostgresStartedByThisProcess = true;
+            const supervisedPort = port;
+            embeddedPostgresSupervisor = createEmbeddedPostgresSupervisor({
+              initialInstance: embeddedPostgres,
+              createInstance: () => new EmbeddedPostgres({ ...embeddedPostgresOptions, port: supervisedPort }),
+              // Recovery follows the same lock rules as start-up: a live or unproven owner is
+              // refused, and a stale lock is moved aside (never deleted) only under the start lock.
+              beforeRestart: async () => {
+                const releaseRestartLock = await acquireEmbeddedStartLock(dataDir);
+                try {
+                  const live = await readRunningEmbeddedPostgres(dataDir, supervisedPort, embeddedAdminUrl, {
+                    startLockHeld: true,
+                    serverLogPath,
+                  });
+                  if (live) {
+                    throw new Error(`Refusing embedded PostgreSQL recovery because the data directory reports a live process (pid=${live.pid})`);
+                  }
+                  if (existsSync(postmasterPidFile)) {
+                    moveStaleLockAside(postmasterPidFile, readLockIdentity(postmasterPidFile));
+                  }
+                } finally {
+                  releaseRestartLock();
+                }
+              },
+              onUnexpectedExit: (code, signal) => logger.error(
+                { code, signal, recentLogs: logBuffer.getRecentLogs() },
+                "Embedded PostgreSQL exited unexpectedly; attempting recovery",
+              ),
+              onRestartAttemptFailed: (err, attempt) => logger.error(
+                { err, attempt, recentLogs: logBuffer.getRecentLogs() },
+                "Embedded PostgreSQL recovery attempt failed",
+              ),
+              onRestarted: (attempt) => logger.info(
+                { attempt, port: supervisedPort },
+                "Embedded PostgreSQL recovered after unexpected exit",
+              ),
+              onRecoveryExhausted: (err) => {
+                logger.fatal(
+                  { err, recentLogs: logBuffer.getRecentLogs() },
+                  "Embedded PostgreSQL recovery exhausted; stopping the unhealthy server",
+                );
+                process.kill(process.pid, "SIGTERM");
+              },
             });
           }
-        } else {
-          logger.info(`Embedded PostgreSQL cluster already exists (${clusterVersionFile}); skipping init`);
         }
-
-        if (existsSync(postmasterPidFile)) {
-          logger.warn("Removing stale embedded PostgreSQL lock file");
-          rmSync(postmasterPidFile, { force: true });
-        }
-        try {
-          await embeddedPostgres.start();
-        } catch (err) {
-          logEmbeddedPostgresFailure("start", err);
-          throw formatEmbeddedPostgresError(err, {
-            fallbackMessage: `Failed to start embedded PostgreSQL on port ${port}`,
-            recentLogs: logBuffer.getRecentLogs(),
-          });
-        }
-        embeddedPostgresStartedByThisProcess = true;
       }
+    } finally {
+      releaseStartLock();
     }
   
-    const embeddedAdminConnectionString = `postgres://paperclip:paperclip@127.0.0.1:${port}/postgres`;
+    const embeddedAdminConnectionString = embeddedAdminUrl(port);
     const dbStatus = await ensurePostgresDatabase(embeddedAdminConnectionString, "paperclip");
     if (dbStatus === "created") {
       logger.info("Created embedded PostgreSQL database: paperclip");
     }
   
-    const embeddedConnectionString = `postgres://paperclip:paperclip@127.0.0.1:${port}/paperclip`;
+    const embeddedConnectionString = embeddedPostgresUrl(port, "paperclip");
     const shouldAutoApplyFirstRunMigrations = !clusterAlreadyInitialized || dbStatus === "created";
     if (shouldAutoApplyFirstRunMigrations) {
       logger.info("Detected first-run embedded PostgreSQL setup; applying pending migrations automatically");
@@ -549,9 +706,13 @@ export async function startServer(): Promise<StartedServer> {
   }
 
   const requestedListenPort = config.port;
-  const listenPort = await detectPort(requestedListenPort);
+  const listenPort = await resolveListenPort({
+    port: requestedListenPort,
+    host: config.host,
+    strictPort: config.strictPort,
+  });
   if (config.authBaseUrlMode === "explicit" && config.authPublicBaseUrl) {
-    config.authPublicBaseUrl = rewriteLocalUrlPort(config.authPublicBaseUrl, listenPort);
+    config.authPublicBaseUrl = rewriteLoopbackUrlPort(config.authPublicBaseUrl, listenPort);
   }
   
   let authReady = config.deploymentMode === "local_trusted";
@@ -645,6 +806,22 @@ export async function startServer(): Promise<StartedServer> {
     throw err;
   }
 
+  // Operator setting defaults (PAPERCLIP_SETTING_DEFAULTS). Same fail-closed
+  // posture as the managed-config parse above: malformed JSON or an invalid
+  // value for a known field refuses startup; unknown field names only warn.
+  try {
+    const operatorDefaults = getOperatorSettingDefaults();
+    if (operatorDefaults && Object.keys(operatorDefaults).length > 0) {
+      logger.warn(
+        { defaultedSettings: Object.keys(operatorDefaults).sort() },
+        "operator setting defaults active",
+      );
+    }
+  } catch (err) {
+    logger.error({ err }, "invalid PAPERCLIP_SETTING_DEFAULTS; refusing to start (fail closed)");
+    throw err;
+  }
+
   const uiMode = config.uiDevMiddleware ? "vite-dev" : config.serveUi ? "static" : "none";
   const storageService = createStorageServiceFromConfig(config);
   const feedback = feedbackService(db as any, {
@@ -686,12 +863,16 @@ export async function startServer(): Promise<StartedServer> {
       // Read retention from Instance Settings (DB) so changes take effect without restart.
       const generalSettings = await backupSettingsSvc.getGeneral();
       const retention = generalSettings.backupRetention;
+      // Opt-in (#125): PAPERCLIP_DB_BACKUP_PRESERVE_ALL=1 selects native pg_dump with no pruning and
+      // no JavaScript fallback. Default off keeps the prior retention-driven behaviour.
+      const preserveAllBackups = /^(1|true|yes|on)$/i.test(process.env.PAPERCLIP_DB_BACKUP_PRESERVE_ALL ?? "");
 
       const result = await runDatabaseBackup({
         connectionString: activeDatabaseConnectionString,
         backupDir: config.databaseBackupDir,
         retention,
         filenamePrefix: "paperclip",
+        ...(preserveAllBackups ? { backupEngine: "pg_dump" as const, preserveAll: true } : {}),
       });
       const finishedAt = new Date();
       const response: InstanceDatabaseBackupRunResult = {
@@ -723,9 +904,57 @@ export async function startServer(): Promise<StartedServer> {
       databaseBackupInFlight = false;
     }
   };
-  const pluginWorkerManager = createPluginWorkerManager();
+  // The process-owned aggregate byte ledger for the sandbox duplex channel. One
+  // ledger per host process bounds the aggregate bytes that all live duplex routes
+  // retain. The route-count controller bounds only the route count, so without this
+  // ledger the per-route byte bounds multiply to many gigabytes at the maximum
+  // route count. The manager injects this same object into every worker handle, so
+  // one shared gauge bounds every host-side retention site.
+  //
+  // The optional operator override reads PAPERCLIP_MAX_AGGREGATE_DUPLEX_ROUTE_BYTES.
+  // An absent variable uses the documented default. A present invalid, blank,
+  // whitespace-only, non-finite, zero, negative, non-integer, unsafe, or
+  // over-maximum value does not fail startup. The host process is multi-tenant, so
+  // one invalid environment value must not brick the whole host. The helper sends
+  // the raw string to the resolver, so a present blank value is invalid, not
+  // absent. The resolver rejects the invalid override and returns the safe default.
+  // The reporter logs the rejection loudly at error, so the misconfiguration stays
+  // visible while the host stays up. The log line carries only the rejected numeric
+  // value, never the raw string.
+  const duplexAggregateCeilingBytes = resolveDuplexAggregateCeilingBytesFromEnv(
+    process.env.PAPERCLIP_MAX_AGGREGATE_DUPLEX_ROUTE_BYTES,
+    (rejectedValue) => {
+      logger.error(
+        { rejectedValue },
+        "duplex aggregate byte ceiling override rejected; using the safe default",
+      );
+    },
+  );
+  // The server has no process metric pipeline yet, so the ledger telemetry maps to
+  // the structured logger. The gauge logs at debug. A reservation rejection logs at
+  // warn, because it marks an availability limit hit. An accounting-underflow defect
+  // logs at error, because it marks a real cleanup bug. Each record carries only the
+  // fixed metric name and the numeric value; no route, company, run, or payload
+  // value reaches a log line.
+  const duplexAggregateByteLedgerMetricSink: DuplexAggregateByteLedgerMetricSink = {
+    setGauge(name, value) {
+      logger.debug({ metric: name, value }, "duplex aggregate byte ledger gauge");
+    },
+    incrementCounter(name) {
+      if (name === DUPLEX_COUNTER_AGGREGATE_BYTE_ACCOUNTING_UNDERFLOW_TOTAL) {
+        logger.error({ metric: name }, "duplex aggregate byte ledger accounting underflow");
+        return;
+      }
+      logger.warn({ metric: name }, "duplex aggregate byte ledger reservation rejected");
+    },
+  };
+  const duplexAggregateByteLedger = new DuplexAggregateByteLedger({
+    ceilingBytes: duplexAggregateCeilingBytes,
+    telemetry: createDuplexAggregateByteLedgerTelemetry(duplexAggregateByteLedgerMetricSink),
+  });
+  const pluginWorkerManager = createPluginWorkerManager({ duplexAggregateByteLedger });
   const heartbeat = config.heartbeatSchedulerEnabled
-    ? heartbeatService(db as any, { pluginWorkerManager })
+    ? heartbeatService(db as any, { pluginWorkerManager, duplexAggregateByteLedger })
     : null;
   const decisionServiceOptions = {
     wakeOriginAgent: createDecisionWakeOriginAgent(heartbeat?.wakeup ?? null),
@@ -761,6 +990,7 @@ export async function startServer(): Promise<StartedServer> {
     deploymentExposure: config.deploymentExposure,
     allowedHostnames: config.allowedHostnames,
     bindHost: config.host,
+    authPublicBaseUrl: config.authPublicBaseUrl,
     authReady,
     companyDeletionEnabled: config.companyDeletionEnabled,
     pluginMigrationDb: pluginMigrationDb as any,
@@ -769,6 +999,7 @@ export async function startServer(): Promise<StartedServer> {
     pluginWorkerManager,
     decisionServiceOptions,
     managedPluginAutoInstall,
+    nativeGitHubProjectSchedulingEnabled: config.nativeGitHubProjectSchedulingEnabled,
   });
   const server = createServer(app as unknown as Parameters<typeof createServer>[0]);
 
@@ -803,19 +1034,61 @@ export async function startServer(): Promise<StartedServer> {
   process.env.PAPERCLIP_RUNTIME_API_CANDIDATES_JSON = JSON.stringify(runtimeApiCandidates);
   process.env.PAPERCLIP_API_URL = configuredApiUrl;
   
+  setupRunnerPrpWebSocketServer(server, { apiUrl: configuredApiUrl });
   setupEnvironmentCustomImageTerminalWebSocketServer(server, db as any, {
     pluginWorkerManager,
   });
   setupLiveEventsWebSocketServer(server, db as any, {
     deploymentMode: config.deploymentMode,
     resolveSessionFromHeaders,
+    // Cloud-proxied browsers carry trusted x-paperclip-cloud-* headers instead
+    // of a local Better Auth session; without this lane every live-events
+    // upgrade behind the Cloud front door 403s forever. The resolver is
+    // self-gating: it returns null unless PAPERCLIP_CLOUD_TENANT_SERVER_TOKEN
+    // is configured and the request presents the matching trust token, so
+    // self-hosted deployments never take this path.
+    resolveCloudActor: async (req) => {
+      const actor = await resolveCloudTenantActor(
+        db as any,
+        cloudActorHeaderSourceFromHeaders(req.headers),
+      );
+      if (!actor?.userId || !actor.companyIds) return null;
+      return { userId: actor.userId, companyIds: actor.companyIds };
+    },
   });
+
+  try {
+    const result = await workspaceOperationService(db as any)
+      .reconcileStaleRuntimeControlOperations();
+    if (result.reconciled > 0) {
+      logger.warn(
+        { reconciled: result.reconciled, operationIds: result.operationIds },
+        "reconciled stale managed runtime control operations from a previous server process",
+      );
+    }
+  } catch (err) {
+    logger.error({ err }, "startup reconciliation of managed runtime control operations failed");
+  }
 
   void reconcilePersistedRuntimeServicesOnStartup(db as any)
     .then((result) => {
-      if (result.reconciled > 0) {
+      if (
+        result.reconciled > 0
+        || result.restarted > 0
+        || result.restartFailed > 0
+        || result.backfilled > 0
+      ) {
         logger.warn(
-          { reconciled: result.reconciled },
+          {
+            reconciled: result.reconciled,
+            adopted: result.adopted,
+            stopped: result.stopped,
+            // Managed HTTP-only services taken down so they come back on a
+            // verified HTTPS origin (PAP-17158).
+            httpsBackfilled: result.backfilled,
+            restarted: result.restarted,
+            restartFailed: result.restartFailed,
+          },
           "reconciled persisted runtime services from a previous server process",
         );
       }
@@ -940,13 +1213,37 @@ export async function startServer(): Promise<StartedServer> {
     heartbeatSchedulerInterval = setInterval(callback, config.heartbeatSchedulerIntervalMs);
     heartbeatSchedulerInterval?.unref?.();
   };
+  // Keep concurrent sweeps strictly below the postgres.js pool. The driver
+  // opens one backend per concurrent query until `max` (10 unless
+  // DATABASE_POOL_MAX is set). A tick that starts every sweep at once fills
+  // that pool, and the next checkout fails with write CONNECT_TIMEOUT.
+  const heartbeatSweeps = createNamedSweepScheduler(
+    schedulerSweepConcurrency(effectiveDatabasePoolMax()),
+  );
+  const trackBoundedSweep = (name: string, start: () => Promise<unknown>) => {
+    if (heartbeatSchedulerStopped) return;
+    const work = heartbeatSweeps.start(name, async () => {
+      // A sweep can wait behind another one. Shutdown may begin before its slot
+      // is granted; skip new work then, while the runner still releases its slot.
+      if (heartbeatSchedulerStopped) return;
+      try {
+        return await start();
+      } catch (error) {
+        // Local handlers own errors they consume. Only an otherwise-unhandled
+        // rejection reaches this boundary; keep its diagnostic bounded/value-free.
+        logger.error({ sweep: name }, "heartbeat scheduler sweep rejected");
+        throw error;
+      }
+    });
+    if (work) trackHeartbeatSchedulerWork(work);
+  };
   const externalObjects = externalObjectService(db as any, {
     pluginWorkerManager,
     enabled: async () => (await instanceSettingsService(db).getExperimental()).enableExternalObjects === true,
   });
   const scheduleExternalObjectRefreshSweep = (now = new Date()) => {
     if (heartbeatSchedulerStopped) return;
-    trackHeartbeatSchedulerWork(externalObjects
+    trackBoundedSweep("external-object-refresh", () => externalObjects
       .refreshDueObjectsForActiveCompanies(50, now)
       .then((result) => {
         if (result.checked > 0 || result.refreshed > 0) {
@@ -957,6 +1254,60 @@ export async function startServer(): Promise<StartedServer> {
         logger.error({ err }, "external-object scheduler tick failed");
       }));
   };
+
+  // The retry backstop for orphan sandboxes. An acquire that rejects a
+  // foreign-company insert tears the provisioned sandbox down. If that teardown
+  // also fails, the acquire records a lease-less `pending_cleanup` lease row. No
+  // other path releases that sandbox, so the master pending-cleanup sweep retries
+  // the provider teardown and releases the orphan. The sweep runs on startup and
+  // on the scheduler interval.
+  //
+  // This backstop is independent of the heartbeat scheduler toggle. A leaked
+  // provider sandbox costs money whether or not the instance schedules
+  // heartbeats, so both the enabled and the disabled path run the sweep. A
+  // disabled heartbeat scheduler must not strand a paid sandbox forever.
+  //
+  // The master pending-cleanup sweep is the single owner of these rows. Its
+  // atomic per-attempt claim makes two overlapping sweeps safe, so the enabled
+  // path can also run the sweep from the orphaned-run reaper without a second
+  // teardown. The heartbeat scheduler owns the sweep when it is enabled; the
+  // disabled path creates its own runtime to own the same sweep.
+  // The interval sweep waits this long after a lease's last write before it
+  // retries the teardown. The window matches the orphaned-run reaper staleness,
+  // so a just-failed lease does not draw a retry on every tick. The startup
+  // sweep passes zero, so a restart retries a stranded orphan at once.
+  const ENVIRONMENT_LEASE_CLEANUP_SWEEP_BACKOFF_MS = 5 * 60 * 1000;
+  const environmentLeaseCleanupHeartbeat =
+    heartbeat ?? heartbeatService(db as any, { pluginWorkerManager });
+  const questionResponseDeliveries = questionResponseDeliveryService(db as any, {
+    heartbeat: environmentLeaseCleanupHeartbeat,
+  });
+  const runEnvironmentLeaseCleanupSweep = (backoffMs: number) =>
+    environmentLeaseCleanupHeartbeat
+      .sweepPendingCleanupLeases({ backoffMs })
+      .then((result) => {
+        if (result.destroyed > 0 || result.capped > 0) {
+          logger.info(result, "environment lease cleanup sweep retried orphan sandbox teardowns");
+        }
+      })
+      .catch((err) => {
+        logger.error({ err }, "environment lease cleanup sweep failed");
+      });
+  const scheduleEnvironmentLeaseCleanupSweep = () => {
+    if (heartbeatSchedulerStopped) return;
+    trackBoundedSweep(
+      "environment-lease-cleanup",
+      () => runEnvironmentLeaseCleanupSweep(ENVIRONMENT_LEASE_CLEANUP_SWEEP_BACKOFF_MS),
+    );
+  };
+
+  await questionResponseDeliveries.sweepPending().then((result) => {
+    if (result.scanned > 0) {
+      logger.info(result, "startup question-response delivery sweep completed");
+    }
+  }).catch((err) => {
+    logger.error({ err }, "startup question-response delivery sweep failed");
+  });
 
   if (heartbeat) {
     const secretProposals = createSecretProposalsService(db as any);
@@ -975,10 +1326,12 @@ export async function startServer(): Promise<StartedServer> {
     const mergedPullRequestConfirmations = issueThreadInteractionService(db as any, {
       wakeup: heartbeat.wakeup,
     });
-    const terminalWorkspaces = executionWorkspaceService(db as any);
+    const terminalWorkspaces = executionWorkspaceService(db as any, {
+      workspaceReaperCooldownDays: config.workspaceReaperCooldownDays,
+    });
     const scheduleMergedPullRequestConfirmationSweep = () => {
       if (heartbeatSchedulerStopped) return;
-      trackHeartbeatSchedulerWork(mergedPullRequestConfirmations
+      trackBoundedSweep("merged-pr-confirmation", () => mergedPullRequestConfirmations
         .sweepMergedPullRequestConfirmations()
         .then((result) => {
           if (result.accepted > 0) {
@@ -989,19 +1342,98 @@ export async function startServer(): Promise<StartedServer> {
           logger.error({ err }, "merged pull-request confirmation sweep failed");
         }));
     };
+    // Emit a periodic signal when the reaper inspects candidates but archives
+    // none, so an inert reaper that skips every candidate is never fully silent.
+    // The throttle keeps the 30s cadence from flooding the log.
+    let lastTerminalWorkspaceSkipLogAt = 0;
+    const terminalWorkspaceSkipLogIntervalMs = 10 * 60 * 1000;
     const scheduleTerminalWorkspaceSweep = () => {
       if (heartbeatSchedulerStopped) return;
-      trackHeartbeatSchedulerWork(terminalWorkspaces
+      trackBoundedSweep("terminal-workspace", () => terminalWorkspaces
         .sweepTerminalWorkspaces()
         .then((result) => {
           if (result.archived > 0 || result.cleanupFailed > 0) {
             logger.info(result, "terminal issue workspace reaper changed workspace state");
+            return;
+          }
+          const skipped =
+            result.skippedActiveRun
+            + result.skippedNonTerminalTree
+            + result.skippedUndelivered
+            + result.skippedRace
+            + result.skippedCooldown;
+          const nowMs = Date.now();
+          if (skipped > 0 && nowMs - lastTerminalWorkspaceSkipLogAt >= terminalWorkspaceSkipLogIntervalMs) {
+            lastTerminalWorkspaceSkipLogAt = nowMs;
+            logger.info(result, "terminal issue workspace reaper skipped all candidates");
           }
         })
         .catch((err) => {
           logger.error({ err }, "terminal issue workspace reaper failed");
         }));
     };
+
+    // The restart-safe cleanup backstop for adapter login sessions. The
+    // in-process five-minute timer stays the primary control. This reaper runs
+    // on startup and on the scheduler interval. It deletes the login sandbox for
+    // any expired non-terminal session, retries the delete for any terminal
+    // session left in `cleanup_pending`, and deletes a tagged lease that no live
+    // session references.
+    const adapterLoginReaper = createCodexDeviceLoginReaper({
+      store: createDbAdapterAuthSessionStore(db as any),
+      runtime: createProductionLoginSessionReaperRuntime({
+        db: db as any,
+        environmentRuntime: environmentRuntimeService(db as any, { pluginWorkerManager }),
+      }),
+    });
+    const logAdapterLoginReaperResult = (
+      result: Awaited<ReturnType<typeof adapterLoginReaper.sweep>>,
+    ) => {
+      if (
+        result.expiredTimedOut > 0 ||
+        result.cleanupCleared > 0 ||
+        result.orphanLeasesDeleted > 0 ||
+        result.cleanupPendingRemaining > 0
+      ) {
+        logger.info(result, "adapter login reaper swept login sessions");
+      }
+    };
+    const scheduleAdapterLoginReaperSweep = () => {
+      if (heartbeatSchedulerStopped) return;
+      trackBoundedSweep("adapter-login-reaper", () => adapterLoginReaper
+        .sweep()
+        .then(logAdapterLoginReaperResult)
+        .catch((err) => {
+          logger.error({ err }, "adapter login reaper sweep failed");
+        }));
+    };
+
+    // The restart-safe cleanup backstop for the Claude setup-token login flow. It
+    // runs on startup and on the scheduler interval, so a sandbox lease survives a
+    // server restart and a release failure. It releases any lease whose login
+    // session is terminal, past its deadline, or already consumed.
+    const setupTokenReaper = createProductionSetupTokenReaper({
+      db: db as any,
+      environmentRuntime: environmentRuntimeService(db as any, { pluginWorkerManager }),
+      log: (line) => logger.info(line),
+    });
+    const logSetupTokenReaperResult = (
+      result: Awaited<ReturnType<typeof setupTokenReaper.sweep>>,
+    ) => {
+      if (result.released > 0 || result.failed > 0) {
+        logger.info(result, "setup-token login reaper released leases");
+      }
+    };
+    const scheduleSetupTokenReaperSweep = () => {
+      if (heartbeatSchedulerStopped) return;
+      trackBoundedSweep("setup-token-reaper", () => setupTokenReaper
+        .sweep()
+        .then(logSetupTokenReaperResult)
+        .catch((err) => {
+          logger.error({ err }, "setup-token login reaper sweep failed");
+        }));
+    };
+
     const tools = toolAccessService(db as any, {
       deploymentMode: config.deploymentMode,
       deploymentExposure: config.deploymentExposure,
@@ -1129,6 +1561,29 @@ export async function startServer(): Promise<StartedServer> {
       logger.warn({ ...toolHealthSweep }, "startup tool connection health sweep found failing connections");
     }
     await decisionExecutor.sweepExpired();
+
+    // Run the adapter login reaper once at startup, so a login sandbox that
+    // outlived a server restart is deleted before timer ticks start.
+    await adapterLoginReaper
+      .sweep()
+      .then(logAdapterLoginReaperResult)
+      .catch((err) => {
+        logger.error({ err }, "startup adapter login reaper sweep failed");
+      });
+
+    // Run the setup-token login reaper once at startup, so a login sandbox lease
+    // that outlived a server restart releases before timer ticks start.
+    await setupTokenReaper
+      .sweep()
+      .then(logSetupTokenReaperResult)
+      .catch((err) => {
+        logger.error({ err }, "startup setup-token login reaper sweep failed");
+      });
+
+    // Retry any orphan sandbox teardown left by a failed acquire before a server
+    // restart, so a leaked sandbox does not stay allocated across the restart.
+    await runEnvironmentLeaseCleanupSweep(0);
+
     const runRetentionSweep = async () => {
       const activeCompanies = await db.select({ id: companies.id }).from(companies).where(eq(companies.status, "active"));
       let archived = 0;
@@ -1154,10 +1609,10 @@ export async function startServer(): Promise<StartedServer> {
       // captures the authoritative set of running heartbeat rows.
       trackHeartbeatSchedulerWork((async () => {
         if (heartbeatSchedulerStopped) return;
-        trackHeartbeatSchedulerWork(decisionExecutor.sweepExpired().catch((err: unknown) => {
+        trackBoundedSweep("decision-expiry", () => decisionExecutor.sweepExpired().catch((err: unknown) => {
           logger.error({ err }, "decision expiry sweep failed");
         }));
-        trackHeartbeatSchedulerWork(runRetentionSweep().catch((err: unknown) => {
+        trackBoundedSweep("decision-retention", () => runRetentionSweep().catch((err: unknown) => {
           logger.error({ err }, "decision retention sweep failed");
         }));
         const sweptRuntimeStatuses = heartbeat.sweepExpiredRuntimeStatuses();
@@ -1168,18 +1623,27 @@ export async function startServer(): Promise<StartedServer> {
           );
         }
 
-        if (!(await heartbeat.resolveSchedulingSuppression()).suppressed) {
-          trackHeartbeatSchedulerWork(heartbeat
-            .tickTimers(new Date())
-            .then((result) => {
-              if (result.enqueued > 0) {
-                logger.info({ ...result }, "heartbeat timer tick enqueued runs");
-              }
-            })
-            .catch((err) => {
-              logger.error({ err }, "heartbeat timer tick failed");
-            }));
-        }
+        trackBoundedSweep("heartbeat-timer", async () => {
+          try {
+            if ((await heartbeat.resolveSchedulingSuppression()).suppressed) return;
+            const result = await runHeartbeatTickWithConnectRetry(
+              () => heartbeat.tickTimers(new Date()),
+              {
+                onRetry: (attempt, err) => {
+                  logger.warn(
+                    { err, attempt },
+                    "heartbeat timer tick hit a transient CONNECT_TIMEOUT; retrying",
+                  );
+                },
+              },
+            );
+            if (result.enqueued > 0) {
+              logger.info({ ...result }, "heartbeat timer tick enqueued runs");
+            }
+          } catch (err) {
+            logger.error({ err }, "heartbeat timer tick failed");
+          }
+        });
 
         if (heartbeatSchedulerStopped) return;
         scheduleExternalObjectRefreshSweep(new Date());
@@ -1187,9 +1651,12 @@ export async function startServer(): Promise<StartedServer> {
         if (heartbeatSchedulerStopped) return;
         scheduleMergedPullRequestConfirmationSweep();
         scheduleTerminalWorkspaceSweep();
+        scheduleAdapterLoginReaperSweep();
+        scheduleSetupTokenReaperSweep();
+        scheduleEnvironmentLeaseCleanupSweep();
 
         if (heartbeatSchedulerStopped) return;
-        trackHeartbeatSchedulerWork(routines
+        trackBoundedSweep("routine-scheduler", () => routines
           .tickScheduledTriggers(new Date())
           .then((result) => {
             if (result.triggered > 0) {
@@ -1201,7 +1668,7 @@ export async function startServer(): Promise<StartedServer> {
           }));
 
         if (heartbeatSchedulerStopped) return;
-        trackHeartbeatSchedulerWork((async () => {
+        trackBoundedSweep("status-card", () => (async () => {
           const experimental = await instanceSettingsService(db).getExperimental();
           if (experimental.enableStatusCards !== true) return;
           const result = await statusCards.tickDueStatusCards(new Date());
@@ -1230,7 +1697,7 @@ export async function startServer(): Promise<StartedServer> {
         }));
 
         if (heartbeatSchedulerStopped) return;
-        trackHeartbeatSchedulerWork(environmentCustomImages
+        trackBoundedSweep("environment-custom-image-cleanup", () => environmentCustomImages
           .cleanupExpiredSetupSessions()
           .then((result) => {
             if (result.timedOut > 0 || result.failed > 0) {
@@ -1242,7 +1709,7 @@ export async function startServer(): Promise<StartedServer> {
           }));
 
         if (heartbeatSchedulerStopped) return;
-        trackHeartbeatSchedulerWork(tools
+        trackBoundedSweep("tool-connection-health", () => tools
           .sweepConnectionHealth()
           .then((swept) => {
             if (swept.failed > 0) {
@@ -1253,7 +1720,7 @@ export async function startServer(): Promise<StartedServer> {
             logger.error({ err }, "periodic tool connection health sweep failed");
           }));
 
-        trackHeartbeatSchedulerWork(secretProposals.sweepExpired()
+        trackBoundedSweep("secret-proposal-expiry", () => secretProposals.sweepExpired()
           .then((expired) => {
             if (expired > 0) logger.warn({ expired }, "periodic secret proposal expiry scrubbed proposals");
           })
@@ -1261,11 +1728,22 @@ export async function startServer(): Promise<StartedServer> {
             logger.error({ err }, "periodic secret proposal expiry sweep failed");
           }));
 
+        trackBoundedSweep("question-response-delivery", () => questionResponseDeliveries.sweepPending()
+          .then((result) => {
+            if (result.scanned > 0) {
+              logger.info(result, "periodic question-response delivery sweep completed");
+            }
+          })
+          .catch((err) => {
+            logger.error({ err }, "periodic question-response delivery sweep failed");
+          }));
+
         if (heartbeatSchedulerStopped) return;
-        if (!(await heartbeat.resolveSchedulingSuppression()).suppressed) {
+        trackBoundedSweep("heartbeat-recovery", async () => {
+          if ((await heartbeat.resolveSchedulingSuppression()).suppressed) return;
           // Periodically reap orphaned runs (5-min staleness threshold) and make sure
           // persisted queued work is still being driven forward.
-          trackHeartbeatSchedulerWork(heartbeat
+          await heartbeat
             .reapOrphanedRuns({ staleThresholdMs: 5 * 60 * 1000 })
             .then(() => heartbeat.promoteDueScheduledRetries())
             .then(async (promotion) => {
@@ -1317,15 +1795,21 @@ export async function startServer(): Promise<StartedServer> {
             })
             .catch((err) => {
               logger.error({ err }, "periodic heartbeat recovery failed");
-            }));
-        }
+            });
+        });
       })().catch((err) => {
         logger.error({ err }, "heartbeat scheduler tick failed");
       }));
     });
   } else {
+    // The heartbeat scheduler is disabled, but the orphan-sandbox cleanup sweep
+    // is still required. A failed acquire can leak a paid provider sandbox, so
+    // this path retries the teardown at startup and on the interval, exactly as
+    // the enabled path does.
+    await runEnvironmentLeaseCleanupSweep(0);
     startHeartbeatSchedulerInterval(() => {
       scheduleExternalObjectRefreshSweep(new Date());
+      scheduleEnvironmentLeaseCleanupSweep();
     });
   }
   
@@ -1431,12 +1915,13 @@ export async function startServer(): Promise<StartedServer> {
   
   {
     const shutdown = async (signal: "SIGINT" | "SIGTERM") => {
-      await systemdNotify(["--stopping", `--status=Stopping after ${signal}`]);
+      // Quiesce synchronously: notification can wait on an external process.
       heartbeatSchedulerStopped = true;
       if (heartbeatSchedulerInterval) {
         clearInterval(heartbeatSchedulerInterval);
         heartbeatSchedulerInterval = null;
       }
+      await systemdNotify(["--stopping", `--status=Stopping after ${signal}`]);
 
       const heartbeatShutdown = await coordinateHeartbeatSchedulerShutdown({
         signal,
@@ -1482,21 +1967,27 @@ export async function startServer(): Promise<StartedServer> {
         logger.error({ err, signal }, "run-log in-flight mirror flush failed");
       }
 
-      const appShutdown = (app as { locals?: { paperclipShutdown?: () => void } }).locals?.paperclipShutdown;
-      appShutdown?.();
+      const appShutdown = (app as { locals?: { paperclipShutdown?: () => Promise<void> } }).locals
+        ?.paperclipShutdown;
+      const stopEmbeddedPostgres = embeddedPostgres && embeddedPostgresStartedByThisProcess
+        ? () => embeddedPostgresSupervisor?.shutdown() ?? embeddedPostgres!.stop()
+        : null;
 
-      if (embeddedPostgres && embeddedPostgresStartedByThisProcess) {
-        logger.info({ signal }, "Stopping embedded PostgreSQL");
-        try {
-          await embeddedPostgres?.stop();
-        } catch (err) {
-          logger.error({ err }, "Failed to stop embedded PostgreSQL cleanly");
-        }
-      }
-
-      // Flush buffered OTel spans before the process goes away; without this
-      // await the exporter's final batch is dropped on exit.
-      await shutdownInstrumentation();
+      // Await the ordered application teardown before the process exits. A live
+      // setup-token login session must stop and release its sandbox lease before
+      // the database and the provider stop, so an orderly shutdown never leaves a
+      // sandbox lease or confidential login state alive past the process exit.
+      await finalizeServerShutdown({
+        signal,
+        shutdownAppServices: appShutdown,
+        // End the database pools before PostgreSQL stops, so a restart does not
+        // leave idle backends behind.
+        closeDatabasePools: closeAllRegisteredClients,
+        stopEmbeddedPostgres,
+        shutdownInstrumentation,
+        shutdownSentry,
+        log: logger,
+      });
 
       process.exit(0);
     };
@@ -1529,8 +2020,12 @@ function isMainModule(metaUrl: string): boolean {
 }
 
 if (isMainModule(import.meta.url)) {
-  void startServer().catch((err) => {
+  void startServer().catch(async (err) => {
     logger.error({ err }, "Paperclip server failed to start");
-    process.exit(1);
+    captureException(err);
+    await shutdownSentry();
+    // A distinct code lets service managers and health checks tell "an existing
+    // PostgreSQL may own the data directory" apart from other startup failures.
+    process.exit(err instanceof EmbeddedPostgresLockRefusal ? err.exitCode : 1);
   });
 }

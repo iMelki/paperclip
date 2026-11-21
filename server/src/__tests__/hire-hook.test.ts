@@ -1,6 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Db } from "@paperclipai/db";
-import { notifyHireApproved } from "../services/hire-hook.js";
+import {
+  notifyHireApproved,
+  queueDurableHireNotification,
+  processPendingHireNotifications,
+  getPendingNotificationQueueSize,
+} from "../services/hire-hook.js";
 
 // Mock the registry so we control whether the adapter has onHireApproved and what it does.
 vi.mock("../adapters/registry.js", () => ({
@@ -177,4 +182,36 @@ describe("notifyHireApproved", () => {
       }),
     );
   });
+
+  describe("durable hire notification queueing and retry dispatcher", () => {
+    it("queues and processes pending notifications with backoff", async () => {
+      vi.mocked(findActiveServerAdapter).mockReturnValue({
+        type: "openclaw_gateway",
+        onHireApproved: vi.fn().mockResolvedValue({ ok: true }),
+      } as any);
+
+      const db = mockDbWithAgent({
+        id: "a1",
+        companyId: "c1",
+        name: "OpenClaw Agent",
+        adapterType: "openclaw_gateway",
+      });
+
+      queueDurableHireNotification({
+        companyId: "c1",
+        agentId: "a1",
+        source: "approval",
+        sourceId: "ap-durable-1",
+      });
+
+      expect(getPendingNotificationQueueSize()).toBeGreaterThan(0);
+
+      const result = await processPendingHireNotifications(db);
+      expect(result.processed).toBeGreaterThan(0);
+      expect(result.succeeded).toBeGreaterThan(0);
+      expect(result.failed).toBe(0);
+      expect(getPendingNotificationQueueSize()).toBe(0);
+    });
+  });
 });
+

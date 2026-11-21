@@ -26,6 +26,7 @@ import type {
   AdapterExecutionResult,
   UsageSummary,
 } from "@paperclipai/adapter-utils";
+import { resolveAdapterTimeoutSec } from "@paperclipai/adapter-utils/adapter-timeout";
 
 import {
   runChildProcess,
@@ -52,6 +53,13 @@ import {
   detectModel,
   resolveProvider,
 } from "./detect-model.js";
+import { reconcileHermesPaperclipSkills, resolveHermesOperationalSkillPreload } from "./skills.js";
+import {
+  computeRunUsage, readHermesSessionUsage, readUsageBaseline, USAGE_UNAVAILABLE_TEXT,
+  type HermesSessionUsage, type UsageUnavailableReason,
+} from "./usage.js";
+import { resolveStrictHermesIsolation } from "./strict-isolation.js";
+import { apiBaseOf, resolveConfiguredApiUrl } from "./api-url.js";
 
 // ---------------------------------------------------------------------------
 // Config helpers
@@ -92,9 +100,8 @@ const HERMES_DEFAULT_PROMPT_TEMPLATE = [
   "Paperclip API guidance:",
   "- Use `curl` from the terminal for Paperclip API calls; browser/web extraction tools may not reach localhost.",
   "- Use `$PAPERCLIP_API_URL`, `$PAPERCLIP_API_KEY`, and `$PAPERCLIP_RUN_ID`; do not hard-code local ports or copy secrets into comments.",
-  "- Displayed command logs may redact secrets; rely on environment variables instead of printed token values.",
-  "- Include `-H \"Authorization: Bearer $PAPERCLIP_API_KEY\"` on API requests.",
-  "- Include `-H \"X-Paperclip-Run-Id: $PAPERCLIP_RUN_ID\"` on mutating issue requests.",
+  "- Never put `$PAPERCLIP_API_KEY` on a command line: the shell expands it into the process arguments, which other processes can read.",
+  "- Send the authorization and run-id headers from a private header file written with the `printf` builtin, as in the pattern below (`curl -H @file`).",
   "- For multiline comments or status updates, preserve newlines with `jq --arg` or a heredoc-fed helper rather than hand-escaping JSON.",
   "",
   "Safe multiline update pattern:",
@@ -109,12 +116,14 @@ const HERMES_DEFAULT_PROMPT_TEMPLATE = [
   "- Detail two",
   "MD",
   ")",
+  "hdr=\"$(mktemp)\"; trap 'rm -f \"$hdr\"' EXIT",
+  "printf 'Authorization: Bearer %s\\nX-Paperclip-Run-Id: %s\\n' \"$PAPERCLIP_API_KEY\" \"$PAPERCLIP_RUN_ID\" > \"$hdr\"",
   "jq -n --arg status done --arg comment \"$body\" '{status:$status, comment:$comment}' | \\",
   "  curl -sS -X PATCH \"$api/issues/{{context.issueId}}\" \\",
-  "    -H \"Authorization: Bearer $PAPERCLIP_API_KEY\" \\",
-  "    -H \"X-Paperclip-Run-Id: $PAPERCLIP_RUN_ID\" \\",
+  "    -H @\"$hdr\" \\",
   "    -H \"Content-Type: application/json\" \\",
   "    --data-binary @-",
+  "rm -f \"$hdr\"",
   "```",
   "",
   DEFAULT_PAPERCLIP_AGENT_PROMPT_TEMPLATE,
@@ -136,7 +145,7 @@ function renderConditionalSections(template: string, vars: Record<string, unknow
 export function buildPrompt(
   ctx: AdapterExecutionContext,
   config: Record<string, unknown>,
-  options: { resumedSession?: boolean } = {},
+  options: { resumedSession?: boolean; paperclipApiUrl?: string } = {},
 ): string {
   const template = cfgString(config.promptTemplate) || HERMES_DEFAULT_PROMPT_TEMPLATE;
 
@@ -151,8 +160,10 @@ export function buildPrompt(
   const projectName = cfgString(context.projectName) || cfgString(ctx.config?.projectName) || "";
 
   // Build API URL — ensure it has the /api path
+  // A configured override must be loopback; the same validated value feeds the child environment.
   let paperclipApiUrl =
-    cfgString(config.paperclipApiUrl) ||
+    options.paperclipApiUrl ||
+    (() => { const origin = resolveConfiguredApiUrl(config.paperclipApiUrl); return origin ? apiBaseOf(origin) : ""; })() ||
     process.env.PAPERCLIP_API_URL ||
     "http://127.0.0.1:3100/api";
   // Ensure /api suffix
@@ -326,6 +337,44 @@ function parseHermesOutput(stdout: string, stderr: string): ParsedOutput {
   return result;
 }
 
+/** `auto`, and any provider-qualified auto router such as `openrouter/auto`, lets the provider pick the model. */
+export function isAutoModel(model: string): boolean {
+  return /^(?:[^/\s]+\/)?auto(?::\S*)?$/i.test(model.trim());
+}
+
+/**
+ * The adapter binds the model, provider and profile it validated. A caller-supplied flag later on the
+ * command line would override them, so any spelling of those flags (including argparse prefixes and
+ * `--flag=value`) is refused in extraArgs.
+ */
+export function assertNoCompetingLaunchFlags(extraArgs: string[] | undefined): void {
+  for (const arg of extraArgs ?? []) {
+    const flag = arg.split("=", 1)[0];
+    const longPrefix = flag.length > 2 && flag.startsWith("--");
+    const competing =
+      (longPrefix && ["--model", "--provider", "--profile"].some((name) => name.startsWith(flag))) ||
+      /^-[A-Za-z]*[mp]/.test(flag) && !flag.startsWith("--");
+    if (competing) {
+      throw new Error(
+        `Hermes adapter forbids ${JSON.stringify(flag)} in extraArgs: the model, provider and profile `
+        + "come from adapterConfig and must not be overridden.",
+      );
+    }
+  }
+}
+
+/**
+ * Reserved credential names. Windows environments are case-insensitive, so a differently cased copy
+ * would reach the child unless every case variant is removed before the trusted values are injected.
+ */
+const RESERVED_CREDENTIAL_ENV = new Set(["HERMES_YOLO_MODE", "PAPERCLIP_API_KEY"]);
+
+export function stripReservedCredentialEnv(env: Record<string, string>): void {
+  for (const key of Object.keys(env)) {
+    if (RESERVED_CREDENTIAL_ENV.has(key.toUpperCase())) delete env[key];
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Main execute
 // ---------------------------------------------------------------------------
@@ -334,13 +383,33 @@ export async function execute(
   ctx: AdapterExecutionContext,
 ): Promise<AdapterExecutionResult> {
   const config = (ctx.config ?? ctx.agent?.adapterConfig ?? {}) as Record<string, unknown>;
+  const strictIsolation = config.strictIsolation === true
+    ? await resolveStrictHermesIsolation(config)
+    : null;
 
   // ── Resolve configuration ──────────────────────────────────────────────
   const hermesCmd = resolveHermesCommand(config);
-  const model = cfgString(config.model) || DEFAULT_MODEL;
-  const timeoutSec = cfgNumber(config.timeoutSec) || DEFAULT_TIMEOUT_SEC;
+  const configuredModel = (cfgString(config.model) ?? "").trim();
+  const model = configuredModel || DEFAULT_MODEL;
+  // Fail closed: with no model, or "auto", the provider (OpenRouter in particular) chooses the model
+  // per call, so it is not known which model receives the agent's instructions or what a run costs.
+  // OpenRouter's provider-qualified router ("openrouter/auto") delegates the choice just the same.
+  if (!configuredModel || isAutoModel(configuredModel)) {
+    throw new Error(
+      "hermes_local requires an explicit model (not unset, \"auto\" or a provider's auto router) so the "
+      + "model that receives the agent's instructions is known; set adapterConfig.model and adapterConfig.provider.",
+    );
+  }
+  assertNoCompetingLaunchFlags(cfgStringArray(config.extraArgs));
+  // One validated API URL for both the prompt and the child environment (normal lane).
+  // Strict isolation validates and sets its own URL; the normal lane validates here (a bare origin).
+  const validatedApiUrl = strictIsolation ? null : resolveConfiguredApiUrl(config.paperclipApiUrl);
+  const timeoutSec = strictIsolation?.timeoutSec ?? resolveAdapterTimeoutSec({
+    configured: config.timeoutSec,
+    adapterDefaultSec: DEFAULT_TIMEOUT_SEC,
+  }).timeoutSec;
   const graceSec = cfgNumber(config.graceSec) || DEFAULT_GRACE_SEC;
-  const maxTurns = cfgNumber(config.maxTurnsPerRun);
+  const maxTurns = strictIsolation?.maxTurns ?? cfgNumber(config.maxTurnsPerRun);
   const toolsets = cfgString(config.toolsets) || cfgStringArray(config.enabledToolsets)?.join(",");
   const extraArgs = cfgStringArray(config.extraArgs);
   const persistSession = cfgBoolean(config.persistSession) !== false;
@@ -349,6 +418,32 @@ export async function execute(
   const prevSessionId = cfgString(
     (ctx.runtime?.sessionParams as Record<string, unknown> | null)?.sessionId,
   );
+  const canResumeSession = persistSession && Boolean(prevSessionId);
+
+  // The server adds this runtime inventory at the run boundary. Requiring the
+  // marker avoids touching a developer's real Hermes home in direct unit or
+  // library calls that did not opt into Paperclip runtime skills.
+  let preloadSkillName: string | null = null;
+  if (Object.prototype.hasOwnProperty.call(config, "paperclipRuntimeSkills")) {
+    try {
+      // Link where the child will actually read skills: strict isolation uses its own profile home;
+      // the normal lane uses the environment the child inherits plus the adapter env block.
+      const selectedSkills = await reconcileHermesPaperclipSkills(config, undefined, {
+        ...(strictIsolation ? { strict: { root: strictIsolation.root, profile: strictIsolation.profile } } : {}),
+      });
+      preloadSkillName = await resolveHermesOperationalSkillPreload(config, selectedSkills);
+      if (selectedSkills.length > 0) {
+        await ctx.onLog(
+          "stdout",
+          `[hermes] Reconciled ${selectedSkills.length} Paperclip-managed skill(s) into the Hermes skills home.\n`,
+        );
+      }
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err);
+      await ctx.onLog("stderr", `[hermes] Cannot start without the required Paperclip-managed skills: ${reason}\n`);
+      throw err;
+    }
+  }
 
   // ── Resolve provider (defense in depth) ────────────────────────────────
   // Priority chain:
@@ -363,7 +458,7 @@ export async function execute(
   let detectedConfig: Awaited<ReturnType<typeof detectModel>> | null = null;
   const explicitProvider = cfgString(config.provider);
 
-  if (!explicitProvider) {
+  if (!explicitProvider && !strictIsolation) {
     try {
       detectedConfig = await detectModel();
     } catch {
@@ -380,6 +475,11 @@ export async function execute(
     detectedApiMode: detectedConfig?.apiMode,
     model,
   });
+  if (resolvedProvider === "auto") {
+    throw new Error(
+      "hermes_local could not bind a provider for this model (resolved to \"auto\"); set adapterConfig.provider.",
+    );
+  }
 
   // ── Load agent instructions file (Paperclip instruction bundles) ──────
   // Paperclip can materialize managed instructions into instructionsFilePath;
@@ -409,7 +509,10 @@ export async function execute(
   }
 
   // ── Build prompt ───────────────────────────────────────────────────────
-  let prompt = buildPrompt(ctx, config, { resumedSession: Boolean(prevSessionId) });
+  let prompt = buildPrompt(ctx, config, {
+    resumedSession: canResumeSession,
+    ...(validatedApiUrl ? { paperclipApiUrl: apiBaseOf(validatedApiUrl) } : {}),
+  });
   if (agentInstructions) {
     prompt = agentInstructions + "\n\n---\n\n" + prompt;
   }
@@ -417,11 +520,19 @@ export async function execute(
   // ── Build command args ─────────────────────────────────────────────────
   // Use -Q (quiet) to get clean output: just response + session_id line
   const useQuiet = cfgBoolean(config.quiet) === true; // default false
-  const args: string[] = ["chat", "-q", prompt];
+  const args: string[] = strictIsolation
+    ? ["--profile", strictIsolation.profile, "chat", "-q", prompt]
+    : ["chat", "-q", prompt];
   if (useQuiet) args.push("-Q");
 
   if (model) {
     args.push("-m", model);
+  }
+
+  // Hermes' tool shell strips secrets. Preloading the operational Paperclip skill registers the
+  // variables its frontmatter declares (API URL, run key, ids) so the agent's curl calls work.
+  if (preloadSkillName) {
+    args.push("-s", preloadSkillName);
   }
 
   // Always pass --provider when we have a resolved one (not "auto").
@@ -446,28 +557,43 @@ export async function execute(
   // Requires hermes-agent >= PR #3255 (feat/session-source-tag).
   args.push("--source", "tool");
 
-  // Bypass Hermes dangerous-command approval prompts.
-  // Paperclip agents run as non-interactive subprocesses with no TTY,
-  // so approval prompts would always timeout and deny legitimate commands
-  // (curl, python3 -c, etc.). Agents operate in a sandbox — the approval
-  // system is designed for human-attended interactive sessions.
-  args.push("--yolo");
+  // Do not bypass dangerous-command approval in an unattended process.
+  // A caller-supplied extraArgs bypass is also rejected below.
 
-  if (persistSession && prevSessionId) {
+  if (canResumeSession && prevSessionId) {
     args.push("--resume", prevSessionId);
   }
 
+  if (extraArgs?.some((arg) => {
+    const flag = arg.split("=", 1)[0];
+    return flag.length > 2 && "--yolo".startsWith(flag);
+  })) {
+    throw new Error("Hermes adapter forbids --yolo in extraArgs");
+  }
   if (extraArgs?.length) {
     args.push(...extraArgs);
   }
 
   // ── Build environment ──────────────────────────────────────────────────
   const userEnv = config.env as Record<string, string> | undefined;
-  const env: Record<string, string> = {
-    ...(process.env as Record<string, string>),
-    ...(userEnv && typeof userEnv === "object" ? userEnv : {}),
-    ...buildPaperclipEnv(ctx.agent),
+  const inheritedEnv: Record<string, string> = {
+    ...(strictIsolation?.env ?? (process.env as Record<string, string>)),
+    ...(!strictIsolation && userEnv && typeof userEnv === "object" ? userEnv : {}),
   };
+  // Remove every case variant of the reserved names before the trusted values are injected.
+  stripReservedCredentialEnv(inheritedEnv);
+  const env: Record<string, string> = {
+    ...inheritedEnv,
+    ...(strictIsolation ? {
+      PAPERCLIP_AGENT_ID: ctx.agent.id,
+      PAPERCLIP_COMPANY_ID: ctx.agent.companyId,
+      PAPERCLIP_API_URL: strictIsolation.paperclipApiUrl,
+    } : buildPaperclipEnv(ctx.agent)),
+  };
+  // A validated, adapter-configured loopback API URL wins over the server's own value, which may be a
+  // tailnet or public address the tool shell cannot rely on. It stays the bare origin like every other
+  // adapter; only the prompt text adds /api.
+  if (validatedApiUrl && !strictIsolation) env.PAPERCLIP_API_URL = validatedApiUrl;
 
   if (ctx.runId) env.PAPERCLIP_RUN_ID = ctx.runId;
 
@@ -501,7 +627,7 @@ export async function execute(
     "stdout",
     `[hermes] Starting Hermes Agent (model=${model}, provider=${resolvedProvider} [${resolvedFrom}], timeout=${timeoutSec}s${maxTurns ? `, max_turns=${maxTurns}` : ""})\n`,
   );
-  if (prevSessionId) {
+  if (canResumeSession && prevSessionId) {
     await ctx.onLog(
       "stdout",
       `[hermes] Resuming session: ${prevSessionId}\n`,
@@ -535,6 +661,7 @@ export async function execute(
   const result = await runChildProcess(ctx.runId, hermesCmd, args, {
     cwd,
     env,
+    inheritEnv: !strictIsolation,
     timeoutSec,
     graceSec,
     onLog: wrappedOnLog,
@@ -552,6 +679,46 @@ export async function execute(
     await ctx.onLog("stdout", `[hermes] Session: ${parsed.sessionId}\n`);
   }
 
+  // ── Usage from Hermes' own session record (best effort) ─────────────────
+  // Hermes prints no token counts or cost in a chat run, so without this Paperclip budgets never move.
+  // The export runs after the chat process, outside the run's timeout, with its own fixed 180 s limit.
+  // It cannot be switched off: usage reporting is what lets per-agent budgets trip.
+  let sessionUsage: HermesSessionUsage | null = null;
+  let usageUnavailable: UsageUnavailableReason | null = null;
+  if (parsed.sessionId) {
+    const outcome = await readHermesSessionUsage({
+      command: hermesCmd,
+      argsPrefix: strictIsolation ? ["--profile", strictIsolation.profile] : [],
+      env,
+      inheritEnv: !strictIsolation,
+      cwd,
+      runId: ctx.runId,
+      sessionId: parsed.sessionId,
+      timeoutSec: 180,
+    });
+    if (outcome.status === "ok") sessionUsage = outcome.usage;
+    else usageUnavailable = outcome.reason;
+  } else {
+    usageUnavailable = "no_session_id";
+  }
+  // The session record is authoritative: the model that actually answered, the billing provider, the
+  // tokens, and a cost only when Hermes could price the model. A resumed session is cumulative, so
+  // report this run's share against the baseline kept in the session parameters. Numbers scraped from
+  // the chat output are never used for usage or cost: an unknown measurement stays unknown.
+  let runUsage: ReturnType<typeof computeRunUsage> | null = null;
+  if (sessionUsage) {
+    runUsage = computeRunUsage(
+      sessionUsage,
+      readUsageBaseline(ctx.runtime?.sessionParams),
+      canResumeSession ? prevSessionId ?? null : null,
+    );
+    usageUnavailable = runUsage.unknownReason;
+  }
+  if (usageUnavailable) {
+    // Unknown is not zero: no usage or cost is reported, and the result says so for any budget check.
+    await ctx.onLog("stdout", `[hermes] Usage unavailable: ${USAGE_UNAVAILABLE_TEXT[usageUnavailable]}\n`);
+  }
+
   // ── Build result ───────────────────────────────────────────────────────
   const executionResult: AdapterExecutionResult = {
     exitCode: result.exitCode,
@@ -563,14 +730,21 @@ export async function execute(
 
   if (parsed.errorMessage) {
     executionResult.errorMessage = parsed.errorMessage;
+  } else if (!result.timedOut && typeof result.exitCode === "number" && result.exitCode !== 0) {
+    executionResult.errorMessage = `Hermes exited with code ${result.exitCode}`;
   }
 
-  if (parsed.usage) {
-    executionResult.usage = parsed.usage;
-  }
-
-  if (parsed.costUsd !== undefined) {
-    executionResult.costUsd = parsed.costUsd;
+  if (sessionUsage) {
+    if (runUsage?.usage) {
+      executionResult.usage = runUsage.usage;
+      executionResult.usageBasis = runUsage.usageBasis;
+    }
+    if (runUsage?.costUsd != null) {
+      executionResult.costUsd = runUsage.costUsd;
+      executionResult.billingType = "metered_api";
+    }
+    if (sessionUsage.model) executionResult.model = sessionUsage.model;
+    if (sessionUsage.provider) executionResult.biller = sessionUsage.provider;
   }
 
   // Summary from agent response
@@ -582,13 +756,26 @@ export async function execute(
   executionResult.resultJson = {
     result: parsed.response || "",
     session_id: parsed.sessionId || null,
-    usage: parsed.usage || null,
-    cost_usd: parsed.costUsd ?? null,
+    usage: runUsage?.usage ?? null,
+    cost_usd: runUsage?.costUsd ?? null,
+    cost_status: sessionUsage?.costStatus ?? null,
+    served_model: sessionUsage?.model ?? null,
+    // "unknown" means the run may have spent tokens that were not measured; it is never a zero.
+    usage_status: usageUnavailable ? "unknown" : "reported",
+    usage_unavailable_reason: usageUnavailable,
   };
 
   // Store session ID for next run
   if (persistSession && parsed.sessionId) {
-    executionResult.sessionParams = { sessionId: parsed.sessionId };
+    // After a failed read, keep the previous baseline of this same session so the next successful
+    // read reports everything since then, including this run's unmeasured share.
+    const previousBaseline = readUsageBaseline(ctx.runtime?.sessionParams);
+    const carriedBaseline = previousBaseline && previousBaseline.sessionId === parsed.sessionId ? previousBaseline : null;
+    const nextBaseline = runUsage?.nextBaseline ?? carriedBaseline;
+    executionResult.sessionParams = {
+      sessionId: parsed.sessionId,
+      ...(nextBaseline ? { usageBaseline: nextBaseline } : {}),
+    };
     executionResult.sessionDisplayId = parsed.sessionId.slice(0, 16);
   }
 

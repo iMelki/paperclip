@@ -52,6 +52,8 @@ function createMockRun(options: MockRunOptions = {}) {
     model: waitResult.model ?? null,
     durationMs: waitResult.durationMs ?? null,
     git: waitResult.git ?? null,
+    abortClientStream: vi.fn(() => {}),
+    disposeClientStream: vi.fn(async (): Promise<void> => {}),
     supports(capability: string) {
       return capability === "stream" || capability === "wait";
     },
@@ -135,6 +137,51 @@ function createContext(
   };
 }
 
+function createReattachedContext() {
+  return createContext({
+    runtime: {
+      sessionId: "agent-attached",
+      sessionDisplayId: "agent-attached",
+      taskKey: null,
+      sessionParams: {
+        cursorAgentId: "agent-attached",
+        latestRunId: "run-attached",
+        runtime: "cloud",
+        envType: "cloud",
+        repos: [{ url: "https://github.com/paperclipai/paperclip.git", startingRef: "main" }],
+      },
+    },
+  });
+}
+
+function createHangingAttachedRun() {
+  const controller = new AbortController();
+  let active = false;
+  const stopped = new Promise<void>((resolve) => {
+    controller.signal.addEventListener("abort", () => resolve(), { once: true });
+  });
+  const abortClientStream = vi.fn(() => controller.abort());
+  const run = {
+    ...createMockRun({ id: "run-attached", agentId: "agent-attached", status: "running" }),
+    stream: vi.fn(async function* () {
+      active = true;
+      try {
+        await stopped;
+      } finally {
+        active = false;
+      }
+    }),
+    wait: vi.fn(() => new Promise<never>(() => {})),
+    cancel: vi.fn(() => new Promise<void>(() => {})),
+    abortClientStream,
+    disposeClientStream: vi.fn(async (): Promise<void> => {
+      abortClientStream();
+      await stopped;
+    }),
+  };
+  return { run, controller, isActive: () => active };
+}
+
 describe("cursor_cloud execute", () => {
   beforeEach(() => {
     createMock.mockReset();
@@ -179,6 +226,9 @@ describe("cursor_cloud execute", () => {
       PAPERCLIP_WAKE_REASON: "issue_commented",
       PAPERCLIP_API_KEY: "paperclip-run-jwt",
     });
+    // When a run JWT is present the callback URL is retained so the worker can
+    // authenticate its Paperclip API calls.
+    expect(createMock.mock.calls[0]?.[0]?.cloud?.envVars).toHaveProperty("PAPERCLIP_API_URL");
     expect(createMock.mock.calls[0]?.[0]?.cloud?.envVars).not.toHaveProperty("CURSOR_API_KEY");
 
     expect(result).toMatchObject({
@@ -202,6 +252,29 @@ describe("cursor_cloud execute", () => {
         expect.stringContaining('"type":"cursor_cloud.result"'),
       ]),
     );
+  });
+
+  it("omits the Paperclip API callback when no run JWT is issued (remote worker cannot call home)", async () => {
+    const run = createMockRun({ agentId: "agent-no-jwt" });
+    const sdkAgent = createMockSdkAgent({ agentId: "agent-no-jwt", sendRun: run });
+    createMock.mockResolvedValue(sdkAgent);
+    // cursor_cloud is registered with supportsLocalAgentJwt=false, so heartbeat
+    // passes no authToken. A remote cloud worker must not receive a callback URL
+    // it can neither reach nor authenticate against (the source of 401 noise).
+    const ctx = createContext({ authToken: undefined });
+
+    await execute(ctx);
+
+    const envVars = (createMock.mock.calls[0]?.[0]?.cloud?.envVars ?? {}) as Record<string, string>;
+    expect(envVars).not.toHaveProperty("PAPERCLIP_API_KEY");
+    expect(envVars).not.toHaveProperty("PAPERCLIP_API_URL");
+    expect(envVars).not.toHaveProperty("PAPERCLIP_API_BRIDGE_MODE");
+    // Informational Paperclip env (non-credential) still flows through.
+    expect(envVars).toMatchObject({
+      PAPERCLIP_RUN_ID: "run-heartbeat-1",
+      PAPERCLIP_AGENT_ID: "agent-1",
+      PAPERCLIP_COMPANY_ID: "company-1",
+    });
   });
 
   it("resumes a matching saved session when no active run can be reattached", async () => {
@@ -345,4 +418,255 @@ describe("cursor_cloud execute", () => {
       },
     });
   });
+
+  it("terminates a hung Cursor wait when timeoutSec elapses", async () => {
+    let cancelled = false;
+    const hungRun = {
+      ...createMockRun({ id: "run-hung", agentId: "agent-hung" }),
+      async wait(): Promise<Record<string, unknown>> {
+        return new Promise(() => {});
+      },
+      async cancel() {
+        cancelled = true;
+      },
+    };
+    createMock.mockResolvedValue(createMockSdkAgent({ agentId: "agent-hung", sendRun: hungRun }));
+    const ctx = createContext();
+    ctx.config.timeoutSec = 0.05;
+
+    const result = await execute(ctx);
+
+    expect(result.timedOut).toBe(true);
+    expect(result.errorCode).toBe("cursor_cloud_timeout");
+    expect(cancelled).toBe(true);
+    expect(result.sessionParams).toMatchObject({
+      cursorAgentId: "agent-hung",
+      timedOutRunId: "run-hung",
+      runtime: "cloud",
+      envType: "cloud",
+      repos: [{ url: "https://github.com/paperclipai/paperclip.git", startingRef: "main" }],
+    });
+    expect(result.sessionParams).not.toHaveProperty("latestRunId");
+  });
+
+  it("does not wait forever on an event stream that never closes after the run result arrived", async () => {
+    const run = {
+      ...createMockRun({ id: "run-open-stream", agentId: "agent-open-stream" }),
+      async *stream() {
+        await new Promise(() => {});
+        yield undefined as never;
+      },
+    };
+    createMock.mockResolvedValue(createMockSdkAgent({ agentId: "agent-open-stream", sendRun: run }));
+    const ctx = createContext();
+    ctx.config.timeoutSec = 0.2;
+
+    const result = await Promise.race([
+      execute(ctx),
+      new Promise<never>((_, reject) => setTimeout(() => reject(new Error("execute hung on the open stream")), 3_000)),
+    ]);
+
+    expect(result.timedOut).toBe(false);
+    expect(result.exitCode).toBe(0);
+    expect(ctx.logs.some((entry) => entry.chunk.includes("event stream for run-open-stream was still open"))).toBe(true);
+  });
+
+  it("returns the timeout when Cursor cancel never settles", async () => {
+    const hungRun = {
+      ...createMockRun({ id: "run-cancel-hang", agentId: "agent-cancel-hang" }),
+      async wait(): Promise<Record<string, unknown>> {
+        return new Promise(() => {});
+      },
+      cancel() {
+        return new Promise(() => {});
+      },
+    };
+    createMock.mockResolvedValue(createMockSdkAgent({ agentId: "agent-cancel-hang", sendRun: hungRun }));
+    const ctx = createContext();
+    ctx.config.timeoutSec = 0.05;
+
+    const result = await execute(ctx);
+
+    expect(result.timedOut).toBe(true);
+    expect(result.sessionParams).toMatchObject({
+      cursorAgentId: "agent-cancel-hang",
+      timedOutRunId: "run-cancel-hang",
+    });
+    expect(result.sessionParams).not.toHaveProperty("latestRunId");
+  });
+
+  it("starts a new run after a timeout instead of waiting on the timed-out run again", async () => {
+    const stuckRun = {
+      ...createMockRun({ id: "run-stuck", agentId: "agent-stuck", status: "running" }),
+      async wait(): Promise<Record<string, unknown>> {
+        return new Promise(() => {});
+      },
+      cancel() {
+        return new Promise(() => {});
+      },
+    };
+    createMock.mockResolvedValue(createMockSdkAgent({ agentId: "agent-stuck", sendRun: stuckRun }));
+    const first = createContext();
+    first.config.timeoutSec = 0.05;
+
+    const timedOut = await execute(first);
+
+    expect(timedOut.timedOut).toBe(true);
+    expect(timedOut.sessionParams).toMatchObject({
+      cursorAgentId: "agent-stuck",
+      timedOutRunId: "run-stuck",
+      envType: "cloud",
+    });
+    expect(timedOut.sessionParams).not.toHaveProperty("latestRunId");
+
+    const stillRunning = {
+      ...createMockRun({ id: "run-stuck", agentId: "agent-stuck", status: "running" }),
+      async wait(): Promise<Record<string, unknown>> {
+        return new Promise(() => {});
+      },
+    };
+    getRunMock.mockResolvedValue(stillRunning);
+    const nextRun = createMockRun({ id: "run-next", agentId: "agent-stuck" });
+    const resumed = createMockSdkAgent({ agentId: "agent-stuck", sendRun: nextRun });
+    resumeMock.mockResolvedValue(resumed);
+    const second = createContext({
+      runtime: {
+        sessionId: "agent-stuck",
+        sessionDisplayId: "agent-stuck",
+        taskKey: null,
+        sessionParams: timedOut.sessionParams ?? null,
+      },
+    });
+    second.config.timeoutSec = 0.05;
+
+    const followedUp = await execute(second);
+
+    expect(getRunMock).not.toHaveBeenCalled();
+    expect(resumeMock).toHaveBeenCalledTimes(1);
+    expect(resumed.send).toHaveBeenCalledTimes(1);
+    expect(followedUp.timedOut).toBe(false);
+    expect(followedUp.sessionParams).toMatchObject({
+      cursorAgentId: "agent-stuck",
+      latestRunId: "run-next",
+    });
+    expect(second.logs.map((entry) => entry.chunk).join("")).not.toContain("Reattached to existing Cursor run");
+  });
+
+  it("terminates a hung Cursor wait when timeoutSec is 0 by using the env default", async () => {
+    const previous = process.env.PAPERCLIP_ADAPTER_TIMEOUT_SEC;
+    process.env.PAPERCLIP_ADAPTER_TIMEOUT_SEC = "0.05";
+    const hungRun = {
+      ...createMockRun({ id: "run-hung-default", agentId: "agent-hung" }),
+      async wait(): Promise<Record<string, unknown>> {
+        return new Promise(() => {});
+      },
+    };
+    createMock.mockResolvedValue(createMockSdkAgent({ agentId: "agent-hung", sendRun: hungRun }));
+    const ctx = createContext();
+    ctx.config.timeoutSec = 0;
+
+    try {
+      const result = await execute(ctx);
+      expect(result.timedOut).toBe(true);
+      expect(result.errorCode).toBe("cursor_cloud_timeout");
+      expect(result.sessionParams).not.toHaveProperty("latestRunId");
+      expect(result.sessionParams).toMatchObject({ timedOutRunId: "run-hung-default" });
+    } finally {
+      if (previous === undefined) delete process.env.PAPERCLIP_ADAPTER_TIMEOUT_SEC;
+      else process.env.PAPERCLIP_ADAPTER_TIMEOUT_SEC = previous;
+    }
+  });
+
+  it("aborts a reattached local stream even when remote cancel never settles", async () => {
+    const attached = createHangingAttachedRun();
+    getRunMock.mockResolvedValue(attached.run);
+    const ctx = createReattachedContext();
+    ctx.config.timeoutSec = 0.05;
+
+    try {
+      const result = await execute(ctx);
+      expect(result.timedOut).toBe(true);
+      expect(attached.run.stream).toHaveBeenCalledTimes(1);
+      expect(attached.run.wait).toHaveBeenCalledTimes(1);
+      expect(attached.run.cancel).toHaveBeenCalledTimes(1);
+      expect(attached.run.abortClientStream).toHaveBeenCalled();
+      expect(attached.run.disposeClientStream).toHaveBeenCalledTimes(1);
+      expect(attached.controller.signal.aborted).toBe(true);
+      expect(attached.isActive()).toBe(false);
+      expect(result.sessionParams).toMatchObject({
+        cursorAgentId: "agent-attached",
+        timedOutRunId: "run-attached",
+      });
+      expect(result.sessionParams).not.toHaveProperty("latestRunId");
+      expect(createMock).not.toHaveBeenCalled();
+      expect(resumeMock).not.toHaveBeenCalled();
+    } finally {
+      // The old implementation must fail the custody assertions, then this
+      // fixture cleanup releases its mock producer without any external work.
+      attached.controller.abort();
+    }
+  });
+
+  it.each(["abortClientStream", "disposeClientStream"] as const)(
+    "refuses reattach before starting work when %s is missing",
+    async (missingMethod) => {
+      const attached = createHangingAttachedRun();
+      const unsupported = { ...attached.run, [missingMethod]: undefined };
+      getRunMock.mockResolvedValue(unsupported);
+      const ctx = createReattachedContext();
+      ctx.config.timeoutSec = 0.05;
+
+      try {
+        const result = await execute(ctx);
+
+        expect(result).toMatchObject({
+          exitCode: 1,
+          timedOut: false,
+          errorCode: "cursor_cloud_stream_cleanup_unavailable",
+          errorMessage: "Cursor cloud reattach requires the pinned SDK 1.2.0 local stream cleanup contract.",
+        });
+        expect(result.sessionParams).toMatchObject({
+          cursorAgentId: "agent-attached",
+          latestRunId: "run-attached",
+        });
+        expect(attached.run.stream).not.toHaveBeenCalled();
+        expect(attached.run.wait).not.toHaveBeenCalled();
+        expect(attached.run.cancel).not.toHaveBeenCalled();
+        expect(attached.run.abortClientStream).not.toHaveBeenCalled();
+        expect(attached.run.disposeClientStream).not.toHaveBeenCalled();
+        expect(createMock).not.toHaveBeenCalled();
+        expect(resumeMock).not.toHaveBeenCalled();
+      } finally {
+        attached.controller.abort();
+      }
+    },
+  );
+
+  it("bounds local reattached disposal after synchronously aborting the producer", async () => {
+    vi.useFakeTimers();
+    const attached = createHangingAttachedRun();
+    attached.run.disposeClientStream.mockImplementation(() => new Promise<void>(() => {}));
+    getRunMock.mockResolvedValue(attached.run);
+    const ctx = createReattachedContext();
+    ctx.config.timeoutSec = 0.05;
+    const startedAt = Date.now();
+
+    try {
+      const execution = execute(ctx);
+      await vi.waitFor(() => expect(attached.run.wait).toHaveBeenCalledTimes(1));
+      await vi.advanceTimersByTimeAsync(2_550);
+      const result = await execution;
+      expect(result.timedOut).toBe(true);
+      expect(attached.run.disposeClientStream).toHaveBeenCalledTimes(1);
+      expect(attached.controller.signal.aborted).toBe(true);
+      expect(attached.isActive()).toBe(false);
+      expect(Date.now() - startedAt).toBeLessThanOrEqual(2_650);
+      expect(createMock).not.toHaveBeenCalled();
+      expect(resumeMock).not.toHaveBeenCalled();
+    } finally {
+      attached.controller.abort();
+      vi.useRealTimers();
+    }
+  });
+
 });

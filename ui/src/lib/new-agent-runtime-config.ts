@@ -1,5 +1,5 @@
-import { AGENT_DEFAULT_MAX_CONCURRENT_RUNS } from "@paperclipai/shared";
-import { defaultCreateValues } from "../components/agent-config-defaults";
+import { AGENT_DEFAULT_MAX_CONCURRENT_RUNS } from "@paperclipai/shared/constants";
+import { defaultCreateValues } from "../components/agent-config-defaults.js";
 
 export function buildNewAgentRuntimeConfig(input?: {
   heartbeatEnabled?: boolean;

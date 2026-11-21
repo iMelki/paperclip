@@ -114,8 +114,9 @@
 - [ ] I have updated relevant documentation to reflect my changes
 - [ ] I have considered and documented any risks above
 - [ ] All Paperclip CI gates are green
-- [ ] Greptile is 5/5 with no open P2s, recommendations, or follow-ups
+- [ ] Greptile review: N/A — Greptile is not configured for this repository. Do not claim a score or completion.
+- [ ] If Greptile is configured for this PR, I have linked its review and resolved documented findings.
 - [ ] Related issue is linked
 - [ ] Scope matches the issue and out-of-scope work was split
 - [ ] Human review is requested for medium, high, or critical risk
-- [ ] I will address all Greptile and reviewer comments before requesting merge
+- [ ] I will address all applicable reviewer comments before requesting merge

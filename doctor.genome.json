@@ -1,0 +1,117 @@
+{
+  "$schema": "https://raw.githubusercontent.com/iMelki/projects-ops/main/docs/schemas/doctor-genome.v1.json",
+  "schemaVersion": "doctor-genome.v1",
+  "profile": "observe",
+  "capabilities": [
+    "documentation",
+    "repository-governance",
+    "typescript"
+  ],
+  "sourceSets": [
+    {
+      "id": "authored-server-cli",
+      "kind": "authored-runtime",
+      "globContract": "repo-doctor-glob.v1",
+      "includeGlobs": [
+        "server/src/**/*.ts",
+        "server/src/**/*.tsx",
+        "server/src/**/*.mts",
+        "server/src/**/*.cts",
+        "cli/src/**/*.ts",
+        "cli/src/**/*.tsx",
+        "cli/src/**/*.mts",
+        "cli/src/**/*.cts"
+      ],
+      "excludeGlobs": [],
+      "reason": "Hand-authored server and CLI TypeScript that implements the control plane and operator command surface."
+    },
+    {
+      "id": "authored-packages",
+      "kind": "authored-runtime",
+      "globContract": "repo-doctor-glob.v1",
+      "includeGlobs": [
+        "packages/**/*.ts",
+        "packages/**/*.tsx",
+        "packages/**/*.mts",
+        "packages/**/*.cts",
+        "packages/**/*.js",
+        "packages/**/*.cjs",
+        "packages/**/*.mjs"
+      ],
+      "excludeGlobs": [
+        "packages/shared/src/app-definitions.generated.ts",
+        "packages/shared/src/telemetry/generated/**"
+      ],
+      "reason": "Hand-authored workspace-package runtime code; generated app definitions and telemetry output are excluded explicitly."
+    },
+    {
+      "id": "authored-ui",
+      "kind": "authored-runtime",
+      "globContract": "repo-doctor-glob.v1",
+      "includeGlobs": [
+        "ui/src/**/*.ts",
+        "ui/src/**/*.tsx",
+        "ui/src/**/*.mts",
+        "ui/src/**/*.cts",
+        "ui/src/**/*.js",
+        "ui/src/**/*.cjs",
+        "ui/src/**/*.mjs"
+      ],
+      "excludeGlobs": [],
+      "reason": "Hand-authored board UI source whose TypeScript and lint findings are actionable in this fork."
+    },
+    {
+      "id": "authored-scripts",
+      "kind": "authored-runtime",
+      "globContract": "repo-doctor-glob.v1",
+      "includeGlobs": [
+        "scripts/**/*.ts",
+        "scripts/**/*.tsx",
+        "scripts/**/*.mts",
+        "scripts/**/*.cts",
+        "scripts/**/*.js",
+        "scripts/**/*.cjs",
+        "scripts/**/*.mjs"
+      ],
+      "excludeGlobs": [],
+      "reason": "Hand-authored maintenance and verification scripts invoked by developers, hooks, and CI."
+    }
+  ],
+  "packs": [
+    {
+      "id": "node.typecheck",
+      "version": "1.0.0",
+      "required": true
+    },
+    {
+      "id": "node.lint",
+      "version": "1.0.0",
+      "required": false
+    },
+    {
+      "id": "architecture.boundaries",
+      "version": "1.0.0",
+      "required": false
+    }
+  ],
+  "gates": [
+    {
+      "id": "on_demand",
+      "scope": "repository",
+      "timeoutSeconds": 300,
+      "maxParallel": 1,
+      "sourceSets": [
+        "authored-server-cli",
+        "authored-packages",
+        "authored-ui",
+        "authored-scripts"
+      ],
+      "packs": [
+        "node.typecheck",
+        "node.lint",
+        "architecture.boundaries"
+      ]
+    }
+  ],
+  "exceptions": []
+}

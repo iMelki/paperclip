@@ -51,6 +51,31 @@ export function getConfigSchema(): AdapterConfigSchema {
         hint: "Optional Hermes --max-turns limit for tool-calling iterations.",
       },
       {
+        key: "strictIsolation",
+        label: "Strict isolated launch",
+        type: "toggle",
+        default: false,
+        hint: "Require a separate Hermes home, an existing named profile, no adapter env overrides, no session reuse, and a 15-minute/three-turn maximum. This is not effective-auth or provider-cost proof.",
+      },
+      {
+        key: "hermesHome",
+        label: "Isolated Hermes home",
+        type: "text",
+        hint: "Absolute path to a separate Hermes root. Required by strict isolated launch.",
+      },
+      {
+        key: "hermesProfile",
+        label: "Named Hermes profile",
+        type: "text",
+        hint: "Existing named profile inside the isolated Hermes home. Required by strict isolated launch.",
+      },
+      {
+        key: "baseUrl",
+        label: "Custom provider base URL",
+        type: "text",
+        hint: "Strict isolated launch with provider custom only: http(s) URL on host 127.0.0.1 that must equal model.base_url in the profile config.yaml. Hermes reads the endpoint from that file; this value is validated, not passed to Hermes.",
+      },
+      {
         key: "toolsets",
         label: "Toolsets",
         type: "text",

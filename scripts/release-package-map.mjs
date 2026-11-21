@@ -14,6 +14,10 @@ function readJson(filePath) {
   return JSON.parse(readFileSync(filePath, "utf8"));
 }
 
+function toManifestDir(relativeDir) {
+  return relativeDir.split(/[\\/]+/u).filter(Boolean).join("/");
+}
+
 function discoverPublicPackages() {
   const packages = [];
 
@@ -26,7 +30,7 @@ function discoverPublicPackages() {
       const pkg = readJson(pkgPath);
       if (!pkg.private) {
         packages.push({
-          dir: relDir,
+          dir: toManifestDir(relDir),
           pkgPath,
           name: pkg.name,
           version: pkg.version,
@@ -343,4 +347,5 @@ export {
   findUnpublishableWorkspaceEdges,
   getReleasePackages,
   loadReleaseManifest,
+  toManifestDir,
 };

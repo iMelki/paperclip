@@ -2,6 +2,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { AdapterExecutionContext, AdapterExecutionResult } from "@paperclipai/adapter-utils";
+import { ADAPTER_DEFAULT_TIMEOUT_SEC } from "@paperclipai/adapter-utils/adapter-timeout";
 import {
   adapterExecutionTargetIsRemote,
   adapterExecutionTargetRemoteCwd,
@@ -34,7 +35,7 @@ import {
   renderTemplate,
   renderPaperclipWakePrompt,
   isPaperclipRecoveryWakePayload,
-  resolvePaperclipDesiredSkillNames,
+  resolveLegacyPaperclipDesiredSkillNames,
   stringifyPaperclipWakePayload,
   refreshPaperclipWorkspaceEnvForExecution,
   DEFAULT_PAPERCLIP_AGENT_PROMPT_TEMPLATE,
@@ -203,7 +204,11 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   );
   const command = asString(config.command, "grok");
   const model = asString(config.model, DEFAULT_GROK_LOCAL_MODEL).trim();
-  const permissionMode = asString(config.permissionMode, "dontAsk").trim() || "dontAsk";
+  // No default permission mode: Grok >= 1.0 enforces `dontAsk` as
+  // deny-by-default and it overrides --always-approve, so passing it broke
+  // every unattended run (the first tool call died with "User cancelled the
+  // execution for tool ..."). --always-approve alone is the unattended policy.
+  const permissionMode = asString(config.permissionMode, "").trim();
   const reasoningEffort = asString(config.reasoningEffort, "").trim();
   const maxTurns = asNumber(config.maxTurns, 0);
   const alwaysApprove = asBoolean(config.alwaysApprove, true);
@@ -229,7 +234,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   await ensureAbsoluteDirectory(cwd, { createIfMissing: true });
 
   const grokSkillEntries = await readPaperclipRuntimeSkillEntries(config, __moduleDir);
-  const desiredGrokSkillNames = resolvePaperclipDesiredSkillNames(config, grokSkillEntries);
+  const desiredGrokSkillNames = resolveLegacyPaperclipDesiredSkillNames(config, grokSkillEntries);
   const instructionsFilePath = asString(config.instructionsFilePath, "").trim();
   const stagedAssets = await stageGrokProjectAssets({
     cwd,
@@ -296,7 +301,8 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
 
     const timeoutSec = resolveAdapterExecutionTargetTimeoutSec(
       executionTarget,
-      asNumber(config.timeoutSec, 0),
+      config.timeoutSec,
+      { adapterDefaultSec: ADAPTER_DEFAULT_TIMEOUT_SEC.grok_local },
     );
     const graceSec = asNumber(config.graceSec, 20);
     await ensureAdapterExecutionTargetRuntimeCommandInstalled({
@@ -541,10 +547,14 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         timedOut: false,
         errorMessage: failed ? fallbackErrorMessage : null,
         usage: {
-          inputTokens: 0,
-          outputTokens: 0,
-          cachedInputTokens: 0,
+          inputTokens: attempt.parsed.inputTokens,
+          outputTokens: attempt.parsed.outputTokens,
+          cachedInputTokens: attempt.parsed.cachedInputTokens,
         },
+        // Each `--single` invocation reports usage for just that process, not
+        // a running total for the resumed session, so the server must not
+        // delta it against the previous run's usage.
+        usageBasis: "per_run",
         sessionId: resolvedSessionId,
         sessionParams: resolvedSessionParams,
         sessionDisplayId: resolvedSessionId,
@@ -552,7 +562,9 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         biller: billingType === "api" ? "xai" : "grok",
         model,
         billingType,
-        costUsd: null,
+        // Subscription billing (OAuth/SuperGrok) has no marginal dollar cost per run,
+        // so we only surface costUsd for metered API-key billing.
+        costUsd: billingType === "api" ? attempt.parsed.costUsd : null,
         resultJson: {
           stopReason: attempt.parsed.stopReason,
           requestId: attempt.parsed.requestId,

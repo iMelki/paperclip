@@ -49,14 +49,37 @@ import type { PluginJobScheduler } from "./plugin-job-scheduler.js";
 import type { PluginJobStore } from "./plugin-job-store.js";
 import type { PluginToolDispatcher } from "./plugin-tool-dispatcher.js";
 import type { PluginLifecycleManager } from "./plugin-lifecycle.js";
-import { pluginDatabaseService } from "./plugin-database.js";
+import type { GitHubProjectBoardSchedulerBridge } from "./plugin-github-project-board-scheduler-bridge.js";
+import { loadPluginMigrationFiles, pluginDatabaseService } from "./plugin-database.js";
+import { resolveBundledCatalogRoot } from "./bundled-plugins.js";
 
 const execFileAsync = promisify(execFile);
+
+export function resolveNpmCliPath(nodeExecutable = process.execPath): string {
+  return path.join(path.dirname(nodeExecutable), "node_modules", "npm", "bin", "npm-cli.js");
+}
+
+export function resolveNpmInvocation(
+  args: readonly string[],
+  options: {
+    platform?: NodeJS.Platform;
+    nodeExecutable?: string;
+  } = {},
+): { file: string; args: readonly string[] } {
+  const platform = options.platform ?? process.platform;
+  if (platform !== "win32") return { file: "npm", args };
+
+  const nodeExecutable = options.nodeExecutable ?? process.execPath;
+  return {
+    file: nodeExecutable,
+    args: [resolveNpmCliPath(nodeExecutable), ...args],
+  };
+}
 
 async function execLocalPluginCommand(
   file: string,
   args: readonly string[],
-  options: { cwd: string; timeout: number },
+  options: { cwd?: string; timeout: number },
 ) {
   if (process.platform !== "win32") {
     return execFileAsync(file, args, options);
@@ -76,6 +99,17 @@ async function execLocalPluginCommand(
     ["/d", "/s", "/c", windowsFile, ...args],
     options,
   );
+}
+
+async function execNpmCommand(
+  args: readonly string[],
+  options: { cwd?: string; timeout: number },
+) {
+  const invocation = resolveNpmInvocation(args);
+  if (process.platform === "win32" && !existsSync(invocation.args[0]!)) {
+    throw new Error(`npm CLI was not found at ${invocation.args[0]}`);
+  }
+  return execFileAsync(invocation.file, invocation.args, options);
 }
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 export const REPO_ROOT = path.resolve(__dirname, "../../..");
@@ -143,8 +177,43 @@ const K8S_IN_CLUSTER_ENV_PASSTHROUGH = [
   "KUBERNETES_SERVICE_PORT_HTTPS",
 ];
 
+/**
+ * Each first-party sandbox provider's documented credential fallback env
+ * var. Environment rows may omit `config.apiKey` (managed/platform-
+ * provisioned rows always do — see `managed-environments.ts`), in which
+ * case the provider reads its documented process env var. That fallback
+ * executes inside the plugin worker, whose environment is scrubbed, so
+ * the deployment-level var must be forwarded explicitly.
+ *
+ * Keyed by the installed npm package name and cross-checked against the
+ * manifest's declared driver key — but name and manifest are both
+ * plugin-authored, so neither is proof of identity on its own. The gate
+ * therefore also requires a trusted install origin: a registry install
+ * (`packagePath` null — the `@paperclipai` scope is project-controlled at
+ * the registry), or a local path inside the repo/bundled plugin catalog,
+ * which ships inside the release image and is as trusted as the server
+ * code itself. An operator-added local plugin directory can claim any
+ * name and driver key and still receives nothing.
+ */
+const SANDBOX_PROVIDER_CREDENTIAL_ENV_PASSTHROUGH: Record<
+  string,
+  { driverKey: string; envVars: readonly string[] }
+> = {
+  "@paperclipai/plugin-daytona": { driverKey: "daytona", envVars: ["DAYTONA_API_KEY"] },
+  "@paperclipai/plugin-e2b": { driverKey: "e2b", envVars: ["E2B_API_KEY"] },
+  "@paperclipai/plugin-exe-dev": { driverKey: "exe-dev", envVars: ["EXE_API_KEY"] },
+  "@paperclipai/plugin-novita-sandbox": { driverKey: "novita", envVars: ["NOVITA_API_KEY"] },
+};
+
 export function buildPluginWorkerEnv(input: {
-  manifest: Pick<PaperclipPluginManifestV1, "capabilities">;
+  manifest: Pick<PaperclipPluginManifestV1, "capabilities"> & {
+    environmentDrivers?: ReadonlyArray<{ driverKey: string }>;
+  };
+  packageName?: string;
+  /** Local install path (`PluginRecord.packagePath`); null for registry installs. */
+  packagePath?: string | null;
+  /** Test seam; defaults to the repo plugin tree and the bundled catalog root. */
+  trustedLocalPluginRoots?: readonly string[];
   instanceInfo: { deploymentMode?: string | null; deploymentExposure?: string | null };
   processEnv?: NodeJS.ProcessEnv;
 }): Record<string, string> {
@@ -157,7 +226,22 @@ export function buildPluginWorkerEnv(input: {
     && input.manifest.capabilities.includes("environment.drivers.register");
   if (!canRegisterEnvironmentDrivers) return env;
 
-  for (const key of [...ADAPTER_ENV_PASSTHROUGH, ...K8S_IN_CLUSTER_ENV_PASSTHROUGH]) {
+  const trustedLocalRoots = input.trustedLocalPluginRoots
+    ?? [BUNDLED_LOCAL_PLUGIN_ROOT, resolveBundledCatalogRoot(processEnv)];
+  const installOriginTrusted =
+    input.packagePath == null
+    || trustedLocalRoots.some((root) => isPathWithin(root, path.resolve(input.packagePath as string)));
+  const credentialEntry = installOriginTrusted && input.packageName
+    ? SANDBOX_PROVIDER_CREDENTIAL_ENV_PASSTHROUGH[input.packageName]
+    : undefined;
+  const credentialKeys =
+    credentialEntry
+      && (input.manifest.environmentDrivers ?? []).some(
+        (driver) => driver.driverKey === credentialEntry.driverKey,
+      )
+      ? credentialEntry.envVars
+      : [];
+  for (const key of [...ADAPTER_ENV_PASSTHROUGH, ...K8S_IN_CLUSTER_ENV_PASSTHROUGH, ...credentialKeys]) {
     const value = processEnv[key];
     if (value && value.trim().length > 0) {
       env[key] = value;
@@ -306,6 +390,11 @@ export interface PluginInstallOptions {
   installDir?: string;
 }
 
+/** Internal lifecycle staging, never capability approval or activation. */
+export interface PluginPackageUpgradeOptions extends Omit<PluginInstallOptions, "installDir"> {
+  stageForApproval?: boolean;
+}
+
 // ---------------------------------------------------------------------------
 // Runtime options — services needed for initializing loaded plugins
 // ---------------------------------------------------------------------------
@@ -329,6 +418,8 @@ export interface PluginRuntimeServices {
   jobScheduler: PluginJobScheduler;
   /** Job store for syncing manifest job declarations to the DB. */
   jobStore: PluginJobStore;
+  /** Shared host declaration reconciliation for boot, loadSingle and runtime reload. */
+  nativeGitHubProjectBoard?: GitHubProjectBoardSchedulerBridge;
   /** Tool dispatcher for registering plugin-contributed agent tools. */
   toolDispatcher: PluginToolDispatcher;
   /** Lifecycle manager for state transitions and worker lifecycle events. */
@@ -509,7 +600,7 @@ export interface PluginLoader {
    *
    * @see PLUGIN_SPEC.md §25.3 — Upgrade Lifecycle
    */
-  upgradePlugin(pluginId: string, options: Omit<PluginInstallOptions, "installDir">): Promise<{
+  upgradePlugin(pluginId: string, options: PluginPackageUpgradeOptions): Promise<{
     oldManifest: PaperclipPluginManifestV1;
     newManifest: PaperclipPluginManifestV1;
     discovered: DiscoveredPlugin;
@@ -1210,8 +1301,7 @@ export function pluginLoader(
         // Use execFile (not exec) to avoid shell injection from package name/version.
         // --ignore-scripts prevents preinstall/install/postinstall hooks from
         // executing arbitrary code on the host before manifest validation.
-        await execFileAsync(
-          "npm",
+        await execNpmCommand(
           ["install", spec, "--prefix", targetInstallDir, "--save", "--ignore-scripts"],
           { timeout: 120_000 }, // 2 minute timeout for npm install
         );
@@ -1685,6 +1775,12 @@ export function pluginLoader(
     async installPlugin(installOptions: PluginInstallOptions): Promise<DiscoveredPlugin> {
       const discovered = await fetchAndValidate(installOptions);
       const manifest = discovered.manifest!;
+      // Read migration files before the install transaction. The transaction
+      // locks the plugin row; holding that lock across filesystem reads is what
+      // makes a concurrent `plugins ... FOR SHARE` sit until statement_timeout.
+      const loadedMigrations = manifest.database
+        ? await loadPluginMigrationFiles(discovered.packagePath, manifest)
+        : undefined;
 
       // Step 6: Persist install record and apply plugin-owned schema migrations
       // in one database transaction. If migration validation fails, the plugin
@@ -1710,7 +1806,7 @@ export function pluginLoader(
             installed.id,
             manifest,
             discovered.packagePath,
-            { persistFailure: false },
+            { persistFailure: false, loadedMigrations },
           );
         }
       });
@@ -1747,7 +1843,7 @@ export function pluginLoader(
      */
     async upgradePlugin(
       pluginId: string,
-      upgradeOptions: Omit<PluginInstallOptions, "installDir">,
+      upgradeOptions: PluginPackageUpgradeOptions,
     ): Promise<{
       oldManifest: PaperclipPluginManifestV1;
       newManifest: PaperclipPluginManifestV1;
@@ -1758,9 +1854,14 @@ export function pluginLoader(
         packageName: string;
         packagePath: string | null;
         manifestJson: PaperclipPluginManifestV1;
+        status: PluginRecord["status"];
       } | null;
       if (!plugin) throw new Error(`Plugin not found: ${pluginId}`);
 
+      const staging = upgradeOptions.stageForApproval === true;
+      if (staging && plugin.status !== "upgrade_pending") {
+        throw new Error("Capability staging requires a persisted upgrade_pending hold.");
+      }
       const oldManifest = plugin.manifestJson;
       const {
         packageName = plugin.packageName,
@@ -1798,7 +1899,7 @@ export function pluginLoader(
       const newCaps = newManifest.capabilities ?? [];
       const escalated = newCaps.filter((c) => !oldCaps.has(c));
 
-      if (escalated.length > 0) {
+      if (escalated.length > 0 && !staging) {
         log.warn(
           { pluginId, escalated, oldVersion: oldManifest.version, newVersion: newManifest.version },
           "plugin-loader: upgrade introduces new capabilities — requires admin approval",
@@ -1811,11 +1912,20 @@ export function pluginLoader(
       }
 
       // 4. Update the existing record
-      await registry.update(pluginId, {
+      const replacement = {
         packageName: discovered.packageName,
+        packagePath: discovered.source === "local-filesystem" ? discovered.packagePath : null,
         version: discovered.version,
         manifest: newManifest,
-      });
+      };
+      if (staging) {
+        const updated = await registry.update(pluginId, replacement, {
+          status: "upgrade_pending", manifest: oldManifest,
+        });
+        if (!updated) throw new Error("Plugin activation hold changed before replacement.");
+      } else {
+        await registry.update(pluginId, replacement);
+      }
 
       return {
         oldManifest,
@@ -1919,25 +2029,63 @@ export function pluginLoader(
       // Fetch all plugins in ready status, ordered by installOrder
       const readyPlugins = (await registry.listByStatus("ready")) as PluginRecord[];
 
-      if (readyPlugins.length === 0) {
+      // Retry plugins stranded in error status. An activation failure is often
+      // environmental — missing package dependencies, a stale build output, a
+      // module that moved under a pull — and the fix lands on disk without any
+      // write to the plugin row, so the row would otherwise stay dead until an
+      // operator flips it back by hand. One attempt per boot cannot crash-loop
+      // within a running process, and a failed attempt re-records the error
+      // through the normal markError path. The flip to ready must run BEFORE
+      // activation: the error status only legally transitions to ready or
+      // uninstalled, so a retry that failed while still in error status could
+      // not re-mark itself as errored.
+      // This covers every plugin in error status, bundled and third-party alike,
+      // once per boot.
+      const erroredPlugins = (await registry.listByStatus("error")) as PluginRecord[];
+      const retriedPlugins: PluginRecord[] = [];
+      for (const plugin of erroredPlugins) {
+        try {
+          const flipped = (await registry.updateStatus(plugin.id, { status: "ready" })) as PluginRecord | null;
+          if (flipped) retriedPlugins.push(flipped);
+        } catch (err) {
+          log.warn(
+            {
+              pluginId: plugin.id,
+              pluginKey: plugin.pluginKey,
+              err: err instanceof Error ? err.message : String(err),
+            },
+            "plugin-loader: could not queue errored plugin for a boot retry",
+          );
+        }
+      }
+      if (retriedPlugins.length > 0) {
+        log.info(
+          { count: retriedPlugins.length, pluginKeys: retriedPlugins.map((plugin) => plugin.pluginKey) },
+          "plugin-loader: retrying plugins that failed activation on a previous boot",
+        );
+      }
+
+      const pluginsToLoad = [...readyPlugins, ...retriedPlugins];
+
+      if (pluginsToLoad.length === 0) {
         log.info("plugin-loader: no ready plugins to load");
         return { total: 0, succeeded: 0, failed: 0, results: [] };
       }
 
       log.info(
-        { count: readyPlugins.length },
+        { count: pluginsToLoad.length },
         "plugin-loader: found ready plugins to load",
       );
 
       // Load plugins in parallel
       const results = await Promise.allSettled(
-        readyPlugins.map((plugin) => activatePlugin(plugin))
+        pluginsToLoad.map((plugin) => activatePlugin(plugin))
       );
 
       const loadResults = results.map((r, i) => {
         if (r.status === "fulfilled") return r.value;
         return {
-          plugin: readyPlugins[i]!,
+          plugin: pluginsToLoad[i]!,
           success: false,
           error: String(r.reason),
           registered: { worker: false, eventSubscriptions: 0, jobs: 0, webhooks: 0, tools: 0 },
@@ -1949,7 +2097,7 @@ export function pluginLoader(
 
       log.info(
         {
-          total: readyPlugins.length,
+          total: pluginsToLoad.length,
           succeeded,
           failed,
         },
@@ -1957,7 +2105,7 @@ export function pluginLoader(
       );
 
       return {
-        total: readyPlugins.length,
+        total: pluginsToLoad.length,
         succeeded,
         failed,
         results: loadResults,
@@ -2247,7 +2395,12 @@ export function pluginLoader(
         databaseNamespace,
         hostHandlers,
         autoRestart: true,
-        env: buildPluginWorkerEnv({ manifest, instanceInfo }),
+        env: buildPluginWorkerEnv({
+          manifest,
+          packageName: activePlugin.packageName,
+          packagePath: activePlugin.packagePath,
+          instanceInfo,
+        }),
         // Authorize the worker to act on each configured company from its
         // proactive loops/timers (LOOA-629). Seeded here so it is in place
         // before any setup()-time worker→host call (LOOA-695). The authorized
@@ -2260,7 +2413,7 @@ export function pluginLoader(
       // (for example @paperclipai/shared exports). Run those workers through
       // the tsx loader so first-party example plugins work in development.
       if (activePlugin.packagePath && existsSync(DEV_TSX_LOADER_PATH)) {
-        workerOptions.execArgv = ["--import", DEV_TSX_LOADER_PATH];
+        workerOptions.execArgv = ["--import", pathToFileURL(DEV_TSX_LOADER_PATH).href];
       }
 
       await workerManager.startWorker(pluginId, workerOptions);
@@ -2324,7 +2477,9 @@ export function pluginLoader(
       // ------------------------------------------------------------------
       // 6. Sync job declarations and register with scheduler
       // ------------------------------------------------------------------
-      const jobDeclarations = manifest.jobs ?? [];
+      const jobDeclarations = runtimeServices.nativeGitHubProjectBoard
+        ? await runtimeServices.nativeGitHubProjectBoard.reconcileDeclarations(pluginId, pluginKey, manifest.jobs ?? [])
+        : manifest.jobs ?? [];
       if (jobDeclarations.length > 0) {
         await jobStore.syncJobDeclarations(pluginId, jobDeclarations);
         await jobScheduler.registerPlugin(pluginId);
@@ -2416,8 +2571,9 @@ export function pluginLoader(
       );
 
       if (options.markErrorOnFailure) {
-        // Mark the plugin as errored in the database so it is not retried
-        // automatically on next startup without operator intervention.
+        // Mark the plugin as errored in the database. The running process
+        // leaves it inactive; the next boot's loadAll retries it once, and the
+        // lifecycle enable() path can revive it sooner by hand.
         // markError also deactivates the plugin runtime in this process.
         try {
           await lifecycleManager.markError(pluginId, `Activation failed: ${errorMessage}`);

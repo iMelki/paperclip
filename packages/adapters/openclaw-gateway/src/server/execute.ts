@@ -4,6 +4,11 @@ import type {
   AdapterRuntimeServiceReport,
 } from "@paperclipai/adapter-utils";
 import {
+  ADAPTER_DEFAULT_TIMEOUT_SEC,
+  MAX_ADAPTER_TIMEOUT_MS,
+  resolveAdapterTimeoutSec,
+} from "@paperclipai/adapter-utils/adapter-timeout";
+import {
   asNumber,
   asString,
   buildPaperclipEnv,
@@ -423,6 +428,7 @@ function buildWakeText(
     "Workflow:",
     "1) GET /api/agents/me",
     `2) Determine issueId: PAPERCLIP_TASK_ID if present, otherwise issue_id (${issueIdHint}).`,
+    '   Replace {issueId} in every endpoint below with that determined id. Never send the literal text "{issueId}" in a URL.',
     "3) If issueId exists:",
     "   - POST /api/issues/{issueId}/checkout with {\"agentId\":\"$PAPERCLIP_AGENT_ID\",\"expectedStatuses\":[\"todo\",\"backlog\",\"blocked\",\"in_review\"]}",
     "   - GET /api/issues/{issueId}",
@@ -1057,10 +1063,13 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     };
   }
 
-  const timeoutSec = Math.max(0, Math.floor(asNumber(ctx.config.timeoutSec, 120)));
-  const timeoutMs = timeoutSec > 0 ? timeoutSec * 1000 : 0;
-  const connectTimeoutMs = timeoutMs > 0 ? Math.min(timeoutMs, 15_000) : 10_000;
-  const waitTimeoutMs = parseOptionalPositiveInteger(ctx.config.waitTimeoutMs) ?? (timeoutMs > 0 ? timeoutMs : 30_000);
+  const timeoutSec = resolveAdapterTimeoutSec({
+    configured: ctx.config.timeoutSec,
+    adapterDefaultSec: ADAPTER_DEFAULT_TIMEOUT_SEC.openclaw_gateway,
+  }).timeoutSec;
+  const timeoutMs = timeoutSec * 1000;
+  const connectTimeoutMs = Math.min(timeoutMs, 15_000);
+  const waitTimeoutMs = parseOptionalPositiveInteger(ctx.config.waitTimeoutMs) ?? timeoutMs;
 
   const payloadTemplate = parseObject(ctx.config.payloadTemplate);
   const transportHint = nonEmpty(ctx.config.streamTransport) ?? nonEmpty(ctx.config.transport);
@@ -1319,7 +1328,9 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         const waitPayload = await client.request<Record<string, unknown>>(
           "agent.wait",
           { runId: acceptedRunId, timeoutMs: waitTimeoutMs },
-          { timeoutMs: waitTimeoutMs + connectTimeoutMs },
+          // setTimeout fires at once above 2^31-1 ms, so a long override must not
+          // push the composed request timer past that limit.
+          { timeoutMs: Math.min(waitTimeoutMs + connectTimeoutMs, MAX_ADAPTER_TIMEOUT_MS) },
         );
 
         latestResultPayload = waitPayload;

@@ -34,6 +34,17 @@ import {
   type TrustedLoopbackHttpRule,
 } from "./plugin-trusted-loopback-policy.js";
 
+interface PluginMutationSnapshot {
+  status: PluginStatus;
+  manifest: PaperclipPluginManifestV1;
+}
+
+function pluginMutationCondition(id: string, expected?: PluginMutationSnapshot) {
+  return expected
+    ? and(eq(plugins.id, id), eq(plugins.status, expected.status), eq(plugins.manifestJson, expected.manifest))
+    : eq(plugins.id, id);
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -204,9 +215,11 @@ export function pluginRegistryService(db: Db) {
       id: string,
       data: {
         packageName?: string;
+        packagePath?: string | null;
         version?: string;
         manifest?: PaperclipPluginManifestV1;
       },
+      expected?: PluginMutationSnapshot,
     ) => {
       const plugin = await getById(id);
       if (!plugin) throw notFound("Plugin not found");
@@ -215,6 +228,7 @@ export function pluginRegistryService(db: Db) {
         updatedAt: new Date(),
       };
       if (data.packageName !== undefined) setClause.packageName = data.packageName;
+      if (data.packagePath !== undefined) setClause.packagePath = data.packagePath;
       if (data.version !== undefined) setClause.version = data.version;
       if (data.manifest !== undefined) {
         setClause.manifestJson = data.manifest;
@@ -225,15 +239,18 @@ export function pluginRegistryService(db: Db) {
       return db
         .update(plugins)
         .set(setClause)
-        .where(eq(plugins.id, id))
+        .where(pluginMutationCondition(id, expected))
         .returning()
-        .then((rows) => rows[0] ?? null);
+        .then((rows) => {
+          if (expected && rows.length === 0) throw conflict("Plugin activation hold changed; reload and review again.");
+          return rows[0] ?? null;
+        });
     },
 
     // ----- Status ---------------------------------------------------------
 
     /** Update a plugin's lifecycle status and optional error message. */
-    updateStatus: async (id: string, input: UpdatePluginStatus) => {
+    updateStatus: async (id: string, input: UpdatePluginStatus, expected?: PluginMutationSnapshot) => {
       const plugin = await getById(id);
       if (!plugin) throw notFound("Plugin not found");
 
@@ -244,9 +261,12 @@ export function pluginRegistryService(db: Db) {
           lastError: input.lastError ?? null,
           updatedAt: new Date(),
         })
-        .where(eq(plugins.id, id))
+        .where(pluginMutationCondition(id, expected))
         .returning()
-        .then((rows) => rows[0] ?? null);
+        .then((rows) => {
+          if (expected && rows.length === 0) throw conflict("Plugin activation hold changed; reload and review again.");
+          return rows[0] ?? null;
+        });
     },
 
     // ----- Uninstall / Remove --------------------------------------------

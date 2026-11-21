@@ -1,0 +1,76 @@
+231:    if (result === "stopped" || result === "failed") cleanupOnce();
+258:      if (false && !stopped) {
+
+[test:run] exact pre-push selection: packages/db/src/test-embedded-postgres-stop.test.ts
+
+ RUN  v4.1.10 S:/source/CCAI/Assistants/.tmp/paperclip-pr117-correction-20260912
+
+ ❯ |@paperclipai/db| src/test-embedded-postgres-stop.test.ts (6 tests | 4 failed) 30ms
+     ✓ reclaims once after confirmed graceful stop 4ms
+     × preserves data after rejected or synchronous failed stop: false 6ms
+     × preserves data after rejected or synchronous failed stop: true 1ms
+     × timeout preserves data; late success alone permits cleanup: false 7ms
+     ✓ timeout preserves data; late success alone permits cleanup: true 1ms
+     × does not retry or remove data when failed-start cleanup is unresolved 8ms
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 4 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  |@paperclipai/db| src/test-embedded-postgres-stop.test.ts > bounded embedded PostgreSQL cleanup > preserves data after rejected or synchronous failed stop: false
+ FAIL  |@paperclipai/db| src/test-embedded-postgres-stop.test.ts > bounded embedded PostgreSQL cleanup > preserves data after rejected or synchronous failed stop: true
+AssertionError: expected "vi.fn()" to not be called at all, but actually been called 1 times
+
+Received:
+
+  1st vi.fn() call:
+
+    Array []
+
+
+Number of calls: 1
+
+ ❯ src/test-embedded-postgres-stop.test.ts:48:25
+     46|     expect(await stopBounded(instance(stop), null, cleanup)).toBe(fals…
+     47|     await Promise.resolve();
+     48|     expect(cleanup).not.toHaveBeenCalled();
+       |                         ^
+     49|   });
+     50|
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/4]⎯
+
+ FAIL  |@paperclipai/db| src/test-embedded-postgres-stop.test.ts > bounded embedded PostgreSQL cleanup > timeout preserves data; late success alone permits cleanup: false
+AssertionError: expected "vi.fn()" to be called +0 times, but got 1 times
+ ❯ src/test-embedded-postgres-stop.test.ts:63:21
+     61|     if (success) resolve(); else reject(new Error("late failure"));
+     62|     await vi.advanceTimersByTimeAsync(0);
+     63|     expect(cleanup).toHaveBeenCalledTimes(success ? 1 : 0);
+       |                     ^
+     64|   });
+     65|
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/4]⎯
+
+ FAIL  |@paperclipai/db| src/test-embedded-postgres-stop.test.ts > bounded embedded PostgreSQL cleanup > does not retry or remove data when failed-start cleanup is unresolved
+AssertionError: expected [Function] to throw error matching /cleanup unresolved; no retry; data pr…/ but got 'Failed to start embedded PostgreSQL t…'
+
+- Expected:
+/cleanup unresolved; no retry; data preserved.*original startup failure/
+
++ Received:
+"Failed to start embedded PostgreSQL test database after 5 attempts: original startup failure"
+
+ ❯ src/test-embedded-postgres-stop.test.ts:76:51
+     74|     }
+     75|     setCtor(async () => Fake);
+     76|     await expect(startWithRetry("synthetic-only-")).rejects.toThrow(
+       |                                                   ^
+     77|       /cleanup unresolved; no retry; data preserved.*original startup …
+     78|     );
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[3/4]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  4 failed | 2 passed (6)
+   Start at  01:00:21
+   Duration  608ms (transform 129ms, setup 0ms, import 176ms, tests 30ms, environment 0ms)

@@ -1,7 +1,18 @@
 // @vitest-environment node
 import { describe, expect, it } from "vitest";
-import { buildNewAgentHirePayload } from "./new-agent-hire-payload";
-import { defaultCreateValues } from "../components/agent-config-defaults";
+import { buildNewAgentHirePayload, shouldUnlockHireSubmission } from "./new-agent-hire-payload.js";
+import { ApiError } from "../api/client.js";
+
+describe("shouldUnlockHireSubmission", () => {
+  it("unlocks on a 4xx rejection and keeps the lock on 409, 5xx or network errors", () => {
+    expect(shouldUnlockHireSubmission(new ApiError("bad", 400, null))).toBe(true);
+    expect(shouldUnlockHireSubmission(new ApiError("conflict", 409, null))).toBe(false);
+    expect(shouldUnlockHireSubmission(new ApiError("unprocessable", 422, null))).toBe(true);
+    expect(shouldUnlockHireSubmission(new ApiError("down", 503, null))).toBe(false);
+    expect(shouldUnlockHireSubmission(new TypeError("Failed to fetch"))).toBe(false);
+  });
+});
+import { defaultCreateValues } from "../components/agent-config-defaults.js";
 
 describe("buildNewAgentHirePayload", () => {
   it("persists the selected default environment id", () => {
@@ -40,6 +51,32 @@ describe("buildNewAgentHirePayload", () => {
     ).toMatchObject({
       defaultEnvironmentId: null,
     });
+  });
+
+  it("sends the apply-existing flag when the owner applies a stored Claude login", () => {
+    const payload = buildNewAgentHirePayload({
+      name: "Stored Claude",
+      effectiveRole: "general",
+      configValues: {
+        ...defaultCreateValues,
+        adapterType: "claude_local",
+        claudeApplyStoredLogin: true,
+      },
+      adapterConfig: {},
+    });
+    expect(payload).toMatchObject({ applyStoredClaudeLogin: true });
+    // Apply-existing carries no stored-session claim.
+    expect("storedSessionId" in payload).toBe(false);
+  });
+
+  it("omits the apply-existing flag when the owner does not apply a stored login", () => {
+    const payload = buildNewAgentHirePayload({
+      name: "Fresh Claude",
+      effectiveRole: "general",
+      configValues: { ...defaultCreateValues, adapterType: "claude_local" },
+      adapterConfig: {},
+    });
+    expect("applyStoredClaudeLogin" in payload).toBe(false);
   });
 
   it("includes core trust preset permissions when provided", () => {
@@ -89,5 +126,22 @@ describe("buildNewAgentHirePayload", () => {
         },
       },
     });
+  });
+});
+
+
+describe("paused hire request", () => {
+  it("emits an inert process request even if the editor previously held a configured provider", () => {
+    const payload = buildNewAgentHirePayload({
+      name: " CFO ", effectiveRole: "general", title: "Chief Financial Officer",
+      reportsTo: "22222222-2222-4222-8222-222222222222", pausedSetup: true, idempotencyKey: "same-attempt",
+      configValues: { ...defaultCreateValues, adapterType: "claude_local", heartbeatEnabled: true },
+      adapterConfig: { command: "must-not-launch", env: { TOKEN: "SENTINEL_DO_NOT_TRANSMIT" } },
+      selectedSkillKeys: ["must-not-install"], permissions: { canCreateAgents: true, canCreateSkills: true },
+    });
+    expect(payload).toMatchObject({ name: "CFO", pausedSetup: true, idempotencyKey: "same-attempt", adapterType: "process", adapterConfig: {}, defaultEnvironmentId: null, runtimeConfig: { heartbeat: { enabled: false, wakeOnDemand: false, wakeOnAssignment: false, wakeOnAutomation: false, intervalSec: 0 } }, permissions: { canCreateAgents: false, canCreateSkills: false, canAssignTasks: false } });
+    expect(payload).not.toHaveProperty("desiredSkills");
+    expect(JSON.stringify(payload)).not.toContain("SENTINEL");
+    expect(JSON.stringify(payload)).not.toContain("must-not");
   });
 });

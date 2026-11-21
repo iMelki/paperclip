@@ -1,0 +1,23 @@
+{
+  "capturedAt": "2026-08-27T05:18:00.000Z",
+  "surface": "/ux-lab/issue-chat",
+  "base": "http://127.0.0.1:5173",
+  "note": "Vite preview of built UI with new route; factory :5113 serves pre-build bundle until restart.",
+  "counts": {
+    "shimmerText": 2,
+    "shimmerMuted": 0,
+    "thinkingIcon": 0,
+    "thinkingPath": 0
+  },
+  "animation": {
+    "shimmerText": {
+      "animationName": "shimmer-text-slide",
+      "animationDuration": "2.5s"
+    }
+  },
+  "screenshots": [
+    "gauntlet-shots/07-issue-chat-ux-lab-shimmer-1440.png",
+    "gauntlet-shots/08-working-token-shimmer-1440.png"
+  ],
+  "routeLand": "App.tsx ux-lab/issue-chat -> IssueChatUxLab (fixture-backed; no live agent required)"
+}

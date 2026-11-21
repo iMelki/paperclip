@@ -60,6 +60,7 @@ describe("logger translateTime respects TZ environment variable", () => {
     const { targets } = mockTransport.mock.calls[0][0] as {
       targets: Array<{ options: Record<string, unknown> }>;
     };
+    expect(targets.length).toBeGreaterThan(0);
     for (const target of targets) {
       expect(target.options.translateTime).toBe("SYS:HH:MM:ss");
     }

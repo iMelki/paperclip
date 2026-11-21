@@ -8,7 +8,8 @@ import { Button } from "@/components/ui/button";
 import { AsciiArtAnimation } from "@/components/AsciiArtAnimation";
 import { PaperclipLoading } from "@/components/AnimatedPaperclipIcon";
 import { ThemeToggle } from "@/components/ThemeToggle";
-import { Sparkles } from "lucide-react";
+import { PaperclipLockup } from "../components/PaperclipLockup";
+import { PasswordInput } from "@/components/PasswordInput";
 
 type AuthMode = "sign_in" | "sign_up";
 
@@ -73,7 +74,11 @@ export function AuthPage() {
       setError(null);
       await queryClient.invalidateQueries({ queryKey: queryKeys.auth.session });
       await queryClient.invalidateQueries({ queryKey: queryKeys.health });
-      await queryClient.invalidateQueries({ queryKey: queryKeys.companies.all });
+      // Reset rather than invalidate: the `["companies"]` entry is shared app-wide and
+      // is not account-scoped, so invalidating leaves the previous account's list
+      // readable (and any fetch for that session in flight) until the refetch lands.
+      // Sign-in can change accounts, so drop the list outright.
+      await queryClient.resetQueries({ queryKey: queryKeys.companies.all });
       navigate(nextPath, { replace: true });
     },
     onError: (err) => {
@@ -102,9 +107,8 @@ export function AuthPage() {
       {/* Left half — form */}
       <div className="w-full md:w-1/2 flex flex-col overflow-y-auto">
         <div className="w-full max-w-md mx-auto my-auto px-8 py-12">
-          <div className="flex items-center gap-2 mb-8">
-            <Sparkles className="h-4 w-4 text-muted-foreground" />
-            <span className="text-sm font-medium">Paperclip</span>
+          <div className="mb-8">
+            <PaperclipLockup className="h-5 w-auto" />
           </div>
 
           <h1 className="text-xl font-semibold">
@@ -167,11 +171,10 @@ export function AuthPage() {
             </div>
             <div>
               <label htmlFor="password" className="text-xs text-muted-foreground mb-1 block">Password</label>
-              <input
+              <PasswordInput
                 id="password"
                 name="password"
                 className="w-full rounded-md border border-border bg-transparent px-3 py-2 text-sm outline-none focus:ring-1 focus:ring-ring placeholder:text-muted-foreground/50"
-                type="password"
                 value={password}
                 onChange={(event) => setPassword(event.target.value)}
                 autoComplete={mode === "sign_in" ? "current-password" : "new-password"}

@@ -203,6 +203,110 @@ describe("buildPluginWorkerEnv", () => {
       PAPERCLIP_DEPLOYMENT_EXPOSURE: "public",
     });
   });
+
+  it("passes a first-party sandbox provider's documented credential env var to its own worker", () => {
+    const env = buildPluginWorkerEnv({
+      manifest: {
+        capabilities: ["environment.drivers.register"],
+        environmentDrivers: [{ driverKey: "daytona" }],
+      },
+      packageName: "@paperclipai/plugin-daytona",
+      packagePath: null,
+      instanceInfo,
+      processEnv: {
+        DAYTONA_API_KEY: "daytona-token",
+        NOVITA_API_KEY: "novita-token",
+        E2B_API_KEY: " ",
+      },
+    });
+
+    expect(env).toEqual({
+      PAPERCLIP_DEPLOYMENT_MODE: "authenticated",
+      PAPERCLIP_DEPLOYMENT_EXPOSURE: "public",
+      DAYTONA_API_KEY: "daytona-token",
+    });
+  });
+
+  it("passes the credential to a first-party plugin installed from the bundled catalog", () => {
+    const env = buildPluginWorkerEnv({
+      manifest: {
+        capabilities: ["environment.drivers.register"],
+        environmentDrivers: [{ driverKey: "daytona" }],
+      },
+      packageName: "@paperclipai/plugin-daytona",
+      packagePath: "/app/packages/plugins/sandbox-providers/daytona",
+      trustedLocalPluginRoots: ["/app/packages/plugins"],
+      instanceInfo,
+      processEnv: {
+        DAYTONA_API_KEY: "daytona-token",
+      },
+    });
+
+    expect(env).toEqual({
+      PAPERCLIP_DEPLOYMENT_MODE: "authenticated",
+      PAPERCLIP_DEPLOYMENT_EXPOSURE: "public",
+      DAYTONA_API_KEY: "daytona-token",
+    });
+  });
+
+  it("does not pass the credential to a local plugin that self-declares the first-party name", () => {
+    const env = buildPluginWorkerEnv({
+      manifest: {
+        capabilities: ["environment.drivers.register"],
+        environmentDrivers: [{ driverKey: "daytona" }],
+      },
+      packageName: "@paperclipai/plugin-daytona",
+      packagePath: "/home/operator/.paperclip/plugins/fake-daytona",
+      trustedLocalPluginRoots: ["/app/packages/plugins"],
+      instanceInfo,
+      processEnv: {
+        DAYTONA_API_KEY: "daytona-token",
+      },
+    });
+
+    expect(env).toEqual({
+      PAPERCLIP_DEPLOYMENT_MODE: "authenticated",
+      PAPERCLIP_DEPLOYMENT_EXPOSURE: "public",
+    });
+  });
+
+  it("does not pass a credential to a third-party plugin that claims a first-party driver key", () => {
+    const env = buildPluginWorkerEnv({
+      manifest: {
+        capabilities: ["environment.drivers.register"],
+        environmentDrivers: [{ driverKey: "daytona" }],
+      },
+      packageName: "@acme/plugin-fake-daytona",
+      instanceInfo,
+      processEnv: {
+        DAYTONA_API_KEY: "daytona-token",
+      },
+    });
+
+    expect(env).toEqual({
+      PAPERCLIP_DEPLOYMENT_MODE: "authenticated",
+      PAPERCLIP_DEPLOYMENT_EXPOSURE: "public",
+    });
+  });
+
+  it("does not pass a credential when the first-party package omits its expected driver key", () => {
+    const env = buildPluginWorkerEnv({
+      manifest: {
+        capabilities: ["environment.drivers.register"],
+        environmentDrivers: [{ driverKey: "kubernetes" }],
+      },
+      packageName: "@paperclipai/plugin-daytona",
+      instanceInfo,
+      processEnv: {
+        DAYTONA_API_KEY: "daytona-token",
+      },
+    });
+
+    expect(env).toEqual({
+      PAPERCLIP_DEPLOYMENT_MODE: "authenticated",
+      PAPERCLIP_DEPLOYMENT_EXPOSURE: "public",
+    });
+  });
 });
 
 describeEmbeddedPostgres("plugin database namespaces", () => {
@@ -496,6 +600,55 @@ describeEmbeddedPostgres("plugin database namespaces", () => {
       .from(pluginMigrations)
       .where(eq(pluginMigrations.pluginId, pluginId));
     expect(migration?.status).toBe("failed");
+  });
+
+  it("does not overwrite a migration another attempt applied while this one was failing", async () => {
+    const pluginManifest = manifest("paperclip.escape");
+    const packageRoot = await createPluginPackage(
+      pluginManifest,
+      "CREATE TABLE public.plugin_escape (id uuid PRIMARY KEY);",
+    );
+    const pluginId = await installPluginRecord(pluginManifest);
+    let injected = false;
+    // A concurrent attempt commits the same migration right after this one
+    // rolls back (which releases the advisory lock) and before its failure write.
+    const racingDb = new Proxy(db, {
+      get(target, prop) {
+        const value = Reflect.get(target, prop);
+        if (prop !== "transaction") return typeof value === "function" ? value.bind(target) : value;
+        return async (...args: unknown[]) => {
+          try {
+            return await (value as (...a: unknown[]) => Promise<unknown>).apply(target, args);
+          } catch (error) {
+            if (!injected) {
+              injected = true;
+              await target.insert(pluginMigrations).values({
+                pluginId,
+                pluginKey: pluginManifest.id,
+                namespaceName: derivePluginDatabaseNamespace(pluginManifest.id),
+                migrationKey: "001_init.sql",
+                checksum: "concurrent-attempt",
+                pluginVersion: pluginManifest.version,
+                status: "applied",
+                appliedAt: new Date(),
+              });
+            }
+            throw error;
+          }
+        };
+      },
+    }) as typeof db;
+
+    await expect(
+      pluginDatabaseService(racingDb).applyMigrations(pluginId, pluginManifest, packageRoot),
+    ).rejects.toThrow(/public/i);
+
+    const [migration] = await db
+      .select()
+      .from(pluginMigrations)
+      .where(eq(pluginMigrations.pluginId, pluginId));
+    expect(migration?.status).toBe("applied");
+    expect(migration?.checksum).toBe("concurrent-attempt");
   });
 
   it("rolls back plugin install when migration validation fails", async () => {

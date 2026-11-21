@@ -19,6 +19,84 @@ That's it. On first start the server:
 
 Data persists across restarts in `~/.paperclip/instances/default/db/`. To reset local dev data, delete that directory.
 
+On server startup, a live PID in `postmaster.pid` is not enough to reuse the
+embedded server. Paperclip queries PostgreSQL on the recorded port, with the
+same login it uses for the embedded database, and checks that its
+`data_directory` is the configured directory. Both paths are resolved to their
+physical location first (symlinks and junctions), and compared without case on
+Windows.
+
+On server startup, PostgreSQL is started only when the lock is stale: the PID no longer exists
+(`ESRCH`), or it is the server's own process. If the live PID is affirmatively
+not PostgreSQL (the OS recycled it, checked with `ps` or `tasklist`) and nothing
+answers on the recorded or configured port, the lock is stale too. A stale lock is
+never deleted: startup renames it to `postmaster.pid.stale-<timestamp>`, then
+starts normally. If the rename fails, startup refuses (exit code 75). Moved-aside
+locks are never pruned automatically; delete old `postmaster.pid.stale-*` files by hand
+once you no longer need them. For a data directory that was never initialised (no
+`PG_VERSION`), the archive is written beside it as `<dir>.postmaster.pid.stale-<timestamp>`
+so the first-time `initdb` still finds an empty directory.
+
+If `postmaster.pid` cannot be read or holds no valid process id, the owner is
+looked up without it. A server answering on the configured port, or any
+PostgreSQL process whose command line or working directory is this data
+directory, keeps the lock in place. Otherwise the lock is renamed to
+`postmaster.pid.stale-<timestamp>` with a warning and startup continues.
+
+Startup stops, leaving `postmaster.pid` unchanged, only when a PostgreSQL that
+may own the directory is found or the process list cannot be read. A PostgreSQL
+process that names no resolvable data directory and whose working directory cannot be read
+(no `/proc` on macOS or BSD, or no permission) counts as "cannot be read", since it
+may have been started through `PGDATA`. The error
+names the process found and the command that resolves it (`kill <pid>` or
+`taskkill /PID <pid>`); after that, the next start handles any leftover lock by
+itself. The same refusal applies when a live PID is not verified as non-PostgreSQL
+and the identity query fails (PostgreSQL may be starting or recovering). It names
+a stop command only for a PID confirmed to be PostgreSQL for this data directory;
+otherwise it shows how to inspect the process first. It also applies when
+a reachable server reports another data directory. These refusals exit with code
+75 (all other startup failures exit 1), so a service manager or health check can
+tell them apart. This check applies to server startup; the CLI lifecycle checks
+remain separate.
+
+**Which server owns the directory.** A PostgreSQL process is matched to the data
+directory by its working directory when that can be read (a postmaster works in its
+data directory), and otherwise by a command line that names the directory
+(`-D`, `--data-directory`, `-c data_directory=...`, `--data_directory=...`; the last
+option wins). A `-D` that names a different directory does not rule a server out,
+because `postgresql.conf`, an include, or an external `config_file` can move the data
+elsewhere. Such a server counts as "ownership not proven".
+
+**A lock is moved only if it is the one that was examined.** Before `postmaster.pid`
+is moved aside, startup takes hold of the file with a hard link and compares it with
+the file it examined. If another file replaced it (for example a live server wrote a
+new lock), nothing is moved and startup refuses. A start lock file beside the data
+directory, `<dir>.paperclip-start.lock`, keeps two Paperclip starts on the same
+directory apart: the second waits (up to 60 seconds) for the first to finish. `<dir>`
+is the physical path, so a symlink or junction to the data directory shares the same
+lock. A `postmaster.pid` is moved aside only while a start holds this lock; without
+it the lock stays where it is and startup refuses. A start lock is never moved or removed
+automatically, not even when its owner process is gone: a rename cannot test that the
+file is still the one that was read. Startup refuses at once, names the file and the
+process, and asks the operator to confirm that no Paperclip server is starting and to
+move the file aside by hand (keep it; never delete data). If the start lock cannot be
+created or written (for example the directory that contains the data directory is
+read-only), startup refuses and says what to fix. It does not start without the lock.
+If the wait for a live owner ends, startup refuses and names the file; move it aside
+by hand only when no Paperclip server is starting.
+
+**Known Windows limitation.** Windows offers no working directory to read, so a
+`postgres.exe` whose command line does not name this data directory cannot be ruled
+out. This matters only when `postmaster.pid` exists and its owner cannot be decided: an
+unreadable or malformed lock, or a live recorded PID that the identity query cannot
+identify. With no lock, a dead recorded PID, or a successful identity query, no process
+scan happens and startup is not affected. When it does refuse, the message names each
+blocking PID and command line and says that ownership could not be proven. Stop that
+server, or, if it is unrelated, move `<dataDir>/postmaster.pid` aside by hand after
+confirming that no Paperclip instance is running. Do not delete any data. The start
+lock keeps Paperclip starts apart, but it does not tell a Windows server's directory,
+so this limit stays until ownership can be read another way.
+
 If you need to apply pending migrations manually, run:
 
 ```sh
@@ -122,8 +200,10 @@ All of these are optional; when unset, the driver defaults apply and behavior is
 ```sh
 DATABASE_PREPARED_STATEMENTS=false   # required for transaction-mode poolers; default: enabled
 DATABASE_POOL_MAX=25                 # connection pool size; default: 10
-DATABASE_IDLE_TIMEOUT_SECONDS=60     # close idle pooled connections; default: keep open
+DATABASE_IDLE_TIMEOUT_SECONDS=60     # close idle pooled connections; default: 60 (0 = keep open)
 DATABASE_CONNECT_TIMEOUT_SECONDS=10  # default: 30
+DATABASE_MAX_LIFETIME_SECONDS=1800   # recycle a pooled connection after this long; default: 30-60 min (random)
+DATABASE_APPLICATION_NAME=paperclip  # application_name in pg_stat_activity; default: paperclip
 ```
 
 ### Push the schema
@@ -167,6 +247,14 @@ When authoring migrations or one-time backfills:
 - Split schema changes, index creation, and data backfill into separate phases so each step has clear locking and rollback behavior.
 - Treat the `check:migrations` CI gate as the enforcement backstop for these rules. If it flags a migration, rewrite the migration or add a suppression comment with the indexed predicate, batch bound, and reason the remaining scan is safe.
 
+## Migration snapshots
+
+`drizzle-kit generate` diffs `packages/db/src/schema/` against the newest snapshot in `packages/db/src/migrations/meta/`. That snapshot must describe the schema that every migration produces when they run in order. A snapshot that drifts from the schema makes the *next* migration wrong, because `generate` folds the drift into it. The drift can add a column that an earlier migration already created, which makes that migration fail on a fresh database. It can also drop a column that the schema still uses.
+
+- Create every migration with `pnpm --filter @paperclipai/db generate`. Do not hand-write a snapshot.
+- Do not hand-edit a snapshot to resolve a merge conflict. Renumber your migration and run `generate` again, as `packages/db/.gitattributes` describes.
+- `packages/db/src/migration-snapshot-drift.test.ts` is the enforcement backstop. It repeats the diff that `generate` performs and fails when the newest snapshot no longer matches `packages/db/src/schema/`.
+
 ## Resource membership tables
 
 Paperclip stores current-user sidebar membership state in:
@@ -197,6 +285,39 @@ The decisions desk stores queue membership, decide-by/snooze state, and retentio
 Triage writes serialize on the company and attention-source identity so concurrent partial updates preserve both fields and produce monotonic history versions.
 
 `decision_retention` tracks the last observed source `activityAt`, Keep, reversible archive provenance, and monotonic source/archive versions. `decision_archive_notification_outbox` has a unique key over company, source identity, archive version, and immutable origin agent so repeated sweeps cannot enqueue duplicate notifications; delivery claims are retryable and coalesced per agent.
+
+## Native runner persistence
+
+Native runner state is additive to the existing heartbeat tables. Every existing
+`heartbeat_runs` row defaults to `runtime_mode = 'legacy'`; adding these columns
+does not select the native runtime or start a runner process. Native execution can
+record its resolved runtime profile, provider session, driver, completion
+contract, durable event cursor, and finalization phase on the run when a later
+rollout explicitly selects it.
+
+`completion_contracts`, `native_run_results`, `native_run_finalizations`,
+`work_assessments`, `status_decisions`, and `status_decision_effects` form the
+append-oriented evidence and status-decision chain. Unique fingerprints,
+versions, ordinals, and idempotency keys make retries deterministic. Composite
+foreign keys bind every contract, result, assessment, decision, effect, and
+finalization to one company, issue, and run. The database rejects mixed-owner
+evidence even when every referenced ID exists. Native source identities on
+`heartbeat_run_events` are nullable so legacy events remain readable without
+rewriting historical rows. Per-run native source identifiers are unique, while
+the existing legacy sequence behavior remains unchanged. The hidden native
+coordinator serializes on its bound `heartbeat_runs` row, allocates
+`next_event_seq`, and commits a validated PRP event before the transport sends
+its cumulative ACK. Byte-equivalent source retries return the existing cursor;
+gaps and conflicting replays fail closed. Accepted structured results enter the
+finalization ledger, whose retry time and owner lease are checked under a row
+lock. None of these writes selects a runtime or changes a legacy run's execution
+path.
+
+Issue `status_version` advances only when `status` changes. The JavaScript backup
+path includes user-defined functions and triggers so a restored database keeps
+that invariant. Removing or disabling a future native rollout flag must not
+delete these records; persisted experimental runs remain available for recovery
+and inspection.
 
 ## Plugin database namespaces
 
@@ -267,7 +388,7 @@ pnpm paperclipai configure --section secrets
 Inline secret migration command:
 
 ```sh
-pnpm paperclipai secrets migrate-inline-env --company-id <company-id> --apply
+npx paperclipai secrets migrate-inline-env --company-id <company-id> --apply
 
 # direct database maintenance fallback
 pnpm secrets:migrate-inline-env --apply

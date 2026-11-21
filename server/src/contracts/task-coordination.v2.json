@@ -1,0 +1,433 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://raw.githubusercontent.com/iMelki/projects-ops/main/docs/schemas/task-coordination.v2.json",
+  "title": "TaskCoordinationViewV2",
+  "description": "Shape contract for fail-closed task-coordination projections. Producer tests, not JSON Schema alone, prove evidence authority, chronology, freshness, and reconciliation truthfulness.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "task",
+    "workUnits",
+    "participants",
+    "placements",
+    "delivery",
+    "health",
+    "controls",
+    "provenance"
+  ],
+  "definitions": {
+    "timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^\\d{4}-(0[1-9]|1[0-2])-([0-2]\\d|3[01])T([01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(\\.\\d+)?(Z|[+-](0\\d|1[0-4]):[0-5]\\d)(?![\\s\\S])"
+    },
+    "nullableTimestamp": {
+      "type": ["string", "null"],
+      "format": "date-time",
+      "pattern": "^\\d{4}-(0[1-9]|1[0-2])-([0-2]\\d|3[01])T([01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(\\.\\d+)?(Z|[+-](0\\d|1[0-4]):[0-5]\\d)(?![\\s\\S])"
+    },
+    "intentType": {
+      "type": "string",
+      "enum": ["pause", "cancel", "retry", "release", "reassign", "takeover"]
+    },
+    "runtimeSlug": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "^[a-z0-9]+(?:[._-][a-z0-9]+)*(?![\\s\\S])"
+    },
+    "safeIdentifier": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*(?![\\s\\S])"
+    },
+    "credentialFreeHttpsUrl": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 2048,
+      "pattern": "^https://[A-Za-z0-9.-]+(?::[0-9]{1,5})?/(?:[A-Za-z0-9._~!$&'()*+,;=:/-]|%[0-9A-Fa-f]{2})+(?![\\s\\S])"
+    }
+  },
+  "properties": {
+    "schemaVersion": {
+      "type": "string",
+      "enum": ["task-coordination.v2"]
+    },
+    "task": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["canonicalKey", "status", "accountableLead", "generation", "createdAt", "updatedAt"],
+      "properties": {
+        "canonicalKey": {
+          "type": ["string", "null"],
+          "description": "Stable GitHub task identity when authoritatively mapped; null when no authoritative GitHub mapping exists.",
+          "pattern": "^github:[A-Za-z0-9.-]+/[A-Za-z0-9_.-]+#[1-9]\\d*(?![\\s\\S])"
+        },
+        "githubProjectItemId": { "type": ["string", "null"] },
+        "mckTaskId": { "type": ["string", "null"] },
+        "paperclipParentIssueId": {
+          "anyOf": [
+            { "$ref": "#/definitions/safeIdentifier" },
+            { "type": "null" }
+          ]
+        },
+        "correlationId": { "type": "string" },
+        "status": { "type": "string", "enum": ["open", "in_progress", "blocked", "under_review", "completed", "cancelled"] },
+        "accountableLead": { "type": "string" },
+        "generation": { "type": "integer", "minimum": 1 },
+        "createdAt": { "$ref": "#/definitions/timestamp" },
+        "updatedAt": { "$ref": "#/definitions/timestamp" }
+      },
+      "not": {
+        "allOf": [
+          {
+            "properties": { "canonicalKey": { "type": "null" } },
+            "required": ["canonicalKey"]
+          },
+          {
+            "anyOf": [
+              { "not": { "required": ["paperclipParentIssueId"] } },
+              {
+                "properties": { "paperclipParentIssueId": { "type": "null" } },
+                "required": ["paperclipParentIssueId"]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    "workUnits": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "owner", "acceptanceCriteria", "mutationScope", "state"],
+        "properties": {
+          "id": { "type": "string" },
+          "paperclipChildIssueId": { "type": ["string", "null"] },
+          "githubChildIssueId": { "type": ["string", "null"] },
+          "owner": { "type": "string" },
+          "acceptanceCriteria": { "type": "array", "items": { "type": "string" } },
+          "tests": { "type": "array", "items": { "type": "string" } },
+          "mutationScope": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["repositories", "paths"],
+            "properties": {
+              "repositories": { "type": "array", "items": { "type": "string" } },
+              "paths": { "type": "array", "items": { "type": "string" } }
+            }
+          },
+          "state": { "type": "string", "enum": ["pending", "in_progress", "submitted", "approved", "failed"] }
+        }
+      }
+    },
+    "participants": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "runtime", "role", "mode", "enforcementMode", "lastSeenAt"],
+        "properties": {
+          "id": { "type": "string" },
+          "runtime": { "$ref": "#/definitions/runtimeSlug" },
+          "role": { "type": "string", "enum": ["lead", "worker", "reviewer", "helper"] },
+          "mode": { "type": "string", "enum": ["mutate", "read", "review"] },
+          "enforcementMode": { "type": "string", "enum": ["observe", "enforce_mutations"] },
+          "runId": { "type": ["string", "null"] },
+          "sessionId": { "type": ["string", "null"] },
+          "currentAction": { "type": ["string", "null"] },
+          "progressNote": { "type": ["string", "null"] },
+          "blocker": { "type": ["string", "null"] },
+          "nextAction": { "type": ["string", "null"] },
+          "startedAt": { "$ref": "#/definitions/timestamp" },
+          "lastSeenAt": { "$ref": "#/definitions/timestamp" },
+          "endedAt": { "$ref": "#/definitions/nullableTimestamp" }
+        }
+      }
+    },
+    "placements": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["hostId", "hostname", "os", "runtime"],
+        "properties": {
+          "hostId": { "type": "string", "minLength": 1 },
+          "hostname": { "type": "string", "minLength": 1 },
+          "os": { "type": "string", "minLength": 1 },
+          "runtime": { "type": "string", "minLength": 1 },
+          "reachableAddresses": {
+            "type": "array",
+            "uniqueItems": true,
+            "items": { "type": "string", "minLength": 1 }
+          },
+          "environment": { "type": "string", "minLength": 1 },
+          "nativePath": { "type": "string", "minLength": 1 },
+          "runtimePath": { "type": "string", "minLength": 1 },
+          "worktreeIdentity": { "type": "string", "minLength": 1 },
+          "repository": { "type": "string", "minLength": 1 },
+          "remoteUrl": { "$ref": "#/definitions/credentialFreeHttpsUrl" },
+          "branch": { "type": "string", "minLength": 1 },
+          "baseSha": { "type": "string", "minLength": 1 },
+          "headSha": { "type": "string", "minLength": 1 },
+          "dirty": { "type": "boolean" },
+          "aheadCount": { "type": "integer", "minimum": 0 },
+          "behindCount": { "type": "integer", "minimum": 0 },
+          "processId": {
+            "type": ["integer", "null"],
+            "minimum": 1
+          },
+          "processGroup": {
+            "type": ["string", "null"],
+            "minLength": 1
+          },
+          "serviceReferences": {
+            "type": "array",
+            "uniqueItems": true,
+            "items": { "type": "string", "minLength": 1 }
+          },
+          "logReferences": {
+            "type": "array",
+            "uniqueItems": true,
+            "items": { "type": "string", "minLength": 1 }
+          }
+        }
+      }
+    },
+    "delivery": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["commits", "pullRequests"],
+      "properties": {
+        "commits": { "type": "array", "items": { "type": "string" } },
+        "pullRequests": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["number", "url", "headBranch", "baseBranch", "status"],
+            "properties": {
+              "number": { "type": "integer", "minimum": 1 },
+              "url": { "$ref": "#/definitions/credentialFreeHttpsUrl" },
+              "headBranch": { "type": "string" },
+              "baseBranch": { "type": "string" },
+              "status": { "type": "string", "enum": ["open", "draft", "merged", "closed"] }
+            }
+          }
+        }
+      }
+    },
+    "health": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["heartbeatAgeSeconds", "processEvidence", "outputEvidence", "status", "freshnessTimestamp", "evidenceSource"],
+      "properties": {
+        "heartbeatAgeSeconds": {
+          "type": ["number", "null"],
+          "minimum": 0
+        },
+        "processEvidence": { "type": "boolean" },
+        "outputEvidence": { "type": "boolean" },
+        "status": { "type": "string", "enum": ["healthy", "reporting_degraded", "stale", "orphaned", "error", "offline", "unknown"] },
+        "freshnessTimestamp": { "$ref": "#/definitions/nullableTimestamp" },
+        "evidenceSource": { "type": ["string", "null"], "minLength": 1 }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "status": { "const": "healthy" } },
+            "required": ["status"]
+          },
+          "then": {
+            "properties": {
+              "heartbeatAgeSeconds": { "type": "number", "minimum": 0, "maximum": 900 },
+              "processEvidence": { "const": true },
+              "outputEvidence": { "const": true },
+              "freshnessTimestamp": { "$ref": "#/definitions/timestamp" },
+              "evidenceSource": { "type": "string", "minLength": 1, "pattern": "\\S" }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": { "status": { "const": "stale" } },
+            "required": ["status"]
+          },
+          "then": {
+            "properties": {
+              "heartbeatAgeSeconds": { "type": "number", "minimum": 900 }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": { "status": { "const": "orphaned" } },
+            "required": ["status"]
+          },
+          "then": {
+            "properties": {
+              "heartbeatAgeSeconds": { "type": "number", "minimum": 1800 },
+              "processEvidence": { "const": false }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": { "status": { "const": "unknown" } },
+            "required": ["status"]
+          },
+          "then": {
+            "properties": {
+              "heartbeatAgeSeconds": { "type": "null" },
+              "processEvidence": { "const": false },
+              "outputEvidence": { "const": false },
+              "freshnessTimestamp": { "type": "null" },
+              "evidenceSource": { "type": "null" }
+            }
+          }
+        }
+      ]
+    },
+    "controls": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["permittedIntents", "pendingIntents", "completedReceipts"],
+      "properties": {
+        "permittedIntents": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "$ref": "#/definitions/intentType" }
+        },
+        "pendingIntents": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["id", "intentType", "requestedBy", "createdAt"],
+            "properties": {
+              "id": { "$ref": "#/definitions/safeIdentifier" },
+              "intentType": { "$ref": "#/definitions/intentType" },
+              "requestedBy": { "$ref": "#/definitions/safeIdentifier" },
+              "createdAt": { "$ref": "#/definitions/timestamp" },
+              "targetWorkUnitId": {
+                "anyOf": [
+                  { "$ref": "#/definitions/safeIdentifier" },
+                  { "type": "null" }
+                ]
+              }
+            }
+          }
+        },
+        "completedReceipts": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["id", "intentType", "executedAt"],
+            "properties": {
+              "id": { "$ref": "#/definitions/safeIdentifier" },
+              "intentType": { "$ref": "#/definitions/intentType" },
+              "executedAt": { "$ref": "#/definitions/timestamp" }
+            }
+          }
+        }
+      }
+    },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sourceAuthority", "observedAt", "confidence", "reconciliationDrift", "driftDetails"],
+      "properties": {
+        "sourceAuthority": { "type": "string", "enum": ["paperclip", "mck", "github", "mission-control"] },
+        "observedAt": { "$ref": "#/definitions/timestamp" },
+        "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+        "reconciliationDrift": { "type": "boolean" },
+        "driftDetails": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1, "pattern": "\\S" }
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "reconciliationDrift": { "const": true } },
+            "required": ["reconciliationDrift"]
+          },
+          "then": {
+            "properties": { "driftDetails": { "minItems": 1 } }
+          },
+          "else": {
+            "properties": { "driftDetails": { "maxItems": 0 } }
+          }
+        }
+      ]
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "task": {
+            "properties": { "canonicalKey": { "type": "string" } },
+            "required": ["canonicalKey"]
+          },
+          "health": {
+            "properties": { "status": { "const": "healthy" } },
+            "required": ["status"]
+          }
+        },
+        "required": ["task", "health"]
+      },
+      "then": {
+        "properties": {
+          "provenance": {
+            "properties": {
+              "confidence": { "const": 1 },
+              "reconciliationDrift": { "const": false }
+            },
+            "required": ["confidence", "reconciliationDrift"]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "task": {
+            "properties": { "canonicalKey": { "type": "null" } },
+            "required": ["canonicalKey"]
+          }
+        },
+        "required": ["task"]
+      },
+      "then": {
+        "properties": {
+          "health": {
+            "properties": {
+              "status": { "not": { "const": "healthy" } }
+            },
+            "required": ["status"]
+          },
+          "controls": {
+            "properties": {
+              "permittedIntents": { "maxItems": 0 },
+              "pendingIntents": { "maxItems": 0 },
+              "completedReceipts": { "maxItems": 0 }
+            },
+            "required": ["permittedIntents", "pendingIntents", "completedReceipts"]
+          },
+          "provenance": {
+            "properties": {
+              "reconciliationDrift": { "const": true }
+            },
+            "required": ["reconciliationDrift"]
+          }
+        },
+        "required": ["health", "controls", "provenance"]
+      }
+    }
+  ]
+}

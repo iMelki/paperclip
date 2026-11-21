@@ -23,7 +23,7 @@ bash install.sh
 The bootstrap script:
 
 1. verifies that the platform is supported;
-2. ensures Node.js 20 or newer is available;
+2. ensures Node.js 24.11 or newer is available;
 3. delegates installation to `paperclipai install`;
 4. starts interactive onboarding when stdin and stdout are terminals.
 
@@ -76,10 +76,41 @@ Managed code is separate from instance data:
 ~/.local/bin/paperclipai
 ```
 
-The `paperclipai` shim remains stable while `current` switches atomically
-between complete payloads. Paperclip keeps the two previous managed payloads
-for rollback. Configuration, databases, uploads, logs, secrets, and workspaces
-remain under `~/.paperclip/instances/` and are not stored inside CLI payloads.
+The `paperclipai` shim remains stable while `current` switches between complete
+payloads. Paperclip keeps the two previous managed payloads for rollback.
+Configuration, databases, uploads, logs, secrets, and workspaces remain under
+`~/.paperclip/instances/` and are not stored inside CLI payloads.
+
+How `current` switches depends on the platform:
+
+- **Linux and macOS:** atomic. One rename replaces the link, so `current`
+  always exists.
+- **Windows:** rename-aside, with a brief gap. Windows cannot rename a link
+  over an existing directory link, so Paperclip renames the old link to
+  `current.prev-<id>`, renames the new link to `current`, and then removes the
+  old link. For a moment between the two renames, `current` does not exist.
+  Removing the old link never deletes the payload it points to.
+
+### Recover A Missing `current` Link (Windows)
+
+If the switch is interrupted in that gap (for example, the machine loses
+power), `current` is missing and `paperclipai` cannot start, because the shim
+runs `~/.paperclip/cli/current/...`. The last good link is still there as
+`current.prev-<id>`.
+
+The next `paperclipai install` or `paperclipai update` restores it automatically
+when exactly one `current.prev-<id>` exists. Because the shim cannot start,
+restore it by hand first. In PowerShell:
+
+```powershell
+Get-ChildItem "$HOME\.paperclip\cli" -Filter 'current.prev-*'
+Rename-Item -LiteralPath "$HOME\.paperclip\cli\current.prev-<id>" -NewName 'current'
+```
+
+Replace `<id>` with the name that the first command lists. If it lists more
+than one, restore the one that points to the version in `install.json`.
+`paperclipai doctor` (run through `npx paperclipai doctor` if the shim is
+broken) reports this state and prints the exact command.
 
 If `~/.local/bin` is not on `PATH`, the installer offers to update the relevant
 shell startup file when running interactively. Non-interactive installs print
@@ -137,6 +168,11 @@ paperclipai onboard --yes                    # configure only; no service instal
 paperclipai onboard --yes --install-service  # explicit automation opt-in
 paperclipai onboard --yes --no-install-service
 ```
+
+After onboarding installs and starts the service, it waits for the service to
+report its selected runtime port and then prints the dashboard URL. Interactive
+terminals open that URL in the default browser; headless and non-interactive
+runs print the URL without trying to launch a browser.
 
 Service commands are namespaced:
 
@@ -240,6 +276,12 @@ paperclipai service status
 `PATH`, Node.js version, and service state. Service diagnostics cover unit-file
 presence and drift, running state, configured port ownership, and the running
 server version.
+
+The CLI and server also print a non-blocking startup warning when Node.js is
+below the supported minimum. Upgrade Node.js with a version manager or follow
+the downloaded `install.sh` workflow under **Recommended Install**. Do not use
+the piped form for this repair because it requires a supported Node.js runtime
+before it starts.
 
 ## Uninstall
 

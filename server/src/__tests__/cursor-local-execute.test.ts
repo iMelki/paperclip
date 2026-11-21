@@ -274,6 +274,8 @@ describe("cursor execute", () => {
 
   it("injects company-library runtime skills into the Cursor skills home before execution", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-cursor-execute-runtime-skill-"));
+    const processHome = path.join(root, "process-home");
+    const configuredHome = path.join(root, "configured-home");
     const workspace = path.join(root, "workspace");
     const commandPath = path.join(root, "agent");
     const runtimeSkillsRoot = path.join(root, "runtime-skills");
@@ -284,7 +286,7 @@ describe("cursor execute", () => {
     const asciiHeartDir = await createSkillDir(runtimeSkillsRoot, "ascii-heart");
 
     const previousHome = process.env.HOME;
-    process.env.HOME = root;
+    process.env.HOME = processHome;
 
     try {
       const result = await execute({
@@ -306,6 +308,7 @@ describe("cursor execute", () => {
           command: commandPath,
           cwd: workspace,
           model: "auto",
+          env: { HOME: configuredHome },
           paperclipRuntimeSkills: [
             {
               name: "paperclip",
@@ -329,10 +332,12 @@ describe("cursor execute", () => {
 
       expect(result.exitCode).toBe(0);
       expect(result.errorMessage).toBeNull();
-      expect((await fs.lstat(path.join(root, ".cursor", "skills", "ascii-heart"))).isSymbolicLink()).toBe(true);
-      expect(await fs.realpath(path.join(root, ".cursor", "skills", "ascii-heart"))).toBe(
+      const installedSkill = path.join(configuredHome, ".cursor", "skills", "ascii-heart");
+      expect((await fs.lstat(installedSkill)).isSymbolicLink()).toBe(true);
+      expect(await fs.realpath(installedSkill)).toBe(
         await fs.realpath(asciiHeartDir),
       );
+      await expect(fs.lstat(path.join(processHome, ".cursor", "skills", "ascii-heart"))).rejects.toThrow();
     } finally {
       if (previousHome === undefined) {
         delete process.env.HOME;

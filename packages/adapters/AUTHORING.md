@@ -63,8 +63,14 @@ adapter and runtime source (`packages/adapters/`, `packages/adapter-utils/`,
 `server/src/`, `cli/src/`) and fails the `policy` CI job if any unapproved
 `git push` invocation is added. If you are building an operator-configured
 path that legitimately must push, add a
-`// paperclip:allow-git-push: <reason>` comment on the line (or the line
-above) so the opt-in shows up in code review.
+standalone `// paperclip:allow-git-push: <reason>` comment immediately above
+the one invocation it exempts (`# paperclip:allow-git-push: <reason>` in POSIX
+shell) so the opt-in is syntactically visible in code review. Python,
+PowerShell, batch, JSON, YAML, and TOML do not accept exemptions because their
+multiline data/string forms make a preceding marker ambiguous. A trailing marker
+or a marker inside a string does not exempt a command. JavaScript/TypeScript regex
+literals containing a command-shaped token are conservatively review-gated and
+need the same explicit preceding marker when they are intentionally harmless.
 
 For the architecture-level write-up of cross-run persistence, see
 [`docs/guides/board-operator/execution-workspaces-and-runtime-services.md`](../../docs/guides/board-operator/execution-workspaces-and-runtime-services.md#cross-run-persistence-no-remote-git-contract).

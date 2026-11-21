@@ -66,7 +66,7 @@ In agent runtime settings, configure heartbeat policy:
 For local adapters, set:
 
 - `cwd` (working directory)
-- `timeoutSec` (max runtime per heartbeat; `0` uses the target default — no adapter timeout on local/SSH, a 4-hour backstop on sandbox targets — and a negative value disables the adapter timeout everywhere, including sandboxes)
+- `timeoutSec` (max runtime per heartbeat). A missing, `0`, or negative value uses the adapter default. It does not disable the timeout. Set a positive number to override that default. `PAPERCLIP_ADAPTER_TIMEOUT_SEC` overrides the built-in default for every adapter when the agent value is missing, `0`, or negative.
 - `graceSec` (time before force-kill after timeout/cancel)
 - optional env vars and extra CLI args
 - use **Test environment** in agent configuration to run adapter-specific diagnostics before saving

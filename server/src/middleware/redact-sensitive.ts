@@ -42,20 +42,31 @@ const SENSITIVE_KEYS = new Set<string>([
   "session_token",
   "sessiontoken",
   "private_key",
-  "privatekey",
-  "code",
+    "privatekey",
+    "code",
+  // The Claude setup-token login fields. `browserCode` carries the one-time
+  // sign-in code and `authorization_code` carries the OAuth code; neither may
+  // reach a log line.
+  "browsercode",
+  "browser_code",
   "authorization_code",
-  "authorizationcode",
-  "verification_code",
-  "verificationcode",
-  "security_code",
-  "securitycode",
-  "otp",
-  "one_time_password",
-  "onetimepassword",
-  "passcode",
-  "pin",
-  "state",
+    "authorizationcode",
+    "verification_code",
+    "verificationcode",
+    "security_code",
+    "securitycode",
+    "otp",
+    "one_time_password",
+    "onetimepassword",
+    "passcode",
+    // camelCase `passCode` normalizes to `pass_code`, so both spellings are listed.
+    "pass_code",
+    "pin",
+    "state",
+  // The workspace login handoff ticket (PAP-17572). It is a signed bearer
+  // credential carried as a query parameter, so it must never reach a log line
+  // even though the exchange itself answers 302.
+  "ticket",
 ]);
 const SENSITIVE_KEY_SEGMENT_RE =
   /(?:^|[_-])(?:api[-_]?key|access[-_]?token|auth[-_]?token|token|secret|passwd|password|credential|jwt|private[-_]?key|cookie|connection[-_]?string)(?:$|[_-])/i;
@@ -73,6 +84,11 @@ const URLISH_KEYS = new Set<string>([
   "sourceurl",
   "uri",
   "url",
+  // The Claude setup-token login URL. A structured `loginUrl` that reaches a log
+  // sink keeps its origin and path only; the OAuth query, fragment, and any
+  // credentials are stripped (SR-5 backstop).
+  "loginurl",
+  "login_url",
 ]);
 
 function normalizePayloadKey(key: string): string {
@@ -82,10 +98,72 @@ function normalizePayloadKey(key: string): string {
     .toLowerCase();
 }
 
+// Separator-free, lowercase form: `pass-code`, `pass_code`, `passCode` and
+// `PASS CODE` all become `passcode`, and `verification-code` becomes
+// `verificationcode`.
+function compactPayloadKey(key: string): string {
+  return key.toLowerCase().replace(/[-_\s.]/g, "");
+}
+
+const SENSITIVE_COMPACT_KEYS = new Set<string>(
+  [...SENSITIVE_KEYS].map((entry) => entry.replace(/_/g, "")),
+);
+
+// Compound keys (userPassCode, one_time_passcode, smsVerificationCode) are
+// redacted when their compact form contains one of these unambiguous
+// credential tokens. Short or ambiguous tokens (code, pin, state, secret,
+// token) stay exact-match or segment-match only, so keys like barcode,
+// spinner, secretary or tokenCount are not over-redacted.
+const SENSITIVE_COMPACT_SUBSTRINGS = [
+  "password",
+  "passwd",
+  "passcode",
+  "passphrase",
+  "onetimepass",
+  "onetimecode",
+  "verificationcode",
+  "securitycode",
+  "authorizationcode",
+  "browsercode",
+  "privatekey",
+  "apikey",
+  "clientsecret",
+  "accesstoken",
+  "refreshtoken",
+  "sessiontoken",
+  "authtoken",
+];
+
+// `idtoken` is too short to match inside the compact form: validToken and
+// paidTokens compact to validtoken and paidtokens, which contain "idtoken".
+// It is matched on the normalized form instead, where `id` must start a word:
+// id_token, idToken, id-token, IDToken and userIdToken match, validToken and
+// paidTokens do not.
+const SENSITIVE_BOUNDED_TOKEN_RE = /(?:^|[_\-\s.])id[_\-\s.]?token/;
+
+// Whole-word credential tokens, matched on the normalized form so each must sit
+// between word boundaries (start, end, `_`, `-`, space, `.` or a camelCase
+// hump). `sid` and `totp` are short, so substring matching would hit side,
+// insider, considerations or totpal; segment matching does not. By the same
+// contract any key whose own segment is one of these words is redacted, so
+// bearerToken and bearerTrend are both redacted while bearerish is not.
+// `otp` is listed here too so compound one-time-code keys (otpCode, otp_code,
+// smsOtp, emailOTP, user-otp) are redacted, not only the exact `otp` key.
+// The mfa / two-factor / OAuth code words also match their plurals (mfaCodes,
+// twoFactorCodes, oauthCodes), as the compact substrings above already do.
+const SENSITIVE_WORD_TOKEN_RE =
+  /(?:^|[_\-\s.])(?:bearer|otp|mfa[_\-\s.]?codes?|totp|two[_\-\s.]?factor[_\-\s.]?codes?|o[_\-\s.]?auth[_\-\s.]?codes?|credentials?|session[_\-\s.]?id|sid)(?:$|[_\-\s.])/;
+
 function isSensitiveKey(key: string): boolean {
   const normalized = normalizePayloadKey(key);
   if (NON_SENSITIVE_METRIC_KEYS.has(normalized)) return false;
-  return SENSITIVE_KEYS.has(normalized) || SENSITIVE_KEY_SEGMENT_RE.test(normalized);
+  const compact = compactPayloadKey(key);
+  return SENSITIVE_KEYS.has(normalized)
+    || SENSITIVE_COMPACT_KEYS.has(compact)
+    || SENSITIVE_KEY_SEGMENT_RE.test(normalized)
+    || SENSITIVE_BOUNDED_TOKEN_RE.test(normalized)
+    || SENSITIVE_WORD_TOKEN_RE.test(normalized)
+    || SENSITIVE_COMPACT_SUBSTRINGS.some((token) => compact.includes(token));
 }
 
 function isUrlishKey(key: string): boolean {

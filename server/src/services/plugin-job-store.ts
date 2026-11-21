@@ -30,11 +30,12 @@
  * @see PLUGIN_SPEC.md §21.3 — `plugin_jobs` / `plugin_job_runs` tables
  */
 
-import { and, desc, eq, isNull } from "drizzle-orm";
+import { and, desc, eq, inArray, isNull } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { plugins, pluginJobs, pluginJobRuns } from "@paperclipai/db";
 import type {
   PluginJobDeclaration,
+  PluginJobScope,
   PluginJobRunStatus,
   PluginJobRunTrigger,
   PluginJobRecord,
@@ -62,6 +63,8 @@ export interface CreateJobRunInput {
   pluginId: string;
   /** What triggered this run. */
   trigger: PluginJobRunTrigger;
+  /** Company scope of this run; omit or `null` for an instance-level run. */
+  companyId?: string | null;
 }
 
 /**
@@ -131,7 +134,8 @@ export function pluginJobStore(db: Db) {
      * always reflects the manifest's declared jobs:
      *
      * - **New jobs** are inserted with status `active`.
-     * - **Existing jobs** have their `schedule` updated if it changed.
+     * - **Existing jobs** have their `schedule` updated if it changed, while
+     *   retaining their active, paused, or failed status.
      * - **Removed jobs** (present in DB but absent from the manifest) are
      *   set to `paused` so their history is preserved.
      *
@@ -167,15 +171,12 @@ export function pluginJobStore(db: Db) {
         const schedule = decl.schedule ?? "";
 
         if (existing) {
-          // Update schedule if it changed; re-activate if it was paused
+          // Reload is not an operator request to resume a paused job.
           const updates: Record<string, unknown> = {
             updatedAt: new Date(),
           };
           if (existing.schedule !== schedule) {
             updates.schedule = schedule;
-          }
-          if (existing.status === "paused") {
-            updates.status = "active";
           }
 
           await db
@@ -289,11 +290,37 @@ export function pluginJobStore(db: Db) {
     async updateJobStatus(
       jobId: string,
       status: JobDefinitionStatus,
+      options?: { nextRunAt?: Date | null },
     ): Promise<void> {
+      // One UPDATE: a resume sets status and the armed pointer atomically.
       await db
         .update(pluginJobs)
-        .set({ status, updatedAt: new Date() })
+        .set({
+          status,
+          updatedAt: new Date(),
+          ...(options?.nextRunAt !== undefined ? { nextRunAt: options.nextRunAt } : {}),
+        })
         .where(eq(pluginJobs.id, jobId));
+    },
+
+    /**
+     * Arm a stuck job: set `nextRunAt` only if the row is still `active` with
+     * a null `nextRunAt` (one conditional UPDATE). Never touches the status or
+     * `lastRunAt`.
+     *
+     * @returns `true` if the row was updated
+     */
+    async armStuckActiveJob(jobId: string, nextRunAt: Date): Promise<boolean> {
+      const rows = await db
+        .update(pluginJobs)
+        .set({ nextRunAt, updatedAt: new Date() })
+        .where(and(
+          eq(pluginJobs.id, jobId),
+          eq(pluginJobs.status, "active"),
+          isNull(pluginJobs.nextRunAt),
+        ))
+        .returning({ id: pluginJobs.id });
+      return rows.length > 0;
     },
 
     /**
@@ -356,12 +383,36 @@ export function pluginJobStore(db: Db) {
         .values({
           jobId: input.jobId,
           pluginId: input.pluginId,
+          companyId: input.companyId ?? null,
           trigger: input.trigger,
           status: "queued",
         })
         .returning();
 
       return rows[0]!;
+    },
+
+    /**
+     * Resolve the declared execution scope of a job from the plugin's stored
+     * manifest. Jobs that do not declare a scope (or whose plugin or
+     * declaration cannot be found) are treated as `"instance"`, which keeps
+     * the single-run behavior that existed before scopes were declared.
+     *
+     * @param pluginId - UUID of the owning plugin
+     * @param jobKey - Job key from the manifest
+     */
+    async getJobDeclarationScope(
+      pluginId: string,
+      jobKey: string,
+    ): Promise<PluginJobScope> {
+      const rows = await db
+        .select({ manifestJson: plugins.manifestJson })
+        .from(plugins)
+        .where(eq(plugins.id, pluginId));
+      const declaration = rows[0]?.manifestJson?.jobs?.find((job) => job.jobKey === jobKey);
+      return declaration?.scope === "company" || declaration?.dispatchScope === "company"
+        ? "company"
+        : "instance";
     },
 
     /**
@@ -376,7 +427,7 @@ export function pluginJobStore(db: Db) {
           status: "running" as PluginJobRunStatus,
           startedAt: new Date(),
         })
-        .where(eq(pluginJobRuns.id, runId));
+        .where(and(eq(pluginJobRuns.id, runId), eq(pluginJobRuns.status, "queued")));
     },
 
     /**
@@ -398,7 +449,7 @@ export function pluginJobStore(db: Db) {
           durationMs: input.durationMs ?? null,
           finishedAt: new Date(),
         })
-        .where(eq(pluginJobRuns.id, runId));
+        .where(and(eq(pluginJobRuns.id, runId), inArray(pluginJobRuns.status, ["pending", "queued", "running"])));
     },
 
     /**

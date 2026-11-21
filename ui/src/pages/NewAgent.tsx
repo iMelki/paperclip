@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useSearchParams } from "@/lib/router";
 import { useCompany } from "../context/CompanyContext";
@@ -23,19 +23,24 @@ import { roleLabels } from "../components/agent-config-primitives";
 import {
   AgentConfigForm,
   AdapterEnvironmentResult,
+  AdapterLoginPanel,
+  type AdapterLoginDescriptor,
   type CreateConfigValues,
 } from "../components/AgentConfigForm";
 import { defaultCreateValues } from "../components/agent-config-defaults";
+import { buildFixedClaudeOAuthBinding } from "../components/environment-variables-editor/model";
+import type { EnvBinding } from "@paperclipai/shared";
 import { getUIAdapter, listUIAdapters } from "../adapters";
 import { useDisabledAdaptersSync } from "../adapters/use-disabled-adapters";
 import { isValidAdapterType } from "../adapters/metadata";
 import { ReportsToPicker } from "../components/ReportsToPicker";
-import { buildNewAgentHirePayload } from "../lib/new-agent-hire-payload";
+import { buildNewAgentHirePayload, shouldUnlockHireSubmission } from "../lib/new-agent-hire-payload";
 import { TrustPresetSection } from "../components/TrustPresetSection";
 import { buildPermissionsForTrustPreset, getTrustPreset } from "../lib/trust-policy-ui";
 import { DEFAULT_CODEX_LOCAL_BYPASS_APPROVALS_AND_SANDBOX } from "@paperclipai/adapter-codex-local";
 import { DEFAULT_CURSOR_LOCAL_MODEL } from "@paperclipai/adapter-cursor-local";
 import { DEFAULT_GEMINI_LOCAL_MODEL } from "@paperclipai/adapter-gemini-local";
+import { DEFAULT_KIMI_LOCAL_MODEL } from "@paperclipai/adapter-kimi-local";
 import { DEFAULT_OPENCODE_LOCAL_MODEL, isValidOpenCodeModelId } from "@paperclipai/adapter-opencode-local";
 
 function createValuesForAdapterType(
@@ -48,6 +53,8 @@ function createValuesForAdapterType(
       DEFAULT_CODEX_LOCAL_BYPASS_APPROVALS_AND_SANDBOX;
   } else if (adapterType === "gemini_local") {
     nextValues.model = DEFAULT_GEMINI_LOCAL_MODEL;
+  } else if (adapterType === "kimi_local") {
+    nextValues.model = DEFAULT_KIMI_LOCAL_MODEL;
   } else if (adapterType === "cursor") {
     nextValues.model = DEFAULT_CURSOR_LOCAL_MODEL;
   } else if (adapterType === "opencode_local") {
@@ -65,6 +72,10 @@ export function NewAgent() {
   const presetAdapterType = searchParams.get("adapterType");
 
   const [name, setName] = useState("");
+  const [pausedSetup, setPausedSetup] = useState(false);
+  const [submissionKey, setSubmissionKey] = useState(() => crypto.randomUUID());
+  const frozenSubmission = useRef<{ companyId: string; payload: Record<string, unknown> } | null>(null);
+  const [submissionFrozen, setSubmissionFrozen] = useState(false);
   const [title, setTitle] = useState("");
   const [role, setRole] = useState("general");
   const [reportsTo, setReportsTo] = useState<string | null>(null);
@@ -80,9 +91,11 @@ export function NewAgent() {
   const [testAgentFeedback, setTestAgentFeedback] = useState<{
     errorMessage: string | null;
     result: AdapterEnvironmentTestResult | null;
+    login: AdapterLoginDescriptor | null;
   }>({
     errorMessage: null,
     result: null,
+    login: null,
   });
 
   const { data: agents } = useQuery({
@@ -141,14 +154,23 @@ export function NewAgent() {
   }, [presetAdapterType]);
 
   const createAgent = useMutation({
-    mutationFn: (data: Record<string, unknown>) =>
-      agentsApi.hire(selectedCompanyId!, data),
-    onSuccess: (result) => {
-      queryClient.invalidateQueries({ queryKey: queryKeys.agents.list(selectedCompanyId!) });
-      queryClient.invalidateQueries({ queryKey: queryKeys.approvals.list(selectedCompanyId!) });
+    mutationFn: (request: { companyId: string; payload: Record<string, unknown> }) =>
+      agentsApi.hire(request.companyId, request.payload),
+    onSuccess: (result, request) => {
+      queryClient.invalidateQueries({ queryKey: queryKeys.agents.list(request.companyId) });
+      queryClient.invalidateQueries({ queryKey: queryKeys.approvals.list(request.companyId) });
+      if (selectedCompanyId !== request.companyId) {
+        setFormError(`Saved agent ${result.agent.id} in the original company. The saved request remains locked; switch back to view it.`);
+        return;
+      }
       navigate(agentUrl(result.agent));
     },
     onError: (error) => {
+      if (shouldUnlockHireSubmission(error)) {
+        frozenSubmission.current = null;
+        setSubmissionFrozen(false);
+        setSubmissionKey(crypto.randomUUID());
+      }
       setFormError(error instanceof Error ? error.message : "Failed to create agent");
     },
   });
@@ -159,17 +181,22 @@ export function NewAgent() {
   }
 
   function handleSubmit() {
+    if (frozenSubmission.current) {
+      createAgent.mutate(frozenSubmission.current);
+      return;
+    }
     if (!selectedCompanyId || !name.trim()) return;
     setFormError(null);
-    if (configValues.adapterType === "opencode_local") {
+    if (!pausedSetup && configValues.adapterType === "opencode_local") {
       if (!isValidOpenCodeModelId(configValues.model)) {
         setFormError("OpenCode requires an explicit model in provider/model format.");
         return;
       }
     }
-    createAgent.mutate(
-      buildNewAgentHirePayload({
+    const payload = buildNewAgentHirePayload({
         name,
+        pausedSetup,
+        idempotencyKey: submissionKey,
         effectiveRole,
         title,
         reportsTo,
@@ -177,8 +204,11 @@ export function NewAgent() {
         configValues,
         adapterConfig: buildAdapterConfig(),
         permissions,
-      }),
-    );
+      });
+    const request = { companyId: selectedCompanyId, payload };
+    frozenSubmission.current = request;
+    setSubmissionFrozen(true);
+    createAgent.mutate(request);
   }
 
   const availableSkills = (companySkills ?? []).filter((skill) => !skill.key.startsWith("paperclipai/paperclip/"));
@@ -192,6 +222,39 @@ export function NewAgent() {
     });
   }
 
+  // Add the fixed CLAUDE_CODE_OAUTH_TOKEN binding after a Claude subscription
+  // login reaches the server `stored` state. The new-agent page lifts the login
+  // feedback and renders the panel itself, so it holds the stored-session claim
+  // and the fixed binding in the create-mode values here. The claim is a
+  // reference, not a token; the create request sends it, and the server binds
+  // and enforces the token. Keep every unrelated binding.
+  const handleClaudeLoginStored = useCallback((storedSessionId: string) => {
+    setConfigValues((prev) => ({
+      ...prev,
+      envBindings: {
+        ...((prev.envBindings ?? {}) as Record<string, EnvBinding>),
+        ...buildFixedClaudeOAuthBinding(),
+      },
+      claudeStoredSessionId: storedSessionId,
+    }));
+  }, []);
+
+  // Bind the fixed CLAUDE_CODE_OAUTH_TOKEN reference to an existing stored login
+  // with no new login round trip. Add the fixed binding and set the apply-existing
+  // flag on the create-mode values. The create request sends the flag; the server
+  // binds the token only for a user actor and only when a stored value exists.
+  // Keep every unrelated binding.
+  const handleApplyStoredClaudeLogin = useCallback(() => {
+    setConfigValues((prev) => ({
+      ...prev,
+      envBindings: {
+        ...((prev.envBindings ?? {}) as Record<string, EnvBinding>),
+        ...buildFixedClaudeOAuthBinding(),
+      },
+      claudeApplyStoredLogin: true,
+    }));
+  }, []);
+
   const handleTestAgentActionChange = useCallback((fn: (() => void) | null) => {
     setTestAgentAction(() => fn);
   }, []);
@@ -203,6 +266,7 @@ export function NewAgent() {
   const handleTestAgentFeedbackChange = useCallback((feedback: {
     errorMessage: string | null;
     result: AdapterEnvironmentTestResult | null;
+    login: AdapterLoginDescriptor | null;
   }) => {
     setTestAgentFeedback(feedback);
   }, []);
@@ -217,6 +281,7 @@ export function NewAgent() {
       </div>
 
       <div className="border border-border">
+        <fieldset disabled={submissionFrozen} className="min-w-0">
         {/* Name */}
         <div className="px-4 pt-4 pb-2">
           <input
@@ -277,7 +342,11 @@ export function NewAgent() {
           />
         </div>
 
-        <div className="border-t border-border px-4 py-4">
+        {pausedSetup ? (
+          <div className="border-t border-border px-4 py-4">
+            <p className="text-xs text-muted-foreground">Permissions are not granted while the agent is created paused. Configure them when you finish setup.</p>
+          </div>
+        ) : <div className="border-t border-border px-4 py-4">
           <TrustPresetSection
             permissions={permissions}
             onChange={setPermissions}
@@ -293,29 +362,41 @@ export function NewAgent() {
             }))}
             candidatesLoading={boundaryProjectsLoading || boundaryIssuesLoading}
           />
-        </div>
+        </div>}
 
+        <div className="border-t border-border px-4 py-4">
+          <label className="flex items-center gap-2 text-sm">
+            <Checkbox aria-describedby="paused-setup-help" checked={pausedSetup} onCheckedChange={(value) => setPausedSetup(value === true)} />
+            Create paused, without a configured runtime
+          </label>
+          <p id="paused-setup-help" className="mt-1 text-xs text-muted-foreground">No agent runs, automatic wakes, credentials or skills are configured. Required hire approval still applies.</p>
+        </div>
         {/* Shared config form */}
-        <AgentConfigForm
+        {!pausedSetup && <AgentConfigForm
           mode="create"
           values={configValues}
           onChange={(patch) => setConfigValues((prev) => ({ ...prev, ...patch }))}
           onTestActionChange={handleTestAgentActionChange}
           onTestActionStateChange={handleTestAgentStateChange}
           onTestFeedbackChange={handleTestAgentFeedbackChange}
-        />
+        />}
 
-        <div className="border-t border-border px-4 py-4">
+        {pausedSetup ? (
+          <div className="border-t border-border px-4 py-4">
+            <h2 className="text-sm font-medium">Company skills</h2>
+            <p className="mt-1 text-xs text-muted-foreground">Skills are not installed while the agent is created paused. Add them when you finish setup.</p>
+          </div>
+        ) : <div className="border-t border-border px-4 py-4">
           <div className="space-y-3">
             <div>
-              <h2 className="text-sm font-medium">Company skills</h2>
+              <h2 className="text-sm font-medium">Organization skills</h2>
               <p className="mt-1 text-xs text-muted-foreground">
-                Optional skills from the company library. Built-in Paperclip runtime skills are added automatically.
+                Optional skills from the organization library. Built-in Paperclip runtime skills are added automatically.
               </p>
             </div>
             {availableSkills.length === 0 ? (
               <p className="text-xs text-muted-foreground">
-                No optional company skills installed yet.
+                No optional organization skills installed yet.
               </p>
             ) : (
               <div className="space-y-3">
@@ -340,13 +421,16 @@ export function NewAgent() {
               </div>
             )}
           </div>
-        </div>
+        </div>}
 
         {/* Footer */}
+        </fieldset>
         <div className="border-t border-border px-4 py-3">
           {isFirstAgent && (
             <p className="text-xs text-muted-foreground mb-2">This will be the CEO</p>
           )}
+          {submissionFrozen && <p className="mb-2 text-xs text-muted-foreground">This request is locked to its original company and settings. Retrying uses the same saved request.</p>}
+          {pausedSetup && <p id="test-agent-disabled-reason" className="mb-2 text-xs text-muted-foreground">Test Agent is unavailable: a paused agent has no runtime to test.</p>}
           {formError && (
             <p className="text-xs text-destructive mb-2">{formError}</p>
           )}
@@ -359,6 +443,16 @@ export function NewAgent() {
             {testAgentFeedback.result && (
               <AdapterEnvironmentResult result={testAgentFeedback.result} />
             )}
+            {testAgentFeedback.login && (
+              <AdapterLoginPanel
+                key={`${testAgentFeedback.login.adapterType}:${testAgentFeedback.login.environmentId}`}
+                companyId={testAgentFeedback.login.companyId}
+                adapterType={testAgentFeedback.login.adapterType}
+                environmentId={testAgentFeedback.login.environmentId}
+                onStored={handleClaudeLoginStored}
+                onApplyStored={handleApplyStoredClaudeLogin}
+              />
+            )}
             <div className="flex items-center justify-between gap-2">
               <Button variant="outline" size="sm" onClick={() => navigate("/agents")}>
                 Cancel
@@ -368,8 +462,9 @@ export function NewAgent() {
                   type="button"
                   variant="outline"
                   size="sm"
-                  disabled={testAgentState.disabled}
-                  onClick={() => testAgentAction?.()}
+                  disabled={pausedSetup || testAgentState.disabled}
+                  aria-describedby={pausedSetup ? "test-agent-disabled-reason" : undefined}
+                  onClick={() => { if (!pausedSetup) testAgentAction?.(); }}
                 >
                   {testAgentState.pending ? "Testing..." : "Test Agent"}
                 </Button>

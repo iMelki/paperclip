@@ -2,11 +2,22 @@ import type { UsageSummary } from "@paperclipai/adapter-utils";
 import {
   asString,
   asNumber,
+  asBoolean,
   parseObject,
   parseJson,
 } from "@paperclipai/adapter-utils/server-utils";
 
-const CLAUDE_AUTH_REQUIRED_RE = /(?:not\s+logged\s+in|please\s+log\s+in|please\s+run\s+(?:`?claude\s+login`?|\/login)|login\s+required|requires\s+login|unauthorized|authentication\s+required|invalid\s+api\s+key[\s\S]{0,120}(?:\/login|claude\s+login|log\s+in))/i;
+// The legacy login-prompt markers. The Claude CLI prints these words when it
+// asks the user to log in. The detector matches them against any probe output
+// line, which includes the raw stdout and stderr. This scope is pre-existing.
+const CLAUDE_LOGIN_PROMPT_RE =
+  /(?:not\s+logged\s+in|please\s+log\s+in|please\s+run\s+(?:`?claude\s+login`?|\/login)|login\s+required|requires\s+login|unauthorized|authentication\s+required|invalid\s+api\s+key[\s\S]{0,120}(?:\/login|claude\s+login|log\s+in))/i;
+
+// The token-failure markers. An assistant or model event can print these same
+// words as ordinary prose, so the detector matches them only against the parsed
+// terminal result fields of a failed run. See detectClaudeLoginRequired.
+const CLAUDE_AUTH_TOKEN_FAILURE_RE =
+  /(?:authentication[_\s-](?:failed|error)|failed\s+to\s+authenticate|invalid\s+bearer\s+token|(?:invalid|expired|revoked)[\s\S]{0,40}(?:bearer|oauth|access)\s+token|(?:bearer|oauth|access)\s+token[\s\S]{0,40}(?:is\s+)?(?:invalid|expired|revoked))/i;
 const URL_RE = /(https?:\/\/[^\s'"`<>()[\]{};,!?]+[^\s'"`<>()[\]{};,!.?:]+)/gi;
 
 const CLAUDE_TRANSIENT_UPSTREAM_RE =
@@ -16,7 +27,9 @@ const CLAUDE_PROVIDER_QUOTA_RE =
 const CLAUDE_MODEL_NOT_FOUND_RE =
   /(?:\b404\b[\s\S]{0,120})?(?:model[\s_-]*(?:not[\s_-]*found|does not exist|unknown|invalid)|unknown[\s_-]*model)/i;
 const CLAUDE_EXTRA_USAGE_RESET_RE =
-  /(?:you(?:'|’)ve\s+hit\s+your\s+session\s+limit|session\s+limit\s+(?:reached|exceeded)|out\s+of\s+extra\s+usage|extra\s+usage|usage\s+limit\s+reached|usage\s+cap\s+reached|5[-\s]?hour\s+limit\s+reached|weekly\s+limit\s+reached|claude\s+usage\s+limit\s+reached)[\s\S]{0,120}?\bresets?\s+(?:at\s+)?([^\n()]+?)(?:\s*\(([^)]+)\))?(?:[.!]|\n|$)/i;
+  /(?:you(?:'|’)ve\s+hit\s+your\s+session\s+limit|session\s+limit\s+(?:reached|exceeded)|out\s+of\s+extra\s+usage|extra\s+usage|usage\s+limit\s+reached|usage\s+cap\s+reached|5[-\s]?hour\s+limit\s+reached|weekly\s+limit\s+reached|claude\s+usage\s+limit\s+reached)[\s\S]{0,120}?\bresets?\s+(?:at\s+)?([^\n()]+?)(?:\s*\(([^)]+)\))?(?:[.!](?!\d)|\n|$)/i;
+
+const CLAUDE_EXTRA_USAGE_RESET_ALL_RE = new RegExp(CLAUDE_EXTRA_USAGE_RESET_RE.source, "gi");
 
 /**
  * Sum the per-model usage ledger from a Claude CLI result event. The result
@@ -163,28 +176,75 @@ export function extractClaudeLoginUrl(text: string): string | null {
   return match[0]?.replace(/[\])}.!,?;:'\"]+$/g, "") ?? null;
 }
 
+// Collect the parsed terminal result fields that carry an auth failure. The
+// CLI writes the token-failure text to the result event, so the detector reads
+// the result string, the top-level error field, and the errors array. It never
+// reads the raw stdout, so an assistant event cannot inject a token marker.
+function collectClaudeTerminalText(parsed: Record<string, unknown>): string {
+  return [
+    asString(parsed.result, ""),
+    asString(parsed.error, ""),
+    ...extractClaudeErrorMessages(parsed),
+  ]
+    .map((field) => field.trim())
+    .filter(Boolean)
+    .join("\n");
+}
+
+// Report whether the parsed terminal result marks the run as an auth failure.
+// The token-failure markers apply only to a failed run. A successful probe
+// whose answer text repeats an auth phrase does not classify as login required.
+function claudeResultIndicatesAuthFailure(parsed: Record<string, unknown>): boolean {
+  if (asBoolean(parsed.is_error, false)) return true;
+  const subtype = asString(parsed.subtype, "").trim().toLowerCase();
+  if (subtype.startsWith("error")) return true;
+  const status =
+    asNumber(parsed.api_error_status, 0) || asNumber(parsed.error_status, 0);
+  if (status === 401 || status === 403) return true;
+  if (asString(parsed.error, "").trim()) return true;
+  return extractClaudeErrorMessages(parsed).length > 0;
+}
+
 export function detectClaudeLoginRequired(input: {
   parsed: Record<string, unknown> | null;
   stdout: string;
   stderr: string;
 }): { requiresLogin: boolean; loginUrl: string | null } {
-  const resultText = asString(input.parsed?.result, "").trim();
-  const messages = [resultText, ...extractClaudeErrorMessages(input.parsed ?? {}), input.stdout, input.stderr]
+  const parsed = input.parsed ?? null;
+  const resultText = asString(parsed?.result, "").trim();
+
+  // The legacy login-prompt markers keep their broad scope. They match against
+  // every output line, which includes the parsed result, the parsed errors, and
+  // the raw stdout and stderr.
+  const promptLines = [resultText, ...extractClaudeErrorMessages(parsed ?? {}), input.stdout, input.stderr]
     .join("\n")
     .split(/\r?\n/)
     .map((line) => line.trim())
     .filter(Boolean);
+  const loginPrompt = promptLines.some((line) => CLAUDE_LOGIN_PROMPT_RE.test(line));
 
-  const requiresLogin = messages.some((line) => CLAUDE_AUTH_REQUIRED_RE.test(line));
+  // The token-failure markers match only against the parsed terminal fields of
+  // a failed run. The raw stdout is untrusted, so a model that prints a token
+  // phrase, or a successful run that repeats one, does not flip the classifier.
+  const tokenFailure =
+    parsed !== null &&
+    claudeResultIndicatesAuthFailure(parsed) &&
+    CLAUDE_AUTH_TOKEN_FAILURE_RE.test(collectClaudeTerminalText(parsed));
+
   return {
-    requiresLogin,
+    requiresLogin: loginPrompt || tokenFailure,
     loginUrl: extractClaudeLoginUrl([input.stdout, input.stderr].join("\n")),
   };
 }
 
-export function describeClaudeFailure(parsed: Record<string, unknown>): string | null {
+export function describeClaudeFailure(
+  parsed: Record<string, unknown>,
+  options: { trustedOnly?: boolean } = {},
+): string | null {
   const subtype = asString(parsed.subtype, "");
-  const resultText = asString(parsed.result, "").trim();
+  // `trustedOnly` is for text that recovery re-reads as the run's own error: the `result` of a
+  // result event that is not an error is the agent's output, which can quote anything.
+  const resultText = options.trustedOnly && parsed.is_error !== true ? "" : asString(parsed.result, "").trim();
   const errors = extractClaudeErrorMessages(parsed);
 
   let detail = resultText;
@@ -289,27 +349,58 @@ export function isClaudeImageProcessingError(parsed: Record<string, unknown>): b
   );
 }
 
-function buildClaudeTransientHaystack(input: {
+/**
+ * Where a provider quota or transient-upstream verdict, and a retry time, may come from.
+ *
+ * Only text that the Claude CLI or the provider wrote as an error counts:
+ * - `result_error`: the `result` of a result event that the CLI marked `is_error`;
+ * - `errors`: the result event's `errors` entries;
+ * - `stderr`: the CLI process's own error stream;
+ * - `error_message`: the adapter's fallback message when no result event was parsed.
+ * Raw stdout (the whole event stream: assistant text, tool output) and the `result` of a result
+ * event that is not an error are never evidence: an agent can quote "You've hit your session
+ * limit · resets 9am" in either, and that must not park a run or set its retry time.
+ */
+export type ClaudeProviderErrorEvidenceSource = "result_error" | "errors" | "stderr" | "error_message";
+
+export type ClaudeProviderErrorInput = {
   parsed?: Record<string, unknown> | null;
   stdout?: string | null;
   stderr?: string | null;
   errorMessage?: string | null;
-}): string {
-  const parsed = input.parsed ?? null;
-  const resultText = parsed ? asString(parsed.result, "") : "";
-  const parsedErrors = parsed ? extractClaudeErrorMessages(parsed) : [];
-  return [
-    input.errorMessage ?? "",
-    resultText,
-    ...parsedErrors,
-    input.stdout ?? "",
-    input.stderr ?? "",
-  ]
-    .join("\n")
+};
+
+function normalizeClaudeEvidenceText(text: string): string {
+  return text
     .split(/\r?\n/)
     .map((line) => line.trim())
     .filter(Boolean)
     .join("\n");
+}
+
+function collectClaudeProviderErrorEvidence(
+  input: ClaudeProviderErrorInput,
+): Array<{ source: ClaudeProviderErrorEvidenceSource; text: string }> {
+  const parsed = input.parsed ?? null;
+  const evidence: Array<{ source: ClaudeProviderErrorEvidenceSource; text: string }> = [];
+  if (parsed) {
+    if (parsed.is_error === true) {
+      evidence.push({ source: "result_error", text: asString(parsed.result, "") });
+    }
+    evidence.push({ source: "errors", text: extractClaudeErrorMessages(parsed).join("\n") });
+  } else {
+    // With a parsed result the caller's message is built from that result, so it adds nothing
+    // that was not already judged above; without one it is the adapter's own fallback line.
+    evidence.push({ source: "error_message", text: input.errorMessage ?? "" });
+  }
+  evidence.push({ source: "stderr", text: input.stderr ?? "" });
+  return evidence
+    .map((entry) => ({ source: entry.source, text: normalizeClaudeEvidenceText(entry.text) }))
+    .filter((entry) => entry.text.length > 0);
+}
+
+function buildClaudeTransientHaystack(input: ClaudeProviderErrorInput): string {
+  return collectClaudeProviderErrorEvidence(input).map((entry) => entry.text).join("\n");
 }
 
 function readTimeZoneParts(date: Date, timeZone: string) {
@@ -418,6 +509,8 @@ function parseClaudeResetClockTime(clockText: string, now: Date, timeZoneHint?: 
   const normalized = clockText.trim().replace(/\s+/g, " ");
   const match = normalized.match(/^(\d{1,2})(?::(\d{2}))?\s*([ap])\.?\s*m\.?/i);
   if (!match) return null;
+  // Anything glued to the clock ("9:00pm:30", "9:00pm30", "9:00pm.30") means it is not a complete clock token.
+  if (/^[:.]?\d/.test(normalized.slice(match[0].length))) return null;
 
   const hour12 = Number.parseInt(match[1] ?? "", 10);
   const minute = Number.parseInt(match[2] ?? "0", 10);
@@ -434,7 +527,9 @@ function parseClaudeResetClockTime(clockText: string, now: Date, timeZoneHint?: 
       minute,
       timeZoneHint,
     });
-    if (explicitRetryAt) return explicitRetryAt;
+    // A named timezone that cannot be resolved makes the clock unusable; reading it in the server's
+    // own timezone would invent a retry time.
+    return explicitRetryAt;
   }
 
   const retryAt = new Date(now);
@@ -445,19 +540,23 @@ function parseClaudeResetClockTime(clockText: string, now: Date, timeZoneHint?: 
   return retryAt;
 }
 
-export function extractClaudeRetryNotBefore(
-  input: {
-    parsed?: Record<string, unknown> | null;
-    stdout?: string | null;
-    stderr?: string | null;
-    errorMessage?: string | null;
-  },
+export function extractClaudeRetryNotBeforeWithSource(
+  input: ClaudeProviderErrorInput,
   now = new Date(),
-): Date | null {
-  const haystack = buildClaudeTransientHaystack(input);
-  const match = haystack.match(CLAUDE_EXTRA_USAGE_RESET_RE);
-  if (!match) return null;
-  return parseClaudeResetClockTime(match[1] ?? "", now, match[2]);
+): { retryAt: Date; source: ClaudeProviderErrorEvidenceSource } | null {
+  // Every statement in every source is tried: an impossible clock or an unknown timezone is skipped
+  // and must not hide a later valid one, in the same source or the next.
+  for (const entry of collectClaudeProviderErrorEvidence(input)) {
+    for (const match of entry.text.matchAll(CLAUDE_EXTRA_USAGE_RESET_ALL_RE)) {
+      const retryAt = parseClaudeResetClockTime(match[1] ?? "", now, match[2]);
+      if (retryAt) return { retryAt, source: entry.source };
+    }
+  }
+  return null;
+}
+
+export function extractClaudeRetryNotBefore(input: ClaudeProviderErrorInput, now = new Date()): Date | null {
+  return extractClaudeRetryNotBeforeWithSource(input, now)?.retryAt ?? null;
 }
 
 export function isClaudeTransientUpstreamError(input: {
@@ -504,4 +603,11 @@ export function isClaudeProviderQuotaError(input: {
   const haystack = buildClaudeTransientHaystack(input);
   if (!haystack) return false;
   return CLAUDE_PROVIDER_QUOTA_RE.test(haystack);
+}
+
+/** Which trusted evidence source holds the provider quota wording, or null when none does. */
+export function findClaudeProviderQuotaEvidenceSource(
+  input: ClaudeProviderErrorInput,
+): ClaudeProviderErrorEvidenceSource | null {
+  return collectClaudeProviderErrorEvidence(input).find((entry) => CLAUDE_PROVIDER_QUOTA_RE.test(entry.text))?.source ?? null;
 }

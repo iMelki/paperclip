@@ -13,11 +13,12 @@ import { logger } from "../middleware/logger.js";
 import {
   approvalService,
   accessService,
+  agentService,
   heartbeatService,
   issueApprovalService,
   logActivity,
-  secretService,
 } from "../services/index.js";
+import { unprocessable } from "../errors.js";
 import { assertBoard, assertCompanyAccess, getAccessibleResource, getActorInfo, hasCompanyAccess } from "./authz.js";
 import { redactEventPayload } from "../redaction.js";
 import type { PluginWorkerManager } from "../services/plugin-worker-manager.js";
@@ -48,12 +49,12 @@ export function approvalRoutes(
   const router = Router();
   const svc = approvalService(db);
   const access = accessService(db);
+  const agentsSvc = agentService(db);
   const heartbeat = heartbeatService(db, {
     pluginWorkerManager: options.pluginWorkerManager,
   });
   const issueApprovalsSvc = issueApprovalService(db);
   const issuesSvc = issueService(db);
-  const secretsSvc = secretService(db);
   const strictSecretsMode = process.env.PAPERCLIP_SECRETS_STRICT_MODE === "true";
 
   async function lostReviewPathIssueIds(
@@ -204,6 +205,26 @@ export function approvalRoutes(
     return false;
   }
 
+  async function resolveRequestedByAgentId(
+    req: Request,
+    companyId: string,
+    candidate: unknown,
+  ): Promise<string | null> {
+    const actor = getActorInfo(req);
+    if (actor.actorType === "agent") return actor.actorId;
+    if (typeof candidate !== "string") return null;
+
+    const requester = await agentsSvc.getById(candidate);
+    if (!requester || requester.companyId !== companyId) {
+      throw unprocessable("Approval requester must be an agent in the same company", {
+        code: "approval_requester_company_mismatch",
+        companyId,
+        requestedByAgentId: candidate,
+      });
+    }
+    return requester.id;
+  }
+
   router.get("/companies/:companyId/approvals", async (req, res) => {
     const companyId = req.params.companyId as string;
     assertCompanyAccess(req, companyId);
@@ -234,7 +255,7 @@ export function approvalRoutes(
     const { issueIds: _issueIds, ...approvalInput } = req.body;
     const normalizedPayload =
       approvalInput.type === "hire_agent"
-        ? await secretsSvc.normalizeHireApprovalPayloadForPersistence(
+        ? await svc.prepareHirePayloadForPersistence(
             companyId,
             approvalInput.payload,
             { strictMode: strictSecretsMode },
@@ -242,18 +263,26 @@ export function approvalRoutes(
         : approvalInput.payload;
 
     const actor = getActorInfo(req);
-    const approval = await svc.create(companyId, {
-      ...approvalInput,
-      payload: normalizedPayload,
-      requestedByUserId: actor.actorType === "user" ? actor.actorId : null,
-      requestedByAgentId:
-        approvalInput.requestedByAgentId ?? (actor.actorType === "agent" ? actor.actorId : null),
-      status: "pending",
-      decisionNote: null,
-      decidedByUserId: null,
-      decidedAt: null,
-      updatedAt: new Date(),
-    });
+    const requestedByAgentId = await resolveRequestedByAgentId(
+      req,
+      companyId,
+      approvalInput.requestedByAgentId,
+    );
+    const approval = await svc.create(
+      companyId,
+      {
+        ...approvalInput,
+        payload: normalizedPayload,
+        requestedByUserId: actor.actorType === "user" ? actor.actorId : null,
+        requestedByAgentId,
+        status: "pending",
+        decisionNote: null,
+        decidedByUserId: null,
+        decidedAt: null,
+        updatedAt: new Date(),
+      },
+      { strictMode: strictSecretsMode },
+    );
 
     if (uniqueIssueIds.length > 0) {
       await issueApprovalsSvc.linkManyForApproval(approval.id, uniqueIssueIds, {
@@ -476,14 +505,18 @@ export function approvalRoutes(
 
     const normalizedPayload = req.body.payload
       ? existing.type === "hire_agent"
-        ? await secretsSvc.normalizeHireApprovalPayloadForPersistence(
+        ? await svc.prepareHirePayloadForPersistence(
             existing.companyId,
             req.body.payload,
             { strictMode: strictSecretsMode },
           )
         : req.body.payload
       : undefined;
-    const approval = await svc.resubmit(id, normalizedPayload);
+    const approval = await svc.resubmit(
+      id,
+      normalizedPayload,
+      { strictMode: strictSecretsMode },
+    );
     const actor = getActorInfo(req);
     await logActivity(db, {
       companyId: approval.companyId,

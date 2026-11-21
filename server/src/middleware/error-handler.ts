@@ -4,11 +4,35 @@ import { ZodError } from "zod";
 import { HttpError } from "../errors.js";
 import { trackErrorHandlerCrash } from "@paperclipai/shared/telemetry";
 import { getTelemetryClient } from "../telemetry.js";
+import { captureException } from "../sentry.js";
 import { COMPANY_IMPORT_API_PATH } from "../routes/company-import-paths.js";
 import { logger } from "./logger.js";
+import { requestPathForHttpLog } from "./http-log-policy.js";
 import {
   recordResponsibleUserDenialOnActiveRun,
 } from "../services/responsible-user-denial-run-outcomes.js";
+
+const REDACTED_DATABASE_QUERY_PARAMS = "***REDACTED***";
+
+function redactDatabaseQueryParams(value: string | undefined) {
+  if (!value) return value;
+  const markerIndex = value.indexOf("\nparams:");
+  if (markerIndex < 0) return value;
+  // DrizzleQueryError includes every bound value after this marker. Do not try
+  // to recover the original stack after attacker-controlled parameter text;
+  // a value could imitate a stack-frame delimiter and escape redaction.
+  return `${value.slice(0, markerIndex)}\nparams: ${REDACTED_DATABASE_QUERY_PARAMS}`;
+}
+
+function logSafeError(rawError: Error) {
+  const message = redactDatabaseQueryParams(rawError.message) ?? rawError.message;
+  const stack = redactDatabaseQueryParams(rawError.stack);
+  if (message === rawError.message && stack === rawError.stack) return rawError;
+  const safeError = new Error(message);
+  safeError.name = rawError.name;
+  safeError.stack = stack;
+  return safeError;
+}
 
 export interface ErrorContext {
   error: { message: string; stack?: string; name?: string; details?: unknown; raw?: unknown };
@@ -16,11 +40,17 @@ export interface ErrorContext {
   url: string;
   reqBody?: unknown;
   reqParams?: unknown;
-  reqQuery?: unknown;
 }
 
 function isRedactedSkillPolicyDenial(details: Record<string, unknown> | null) {
   return details?.code === "skill_policy_denied";
+}
+
+function readZodIssues(err: unknown): unknown[] | null {
+  if (err instanceof ZodError) return err.issues;
+  if (!err || typeof err !== "object" || (err as { name?: unknown }).name !== "ZodError") return null;
+  const issues = (err as { issues?: unknown }).issues;
+  return Array.isArray(issues) ? issues : null;
 }
 
 function attachErrorContext(
@@ -29,17 +59,28 @@ function attachErrorContext(
   payload: ErrorContext["error"],
   rawError?: Error,
 ) {
+  const safeRawError = rawError ? logSafeError(rawError) : null;
   (res as any).__errorContext = {
-    error: payload,
+    error: {
+      ...payload,
+      message: redactDatabaseQueryParams(payload.message) ?? payload.message,
+      stack: redactDatabaseQueryParams(payload.stack),
+    },
     method: req.method,
-    url: req.originalUrl,
+    url: requestPathForHttpLog(req.originalUrl),
     reqBody: req.body,
     reqParams: req.params,
-    reqQuery: req.query,
   } satisfies ErrorContext;
-  if (rawError) {
-    (res as any).err = rawError;
+  if (safeRawError) {
+    (res as any).err = safeRawError;
   }
+}
+
+/** Report a server-side crash to every error sink. */
+function reportCrash(error: Error): void {
+  const tc = getTelemetryClient();
+  if (tc) trackErrorHandlerCrash(tc, { errorCode: error.name });
+  captureException(error);
 }
 
 function getPaperclipDb(req: Request): Db | null {
@@ -83,6 +124,7 @@ export function errorHandler(
       ? err.details as Record<string, unknown>
       : null;
     const redactedSkillPolicyDenial = isRedactedSkillPolicyDenial(details);
+    const workspaceRepairPreconditionFailure = details?.code === "workspace_repair_precondition_failed";
     const structuredConnectionError = new Set([
       "user_authorization_required",
       "grant_revoked",
@@ -99,30 +141,37 @@ export function errorHandler(
         { message: err.message, stack: err.stack, name: err.name, details: err.details },
         err,
       );
-      const tc = getTelemetryClient();
-      if (tc) trackErrorHandlerCrash(tc, { errorCode: err.name });
+      reportCrash(err);
     }
     res.status(err.status).json({
-      error: err.message,
+      error: redactDatabaseQueryParams(err.message) ?? err.message,
       ...(typeof details?.code === "string" ? { code: details.code } : {}),
       ...(redactedSkillPolicyDenial && typeof details?.reason === "string" ? { reason: details.reason } : {}),
+      ...(workspaceRepairPreconditionFailure && typeof details?.reason === "string" ? { reason: details.reason } : {}),
+      ...(workspaceRepairPreconditionFailure && typeof details?.repairPhase === "string"
+        ? { repairPhase: details.repairPhase }
+        : {}),
       ...(typeof details?.remediation === "string" || (structuredConnectionError && details?.remediation && typeof details.remediation === "object")
         ? { remediation: details.remediation }
         : {}),
       ...(structuredConnectionError && details?.connection ? { connection: details.connection } : {}),
       ...(structuredConnectionError && details?.subject ? { subject: details.subject } : {}),
       ...(structuredConnectionError && typeof details?.grantId === "string" ? { grantId: details.grantId } : {}),
-      ...(!redactedSkillPolicyDenial && err.details ? { details: err.details } : {}),
+      ...(!redactedSkillPolicyDenial && !workspaceRepairPreconditionFailure && err.details
+        ? { details: err.details }
+        : {}),
     });
     return;
   }
 
-  if (err instanceof ZodError) {
-    res.status(400).json({ error: "Validation error", details: err.errors });
+  const zodIssues = readZodIssues(err);
+  if (zodIssues) {
+    res.status(400).json({ error: "Validation error", details: zodIssues });
     return;
   }
 
   const rootError = err instanceof Error ? err : new Error(String(err));
+  const safeRootError = logSafeError(rootError);
   attachErrorContext(
     req,
     res,
@@ -132,12 +181,11 @@ export function errorHandler(
     rootError,
   );
 
-  const tc = getTelemetryClient();
-  if (tc) trackErrorHandlerCrash(tc, { errorCode: rootError.name });
+  reportCrash(rootError);
 
   res.status(500).json({
     error: "Internal server error",
-    ...(shouldExposeTrustedCloudTenantImportError(req) ? { message: rootError.message } : {}),
+    ...(shouldExposeTrustedCloudTenantImportError(req) ? { message: safeRootError.message } : {}),
   });
 }
 

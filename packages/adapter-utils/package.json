@@ -39,15 +39,19 @@
   ],
   "scripts": {
     "build": "tsc",
+    "check:ssh-command-lookup": "node ./scripts/ssh-command-lookup-gate.mjs",
     "clean": "rm -rf dist",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "node ./scripts/ssh-command-lookup-gate.mjs && tsc --noEmit"
   },
   "dependencies": {
     "acpx": "0.12.0",
     "picocolors": "^1.1.1"
   },
   "devDependencies": {
-    "@types/node": "^22.20.1",
-    "typescript": "^5.7.3"
+    "@types/node": "^24.0.0",
+    "typescript": "^7.0.2"
+  },
+  "engines": {
+    "node": ">=24.11.0"
   }
 }

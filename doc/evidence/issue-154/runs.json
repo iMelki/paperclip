@@ -1,0 +1,259 @@
+{
+  "baseCommit": "cf181ecd2852dadedbe3d3747175e380cd75ae27",
+  "testFileSha256": "95d37d85c1d1ed93774e7383e6b8f6cbe0f17b94d80f0495cecbde040352c1e8",
+  "command": "(from server) node ../node_modules/vitest/vitest.mjs run src/__tests__/heartbeat-workspace-branch-containment.test.ts --reporter=default --reporter=json --outputFile.json=<run-report>",
+  "method": "Each process has a distinct TEMP/TMP/TMPDIR. Negative and fixed processes also have an isolated PAPERCLIP_HOME and RUN_LOG_BASE_PATH. No artificial CPU load was added.",
+  "runs": [
+    {
+      "label": "baseline-01",
+      "startedUtc": "2026-10-07T17:16:04Z",
+      "pressure": {
+        "memoryUsedPercent": 83,
+        "availableMemoryBytes": 11613601792
+      },
+      "testSha256": "f75e4de9f6bc73d7c715178784fe0170312a5dc08917452d66ae532a8419d0cc",
+      "exitCode": 0,
+      "durationSeconds": 68.313,
+      "numTotalTests": 8,
+      "numPassedTests": 8,
+      "numFailedTests": 0,
+      "numPendingTests": 0
+    },
+    {
+      "label": "baseline-02",
+      "startedUtc": "2026-10-07T17:17:13Z",
+      "pressure": {
+        "memoryUsedPercent": 81,
+        "availableMemoryBytes": 12872675328
+      },
+      "testSha256": "f75e4de9f6bc73d7c715178784fe0170312a5dc08917452d66ae532a8419d0cc",
+      "exitCode": 0,
+      "durationSeconds": 87.032,
+      "numTotalTests": 8,
+      "numPassedTests": 8,
+      "numFailedTests": 0,
+      "numPendingTests": 0
+    },
+    {
+      "label": "baseline-03",
+      "startedUtc": "2026-10-07T17:18:40Z",
+      "pressure": {
+        "memoryUsedPercent": 86,
+        "availableMemoryBytes": 9311457280
+      },
+      "testSha256": "f75e4de9f6bc73d7c715178784fe0170312a5dc08917452d66ae532a8419d0cc",
+      "exitCode": 0,
+      "durationSeconds": 83.047,
+      "numTotalTests": 8,
+      "numPassedTests": 8,
+      "numFailedTests": 0,
+      "numPendingTests": 0
+    },
+    {
+      "label": "baseline-04",
+      "startedUtc": "2026-10-07T17:20:03Z",
+      "pressure": {
+        "memoryUsedPercent": 86,
+        "availableMemoryBytes": 8992436224
+      },
+      "testSha256": "f75e4de9f6bc73d7c715178784fe0170312a5dc08917452d66ae532a8419d0cc",
+      "exitCode": 0,
+      "durationSeconds": 88.0,
+      "numTotalTests": 8,
+      "numPassedTests": 8,
+      "numFailedTests": 0,
+      "numPendingTests": 0
+    },
+    {
+      "label": "baseline-05",
+      "startedUtc": "2026-10-07T17:21:31Z",
+      "pressure": {
+        "memoryUsedPercent": 87,
+        "availableMemoryBytes": 8863834112
+      },
+      "testSha256": "f75e4de9f6bc73d7c715178784fe0170312a5dc08917452d66ae532a8419d0cc",
+      "exitCode": 0,
+      "durationSeconds": 95.39,
+      "numTotalTests": 8,
+      "numPassedTests": 8,
+      "numFailedTests": 0,
+      "numPendingTests": 0
+    },
+    {
+      "label": "negative-old-waits-01",
+      "startedUtc": "2026-10-07T17:25:41Z",
+      "pressure": {
+        "memoryUsedPercent": 86.83,
+        "availableMemoryBytes": 9005641728,
+        "averageCpuUsedPercent": 67.7
+      },
+      "testSha256": "f4b22a759a97dc7d5690261451de197dfbb9e90ec9363ce40553a4197de7ff2a",
+      "exitCode": 1,
+      "durationSeconds": 86.937,
+      "numTotalTests": 8,
+      "numPassedTests": 7,
+      "numFailedTests": 1,
+      "numPendingTests": 0
+    },
+    {
+      "label": "fixed-01",
+      "startedUtc": "2026-10-07T17:27:33Z",
+      "pressure": {
+        "memoryUsedPercent": 88.99,
+        "availableMemoryBytes": 7527800832,
+        "averageCpuUsedPercent": 53.0
+      },
+      "testSha256": "95d37d85c1d1ed93774e7383e6b8f6cbe0f17b94d80f0495cecbde040352c1e8",
+      "exitCode": 0,
+      "durationSeconds": 70.234,
+      "numTotalTests": 8,
+      "numPassedTests": 8,
+      "numFailedTests": 0,
+      "numPendingTests": 0
+    },
+    {
+      "label": "fixed-02",
+      "startedUtc": "2026-10-07T17:28:43Z",
+      "pressure": {
+        "memoryUsedPercent": 87.26,
+        "availableMemoryBytes": 8715763712,
+        "averageCpuUsedPercent": 72.2
+      },
+      "testSha256": "95d37d85c1d1ed93774e7383e6b8f6cbe0f17b94d80f0495cecbde040352c1e8",
+      "exitCode": 0,
+      "durationSeconds": 85.703,
+      "numTotalTests": 8,
+      "numPassedTests": 8,
+      "numFailedTests": 0,
+      "numPendingTests": 0
+    },
+    {
+      "label": "fixed-03",
+      "startedUtc": "2026-10-07T17:30:09Z",
+      "pressure": {
+        "memoryUsedPercent": 88.45,
+        "availableMemoryBytes": 7895793664,
+        "averageCpuUsedPercent": 56.5
+      },
+      "testSha256": "95d37d85c1d1ed93774e7383e6b8f6cbe0f17b94d80f0495cecbde040352c1e8",
+      "exitCode": 0,
+      "durationSeconds": 78.203,
+      "numTotalTests": 8,
+      "numPassedTests": 8,
+      "numFailedTests": 0,
+      "numPendingTests": 0
+    },
+    {
+      "label": "fixed-04",
+      "startedUtc": "2026-10-07T17:31:27Z",
+      "pressure": {
+        "memoryUsedPercent": 88.02,
+        "availableMemoryBytes": 8192520192,
+        "averageCpuUsedPercent": 65.4
+      },
+      "testSha256": "95d37d85c1d1ed93774e7383e6b8f6cbe0f17b94d80f0495cecbde040352c1e8",
+      "exitCode": 0,
+      "durationSeconds": 81.281,
+      "numTotalTests": 8,
+      "numPassedTests": 8,
+      "numFailedTests": 0,
+      "numPendingTests": 0
+    },
+    {
+      "label": "fixed-05",
+      "startedUtc": "2026-10-07T17:32:48Z",
+      "pressure": {
+        "memoryUsedPercent": 88.69,
+        "availableMemoryBytes": 7732502528,
+        "averageCpuUsedPercent": 55.4
+      },
+      "testSha256": "95d37d85c1d1ed93774e7383e6b8f6cbe0f17b94d80f0495cecbde040352c1e8",
+      "exitCode": 0,
+      "durationSeconds": 75.625,
+      "numTotalTests": 8,
+      "numPassedTests": 8,
+      "numFailedTests": 0,
+      "numPendingTests": 0
+    },
+    {
+      "label": "fixed-06",
+      "startedUtc": "2026-10-07T17:34:04Z",
+      "pressure": {
+        "memoryUsedPercent": 88.5,
+        "availableMemoryBytes": 7863816192,
+        "averageCpuUsedPercent": 67.6
+      },
+      "testSha256": "95d37d85c1d1ed93774e7383e6b8f6cbe0f17b94d80f0495cecbde040352c1e8",
+      "exitCode": 0,
+      "durationSeconds": 89.109,
+      "numTotalTests": 8,
+      "numPassedTests": 8,
+      "numFailedTests": 0,
+      "numPendingTests": 0
+    },
+    {
+      "label": "fixed-07",
+      "startedUtc": "2026-10-07T17:35:33Z",
+      "pressure": {
+        "memoryUsedPercent": 89.96,
+        "availableMemoryBytes": 6863208448,
+        "averageCpuUsedPercent": 72.5
+      },
+      "testSha256": "95d37d85c1d1ed93774e7383e6b8f6cbe0f17b94d80f0495cecbde040352c1e8",
+      "exitCode": 0,
+      "durationSeconds": 95.375,
+      "numTotalTests": 8,
+      "numPassedTests": 8,
+      "numFailedTests": 0,
+      "numPendingTests": 0
+    },
+    {
+      "label": "fixed-08",
+      "startedUtc": "2026-10-07T17:37:29Z",
+      "pressure": {
+        "memoryUsedPercent": 89.57,
+        "availableMemoryBytes": 7132487680,
+        "averageCpuUsedPercent": 68.4
+      },
+      "testSha256": "95d37d85c1d1ed93774e7383e6b8f6cbe0f17b94d80f0495cecbde040352c1e8",
+      "exitCode": 0,
+      "durationSeconds": 83.203,
+      "numTotalTests": 8,
+      "numPassedTests": 8,
+      "numFailedTests": 0,
+      "numPendingTests": 0
+    },
+    {
+      "label": "fixed-09",
+      "startedUtc": "2026-10-07T17:47:39Z",
+      "pressure": {
+        "memoryUsedPercent": 88.39,
+        "availableMemoryBytes": 7938736128,
+        "averageCpuUsedPercent": 37.4
+      },
+      "testSha256": "95d37d85c1d1ed93774e7383e6b8f6cbe0f17b94d80f0495cecbde040352c1e8",
+      "exitCode": 0,
+      "durationSeconds": 56.313,
+      "numTotalTests": 8,
+      "numPassedTests": 8,
+      "numFailedTests": 0,
+      "numPendingTests": 0
+    },
+    {
+      "label": "fixed-10",
+      "startedUtc": "2026-10-07T17:48:35Z",
+      "pressure": {
+        "memoryUsedPercent": 88.82,
+        "availableMemoryBytes": 7649001472,
+        "averageCpuUsedPercent": 60.6
+      },
+      "testSha256": "95d37d85c1d1ed93774e7383e6b8f6cbe0f17b94d80f0495cecbde040352c1e8",
+      "exitCode": 0,
+      "durationSeconds": 77.641,
+      "numTotalTests": 8,
+      "numPassedTests": 8,
+      "numFailedTests": 0,
+      "numPendingTests": 0
+    }
+  ]
+}

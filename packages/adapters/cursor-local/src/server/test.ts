@@ -299,7 +299,7 @@ export async function testEnvironment(
       const autoTrustEnabled = !hasCursorTrustBypassArg(extraArgs);
       const args = ["-p", "--mode", "ask", "--output-format", "json", "--workspace", cwd];
       if (model) args.push("--model", model);
-      if (autoTrustEnabled) args.push("--yolo");
+      if (autoTrustEnabled) args.push("--trust");
       if (extraArgs.length > 0) args.push(...extraArgs);
       args.push("Respond with hello.");
 

@@ -1,0 +1,38 @@
+
+[test:run] exact pre-push selection: server/src/services/coordination-v2.test.ts
+
+ RUN  v4.1.10 <repo-root>
+
+ ❯ |@paperclipai/server| src/services/coordination-v2.test.ts (5 tests | 1 failed) 17ms
+     ✓ pins the exact canonical schema bytes 2ms
+     ✓ never fabricates identity, health, controls, or process evidence 7ms
+     ✓ hides host placement from an unrelated same-company agent 1ms
+     ✓ fails closed for malformed persisted participant enums 0ms
+     × rejects a missing or non-positive persisted generation 5ms
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  |@paperclipai/server| src/services/coordination-v2.test.ts > task coordination v2 > rejects a missing or non-positive persisted generation
+AssertionError: expected [Function] to throw error matching /coordination_generation must be a pos…/ but got 'task-coordination.v2 validation faile…'
+
+- Expected:
+/coordination_generation must be a positive persisted integer/
+
++ Received:
+"task-coordination.v2 validation failed: data/task/generation must be >= 1"
+
+ ❯ src/services/coordination-v2.test.ts:97:10
+     95|     expect(() => projectTaskCoordinationViewV2(snapshot({
+     96|       rootIssue: { ...snapshot().rootIssue, coordinationGeneration: 0 …
+     97|     }))).toThrow(/coordination_generation must be a positive persisted…
+       |          ^
+     98|   });
+     99| });
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  1 failed | 4 passed (5)
+   Start at  05:41:48
+     Duration  2.66s (transform 1.46s, setup 158ms, import 2.22s, tests 17ms, environment 0ms)

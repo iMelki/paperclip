@@ -1,0 +1,7 @@
+declare function execFileText(command: string, args: string[]): Promise<unknown>;
+declare const command: string;
+
+const shellAlias = "/bin/sh";
+const lookupAlias = `command -v ${command}`;
+const argvAlias = ["-lc", lookupAlias];
+void execFileText(shellAlias, argvAlias);

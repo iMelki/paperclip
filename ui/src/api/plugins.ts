@@ -255,7 +255,7 @@ export const pluginsApi = {
    * @param params.version - Target npm version tag/range (optional; defaults to latest).
    * @param params.isLocalPath - Set to `true` when `packageName` is a local path.
    */
-  install: (params: { packageName: string; version?: string; isLocalPath?: boolean }) =>
+  install: (params: { packageName: string; version?: string; isLocalPath?: boolean; activate?: boolean }) =>
     api.post<PluginRecord>("/plugins/install", params),
 
   /**
@@ -362,8 +362,8 @@ export const pluginsApi = {
    * @param pluginId - UUID of the plugin to upgrade.
    * @param version - Target version (optional; defaults to latest published).
    */
-  upgrade: (pluginId: string, version?: string) =>
-    api.post<{ ok: boolean }>(`/plugins/${pluginId}/upgrade`, version ? { version } : {}),
+  upgrade: (pluginId: string, version?: string, options?: { localPath?: string; activate?: boolean }) =>
+    api.post<PluginRecord>(`/plugins/${pluginId}/upgrade`, { ...(version ? { version } : {}), ...options }),
 
   /**
    * Returns normalized UI contribution declarations for ready plugins.

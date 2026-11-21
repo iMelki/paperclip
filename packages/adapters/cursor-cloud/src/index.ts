@@ -23,6 +23,7 @@ Core fields:
 - promptTemplate (string, optional): heartbeat prompt template
 - bootstrapPromptTemplate (string, optional): first-run-only bootstrap prompt template
 - model (string, optional): Cursor model id; omit to use the account default
+- timeoutSec (number, optional): wait timeout in seconds. Default 14400. Missing, 0, and negative values use that default.
 - env.CURSOR_API_KEY (string, required): Cursor API key
 - env.* (optional): additional env vars injected into the cloud agent shell
 

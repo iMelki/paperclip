@@ -1,10 +1,9 @@
 name: Agent runtime images
 
-# Dispatch only. The push trigger was removed: this job publishes to the
-# upstream ghcr.io/paperclipai registry and signs with cosign keyless OIDC,
-# neither of which this fork can do from a box runner (box-img's guard also
-# refuses anything but default-branch builds of this repo's own images), and
-# its only push run (August) failed on a GitHub-hosted runner.
+# Dispatch only. The push trigger was removed on master (hotfix fa47145a8):
+# this job publishes to the upstream ghcr.io/paperclipai registry and signs
+# with cosign keyless OIDC, neither of which this fork can do from a box
+# runner, and its only push run (August) failed on a GitHub-hosted runner.
 on:
   workflow_dispatch:
     inputs:
@@ -26,20 +25,22 @@ jobs:
   build-and-sign:
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
 
       - name: Log into GHCR
-        uses: docker/login-action@v4
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Install cosign
-        uses: sigstore/cosign-installer@v3
+        uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
 
       - name: Build + push all deployed harness images (linux/amd64)
         id: bake

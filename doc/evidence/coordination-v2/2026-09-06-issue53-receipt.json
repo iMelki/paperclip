@@ -1,0 +1,48 @@
+{
+  "issue": "iMelki/paperclip#53",
+  "date": "2026-09-06",
+  "implementation": {
+    "route": "GET /api/issues/:rootIssueId/coordination/v2",
+    "schemaSha256": "3f47037b1f7b5e1705e719e4b087be88223abac19590521024d2f8960823b258",
+    "migration": "0213_coordination_generation.sql",
+    "databaseField": "issues.coordination_generation",
+    "migrationRepair": "Existing NULL values are repaired to 1; DEFAULT and NOT NULL are reasserted before the positive check is added.",
+    "v1Compatibility": "The issue-list select may read the field for internal typing, but v1 HTTP serialization strips coordinationGeneration before returning public issue rows."
+  },
+  "negativeProofs": [
+    {
+      "dimension": "audience",
+      "breakApplied": "Removed the assignee/participation checks so only board callers could see placements.",
+      "command": "node scripts/run-vitest-stable.mjs --files server/src/services/coordination-v2.test.ts",
+      "observedFailure": "exit 1; assigned-agent placement assertion received [] instead of one host.",
+      "log": "2026-09-06-negative-audience.log"
+    },
+    {
+      "dimension": "evidence-authority",
+      "breakApplied": "Changed the fresh-heartbeat projection to report processEvidence=true.",
+      "command": "node scripts/run-vitest-stable.mjs --files server/src/services/coordination-v2.test.ts",
+      "observedFailure": "exit 1; the fail-closed process-evidence assertion received true instead of false.",
+      "log": "2026-09-06-negative-health.log"
+    },
+    {
+      "dimension": "positive-generation",
+      "breakApplied": "Relaxed the persisted-generation guard from < 1 to < 0.",
+      "command": "node scripts/run-vitest-stable.mjs --files server/src/services/coordination-v2.test.ts",
+      "observedFailure": "exit 1; schema validation reported data/task/generation must be >= 1.",
+      "log": "2026-09-06-negative-generation.log"
+    },
+    {
+      "dimension": "schema-byte-integrity",
+      "breakApplied": "Replaced the pinned schema digest with an all-zero digest.",
+      "command": "node scripts/run-vitest-stable.mjs --files server/src/services/coordination-v2.test.ts",
+      "observedFailure": "exit 1 before tests; module import reported the expected and actual SHA-256 values.",
+      "log": "2026-09-06-negative-schema-drift.log"
+    }
+  ],
+  "restoredPass": {
+    "command": "node scripts/run-vitest-stable.mjs --files server/src/services/coordination-v2.test.ts",
+    "result": "exit 0; 5/5 tests passed.",
+    "log": "2026-09-06-restored.log",
+    "thresholdCoverage": "Explicit stale (901s), orphaned (1801s), future, and contradictory timestamp fixtures remain non-positive."
+  }
+}

@@ -1,0 +1,31 @@
+{
+  "base": "http://127.0.0.1:3197",
+  "path": "/NOR/dashboard",
+  "measuredAt": "2026-08-25T05:08:33.341Z",
+  "timeToFirstTextMs": 1150,
+  "requests": 41,
+  "totalContentLengthBytes": 7628622,
+  "byContentType": {
+    "text/javascript": {
+      "n": 1,
+      "bytes": 6779424
+    },
+    "text/css": {
+      "n": 1,
+      "bytes": 456116
+    },
+    "font/woff2": {
+      "n": 1,
+      "bytes": 352240
+    },
+    "application/json": {
+      "n": 37,
+      "bytes": 38599
+    },
+    "text/html": {
+      "n": 1,
+      "bytes": 2243
+    }
+  },
+  "domNodes": 1042
+}

@@ -1,5 +1,6 @@
+import { resolveHttpAdapterTimeout } from "@paperclipai/adapter-utils/adapter-timeout";
 import type { AdapterExecutionContext, AdapterExecutionResult } from "../types.js";
-import { asString, asNumber, parseObject } from "../utils.js";
+import { asString, parseObject } from "../utils.js";
 
 export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExecutionResult> {
   const { config, runId, agent, context } = ctx;
@@ -7,13 +8,16 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   if (!url) throw new Error("HTTP adapter missing url");
 
   const method = asString(config.method, "POST");
-  const timeoutMs = asNumber(config.timeoutMs, 0);
+  const timeoutMs = resolveHttpAdapterTimeout({
+    timeoutSec: config.timeoutSec,
+    timeoutMs: config.timeoutMs,
+  }).timeoutMs;
   const headers = parseObject(config.headers) as Record<string, string>;
   const payloadTemplate = parseObject(config.payloadTemplate);
   const body = { ...payloadTemplate, agentId: agent.id, runId, context };
 
   const controller = new AbortController();
-  const timer = timeoutMs > 0 ? setTimeout(() => controller.abort(), timeoutMs) : null;
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
     const res = await fetch(url, {
@@ -23,7 +27,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         ...headers,
       },
       body: JSON.stringify(body),
-      ...(timer ? { signal: controller.signal } : {}),
+      signal: controller.signal,
     });
 
     if (!res.ok) {

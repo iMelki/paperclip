@@ -2,7 +2,7 @@ import fs from "node:fs";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
-import { applyPendingMigrations, ensurePostgresDatabase } from "./client.js";
+import { applyPendingMigrations, closeRegisteredClients, ensurePostgresDatabase } from "./client.js";
 import { createEmbeddedPostgresLogBuffer, formatEmbeddedPostgresError as formatEmbeddedPostgresErrorDetails } from "./embedded-postgres-error.js";
 import { prepareEmbeddedPostgresNativeRuntime } from "./embedded-postgres-native.js";
 import { reapWindowsTestProcessTree } from "./test-windows-process-tree.js";
@@ -120,12 +120,15 @@ async function createEmbeddedPostgresTestInstance(tempDirPrefix: string) {
 }
 
 function cleanupEmbeddedPostgresTestDirs(dataDir: string) {
-  fs.rmSync(dataDir, {
+  const removal = {
     recursive: true,
     force: true,
     maxRetries: process.platform === "win32" ? 20 : 3,
     retryDelay: process.platform === "win32" ? 100 : 10,
-  });
+  };
+  fs.rmSync(dataDir, removal);
+  // Without an explicit logFile, Windows pg_ctl writes its log beside the data directory.
+  fs.rmSync(`${dataDir}-postgres.log`, removal);
 }
 
 // Native Windows can take materially longer to initialize a fresh embedded
@@ -152,15 +155,68 @@ function readPostmasterPid(dataDir: string): number | null {
   }
 }
 
-async function terminateWindowsPostgresProcessTree(dataDir: string): Promise<boolean> {
+export type EmbeddedPostgresStopOptions = {
+  /**
+   * Override the graceful-stop observation bound for a specific test fixture.
+   * The default remains short for ordinary test hooks; callers must still
+   * preserve the data directory if this bounded wait expires.
+   */
+  stopTimeoutMs?: number;
+
+  /**
+   * Explicit opt-in, OFF by default: when a graceful stop fails on Windows,
+   * terminate this cluster's own processes. Only processes proven to be this
+   * cluster's are touched -- the data directory is in the postmaster's command
+   * line, and descendants follow by verified lineage -- each re-verified by
+   * creation time on a pinned handle before Kill(), so a recycled PID is never
+   * hit. Nothing is signalled when ownership evidence is unusable. The outcome
+   * is reported as "forced", never as a confirmed stop.
+   */
+  forceStopWithoutCustody?: boolean;
+};
+
+/**
+ * No-custody handling of the Windows postmaster tree after a failed stop.
+ *
+ * `embedded-postgres` spawns the postmaster itself, so this process never
+ * holds that child's handle at launch and therefore can never place the tree
+ * under Job Object custody -- which means it can never obtain an authoritative
+ * `confirmedStopped` receipt for it.
+ *
+ * By default it signals nothing and only observes. With
+ * `forceStopWithoutCustody` it forces the identity-verified stop above. Either
+ * way the result gates exactly one decision: whether reclaiming the temp data
+ * directory would pull files out from under a live cluster. A cluster that is
+ * still observable is reported loudly, by name, with its PIDs and the reason.
+ */
+async function resolveWindowsPostgresTreeAfterFailedStop(
+  dataDir: string,
+  options: EmbeddedPostgresStopOptions,
+): Promise<boolean> {
   if (process.platform !== "win32") return false;
   const pid = readPostmasterPid(dataDir);
+  const force = options.forceStopWithoutCustody === true;
   const result = await reapWindowsTestProcessTree({
     rootPid: pid ?? 0,
     ownerMarkers: [dataDir],
-    timeoutMs: 5_000,
+    // Snapshot, signal and re-observe are three PowerShell round trips.
+    timeoutMs: 10_000,
+    forceWithoutCustody: force,
   });
-  return result.confirmedStopped;
+  // confirmedStopped is unreachable on this path today; it is checked first so
+  // that this caller upgrades by itself if custody ever becomes available.
+  const reclaimable = result.confirmedStopped || result.observedNoOwnedProcesses;
+  if (!reclaimable) {
+    const pids = result.remainingPids.length > 0
+      ? result.remainingPids.join(",")
+      : "unknown";
+    console.warn(
+      `Embedded PostgreSQL cluster NOT stopped: data directory ${dataDir} preserved; `
+      + `reason=${result.reason}; stopEvidence=${result.stopEvidence}; `
+      + `force=${force ? "requested" : "not requested"}; PIDs=${pids}.`,
+    );
+  }
+  return reclaimable;
 }
 
 // `embedded-postgres@18.1.0-beta.16` exposes only `stop(): Promise<void>` — no
@@ -169,22 +225,32 @@ async function terminateWindowsPostgresProcessTree(dataDir: string): Promise<boo
 // with no time bound of its own. Under the loaded serial server shard a slow
 // shutdown checkpoint can push that past vitest's hookTimeout and hang the
 // afterAll hook. So we bound the graceful stop. On Windows, a timeout or failed
-// stop falls back to taskkill for the exact postmaster process tree; other
+// stop is resolved by resolveWindowsPostgresTreeAfterFailedStop: by default it
+// observes only, and it terminates the cluster's own verified processes only
+// when the caller passes forceStopWithoutCustody. The bare-PID taskkill that
+// used to run here unconditionally could be aimed at a recycled PID. Other
 // platforms keep waiting asynchronously for the graceful stop to settle.
 //
-// Data-dir reclaim happens only after graceful stop or confirmed forced
-// termination. Removing it on the timeout path would pull files out from under
-// a still-running cluster and provoke checkpoint / WAL I/O errors.
+// Data-dir reclaim happens only after a graceful stop, or when no process of
+// this cluster is observable. Removing it while the cluster may still be
+// running would pull files out from under it and provoke checkpoint / WAL I/O
+// errors.
 async function stopEmbeddedPostgresBounded(
   instance: EmbeddedPostgresInstance | null,
   dataDir: string | null,
   cleanupFn?: () => void,
-): Promise<void> {
+  options: EmbeddedPostgresStopOptions = {},
+): Promise<boolean> {
   if (!instance) {
     cleanupFn?.();
-    return;
+    return true;
+  }
+  const stopTimeoutMs = options.stopTimeoutMs ?? EMBEDDED_POSTGRES_STOP_TIMEOUT_MS;
+  if (!Number.isSafeInteger(stopTimeoutMs) || stopTimeoutMs < 1 || stopTimeoutMs > 120_000) {
+    throw new Error("Embedded PostgreSQL stop timeout must be an integer between 1 and 120000 milliseconds");
   }
   let cleaned = false;
+  let stopFailure: unknown;
   const cleanupOnce = () => {
     if (cleaned) return;
     cleaned = true;
@@ -194,9 +260,12 @@ async function stopEmbeddedPostgresBounded(
       // Best-effort reclaim; ignore removal errors.
     }
   };
-  const stopped = instance.stop().then(
+  const stopped = Promise.resolve().then(() => instance.stop()).then(
     () => "stopped" as const,
-    () => "failed" as const,
+    (error: unknown) => {
+      stopFailure = error;
+      return "failed" as const;
+    },
   );
   let timer: ReturnType<typeof setTimeout> | undefined;
   let outcome: "stopped" | "failed" | "timeout" = "timeout";
@@ -204,7 +273,7 @@ async function stopEmbeddedPostgresBounded(
     outcome = await Promise.race([
       stopped,
       new Promise<"timeout">((resolve) => {
-        timer = setTimeout(() => resolve("timeout"), EMBEDDED_POSTGRES_STOP_TIMEOUT_MS);
+        timer = setTimeout(() => resolve("timeout"), stopTimeoutMs);
         timer.unref?.();
       }),
     ]);
@@ -214,21 +283,34 @@ async function stopEmbeddedPostgresBounded(
 
   if (outcome === "stopped") {
     cleanupOnce();
-    return;
+    return true;
   }
 
   if (process.platform === "win32" && dataDir) {
-    const terminated = await terminateWindowsPostgresProcessTree(dataDir);
-    if (terminated) {
+    // Reclaim gate, not a termination claim: no process of this cluster is
+    // observable (after a forced stop, if one was requested), so reclaiming
+    // the temp data directory cannot pull files from under a live postmaster.
+    // If one is still observable it has been reported and we preserve it.
+    if (await resolveWindowsPostgresTreeAfterFailedStop(dataDir, options)) {
       cleanupOnce();
-      return;
+      return true;
     }
   }
 
   // Never remove the data directory under a process that may still be alive.
-  // The raw stop promise owns cleanup once it eventually settles.
-  void stopped.finally(cleanupOnce);
+  // A rejected stop is not termination proof. Only late success may reclaim.
+  console.warn(
+    `Embedded PostgreSQL graceful stop did not complete for ${dataDir ?? "unknown data directory"}; `
+    + `outcome=${outcome}; timeoutMs=${stopTimeoutMs}; `
+    + `error=${stopFailure instanceof Error ? stopFailure.message : String(stopFailure ?? "none")}.`,
+  );
+  void stopped.then((result) => {
+    if (result === "stopped") cleanupOnce();
+  });
+  return false;
 }
+
+export const __stopEmbeddedPostgresBoundedForTests = stopEmbeddedPostgresBounded;
 
 const EMBEDDED_POSTGRES_START_MAX_ATTEMPTS = 5;
 
@@ -247,9 +329,14 @@ async function startEmbeddedPostgresWithRetry(tempDirPrefix: string): Promise<{
       return created;
     } catch (error) {
       lastError = new Error(formatEmbeddedPostgresError(error, created.getRecentLogs()));
-      await stopEmbeddedPostgresBounded(created.instance, created.dataDir, () => {
+      const stopped = await stopEmbeddedPostgresBounded(created.instance, created.dataDir, () => {
         cleanupEmbeddedPostgresTestDirs(created.dataDir);
       });
+      if (!stopped) {
+        throw new Error(
+          `Embedded PostgreSQL cleanup unresolved; no retry; data preserved at ${created.dataDir}: ${lastError.message}`,
+        );
+      }
     }
   }
   throw new Error(
@@ -312,6 +399,9 @@ export async function startEmbeddedPostgresTestDatabase(
     return {
       connectionString,
       cleanup: async () => {
+        // Close callers' pooled clients before the bounded Windows-aware
+        // shutdown so queued writes cannot target a stopped backend socket.
+        await closeRegisteredClients(connectionString);
         await stopEmbeddedPostgresBounded(instance, dataDir, () => {
           if (dataDir) cleanupEmbeddedPostgresTestDirs(dataDir);
         });

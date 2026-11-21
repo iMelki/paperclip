@@ -1,3 +1,4 @@
+import { AGENT_ADAPTER_TYPES } from "../constants.js";
 import type { TelemetryClient } from "./client.js";
 import type { EventDimensionsMap } from "./generated/paperclip-telemetry.js";
 
@@ -129,6 +130,19 @@ export function trackErrorHandlerCrash(
   client.track("error.handler_crash", { error_code: dims.errorCode });
 }
 
+export function trackInteractionCreated(
+  client: TelemetryClient,
+  dims: {
+    interactionKind: RawDimension<EventDimensionsMap["interaction.created"]["interaction_kind"]>;
+    usedDeprecatedResolverPolicyAlias: boolean;
+  },
+): void {
+  client.track("interaction.created", {
+    interaction_kind: asEventDimension(dims.interactionKind),
+    used_deprecated_resolver_policy_alias: dims.usedDeprecatedResolverPolicyAlias,
+  });
+}
+
 export function trackInteractionResolved(
   client: TelemetryClient,
   dims: {
@@ -146,6 +160,7 @@ export function trackInteractionResolved(
     answeredQuestionCount?: number;
     createdTaskCount?: number;
     skippedTaskCount?: number;
+    legacyInheritedRestriction: boolean;
   },
 ): void {
   client.track("interaction.resolved", {
@@ -163,5 +178,26 @@ export function trackInteractionResolved(
     ...(dims.answeredQuestionCount === undefined ? {} : { answered_question_count: dims.answeredQuestionCount }),
     ...(dims.createdTaskCount === undefined ? {} : { created_task_count: dims.createdTaskCount }),
     ...(dims.skippedTaskCount === undefined ? {} : { skipped_task_count: dims.skippedTaskCount }),
+    legacy_inherited_restriction: dims.legacyInheritedRestriction,
   });
+}
+
+/** First-party proposal; backend registration remains tracked by Paperclip #252.
+ * Unknown events are dropped by TelemetryClient.track before state or network I/O.
+ */
+export function trackQuestionResponseDelivery(
+  client: TelemetryClient,
+  dims: {
+    adapter: string;
+    outcome: "steered" | "coalesced" | "wake_fallback" | "failed" | "skipped_policy";
+  },
+): void {
+  const adapter = (AGENT_ADAPTER_TYPES as readonly string[]).includes(dims.adapter)
+    ? dims.adapter
+    : "other";
+  client.track(
+    // @ts-expect-error -- proposed first-party delivery event is not registered in the generated schema yet.
+    "question_response.delivery",
+    { adapter, outcome: dims.outcome },
+  );
 }

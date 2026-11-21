@@ -1,22 +1,17 @@
 import { useMemo } from "react";
 import type { CostByBiller, CostByProviderModel } from "@paperclipai/shared";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
-import { QuotaBar } from "./QuotaBar";
 import { billingTypeDisplayName, formatCents, formatTokens, providerDisplayName } from "@/lib/utils";
 
 interface BillerSpendCardProps {
   row: CostByBiller;
   weekSpendCents: number;
-  budgetMonthlyCents: number;
-  totalCompanySpendCents: number;
   providerRows: CostByProviderModel[];
 }
 
 export function BillerSpendCard({
   row,
   weekSpendCents,
-  budgetMonthlyCents,
-  totalCompanySpendCents,
   providerRows,
 }: BillerSpendCardProps) {
   const providerBreakdown = useMemo(() => {
@@ -44,15 +39,6 @@ export function BillerSpendCard({
     return Array.from(map.entries()).sort((a, b) => b[1] - a[1]);
   }, [providerRows]);
 
-  const providerBudgetShare =
-    budgetMonthlyCents > 0 && totalCompanySpendCents > 0
-      ? (row.costCents / totalCompanySpendCents) * budgetMonthlyCents
-      : budgetMonthlyCents;
-  const budgetPct =
-    providerBudgetShare > 0
-      ? Math.min(100, (row.costCents / providerBudgetShare) * 100)
-      : 0;
-
   return (
     <Card>
       <CardHeader className="px-4 pt-4 pb-0 gap-1">
@@ -78,14 +64,10 @@ export function BillerSpendCard({
       </CardHeader>
 
       <CardContent className="px-4 pb-4 pt-3 space-y-4">
-        {budgetMonthlyCents > 0 && (
-          <QuotaBar
-            label="Period spend"
-            percentUsed={budgetPct}
-            leftLabel={formatCents(row.costCents)}
-            rightLabel={`${Math.round(budgetPct)}% of allocation`}
-          />
-        )}
+        <div className="space-y-1 text-xs text-muted-foreground">
+          <p>Biller budget: Unallocated</p>
+          <p>The company budget does not define a biller allowance.</p>
+        </div>
 
         <div className="text-xs text-muted-foreground">
           {row.apiRunCount > 0 ? `${row.apiRunCount} metered run${row.apiRunCount === 1 ? "" : "s"}` : "0 metered runs"}

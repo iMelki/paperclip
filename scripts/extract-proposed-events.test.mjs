@@ -3,7 +3,7 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import ts from "typescript";
+import ts from "typescript-compiler-api";
 
 import {
   PROPOSED_TELEMETRY_SCHEMA_VERSION,

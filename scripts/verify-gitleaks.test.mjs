@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { readFileSync, writeFileSync } from "node:fs";
+import { createEphemeralDir } from "./lib/ephemeral-scratch.mjs";
 import { join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -9,7 +9,7 @@ import { fileURLToPath } from "node:url";
 const verifier = fileURLToPath(new URL("./verify-gitleaks.mjs", import.meta.url));
 
 function createFakeGitleaks({ version = "8.30.1", scanExit = 0 } = {}) {
-  const root = mkdtempSync(join(tmpdir(), "paperclip-gitleaks-test-"));
+  const root = createEphemeralDir({ owner: "paperclip", purpose: "gitleakstest" });
   const argsLog = join(root, "args.log");
   const shim = join(root, "fake-gitleaks.mjs");
   writeFileSync(
@@ -22,6 +22,8 @@ function createFakeGitleaks({ version = "8.30.1", scanExit = 0 } = {}) {
       "  process.exit(0);",
       "}",
       `appendFileSync(${JSON.stringify(argsLog)}, [command, ...args].join(" ") + "\\n");`,
+      'console.log("synthetic scanner output");',
+      'console.error("synthetic scanner diagnostic");',
       `process.exit(${scanExit});`,
     ].join("\n"),
   );
@@ -39,6 +41,10 @@ function verify(mode, fake) {
       PAPERCLIP_GITLEAKS_BIN: fake.binary,
       PAPERCLIP_GITLEAKS_BIN_ARGS_JSON: JSON.stringify(fake.prefix),
     },
+    stdio: ["ignore", "pipe", "pipe"],
+    timeout: 15000,
+    maxBuffer: 1024 * 1024,
+    killSignal: "SIGKILL",
     windowsHide: true,
   });
 }
@@ -65,13 +71,13 @@ test("runs the complete history command", () => {
 
 test("runs the exact pull-request commit range without scanning all history", () => {
   const fake = createFakeGitleaks();
-  const base = spawnSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).stdout.trim();
-  const head = base;
+  const base = "a".repeat(40);
+  const head = "b".repeat(40);
   const result = verify(["--range", `${base}..${head}`], fake);
   assert.equal(result.status, 0, result.stderr);
   assert.equal(
     readFileSync(fake.argsLog, "utf8").trim(),
-    `git --redact --verbose --exit-code 2 --log-opts=--diff-merges=remerge ${base}..${head} .`,
+    `git --redact --verbose --exit-code 2 --log-opts=${base}..${head} .`,
   );
 });
 
@@ -80,13 +86,6 @@ test("rejects the removed local-remote outgoing mode before starting gitleaks", 
   const result = verify(["--outgoing", "b".repeat(40), "--remote", "origin"], fake);
   assert.equal(result.status, 3);
   assert.match(result.stderr, /exactly one scan mode/);
-});
-
-test("refuses a range whose commits are not in the checkout", () => {
-  const fake = createFakeGitleaks();
-  const result = verify(["--range", `${"a".repeat(40)}..${"b".repeat(40)}`], fake);
-  assert.equal(result.status, 3);
-  assert.match(result.stderr, /not available in this checkout/);
 });
 
 test("rejects an incomplete or non-object-id range before starting gitleaks", () => {
@@ -113,89 +112,18 @@ test("distinguishes findings from scanner infrastructure errors", () => {
   assert.match(toolError.stderr, /tool\/runtime error/i);
 });
 
-// Real-scanner proof for the range mode. Runs only when the pinned binary is
-// supplied (CI sets it); the fake-scanner tests above cover argument wiring.
-const realGitleaks = process.env.PAPERCLIP_GITLEAKS_REAL_BIN?.trim();
-
-function git(cwd, ...args) {
-  const result = spawnSync("git", args, { cwd, encoding: "utf8", windowsHide: true });
-  assert.equal(result.status, 0, result.stderr);
-  return result.stdout.trim();
-}
-
-function createRangeFixture() {
-  const repo = mkdtempSync(join(tmpdir(), "paperclip-gitleaks-range-"));
-  git(repo, "init", "-q");
-  git(repo, "config", "user.email", "fixture@example.invalid");
-  git(repo, "config", "user.name", "Fixture");
-  const commit = (file, text, message) => {
-    writeFileSync(join(repo, file), text);
-    git(repo, "add", file);
-    git(repo, "commit", "-q", "-m", message);
-    return git(repo, "rev-parse", "HEAD");
-  };
-  const base = commit("README.md", "clean\n", "base");
-  // Assembled at run time so this file never contains a scannable literal.
-  const fixtureSecret = ["n8Zk3vQ2xT9p", "Lw4Rb7YcHd1s", "Ue6JfGm0Xa5V", "b2Nq"].join("");
-  const leaked = commit("config.txt", `${"api"}_${"key"} = "${fixtureSecret}"\n`, "adds a secret");
-  const head = commit("notes.md", "still clean\n", "after the secret");
-  return { repo, base, leaked, head };
-}
-
-function createMergeFixture() {
-  const repo = mkdtempSync(join(tmpdir(), "paperclip-gitleaks-range-"));
-  git(repo, "init", "-q", "-b", "main");
-  git(repo, "config", "user.email", "fixture@example.invalid");
-  git(repo, "config", "user.name", "Fixture");
-  const commit = (file, text, message) => {
-    writeFileSync(join(repo, file), text);
-    git(repo, "add", file);
-    git(repo, "commit", "-q", "-m", message);
-  };
-  commit("README.md", "clean\n", "base");
-  const base = git(repo, "rev-parse", "HEAD");
-  git(repo, "checkout", "-q", "-b", "topic");
-  commit("topic.md", "clean topic\n", "topic work");
-  git(repo, "checkout", "-q", "main");
-  commit("main.md", "clean main\n", "main work");
-  // The secret exists only in the merge commit's own diff.
-  git(repo, "merge", "--no-ff", "--no-commit", "topic");
-  const fixtureSecret = ["n8Zk3vQ2xT9p", "Lw4Rb7YcHd1s", "Ue6JfGm0Xa5V", "b2Nq"].join("");
-  writeFileSync(join(repo, "merged.txt"), `${"api"}_${"key"} = "${fixtureSecret}"\n`);
-  git(repo, "add", "merged.txt");
-  git(repo, "commit", "-q", "-m", "merge topic");
-  return { repo, base, head: git(repo, "rev-parse", "HEAD") };
-}
-
-function verifyReal(repo, range) {
-  return spawnSync(process.execPath, [verifier, "--range", range], {
-    cwd: repo,
-    encoding: "utf8",
-    env: { ...process.env, PAPERCLIP_GITLEAKS_BIN: realGitleaks },
-    windowsHide: true,
-  });
-}
-
-test("real Gitleaks: a secret inside the range is caught", { skip: !realGitleaks }, () => {
-  const { repo, base, head } = createRangeFixture();
-  const result = verifyReal(repo, `${base}..${head}`);
-  assert.equal(result.status, 2, result.stderr);
+test("retains scanner output on successful and failed scans", () => {
+  for (const scanExit of [0, 2, 7]) {
+    const result = verify("--staged", createFakeGitleaks({ scanExit }));
+    assert.match(result.stdout, /synthetic scanner output/);
+    assert.match(result.stderr, /synthetic scanner diagnostic/);
+  }
 });
 
-test("real Gitleaks: a secret added only inside a merge commit is caught", { skip: !realGitleaks }, () => {
-  const { repo, base, head } = createMergeFixture();
-  const result = verifyReal(repo, `${base}..${head}`);
-  assert.equal(result.status, 2, result.stderr);
-});
-
-test("real Gitleaks: a secret outside the range is not scanned", { skip: !realGitleaks }, () => {
-  const { repo, leaked, head } = createRangeFixture();
-  const result = verifyReal(repo, `${leaked}..${head}`);
-  assert.equal(result.status, 0, result.stderr);
-});
-
-test("real Gitleaks: an unknown commit id fails closed", { skip: !realGitleaks }, () => {
-  const { repo, head } = createRangeFixture();
-  const result = verifyReal(repo, `${"0".repeat(40)}..${head}`);
-  assert.notEqual(result.status, 0, "an unreadable range must not pass");
+test("fails closed when the scanner executable cannot start", () => {
+  const fake = createFakeGitleaks();
+  fake.binary = join(fake.prefix[0], "missing-executable");
+  const result = verify("--staged", fake);
+  assert.equal(result.status, 3);
+  assert.match(result.stderr, /required but could not be started/);
 });

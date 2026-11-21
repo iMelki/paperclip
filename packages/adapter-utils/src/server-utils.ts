@@ -3,6 +3,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { constants as fsConstants, existsSync, promises as fs, type Dirent } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { resolveCommandPath } from "./command-path.js";
 import { sanitizeRemoteExecutionEnv } from "./remote-execution-env.js";
 import {
   buildLocalProcessSandboxSpawnTarget,
@@ -29,6 +30,13 @@ export interface RunProcessResult {
   // The sandbox runner sets them, so the exec span records a true wall time.
   finishedAt?: string | null;
   durationMs?: number | null;
+  // The typed error code of a transport-level failure, or absent when the
+  // process result carries no such code. It follows the same additive-optional
+  // convention as the timing fields: a producer that names no code leaves it
+  // absent, so the existing `RunProcessResult` producers stay unchanged. The
+  // run-disposition seam sets it to `duplex_channel_lost` when the sandbox
+  // duplex control channel died before a clean completion.
+  errorCode?: string | null;
   terminalResultCleanup?: TerminalResultCleanupEvidence | null;
 }
 
@@ -62,6 +70,7 @@ interface SpawnTarget {
   args: string[];
   cwd?: string;
   env?: Record<string, string | undefined>;
+  windowsVerbatimArguments?: boolean;
   cleanup?: () => Promise<void>;
 }
 
@@ -169,8 +178,9 @@ export const DEFAULT_PAPERCLIP_AGENT_PROMPT_TEMPLATE = [
   "- If woken by a human comment on a dependency-blocked issue, respond or triage the comment without treating the blocked deliverable work as unblocked.",
   "- Create child issues directly when you know what needs to be done; use issue-thread interactions when the board/user must choose suggested tasks, answer structured questions, or confirm a proposal.",
   "- Use `PAPERCLIP_SCRATCH_DIR` / `PAPERCLIP_RUN_SCRATCH_DIR` for temporary scratch files instead of ad hoc `/tmp` paths; Paperclip removes that run-owned directory after the run ends.",
-  "- To ask for that input, create an interaction on the current issue with POST /api/issues/{issueId}/interactions using kind suggest_tasks, ask_user_questions, or request_confirmation. Use continuationPolicy wake_assignee when you need to resume after a response (it wakes on acceptance and rejection alike; only expiry does not wake); use wake_assignee_on_accept when you want to resume only after acceptance.",
-  "- When you intentionally restart follow-up work on a completed assigned issue, include structured `resume: true` with the POST /api/issues/{issueId}/comments or PATCH /api/issues/{issueId} comment payload. Generic agent comments on closed issues are inert by default.",
+  "- To ask for that input, create an interaction on the current issue with POST /api/issues/$PAPERCLIP_TASK_ID/interactions using kind suggest_tasks, ask_user_questions, or request_confirmation. Use continuationPolicy wake_assignee when you need to resume after a response (it wakes on acceptance and rejection alike; only expiry does not wake); use wake_assignee_on_accept when you want to resume only after acceptance.",
+  "- Never create probe or throwaway issue-thread interactions to discover the interactions API shape or your permissions; schema discovery goes through the OpenAPI spec and explicit validation errors, not placeholder cards. Every ask_user_questions, suggest_tasks, or request_confirmation you post must carry a real, answerable prompt; withdraw one you no longer need instead of leaving it pending.",
+  "- When you intentionally restart follow-up work on a completed assigned issue, include structured `resume: true` with the POST /api/issues/$PAPERCLIP_TASK_ID/comments or PATCH /api/issues/$PAPERCLIP_TASK_ID comment payload (substitute that issue's real id when it is not the current task). Generic agent comments on closed issues are inert by default.",
   "- For plan approval, update the plan document first, then create request_confirmation targeting the latest plan revision with idempotencyKey confirmation:{issueId}:plan:{revisionId}. Wait for acceptance before creating implementation subtasks, and create a fresh confirmation after superseding board/user comments if approval is still needed.",
   "- If blocked, mark the issue blocked and name the unblock owner and action.",
   "- Respect budget, pause/cancel, approval gates, and company boundaries.",
@@ -314,7 +324,13 @@ function buildManagedSkillOrigin(): Pick<
   };
 }
 
-function isPaperclipSkillSourceMissing(entry: PaperclipSkillEntry) {
+/**
+ * True when a runtime skill entry's files are unavailable (failed
+ * materialization, deleted version snapshot). Adapters must skip these at
+ * mount time: their `source` path does not exist, so symlinking produces a
+ * dangling link and content hashing throws.
+ */
+export function isPaperclipSkillSourceMissing(entry: PaperclipSkillEntry) {
   return entry.sourceStatus === "missing";
 }
 
@@ -589,6 +605,14 @@ type PaperclipWakePlanReviewContext = {
   truncated: boolean;
 };
 
+type PaperclipWakeDocumentReviewContext = {
+  issueId: string | null;
+  documents: Array<PaperclipWakePlanReviewContext & { title: string | null }>;
+  totals: PaperclipWakePlanReviewContext["totals"];
+  limits: PaperclipWakePlanReviewContext["limits"];
+  truncated: boolean;
+};
+
 type PaperclipWakeContinuationSummary = {
   key: string | null;
   title: string | null;
@@ -677,6 +701,7 @@ type PaperclipWakePayload = {
   executionStage: PaperclipWakeExecutionStage | null;
   continuationSummary: PaperclipWakeContinuationSummary | null;
   planReviewContext: PaperclipWakePlanReviewContext | null;
+  documentReviewContext: PaperclipWakeDocumentReviewContext | null;
   livenessContinuation: PaperclipWakeLivenessContinuation | null;
   taskWatchdog: PaperclipWakeTaskWatchdogContext | null;
   interactionKind: string | null;
@@ -992,6 +1017,41 @@ function normalizePaperclipWakePlanReviewContext(value: unknown): PaperclipWakeP
   };
 }
 
+function normalizePaperclipWakeDocumentReviewContext(value: unknown): PaperclipWakeDocumentReviewContext | null {
+  const context = parseObject(value);
+  const issueId = asString(context.issueId, "").trim() || null;
+  const documents = Array.isArray(context.documents)
+    ? context.documents.flatMap((value) => {
+        const document = parseObject(value);
+        const normalized = normalizePaperclipWakePlanReviewContext({ ...document, issueId });
+        return normalized
+          ? [{ ...normalized, title: asString(document.title, "").trim() || null }]
+          : [];
+      })
+    : [];
+  if (!issueId && documents.length === 0) return null;
+  const totalsRaw = parseObject(context.totals);
+  const openThreadCount = asNumber(totalsRaw.openThreadCount, documents.reduce((sum, doc) => sum + doc.totals.openThreadCount, 0));
+  const includedThreadCount = asNumber(totalsRaw.includedThreadCount, documents.reduce((sum, doc) => sum + doc.totals.includedThreadCount, 0));
+  const commentCount = asNumber(totalsRaw.commentCount, documents.reduce((sum, doc) => sum + doc.totals.commentCount, 0));
+  const includedCommentCount = asNumber(totalsRaw.includedCommentCount, documents.reduce((sum, doc) => sum + doc.totals.includedCommentCount, 0));
+  const limits = documents[0]?.limits ?? null;
+  return {
+    issueId,
+    documents,
+    totals: {
+      openThreadCount,
+      includedThreadCount,
+      omittedThreadCount: asNumber(totalsRaw.omittedThreadCount, Math.max(0, openThreadCount - includedThreadCount)),
+      commentCount,
+      includedCommentCount,
+      omittedCommentCount: asNumber(totalsRaw.omittedCommentCount, Math.max(0, commentCount - includedCommentCount)),
+    },
+    limits,
+    truncated: asBoolean(context.truncated, false),
+  };
+}
+
 function normalizePaperclipWakeContinuationSummary(value: unknown): PaperclipWakeContinuationSummary | null {
   const summary = parseObject(value);
   const body = asString(summary.body, "").trim();
@@ -1283,6 +1343,7 @@ export function normalizePaperclipWakePayload(value: unknown): PaperclipWakePayl
   const executionStage = normalizePaperclipWakeExecutionStage(payload.executionStage);
   const continuationSummary = normalizePaperclipWakeContinuationSummary(payload.continuationSummary);
   const planReviewContext = normalizePaperclipWakePlanReviewContext(payload.planReviewContext);
+  const documentReviewContext = normalizePaperclipWakeDocumentReviewContext(payload.documentReviewContext);
   const annotationDeltas = Array.isArray(payload.annotationDeltas)
     ? payload.annotationDeltas
         .map((entry) => normalizePaperclipWakeAnnotationDelta(entry))
@@ -1311,7 +1372,7 @@ export function normalizePaperclipWakePayload(value: unknown): PaperclipWakePayl
   const checkboxSelection = normalizePaperclipWakeCheckboxSelection(payload.checkboxSelection);
   const executionWorkspace = normalizePaperclipWakeExecutionWorkspace(payload.executionWorkspace);
   const agentMessage = normalizePaperclipWakeAgentMessage(payload.agentMessage);
-  if (comments.length === 0 && commentIds.length === 0 && annotationDeltas.length === 0 && childIssueSummaries.length === 0 && unresolvedBlockerIssueIds.length === 0 && unresolvedBlockerSummaries.length === 0 && !activeTreeHold && !executionStage && !continuationSummary && !planReviewContext && !livenessContinuation && !taskWatchdog && !checkboxSelection && !executionWorkspace && !agentMessage && !recovery && !normalizePaperclipWakeIssue(payload.issue)) {
+  if (comments.length === 0 && commentIds.length === 0 && annotationDeltas.length === 0 && childIssueSummaries.length === 0 && unresolvedBlockerIssueIds.length === 0 && unresolvedBlockerSummaries.length === 0 && !activeTreeHold && !executionStage && !continuationSummary && !planReviewContext && !documentReviewContext && !livenessContinuation && !taskWatchdog && !checkboxSelection && !executionWorkspace && !agentMessage && !recovery && !normalizePaperclipWakeIssue(payload.issue)) {
     return null;
   }
 
@@ -1329,6 +1390,7 @@ export function normalizePaperclipWakePayload(value: unknown): PaperclipWakePayl
     executionStage,
     continuationSummary,
     planReviewContext,
+    documentReviewContext,
     annotationDeltas,
     livenessContinuation,
     taskWatchdog,
@@ -1759,6 +1821,50 @@ export function renderPaperclipWakePrompt(
     }
   }
 
+  if (normalized.documentReviewContext) {
+    const context = normalized.documentReviewContext;
+    lines.push(
+      "",
+      "## Open document annotations",
+      "",
+      "These open annotations are grouped by issue document. Resolved annotations were intentionally omitted.",
+      "Scope: a document annotation authorizes document edits and thread replies only; propose a child issue before making code changes.",
+      "For snapshot documents such as QA evidence and run summaries, prefer replying and resolving the thread over rewriting the snapshot.",
+      `- open annotation threads included: ${context.totals.includedThreadCount}/${context.totals.openThreadCount}`,
+      `- annotation comments included: ${context.totals.includedCommentCount}/${context.totals.commentCount}`,
+    );
+    for (const document of context.documents) {
+      lines.push(
+        "",
+        `### ${document.title ?? document.documentKey ?? "Document"}`,
+        `- document key: ${document.documentKey ?? "unknown"}`,
+        `- latest revision: ${document.latestRevisionNumber ?? "unknown"}${document.latestRevisionId ? ` (${document.latestRevisionId})` : ""}`,
+      );
+      for (const thread of document.threads) {
+        const state = [
+          thread.status,
+          thread.revisionNumber ? `revision #${thread.revisionNumber}` : null,
+          thread.anchorState,
+          thread.anchorConfidence,
+        ].filter(Boolean).join(", ");
+        lines.push(`- thread ${thread.id ?? "unknown"}${state ? ` (${state})` : ""}`);
+        renderPlanReviewText("  selected text", thread.selectedText, thread.selectedTextTruncated);
+        renderPlanReviewText("  context before", thread.prefixText, thread.prefixTextTruncated);
+        renderPlanReviewText("  context after", thread.suffixText, thread.suffixTextTruncated);
+        for (const comment of thread.comments) {
+          lines.push(
+            `  comment ${comment.id ?? "unknown"} by ${planReviewAuthorLabel(comment.author)}${comment.createdAt ? ` at ${comment.createdAt}` : ""}:`,
+            comment.body,
+          );
+          if (comment.bodyTruncated) lines.push("[document annotation comment body truncated]");
+        }
+        if (thread.commentsTruncated) lines.push("[document annotation thread comments truncated]");
+      }
+      if (document.truncated) lines.push("[document annotation context truncated]");
+    }
+    if (context.truncated) lines.push("[document review context truncated]");
+  }
+
   if (executionStage) {
     lines.push(
       `- execution wake role: ${executionStage.wakeRole ?? "unknown"}`,
@@ -1912,7 +2018,7 @@ export function renderPaperclipWakePrompt(
     lines.push(
       "",
       "The harness already checked out this issue for the current run.",
-      "Do not call `/api/issues/{id}/checkout` again unless you intentionally switch to a different task.",
+      "Do not call `POST /api/issues/$PAPERCLIP_TASK_ID/checkout` again unless you intentionally switch to a different task.",
       "",
     );
   }
@@ -1992,9 +2098,12 @@ export function buildPaperclipEnv(agent: { id: string; companyId: string }): Rec
     process.env.PAPERCLIP_LISTEN_HOST ?? process.env.HOST ?? "localhost",
   );
   const runtimePort = process.env.PAPERCLIP_LISTEN_PORT ?? process.env.PORT ?? "3100";
+  // An explicit PAPERCLIP_API_URL override must win over the URL derived from
+  // authPublicBaseUrl: the derived URL can be unreachable from inside the
+  // runtime container (e.g. when the public base URL is VPN/tailnet-only).
   const apiUrl =
-    process.env.PAPERCLIP_RUNTIME_API_URL ??
     process.env.PAPERCLIP_API_URL ??
+    process.env.PAPERCLIP_RUNTIME_API_URL ??
     `http://${runtimeHost}:${runtimePort}`;
   vars.PAPERCLIP_API_URL = apiUrl;
   return vars;
@@ -2261,53 +2370,12 @@ export function defaultPathForPlatform() {
   return "/usr/local/bin:/opt/homebrew/bin:/usr/local/sbin:/usr/bin:/bin:/usr/sbin:/sbin";
 }
 
-function windowsPathExts(env: NodeJS.ProcessEnv): string[] {
-  return (env.PATHEXT ?? ".EXE;.CMD;.BAT;.COM").split(";").filter(Boolean);
-}
-
 function windowsPosixToolDirs(): string[] {
   if (process.platform !== "win32") return [];
   return [
     "C:\\Program Files\\Git\\usr\\bin",
     "C:\\Program Files (x86)\\Git\\usr\\bin",
   ].filter((candidate) => existsSync(candidate));
-}
-
-async function pathExists(candidate: string) {
-  try {
-    await fs.access(candidate, process.platform === "win32" ? fsConstants.F_OK : fsConstants.X_OK);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-async function resolveCommandPath(command: string, cwd: string, env: NodeJS.ProcessEnv): Promise<string | null> {
-  const hasPathSeparator = command.includes("/") || command.includes("\\");
-  if (hasPathSeparator) {
-    const absolute = path.isAbsolute(command) ? command : path.resolve(cwd, command);
-    return (await pathExists(absolute)) ? absolute : null;
-  }
-
-  const pathValue = env.PATH ?? env.Path ?? "";
-  const delimiter = process.platform === "win32" ? ";" : ":";
-  const dirs = pathValue.split(delimiter).filter(Boolean);
-  const exts = process.platform === "win32" ? windowsPathExts(env) : [""];
-  const hasExtension = process.platform === "win32" && path.extname(command).length > 0;
-
-  for (const dir of dirs) {
-    const candidates =
-      process.platform === "win32"
-        ? hasExtension
-          ? [path.join(dir, command)]
-          : [path.join(dir, command), ...exts.map((ext) => path.join(dir, `${command}${ext}`))]
-        : [path.join(dir, command)];
-    for (const candidate of candidates) {
-      if (await pathExists(candidate)) return candidate;
-    }
-  }
-
-  return null;
 }
 
 export async function resolveCommandForLogs(
@@ -2325,7 +2393,7 @@ export async function resolveCommandForLogs(
   return (await resolveCommandPath(command, cwd, env)) ?? command;
 }
 
-function quoteForCmd(arg: string) {
+export function quoteForCmd(arg: string): string {
   if (!arg.length) return '""';
   const escaped = arg.replace(/"/g, '""');
   return /[\s"&<>|^()]/.test(escaped) ? `"${escaped}"` : escaped;
@@ -2338,8 +2406,10 @@ export function sanitizeSshRemoteEnv(
   return sanitizeRemoteExecutionEnv(env, inheritedEnv);
 }
 
-function resolveWindowsCmdShell(env: NodeJS.ProcessEnv): string {
-  const fallbackRoot = env.SystemRoot || process.env.SystemRoot || "C:\\Windows";
+export function resolveWindowsCmdShell(): string {
+  // Child env is adapter-controlled. Resolve cmd.exe only from the host so a
+  // configured SystemRoot/ComSpec cannot redirect batch execution.
+  const fallbackRoot = process.env.SystemRoot || process.env.WINDIR || "C:\\Windows";
   return path.join(fallbackRoot, "System32", "cmd.exe");
 }
 
@@ -2438,12 +2508,16 @@ async function resolveSpawnTarget(
   }
 
   const resolved = await resolveCommandPath(command, cwd, env);
-  const executable = resolved ?? command;
+  if (!resolved) {
+    if (command.includes("/") || command.includes("\\")) {
+      const absolute = path.isAbsolute(command) ? command : path.resolve(cwd, command);
+      throw new Error(`Command is not executable: "${command}" (resolved: "${absolute}")`);
+    }
+    throw new Error(`Command not found in PATH: "${command}"`);
+  }
+  const executable = resolved;
 
   if (options.localProcessSandbox) {
-    if (!resolved) {
-      throw new Error(`Command not found in PATH: "${command}"`);
-    }
     const requestedSandboxCommand = options.localProcessSandbox.command?.trim() || "bwrap";
     const sandboxCommand = await resolveCommandPath(requestedSandboxCommand, cwd, env);
     if (!sandboxCommand) {
@@ -2467,11 +2541,12 @@ async function resolveSpawnTarget(
   if (/\.(cmd|bat)$/i.test(executable)) {
     // Always use cmd.exe for .cmd/.bat wrappers. Some environments override
     // ComSpec to PowerShell, which breaks cmd-specific flags like /d /s /c.
-    const shell = resolveWindowsCmdShell(env);
+    const shell = resolveWindowsCmdShell();
     const commandLine = [quoteForCmd(executable), ...args.map(quoteForCmd)].join(" ");
     return {
       command: shell,
-      args: ["/d", "/s", "/c", commandLine],
+      args: ["/d", "/s", "/c", `"${commandLine}"`],
+      windowsVerbatimArguments: true,
     };
   }
 
@@ -2972,6 +3047,33 @@ export function resolvePaperclipDesiredSkillNames(
   return Array.from(new Set(desiredSkills));
 }
 
+/**
+ * Legacy adapters call the Paperclip API through the operational skill. Keep
+ * that skill mounted even when an agent predates skill preferences or carries
+ * an explicit empty desired set. Native runners provide the same authority
+ * through their protocol and must continue to use the configurable-only
+ * resolver above.
+ */
+export const PAPERCLIP_OPERATIONAL_SKILL_KEY = "paperclipai/paperclip/paperclip";
+
+export function resolveLegacyPaperclipDesiredSkillNames(
+  config: Record<string, unknown>,
+  availableEntries: Array<{ key: string; runtimeName?: string | null }>,
+): string[] {
+  const desiredSkills = resolvePaperclipDesiredSkillNames(config, availableEntries);
+  const operationalEntry = availableEntries.find(
+    (entry) => entry.key.trim().toLowerCase() === PAPERCLIP_OPERATIONAL_SKILL_KEY,
+  );
+  if (!operationalEntry) return desiredSkills;
+
+  return [
+    operationalEntry.key,
+    ...desiredSkills.filter(
+      (key) => key.trim().toLowerCase() !== PAPERCLIP_OPERATIONAL_SKILL_KEY,
+    ),
+  ];
+}
+
 export function writePaperclipSkillSyncPreference(
   config: Record<string, unknown>,
   desiredSkills: Array<string | PaperclipDesiredSkillEntry>,
@@ -3288,6 +3390,8 @@ export async function runChildProcess(
   opts: {
     cwd: string;
     env: Record<string, string>;
+    /** Disable ambient inheritance when env is an already reviewed allowlist. Defaults to true. */
+    inheritEnv?: boolean;
     timeoutSec: number;
     graceSec: number;
     onLog: (stream: "stdout" | "stderr", chunk: string) => Promise<void>;
@@ -3302,7 +3406,7 @@ export async function runChildProcess(
   const onLogError = opts.onLogError ?? ((err, id, msg) => console.warn({ err, runId: id }, msg));
   return new Promise<RunProcessResult>((resolve, reject) => {
     const rawMerged: NodeJS.ProcessEnv = {
-      ...sanitizeInheritedPaperclipEnv(process.env),
+      ...(opts.inheritEnv === false ? {} : sanitizeInheritedPaperclipEnv(process.env)),
       ...opts.env,
     };
 
@@ -3340,6 +3444,8 @@ export async function runChildProcess(
           env: childEnv,
           detached: process.platform !== "win32",
           shell: false,
+          windowsHide: true,
+          windowsVerbatimArguments: target.windowsVerbatimArguments,
           stdio: [opts.stdin != null ? "pipe" : "ignore", "pipe", "pipe"],
         }) as ChildProcessWithEvents;
         const startedAt = new Date().toISOString();

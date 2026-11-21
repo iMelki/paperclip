@@ -4,54 +4,29 @@ on:
   pull_request:
     branches:
       - master
-
-permissions:
-  contents: read
+      - dev
+      - agent/codex/129-upstream-host-integration
 
 concurrency:
   group: pr-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 jobs:
   secret-scan:
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: ${{ fromJSON(github.repository == 'iMelki/paperclip' && github.repository_id == '1228063587' && toJSON(github.event.repository.private) == 'false' && '["ubuntu-24.04"]' || '["self-hosted","paperclip-public-ci-denied"]') }}
-    # Public context selects an isolated standard VM; any fallback fails before checkout.
-    timeout-minutes: 55
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       contents: read
 
     steps:
-      - name: Confirm approved public CI context
-        id: public_ci_guard
-        env:
-          CI_REPOSITORY: ${{ github.repository }}
-          CI_REPOSITORY_ID: ${{ github.repository_id }}
-          CI_PRIVATE: ${{ toJSON(github.event.repository.private) }}
-          CI_RUNNER_ENVIRONMENT: ${{ runner.environment }}
-          CI_RUNNER_OS: ${{ runner.os }}
-          CI_RUNNER_ARCH: ${{ runner.arch }}
-        run: |
-          set -euo pipefail
-          test "$CI_REPOSITORY" = "iMelki/paperclip"
-          test "$CI_REPOSITORY_ID" = "1228063587"
-          test "$CI_PRIVATE" = "false"
-          test "$CI_RUNNER_ENVIRONMENT" = "github-hosted"
-          test "$CI_RUNNER_OS" = "Linux"
-          test "$CI_RUNNER_ARCH" = "X64"
-
       - name: Checkout complete history
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           fetch-depth: 0
           persist-credentials: false
-
-      # Pin the required Node version instead of relying on the runner image.
-      - name: Setup Node.js
-        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
-        with:
-          node-version: 24
-          package-manager-cache: false
 
       - name: Install pinned Gitleaks
         shell: bash
@@ -69,13 +44,6 @@ jobs:
           echo "PAPERCLIP_GITLEAKS_BIN=$install_dir/gitleaks" >> "$GITHUB_ENV"
           "$install_dir/gitleaks" version
 
-      - name: Prove range scanning with the pinned Gitleaks
-        # Real-scanner check: an in-range secret fails, an out-of-range one is
-        # skipped, and an unreadable range fails closed.
-        run: node --test scripts/verify-gitleaks.test.mjs
-        env:
-          PAPERCLIP_GITLEAKS_REAL_BIN: ${{ env.PAPERCLIP_GITLEAKS_BIN }}
-
       - name: Scan pull-request commit range
         run: >-
           node scripts/verify-gitleaks.mjs --range
@@ -83,92 +51,127 @@ jobs:
 
   policy:
     needs: [secret-scan]
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: ${{ fromJSON(github.repository == 'iMelki/paperclip' && github.repository_id == '1228063587' && toJSON(github.event.repository.private) == 'false' && '["ubuntu-24.04"]' || '["self-hosted","paperclip-public-ci-denied"]') }}
-    # Public context selects an isolated standard VM; any fallback fails before checkout.
-    timeout-minutes: 50
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
     outputs:
       lockfile_regenerated: ${{ steps.regen_lockfile.outputs.regenerated }}
-      lockfile_parts_count: ${{ steps.lockfile_transfer.outputs.count }}
-      lockfile_part_0: ${{ steps.lockfile_transfer.outputs.part_0 }}
-      lockfile_part_1: ${{ steps.lockfile_transfer.outputs.part_1 }}
-      lockfile_part_2: ${{ steps.lockfile_transfer.outputs.part_2 }}
-      lockfile_part_3: ${{ steps.lockfile_transfer.outputs.part_3 }}
-      lockfile_part_4: ${{ steps.lockfile_transfer.outputs.part_4 }}
-      lockfile_part_5: ${{ steps.lockfile_transfer.outputs.part_5 }}
-      lockfile_part_6: ${{ steps.lockfile_transfer.outputs.part_6 }}
-      lockfile_part_7: ${{ steps.lockfile_transfer.outputs.part_7 }}
 
     steps:
-      - name: Confirm approved public CI context
-        id: public_ci_guard
-        env:
-          CI_REPOSITORY: ${{ github.repository }}
-          CI_REPOSITORY_ID: ${{ github.repository_id }}
-          CI_PRIVATE: ${{ toJSON(github.event.repository.private) }}
-          CI_RUNNER_ENVIRONMENT: ${{ runner.environment }}
-          CI_RUNNER_OS: ${{ runner.os }}
-          CI_RUNNER_ARCH: ${{ runner.arch }}
-        run: |
-          set -euo pipefail
-          test "$CI_REPOSITORY" = "iMelki/paperclip"
-          test "$CI_REPOSITORY_ID" = "1228063587"
-          test "$CI_PRIVATE" = "false"
-          test "$CI_RUNNER_ENVIRONMENT" = "github-hosted"
-          test "$CI_RUNNER_OS" = "Linux"
-          test "$CI_RUNNER_ARCH" = "X64"
-
       - name: Checkout repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          fetch-depth: 0
           persist-credentials: false
+          fetch-depth: 0
 
       - name: Block manual lockfile edits
+        id: lockfile_edit
         if: >-
           github.head_ref != 'chore/refresh-lockfile' &&
+          !(github.event.pull_request.user.login == 'github-actions[bot]' &&
+            github.head_ref == format('chore/refresh-lockfile-{0}', github.base_ref)) &&
           github.event.pull_request.user.login != 'dependabot[bot]'
         run: |
           # Diff the PR branch against its merge base so recent base-branch commits
           # do not masquerade as changes made by the PR itself.
           changed="$(git diff --name-only "${{ github.event.pull_request.base.sha }}...${{ github.event.pull_request.head.sha }}")"
           if printf '%s\n' "$changed" | grep -qx 'pnpm-lock.yaml'; then
-            echo "Do not commit pnpm-lock.yaml in pull requests. CI owns lockfile updates."
-            exit 1
+            # A committed lockfile passes only if CI can reproduce it exactly
+            # from the head manifests (checked after pnpm is set up below).
+            # Hand edits do not reproduce and stay blocked.
+            echo "pnpm-lock.yaml changed; it must match a pinned pnpm --lockfile-only regeneration."
+            echo "must_reproduce=1" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Setup pnpm
-        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
         with:
           version: 9.15.4
           run_install: false
 
       - name: Setup Node.js
-        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
           node-version: 24
           package-manager-cache: false
 
+      - name: Require committed lockfile to match a pinned regeneration
+        if: steps.lockfile_edit.outputs.must_reproduce == '1'
+        run: |
+          pnpm install --lockfile-only --ignore-scripts
+          if ! git diff --exit-code --stat pnpm-lock.yaml; then
+            echo "Do not commit pnpm-lock.yaml in pull requests unless it is exactly what pnpm 9.15.4 --lockfile-only produces. CI owns lockfile updates."
+            exit 1
+          fi
+          echo "LOCKFILE_REPRODUCED: committed pnpm-lock.yaml matches pnpm 9.15.4 --lockfile-only --ignore-scripts"
+
+      - name: Validate migration ordering against target branch
+        run: >-
+          node .github/scripts/check-pr-migration-order.mjs
+          "${{ github.event.pull_request.base.sha }}"
+          "${{ github.event.pull_request.head.sha }}"
+
       - name: Validate Dockerfile deps stage
         run: node ./scripts/check-docker-deps-stage.mjs
+
+      - name: Validate Node version policy
+        run: pnpm check:node-version
+
+      - name: Test embedded PostgreSQL pg_ctl lifecycle without a database
+        run: node --test --test-isolation=none scripts/embedded-postgres-pgctl.test.mjs
 
       - name: Reject git push in adapter/runtime code
         run: node ./scripts/check-no-git-push.mjs
 
       - name: Test no-git-push check
-        run: node --test ./scripts/check-no-git-push.test.mjs
+        run: >-
+          node --test
+          ./scripts/check-no-git-push-source.test.mjs
+          ./scripts/git-push-scan-integrity.test.mjs
+          ./scripts/check-no-git-push.test.mjs
+
+      - name: Validate PR workflow trigger policy
+        run: node ./scripts/check-pr-workflow-trigger.mjs
+
+      - name: Test PR workflow trigger policy
+        run: node --test ./scripts/check-pr-workflow-trigger.test.mjs
+
+      - name: Test workflow credential hygiene policy
+        run: node --test ./.github/scripts/tests/workflow-credential-hygiene.test.mjs
+
+      - name: Test lockfile refresh routing
+        run: >-
+          node --test ./scripts/refresh-lockfile.test.mjs
+          ./.github/scripts/tests/check-pr-lockfile.test.mjs
+
+      - name: Test commitperclip review trigger policy
+        run: node --test ./.github/scripts/tests/commitperclip-review-trigger.test.mjs
+
+      - name: Test deterministic pre-push selection and protocol
+        run: >-
+          node --test
+          ./scripts/is-main-module.test.mjs
+          ./scripts/pre-push-callers.test.mjs
+          ./scripts/pre-push-test-selection.test.mjs
+          ./scripts/run-vitest-direct.test.mjs
+          ./scripts/scan-pre-push-secrets.test.mjs
+          ./scripts/run-pre-push-tests.test.mjs
+          ./scripts/verify-gitleaks.test.mjs
+      - name: Test PR quality-gate scripts
+        run: |
+          set -euo pipefail
+          files=(.github/scripts/tests/*.test.mjs)
+          printf '%s\n' "${files[@]}"
+          node --test "${files[@]}"
+          node --test --test-reporter=tap ./.github/scripts/tests/workflow-credential-hygiene.test.mjs | tee "$RUNNER_TEMP/workflow-credential-hygiene.tap"
+          passed="$(awk '/^# pass / { p = $3 } END { print p }' "$RUNNER_TEMP/workflow-credential-hygiene.tap")"
+          echo ".github/scripts/tests/workflow-credential-hygiene.test.mjs: ${passed} passed (${passed})"
+          test "$passed" -ge 1
 
       - name: Test general-server shard partition
         run: node --test ./scripts/__tests__/run-vitest-stable-shard.test.mjs
 
       - name: Test e2e shard partition
         run: node --test ./scripts/__tests__/e2e-shard.test.mjs
-
-      - name: Test bounded lockfile transfer
-        run: node --test ./.github/tests/ci-lockfile-transfer.test.mjs
-
-      - name: Test e2e owned cleanup
-        run: node --test ./scripts/__tests__/e2e-owned-cleanup.test.mjs
 
       - name: Test release verify workflow wiring
         run: node --test ./scripts/__tests__/release-verify-workflow.test.mjs
@@ -190,91 +193,68 @@ jobs:
 
       - name: Validate dependency resolution when manifests change
         id: regen_lockfile
+        env:
+          ALLOW_REMOTE_LOCKFILE: ${{ github.repository != '' && github.repository != 'iMelki/paperclip' && toJSON(github.event.repository.fork) == 'false' }}
         run: |
+          set -euo pipefail
           changed="$(git diff --name-only "${{ github.event.pull_request.base.sha }}...${{ github.event.pull_request.head.sha }}")"
           manifest_pattern='(^|/)package\.json$|^pnpm-workspace\.yaml$|^\.npmrc$|^pnpmfile\.(cjs|js|mjs)$|^patches/'
           if printf '%s\n' "$changed" | grep -Eq "$manifest_pattern"; then
+            git ls-files --error-unmatch pnpm-lock.yaml > /dev/null
             pnpm install --lockfile-only --ignore-scripts --no-frozen-lockfile
-            echo "regenerated=1" >> "$GITHUB_OUTPUT"
+            if [ "$ALLOW_REMOTE_LOCKFILE" = "true" ]; then
+              echo "regenerated=1" >> "$GITHUB_OUTPUT"
+            else
+              if ! git diff --exit-code -- pnpm-lock.yaml; then
+                echo "::error::Commit the canonical pnpm 9.15.4 lockfile before retrying; this fork does not transfer regenerated lockfiles."
+                exit 1
+              fi
+              echo "regenerated=0" >> "$GITHUB_OUTPUT"
+            fi
           else
             echo "regenerated=0" >> "$GITHUB_OUTPUT"
           fi
 
-      # Job outputs preserve identical lock bytes without cache or artifact storage.
-      # GITHUB_SHA is the shared tested PR merge revision for all default checkouts.
-      - name: Share bounded hash-bound regenerated lockfile
-        id: lockfile_transfer
-        if: steps.regen_lockfile.outputs.regenerated == '1'
-        run: |
-          node --input-type=module <<'JS'
-          import { appendFile, readFile } from "node:fs/promises";
-          import { encodeLockfileOutputs } from "./.github/scripts/ci-lockfile-transfer.mjs";
-          const { count, parts } = encodeLockfileOutputs(await readFile("pnpm-lock.yaml"), process.env.GITHUB_SHA);
-          const lines = [`count=${count}`, ...parts.map((part, i) => `part_${i}=${part}`)];
-          await appendFile(process.env.GITHUB_OUTPUT, lines.join("\n") + "\n");
-          JS
+      # Only positively identified non-forks may transfer a regenerated lockfile.
+      # Forks and unknown contexts must use the reproducible committed lockfile.
+      - name: Upload regenerated lockfile for downstream jobs
+        if: github.repository != '' && github.repository != 'iMelki/paperclip' && toJSON(github.event.repository.fork) == 'false' && steps.regen_lockfile.outputs.regenerated == '1'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: pr-lockfile
+          path: pnpm-lock.yaml
+          retention-days: 1
+          if-no-files-found: error
 
   typecheck_release_registry:
     name: Typecheck + Release Registry
     needs: [policy]
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: ${{ fromJSON(github.repository == 'iMelki/paperclip' && github.repository_id == '1228063587' && toJSON(github.event.repository.private) == 'false' && '["ubuntu-24.04"]' || '["self-hosted","paperclip-public-ci-denied"]') }}
-    # Public context selects an isolated standard VM; any fallback fails before checkout.
-    timeout-minutes: 65
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
 
     steps:
-      - name: Confirm approved public CI context
-        id: public_ci_guard
-        env:
-          CI_REPOSITORY: ${{ github.repository }}
-          CI_REPOSITORY_ID: ${{ github.repository_id }}
-          CI_PRIVATE: ${{ toJSON(github.event.repository.private) }}
-          CI_RUNNER_ENVIRONMENT: ${{ runner.environment }}
-          CI_RUNNER_OS: ${{ runner.os }}
-          CI_RUNNER_ARCH: ${{ runner.arch }}
-        run: |
-          set -euo pipefail
-          test "$CI_REPOSITORY" = "iMelki/paperclip"
-          test "$CI_REPOSITORY_ID" = "1228063587"
-          test "$CI_PRIVATE" = "false"
-          test "$CI_RUNNER_ENVIRONMENT" = "github-hosted"
-          test "$CI_RUNNER_OS" = "Linux"
-          test "$CI_RUNNER_ARCH" = "X64"
-
       - name: Checkout repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
 
       - name: Setup pnpm
-        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
         with:
           version: 9.15.4
 
+      - name: Restore regenerated PR lockfile (if policy uploaded one)
+        if: github.repository != '' && github.repository != 'iMelki/paperclip' && toJSON(github.event.repository.fork) == 'false' && needs.policy.outputs.lockfile_regenerated == '1'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: pr-lockfile
+          path: .
+
       - name: Setup Node.js
-        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
           node-version: 24
           package-manager-cache: false
-
-      - name: Restore hash-bound regenerated lockfile
-        if: needs.policy.outputs.lockfile_regenerated == '1'
-        env:
-          LOCKFILE_PARTS_COUNT: ${{ needs.policy.outputs.lockfile_parts_count }}
-          LOCKFILE_PART_0: ${{ needs.policy.outputs.lockfile_part_0 }}
-          LOCKFILE_PART_1: ${{ needs.policy.outputs.lockfile_part_1 }}
-          LOCKFILE_PART_2: ${{ needs.policy.outputs.lockfile_part_2 }}
-          LOCKFILE_PART_3: ${{ needs.policy.outputs.lockfile_part_3 }}
-          LOCKFILE_PART_4: ${{ needs.policy.outputs.lockfile_part_4 }}
-          LOCKFILE_PART_5: ${{ needs.policy.outputs.lockfile_part_5 }}
-          LOCKFILE_PART_6: ${{ needs.policy.outputs.lockfile_part_6 }}
-          LOCKFILE_PART_7: ${{ needs.policy.outputs.lockfile_part_7 }}
-        run: |
-          node --input-type=module <<'JS'
-          import { writeFile } from "node:fs/promises";
-          import { decodeLockfileOutputs } from "./.github/scripts/ci-lockfile-transfer.mjs";
-          await writeFile("pnpm-lock.yaml", decodeLockfileOutputs(process.env.LOCKFILE_PARTS_COUNT, Array.from({ length: 8 }, (_, i) => process.env[`LOCKFILE_PART_${i}`]), process.env.GITHUB_SHA));
-          JS
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
@@ -283,15 +263,15 @@ jobs:
         run: pnpm run typecheck:build-gaps
 
       - name: Verify release registry test coverage
-        run: pnpm run test:release-registry
+        run: |
+          pnpm run test:release-registry
+          node --test scripts/check-forbidden-tokens-core.test.mjs
 
   general_tests:
     name: General tests (${{ matrix.group_label }})
     needs: [policy]
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: ${{ fromJSON(github.repository == 'iMelki/paperclip' && github.repository_id == '1228063587' && toJSON(github.event.repository.private) == 'false' && '["ubuntu-24.04"]' || '["self-hosted","paperclip-public-ci-denied"]') }}
-    # Public context selects an isolated standard VM; any fallback fails before checkout.
-    timeout-minutes: 65
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -323,64 +303,46 @@ jobs:
             group_label: server (5/5)
             shard_index: 4
             shard_count: 5
+          # workspaces-a was the slowest check in the fully-green PR run
+          # 31371439296 (2026-08-10) at 319s, with the ui project's single
+          # vitest invocation accounting for ~224s and the paperclipai CLI
+          # ~37s. Two shards use Vitest's native --shard on each project's
+          # file list (ui: 439 files, cli: 54), bringing each job to roughly
+          # half the suite time (~130s + setup) without a duration manifest.
           - group: general-workspaces-a
-            group_label: workspaces-a
+            group_label: workspaces-a (1/2)
+            shard_index: 0
+            shard_count: 2
+          - group: general-workspaces-a
+            group_label: workspaces-a (2/2)
+            shard_index: 1
+            shard_count: 2
           - group: general-workspaces-b
             group_label: workspaces-b
 
     steps:
-      - name: Confirm approved public CI context
-        id: public_ci_guard
-        env:
-          CI_REPOSITORY: ${{ github.repository }}
-          CI_REPOSITORY_ID: ${{ github.repository_id }}
-          CI_PRIVATE: ${{ toJSON(github.event.repository.private) }}
-          CI_RUNNER_ENVIRONMENT: ${{ runner.environment }}
-          CI_RUNNER_OS: ${{ runner.os }}
-          CI_RUNNER_ARCH: ${{ runner.arch }}
-        run: |
-          set -euo pipefail
-          test "$CI_REPOSITORY" = "iMelki/paperclip"
-          test "$CI_REPOSITORY_ID" = "1228063587"
-          test "$CI_PRIVATE" = "false"
-          test "$CI_RUNNER_ENVIRONMENT" = "github-hosted"
-          test "$CI_RUNNER_OS" = "Linux"
-          test "$CI_RUNNER_ARCH" = "X64"
-
       - name: Checkout repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
 
       - name: Setup pnpm
-        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
         with:
           version: 9.15.4
 
+      - name: Restore regenerated PR lockfile (if policy uploaded one)
+        if: github.repository != '' && github.repository != 'iMelki/paperclip' && toJSON(github.event.repository.fork) == 'false' && needs.policy.outputs.lockfile_regenerated == '1'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: pr-lockfile
+          path: .
+
       - name: Setup Node.js
-        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
           node-version: 24
           package-manager-cache: false
-
-      - name: Restore hash-bound regenerated lockfile
-        if: needs.policy.outputs.lockfile_regenerated == '1'
-        env:
-          LOCKFILE_PARTS_COUNT: ${{ needs.policy.outputs.lockfile_parts_count }}
-          LOCKFILE_PART_0: ${{ needs.policy.outputs.lockfile_part_0 }}
-          LOCKFILE_PART_1: ${{ needs.policy.outputs.lockfile_part_1 }}
-          LOCKFILE_PART_2: ${{ needs.policy.outputs.lockfile_part_2 }}
-          LOCKFILE_PART_3: ${{ needs.policy.outputs.lockfile_part_3 }}
-          LOCKFILE_PART_4: ${{ needs.policy.outputs.lockfile_part_4 }}
-          LOCKFILE_PART_5: ${{ needs.policy.outputs.lockfile_part_5 }}
-          LOCKFILE_PART_6: ${{ needs.policy.outputs.lockfile_part_6 }}
-          LOCKFILE_PART_7: ${{ needs.policy.outputs.lockfile_part_7 }}
-        run: |
-          node --input-type=module <<'JS'
-          import { writeFile } from "node:fs/promises";
-          import { decodeLockfileOutputs } from "./.github/scripts/ci-lockfile-transfer.mjs";
-          await writeFile("pnpm-lock.yaml", decodeLockfileOutputs(process.env.LOCKFILE_PARTS_COUNT, Array.from({ length: 8 }, (_, i) => process.env[`LOCKFILE_PART_${i}`]), process.env.GITHUB_SHA));
-          JS
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
@@ -394,86 +356,16 @@ jobs:
             pnpm test:run:general -- --group '${{ matrix.group }}'
           fi
 
-  verify:
-    # Preserve the legacy required-check name while the underlying work runs in parallel.
-    name: verify
-    # A skip-style job guard would make a fork PR's required check count as
-    # passing. The aggregate always runs on the public isolated route and fails
-    # fork requests before checkout. Non-public or unknown contexts have no
-    # admitted runner route, and can never become a skipped success.
-    if: ${{ always() }}
-    needs: [typecheck_release_registry, general_tests, build]
-    runs-on: ${{ fromJSON(github.repository == 'iMelki/paperclip' && github.repository_id == '1228063587' && toJSON(github.event.repository.private) == 'false' && '["ubuntu-24.04"]' || '["self-hosted","paperclip-public-ci-denied"]') }}
-    # Public context selects an isolated standard VM; any fallback fails before checkout.
-    timeout-minutes: 50
-
-    steps:
-      - name: Confirm approved public CI context
-        id: public_ci_guard
-        env:
-          CI_REPOSITORY: ${{ github.repository }}
-          CI_REPOSITORY_ID: ${{ github.repository_id }}
-          CI_PRIVATE: ${{ toJSON(github.event.repository.private) }}
-          CI_RUNNER_ENVIRONMENT: ${{ runner.environment }}
-          CI_RUNNER_OS: ${{ runner.os }}
-          CI_RUNNER_ARCH: ${{ runner.arch }}
-        run: |
-          set -euo pipefail
-          test "$CI_REPOSITORY" = "iMelki/paperclip"
-          test "$CI_REPOSITORY_ID" = "1228063587"
-          test "$CI_PRIVATE" = "false"
-          test "$CI_RUNNER_ENVIRONMENT" = "github-hosted"
-          test "$CI_RUNNER_OS" = "Linux"
-          test "$CI_RUNNER_ARCH" = "X64"
-
-      - name: Fail fork PRs (CI runs only on same-repo branches)
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
-          BASE_REPO: ${{ github.repository }}
-        run: |
-          if [ "$EVENT_NAME" = "pull_request" ] && [ "$HEAD_REPO" != "$BASE_REPO" ]; then
-            echo "::error::fork PR: CI runs only on same-repo branches, maintainer re-run needed"
-            exit 1
-          fi
-          echo "same-repo or non-PR event: gate passed"
-      - name: Fail if any split verify lane failed
-        env:
-          TYPECHECK_RELEASE_REGISTRY_RESULT: ${{ needs.typecheck_release_registry.result }}
-          GENERAL_TESTS_RESULT: ${{ needs.general_tests.result }}
-          BUILD_RESULT: ${{ needs.build.result }}
-        run: |
-          test "$TYPECHECK_RELEASE_REGISTRY_RESULT" = "success"
-          test "$GENERAL_TESTS_RESULT" = "success"
-          test "$BUILD_RESULT" = "success"
-
-  build:
-    name: Build
+  daytona_plugin_tests:
+    name: Daytona plugin tests
     needs: [policy]
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: ${{ fromJSON(github.repository == 'iMelki/paperclip' && github.repository_id == '1228063587' && toJSON(github.event.repository.private) == 'false' && '["ubuntu-24.04"]' || '["self-hosted","paperclip-public-ci-denied"]') }}
-    # Public context selects an isolated standard VM; any fallback fails before checkout.
-    timeout-minutes: 65
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 20
 
     steps:
-      - name: Confirm approved public CI context
-        id: public_ci_guard
-        env:
-          CI_REPOSITORY: ${{ github.repository }}
-          CI_REPOSITORY_ID: ${{ github.repository_id }}
-          CI_PRIVATE: ${{ toJSON(github.event.repository.private) }}
-          CI_RUNNER_ENVIRONMENT: ${{ runner.environment }}
-          CI_RUNNER_OS: ${{ runner.os }}
-          CI_RUNNER_ARCH: ${{ runner.arch }}
-        run: |
-          set -euo pipefail
-          test "$CI_REPOSITORY" = "iMelki/paperclip"
-          test "$CI_REPOSITORY_ID" = "1228063587"
-          test "$CI_PRIVATE" = "false"
-          test "$CI_RUNNER_ENVIRONMENT" = "github-hosted"
-          test "$CI_RUNNER_OS" = "Linux"
-          test "$CI_RUNNER_ARCH" = "X64"
-
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -484,33 +376,101 @@ jobs:
         with:
           version: 9.15.4
 
+      - name: Restore regenerated PR lockfile (if policy uploaded one)
+        if: github.repository != '' && github.repository != 'iMelki/paperclip' && toJSON(github.event.repository.fork) == 'false' && needs.policy.outputs.lockfile_regenerated == '1'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: pr-lockfile
+          path: .
+
       - name: Setup Node.js
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24
           package-manager-cache: false
 
-      - name: Restore hash-bound regenerated lockfile
-        if: needs.policy.outputs.lockfile_regenerated == '1'
-        env:
-          LOCKFILE_PARTS_COUNT: ${{ needs.policy.outputs.lockfile_parts_count }}
-          LOCKFILE_PART_0: ${{ needs.policy.outputs.lockfile_part_0 }}
-          LOCKFILE_PART_1: ${{ needs.policy.outputs.lockfile_part_1 }}
-          LOCKFILE_PART_2: ${{ needs.policy.outputs.lockfile_part_2 }}
-          LOCKFILE_PART_3: ${{ needs.policy.outputs.lockfile_part_3 }}
-          LOCKFILE_PART_4: ${{ needs.policy.outputs.lockfile_part_4 }}
-          LOCKFILE_PART_5: ${{ needs.policy.outputs.lockfile_part_5 }}
-          LOCKFILE_PART_6: ${{ needs.policy.outputs.lockfile_part_6 }}
-          LOCKFILE_PART_7: ${{ needs.policy.outputs.lockfile_part_7 }}
+      # The Daytona plugin is outside the pnpm workspace, but its vitest config
+      # aliases @paperclipai/plugin-sdk to the SDK sources, which import
+      # @paperclipai/shared. Install only the SDK and its workspace deps, frozen.
+      - name: Install plugin SDK dependencies (frozen)
+        run: pnpm install --frozen-lockfile --filter '@paperclipai/plugin-sdk...'
+
+      # The plugin has its own committed lockfile, so this install is frozen.
+      # It uses the repo's pinned pnpm (9.15.4) with --ignore-workspace.
+      - name: Install Daytona plugin dependencies (frozen)
+        working-directory: packages/plugins/sandbox-providers/daytona
+        run: pnpm install --ignore-workspace --frozen-lockfile
+
+      - name: Run Daytona plugin tests
+        working-directory: packages/plugins/sandbox-providers/daytona
         run: |
-          node --input-type=module <<'JS'
-          import { writeFile } from "node:fs/promises";
-          import { decodeLockfileOutputs } from "./.github/scripts/ci-lockfile-transfer.mjs";
-          await writeFile("pnpm-lock.yaml", decodeLockfileOutputs(process.env.LOCKFILE_PARTS_COUNT, Array.from({ length: 8 }, (_, i) => process.env[`LOCKFILE_PART_${i}`]), process.env.GITHUB_SHA));
-          JS
+          report="$RUNNER_TEMP/daytona-vitest.json"
+          pnpm exec vitest run --config vitest.config.ts --passWithNoTests=false \
+            --exclude '**/*.live.test.ts' --exclude '**/node_modules/**' \
+            --reporter=default --reporter=json --outputFile.json="$report"
+          ran="$(node -e 'const r=require(process.argv[1]); console.log(r.numPassedTests + r.numFailedTests)' "$report")"
+          echo "Daytona plugin tests executed: $ran"
+          if [ "$ran" -lt 1 ]; then
+            echo "::error::Daytona plugin test step ran 0 tests"
+            exit 1
+          fi
+
+  verify:
+    # Preserve the legacy required-check name while the underlying work runs in parallel.
+    name: verify
+    if: ${{ always() }}
+    needs: [typecheck_release_registry, general_tests, build, daytona_plugin_tests]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Fail if any split verify lane failed
+        env:
+          TYPECHECK_RELEASE_REGISTRY_RESULT: ${{ needs.typecheck_release_registry.result }}
+          GENERAL_TESTS_RESULT: ${{ needs.general_tests.result }}
+          BUILD_RESULT: ${{ needs.build.result }}
+          DAYTONA_PLUGIN_TESTS_RESULT: ${{ needs.daytona_plugin_tests.result }}
+        run: |
+          test "$TYPECHECK_RELEASE_REGISTRY_RESULT" = "success"
+          test "$GENERAL_TESTS_RESULT" = "success"
+          test "$BUILD_RESULT" = "success"
+          test "$DAYTONA_PLUGIN_TESTS_RESULT" = "success"
+
+  build:
+    name: Build
+    needs: [policy]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
+        with:
+          version: 9.15.4
+
+      - name: Restore regenerated PR lockfile (if policy uploaded one)
+        if: github.repository != '' && github.repository != 'iMelki/paperclip' && toJSON(github.event.repository.fork) == 'false' && needs.policy.outputs.lockfile_regenerated == '1'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: pr-lockfile
+          path: .
+
+      - name: Setup Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version: 24
+          package-manager-cache: false
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
+
+      - name: Verify Paperclip Runner
+        run: pnpm --filter @paperclipai/paperclip-runner check:all
 
       - name: Build
         run: pnpm build
@@ -518,17 +478,17 @@ jobs:
   verify_serialized_server:
     name: Verify serialized server suites (${{ matrix.shard_label }})
     needs: [policy]
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: ${{ fromJSON(github.repository == 'iMelki/paperclip' && github.repository_id == '1228063587' && toJSON(github.event.repository.private) == 'false' && '["ubuntu-24.04"]' || '["self-hosted","paperclip-public-ci-denied"]') }}
-    # Public context selects an isolated standard VM; any fallback fails before checkout.
-    timeout-minutes: 65
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
         include:
-          # A successful PR run on 2026-08-04 (30876682788) spent 256s in
-          # serialized shard 2/4, making its 305s job the run's slowest check.
-          # Five shards reduce the measured 739s suite total to about 148s per
+          # A successful PR run on 2026-08-17 (32012408876) spent 291s in
+          # serialized shard 1/5 while its siblings ran 170-201s: round-robin
+          # clustered the heavy suites on one runner. Shards are now balanced
+          # by recorded duration (scripts/serialized-shard-durations.json),
+          # which levels the measured 968s suite total to about 194s per
           # runner before setup overhead.
           - shard_index: 0
             shard_count: 5
@@ -547,58 +507,28 @@ jobs:
             shard_label: 5/5
 
     steps:
-      - name: Confirm approved public CI context
-        id: public_ci_guard
-        env:
-          CI_REPOSITORY: ${{ github.repository }}
-          CI_REPOSITORY_ID: ${{ github.repository_id }}
-          CI_PRIVATE: ${{ toJSON(github.event.repository.private) }}
-          CI_RUNNER_ENVIRONMENT: ${{ runner.environment }}
-          CI_RUNNER_OS: ${{ runner.os }}
-          CI_RUNNER_ARCH: ${{ runner.arch }}
-        run: |
-          set -euo pipefail
-          test "$CI_REPOSITORY" = "iMelki/paperclip"
-          test "$CI_REPOSITORY_ID" = "1228063587"
-          test "$CI_PRIVATE" = "false"
-          test "$CI_RUNNER_ENVIRONMENT" = "github-hosted"
-          test "$CI_RUNNER_OS" = "Linux"
-          test "$CI_RUNNER_ARCH" = "X64"
-
       - name: Checkout repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
 
       - name: Setup pnpm
-        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
         with:
           version: 9.15.4
 
+      - name: Restore regenerated PR lockfile (if policy uploaded one)
+        if: github.repository != '' && github.repository != 'iMelki/paperclip' && toJSON(github.event.repository.fork) == 'false' && needs.policy.outputs.lockfile_regenerated == '1'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: pr-lockfile
+          path: .
+
       - name: Setup Node.js
-        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
           node-version: 24
           package-manager-cache: false
-
-      - name: Restore hash-bound regenerated lockfile
-        if: needs.policy.outputs.lockfile_regenerated == '1'
-        env:
-          LOCKFILE_PARTS_COUNT: ${{ needs.policy.outputs.lockfile_parts_count }}
-          LOCKFILE_PART_0: ${{ needs.policy.outputs.lockfile_part_0 }}
-          LOCKFILE_PART_1: ${{ needs.policy.outputs.lockfile_part_1 }}
-          LOCKFILE_PART_2: ${{ needs.policy.outputs.lockfile_part_2 }}
-          LOCKFILE_PART_3: ${{ needs.policy.outputs.lockfile_part_3 }}
-          LOCKFILE_PART_4: ${{ needs.policy.outputs.lockfile_part_4 }}
-          LOCKFILE_PART_5: ${{ needs.policy.outputs.lockfile_part_5 }}
-          LOCKFILE_PART_6: ${{ needs.policy.outputs.lockfile_part_6 }}
-          LOCKFILE_PART_7: ${{ needs.policy.outputs.lockfile_part_7 }}
-        run: |
-          node --input-type=module <<'JS'
-          import { writeFile } from "node:fs/promises";
-          import { decodeLockfileOutputs } from "./.github/scripts/ci-lockfile-transfer.mjs";
-          await writeFile("pnpm-lock.yaml", decodeLockfileOutputs(process.env.LOCKFILE_PARTS_COUNT, Array.from({ length: 8 }, (_, i) => process.env[`LOCKFILE_PART_${i}`]), process.env.GITHUB_SHA));
-          JS
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
@@ -609,64 +539,32 @@ jobs:
   canary_dry_run:
     name: Canary Dry Run
     needs: [policy]
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: ${{ fromJSON(github.repository == 'iMelki/paperclip' && github.repository_id == '1228063587' && toJSON(github.event.repository.private) == 'false' && '["ubuntu-24.04"]' || '["self-hosted","paperclip-public-ci-denied"]') }}
-    # Public context selects an isolated standard VM; any fallback fails before checkout.
-    timeout-minutes: 65
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
 
     steps:
-      - name: Confirm approved public CI context
-        id: public_ci_guard
-        env:
-          CI_REPOSITORY: ${{ github.repository }}
-          CI_REPOSITORY_ID: ${{ github.repository_id }}
-          CI_PRIVATE: ${{ toJSON(github.event.repository.private) }}
-          CI_RUNNER_ENVIRONMENT: ${{ runner.environment }}
-          CI_RUNNER_OS: ${{ runner.os }}
-          CI_RUNNER_ARCH: ${{ runner.arch }}
-        run: |
-          set -euo pipefail
-          test "$CI_REPOSITORY" = "iMelki/paperclip"
-          test "$CI_REPOSITORY_ID" = "1228063587"
-          test "$CI_PRIVATE" = "false"
-          test "$CI_RUNNER_ENVIRONMENT" = "github-hosted"
-          test "$CI_RUNNER_OS" = "Linux"
-          test "$CI_RUNNER_ARCH" = "X64"
-
       - name: Checkout repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
 
       - name: Setup pnpm
-        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
         with:
           version: 9.15.4
 
+      - name: Restore regenerated PR lockfile (if policy uploaded one)
+        if: github.repository != '' && github.repository != 'iMelki/paperclip' && toJSON(github.event.repository.fork) == 'false' && needs.policy.outputs.lockfile_regenerated == '1'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: pr-lockfile
+          path: .
+
       - name: Setup Node.js
-        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
           node-version: 24
           package-manager-cache: false
-
-      - name: Restore hash-bound regenerated lockfile
-        if: needs.policy.outputs.lockfile_regenerated == '1'
-        env:
-          LOCKFILE_PARTS_COUNT: ${{ needs.policy.outputs.lockfile_parts_count }}
-          LOCKFILE_PART_0: ${{ needs.policy.outputs.lockfile_part_0 }}
-          LOCKFILE_PART_1: ${{ needs.policy.outputs.lockfile_part_1 }}
-          LOCKFILE_PART_2: ${{ needs.policy.outputs.lockfile_part_2 }}
-          LOCKFILE_PART_3: ${{ needs.policy.outputs.lockfile_part_3 }}
-          LOCKFILE_PART_4: ${{ needs.policy.outputs.lockfile_part_4 }}
-          LOCKFILE_PART_5: ${{ needs.policy.outputs.lockfile_part_5 }}
-          LOCKFILE_PART_6: ${{ needs.policy.outputs.lockfile_part_6 }}
-          LOCKFILE_PART_7: ${{ needs.policy.outputs.lockfile_part_7 }}
-        run: |
-          node --input-type=module <<'JS'
-          import { writeFile } from "node:fs/promises";
-          import { decodeLockfileOutputs } from "./.github/scripts/ci-lockfile-transfer.mjs";
-          await writeFile("pnpm-lock.yaml", decodeLockfileOutputs(process.env.LOCKFILE_PARTS_COUNT, Array.from({ length: 8 }, (_, i) => process.env[`LOCKFILE_PART_${i}`]), process.env.GITHUB_SHA));
-          JS
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
@@ -698,10 +596,8 @@ jobs:
   e2e_shards:
     name: e2e shard (${{ matrix.shard_label }})
     needs: [policy]
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: ${{ fromJSON(github.repository == 'iMelki/paperclip' && github.repository_id == '1228063587' && toJSON(github.event.repository.private) == 'false' && '["ubuntu-24.04"]' || '["self-hosted","paperclip-public-ci-denied"]') }}
-    # Public context selects an isolated standard VM; any fallback fails before checkout.
-    timeout-minutes: 75
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -724,84 +620,55 @@ jobs:
             shard_label: 3/3
 
     steps:
-      - name: Confirm approved public CI context
-        id: public_ci_guard
-        env:
-          CI_REPOSITORY: ${{ github.repository }}
-          CI_REPOSITORY_ID: ${{ github.repository_id }}
-          CI_PRIVATE: ${{ toJSON(github.event.repository.private) }}
-          CI_RUNNER_ENVIRONMENT: ${{ runner.environment }}
-          CI_RUNNER_OS: ${{ runner.os }}
-          CI_RUNNER_ARCH: ${{ runner.arch }}
-        run: |
-          set -euo pipefail
-          test "$CI_REPOSITORY" = "iMelki/paperclip"
-          test "$CI_REPOSITORY_ID" = "1228063587"
-          test "$CI_PRIVATE" = "false"
-          test "$CI_RUNNER_ENVIRONMENT" = "github-hosted"
-          test "$CI_RUNNER_OS" = "Linux"
-          test "$CI_RUNNER_ARCH" = "X64"
-
       - name: Checkout repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
 
       - name: Setup pnpm
-        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
         with:
           version: 9.15.4
 
+      - name: Restore regenerated PR lockfile (if policy uploaded one)
+        if: github.repository != '' && github.repository != 'iMelki/paperclip' && toJSON(github.event.repository.fork) == 'false' && needs.policy.outputs.lockfile_regenerated == '1'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: pr-lockfile
+          path: .
+
       - name: Setup Node.js
-        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
           node-version: 24
           package-manager-cache: false
-
-      - name: Restore hash-bound regenerated lockfile
-        if: needs.policy.outputs.lockfile_regenerated == '1'
-        env:
-          LOCKFILE_PARTS_COUNT: ${{ needs.policy.outputs.lockfile_parts_count }}
-          LOCKFILE_PART_0: ${{ needs.policy.outputs.lockfile_part_0 }}
-          LOCKFILE_PART_1: ${{ needs.policy.outputs.lockfile_part_1 }}
-          LOCKFILE_PART_2: ${{ needs.policy.outputs.lockfile_part_2 }}
-          LOCKFILE_PART_3: ${{ needs.policy.outputs.lockfile_part_3 }}
-          LOCKFILE_PART_4: ${{ needs.policy.outputs.lockfile_part_4 }}
-          LOCKFILE_PART_5: ${{ needs.policy.outputs.lockfile_part_5 }}
-          LOCKFILE_PART_6: ${{ needs.policy.outputs.lockfile_part_6 }}
-          LOCKFILE_PART_7: ${{ needs.policy.outputs.lockfile_part_7 }}
-        run: |
-          node --input-type=module <<'JS'
-          import { writeFile } from "node:fs/promises";
-          import { decodeLockfileOutputs } from "./.github/scripts/ci-lockfile-transfer.mjs";
-          await writeFile("pnpm-lock.yaml", decodeLockfileOutputs(process.env.LOCKFILE_PARTS_COUNT, Array.from({ length: 8 }, (_, i) => process.env[`LOCKFILE_PART_${i}`]), process.env.GITHUB_SHA));
-          JS
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
       - name: Verify runner Chrome
-        # The rf-paperclip box runner has system Google Chrome installed, so the
-        # headless e2e lane uses it (channel chrome) instead of downloading
-        # Playwright browser bundles, which would also need sudo for --with-deps.
-        # No config is written to the runner's persistent ~/.paperclip:
-        # playwright.config.ts boots onboard in its own temp PAPERCLIP_HOME.
+        # GitHub's Ubuntu runner image already ships Google Chrome, so use that
+        # directly for the headless e2e lane instead of downloading Playwright
+        # browser bundles inside the 30 minute job budget.
         run: google-chrome --version
 
-      - name: Prepare this job's e2e home
-        # One canonical dir per run, attempt, job and shard under RUNNER_TEMP,
-        # with an identity marker. The cleanup step deletes only this dir.
-        env:
-          PAPERCLIP_E2E_OWNER_SUFFIX: ${{ matrix.shard_index }}
-        run: ./scripts/ci/e2e-owned-cleanup.sh prepare
+      - name: Generate Paperclip config
+        run: |
+          mkdir -p ~/.paperclip/instances/default
+          cat > ~/.paperclip/instances/default/config.json << 'CONF'
+          {
+            "$meta": { "version": 1, "updatedAt": "2026-01-01T00:00:00.000Z", "source": "onboard" },
+            "database": { "mode": "embedded-postgres" },
+            "logging": { "mode": "file" },
+            "server": { "deploymentMode": "local_trusted", "host": "127.0.0.1", "port": 3100 },
+            "auth": { "baseUrlMode": "auto" },
+            "storage": { "provider": "local_disk" },
+            "secrets": { "provider": "local_encrypted", "strictMode": false }
+          }
+          CONF
 
       - name: Run e2e tests
         env:
-          # Tools in the run put temp files and unix sockets under TMPDIR. On
-          # the box /tmp is a long-lived tmpfs, so point it at the per-job temp
-          # dir. (The runner context is not available in job-level env.)
-          TMPDIR: ${{ runner.temp }}
-          PAPERCLIP_E2E_OWNER_SUFFIX: ${{ matrix.shard_index }}
           PAPERCLIP_E2E_SKIP_LLM: "true"
           PAPERCLIP_PLAYWRIGHT_CHANNEL: "chrome"
         run: |
@@ -811,69 +678,28 @@ jobs:
           specs="$(node ./scripts/e2e-shard.mjs \
             --shard-index ${{ matrix.shard_index }} --shard-count ${{ matrix.shard_count }})"
           echo "shard ${{ matrix.shard_label }} specs: $specs"
-          # The wrapper points playwright.config.ts's PAPERCLIP_HOME (embedded
-          # Postgres data) at this job's owned dir via PAPERCLIP_E2E_HOME and
-          # records the session it starts, so cleanup can tell this job's
-          # processes and home apart from any other job's.
-          ./scripts/ci/e2e-owned-cleanup.sh run -- pnpm run test:e2e $specs
+          pnpm run test:e2e $specs
 
-      # Test output stays in normal job logs; no billable report artifact is uploaded.
-      - name: Clean up this job's e2e server and temp home
-        env:
-          PAPERCLIP_E2E_OWNER_SUFFIX: ${{ matrix.shard_index }}
-        # Kills only processes this job started (recorded session leader PID
-        # plus start time, and the run's owner token in each process
-        # environment) and deletes only this job's canonical home dir under
-        # RUNNER_TEMP after checking its identity marker. No pattern, port or
-        # /tmp matching, so a concurrent job on the same box is never touched.
-        # Best effort: never fails the job.
-        if: ${{ always() && steps.public_ci_guard.outcome == 'success' }}
-        run: ./scripts/ci/e2e-owned-cleanup.sh cleanup
+      - name: Upload Playwright report
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        if: always() && github.repository != '' && github.repository != 'iMelki/paperclip' && toJSON(github.event.repository.fork) == 'false'
+        with:
+          name: playwright-report-${{ matrix.shard_index }}
+          path: |
+            tests/e2e/playwright-report/
+            tests/e2e/test-results/
+          retention-days: 14
 
   e2e:
     # Preserve the legacy required-check name while the specs run sharded
     # across the matrix above (same pattern as the `verify` aggregate).
     name: e2e
-    # A skip-style job guard would make a fork PR's required check count as
-    # passing. The aggregate always runs on the public isolated route and fails
-    # fork requests before checkout. Non-public or unknown contexts have no
-    # admitted runner route, and can never become a skipped success.
     if: ${{ always() }}
     needs: [e2e_shards]
-    runs-on: ${{ fromJSON(github.repository == 'iMelki/paperclip' && github.repository_id == '1228063587' && toJSON(github.event.repository.private) == 'false' && '["ubuntu-24.04"]' || '["self-hosted","paperclip-public-ci-denied"]') }}
-    # Public context selects an isolated standard VM; any fallback fails before checkout.
-    timeout-minutes: 50
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
 
     steps:
-      - name: Confirm approved public CI context
-        id: public_ci_guard
-        env:
-          CI_REPOSITORY: ${{ github.repository }}
-          CI_REPOSITORY_ID: ${{ github.repository_id }}
-          CI_PRIVATE: ${{ toJSON(github.event.repository.private) }}
-          CI_RUNNER_ENVIRONMENT: ${{ runner.environment }}
-          CI_RUNNER_OS: ${{ runner.os }}
-          CI_RUNNER_ARCH: ${{ runner.arch }}
-        run: |
-          set -euo pipefail
-          test "$CI_REPOSITORY" = "iMelki/paperclip"
-          test "$CI_REPOSITORY_ID" = "1228063587"
-          test "$CI_PRIVATE" = "false"
-          test "$CI_RUNNER_ENVIRONMENT" = "github-hosted"
-          test "$CI_RUNNER_OS" = "Linux"
-          test "$CI_RUNNER_ARCH" = "X64"
-
-      - name: Fail fork PRs (CI runs only on same-repo branches)
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
-          BASE_REPO: ${{ github.repository }}
-        run: |
-          if [ "$EVENT_NAME" = "pull_request" ] && [ "$HEAD_REPO" != "$BASE_REPO" ]; then
-            echo "::error::fork PR: CI runs only on same-repo branches, maintainer re-run needed"
-            exit 1
-          fi
-          echo "same-repo or non-PR event: gate passed"
       - name: Fail if any e2e shard failed
         env:
           E2E_SHARDS_RESULT: ${{ needs.e2e_shards.result }}

@@ -1,5 +1,4 @@
 #!/usr/bin/env node
-import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -9,7 +8,8 @@ import {
   sanitizeGitLocalEnvironment,
 } from "./git-local-env.mjs";
 import { loadShardDurations, selectGeneralServerShard } from "./general-server-shard.mjs";
-import { cleanStaleTestTempDirs } from "./clean-stale-test-temp.mjs";
+import { ephemeralChildEnv } from "./lib/ephemeral-scratch.mjs";
+import { forEachExactVitestFile, runVitestDirect } from "./run-vitest-direct.mjs";
 
 const repoRoot = process.cwd();
 const gitLocalEnvironmentVariableNames = resolveGitLocalEnvironmentVariableNames({ cwd: repoRoot });
@@ -27,6 +27,8 @@ const nonServerProjects = [
   "@paperclipai/adapter-utils",
   "@paperclipai/adapter-claude-local",
   "@paperclipai/adapter-codex-local",
+  "@paperclipai/adapter-cursor-cloud",
+  "@paperclipai/hermes-paperclip-adapter",
   "@paperclipai/adapter-openclaw-gateway",
   "@paperclipai/adapter-opencode-local",
   "@paperclipai/plugin-sdk",
@@ -82,6 +84,7 @@ const commonVitestArgs = [
   "--reporter=default",
   "--reporter=hanging-process",
 ];
+const sourceOnlyVitestArgs = ["--exclude", "**/dist/**"];
 
 function walk(dir) {
   const entries = readdirSync(dir);
@@ -152,10 +155,37 @@ function parseCliOptions(argv) {
   let shardCount = null;
   let group = null;
   let dryRun = false;
+  let related = false;
+  let exact = false;
+  let allowEmptyShard = process.env.PAPERCLIP_ALLOW_EMPTY_SERVER_SHARD === "1"
+    || process.env.PAPERCLIP_ALLOW_EMPTY_SERVER_SHARD === "true";
+  const relatedFiles = [];
+  const exactFiles = [];
 
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
     if (arg === "--") {
+      continue;
+    }
+
+    if (arg === "--related") {
+      related = true;
+      continue;
+    }
+
+    if (arg === "--files") {
+      exact = true;
+      continue;
+    }
+
+    // Once --related is set, bare arguments are the changed source files to trace.
+    if (related && !arg.startsWith("--")) {
+      relatedFiles.push(arg);
+      continue;
+    }
+
+    if (exact && !arg.startsWith("--")) {
+      exactFiles.push(arg);
       continue;
     }
 
@@ -197,6 +227,11 @@ function parseCliOptions(argv) {
       continue;
     }
 
+    if (arg === "--allow-empty-shard") {
+      allowEmptyShard = true;
+      continue;
+    }
+
     if (arg === "--group") {
       group = readOptionValue(argv, index, arg);
       index += 1;
@@ -211,6 +246,45 @@ function parseCliOptions(argv) {
     fail(`Unknown argument "${arg}".`);
   }
 
+  if (related && exact) {
+    fail("--related and --files are mutually exclusive.");
+  }
+
+  if (related) {
+    if (mode !== allModeName || group !== null || shardIndex !== null || shardCount !== null || dryRun) {
+      fail("--related cannot be combined with --mode/--group/--shard-*/--dry-run.");
+    }
+    return {
+      mode,
+      shardIndex: null,
+      shardCount: null,
+      group: null,
+      dryRun: false,
+      related,
+      relatedFiles,
+      exact: false,
+      exactFiles: [],
+    };
+  }
+
+  if (exact) {
+    if (mode !== allModeName || group !== null || shardIndex !== null || shardCount !== null || dryRun) {
+      fail("--files cannot be combined with --mode/--group/--shard-*/--dry-run.");
+    }
+    if (exactFiles.length === 0) fail("--files requires at least one exact test path.");
+    return {
+      mode,
+      shardIndex: null,
+      shardCount: null,
+      group: null,
+      dryRun: false,
+      related: false,
+      relatedFiles: [],
+      exact,
+      exactFiles,
+    };
+  }
+
   if (!new Set([allModeName, generalModeName, serializedModeName]).has(mode)) {
     fail(`Unknown mode "${mode}". Expected one of: ${allModeName}, ${generalModeName}, ${serializedModeName}.`);
   }
@@ -221,10 +295,11 @@ function parseCliOptions(argv) {
 
   const shardAllowed =
     mode === serializedModeName ||
-    (mode === generalModeName && group === generalServerGroupName);
+    (mode === generalModeName &&
+      (group === generalServerGroupName || group === generalWorkspacesAGroupName));
   if (!shardAllowed && shardIndex !== null) {
     fail(
-      "--shard-index/--shard-count are only valid with --mode serialized or --mode general --group general-server.",
+      "--shard-index/--shard-count are only valid with --mode serialized or the sharded general groups.",
     );
   }
 
@@ -249,6 +324,7 @@ function parseCliOptions(argv) {
       shardCount: shardCount ?? 1,
       group: null,
       dryRun,
+      allowEmptyShard,
     };
   }
 
@@ -258,14 +334,37 @@ function parseCliOptions(argv) {
     shardCount,
     group,
     dryRun,
+    allowEmptyShard,
   };
+}
+
+function rejectEmptyServerShard({
+  kind,
+  selectedCount,
+  totalCount,
+  shardIndex,
+  shardCount,
+  allowEmptyShard,
+}) {
+  if (selectedCount > 0) return;
+  const label = `${kind} shard ${shardIndex + 1}/${shardCount}`;
+  if (allowEmptyShard) {
+    console.log(
+      `[test:run] ${label} selected 0 of ${totalCount} suites; empty shard explicitly allowed.`,
+    );
+    return;
+  }
+  fail(
+    `${label} selected 0 test files out of ${totalCount}. ` +
+      "Pass --allow-empty-shard or set PAPERCLIP_ALLOW_EMPTY_SERVER_SHARD=1 when this shard is intentionally empty.",
+  );
 }
 
 function selectSerializedSuites(routeTests, shardIndex, shardCount) {
   return routeTests.filter((_, index) => index % shardCount === shardIndex);
 }
 
-function runVitest(args, label, { serverExcludes = [] } = {}) {
+function runVitest(args, label, { serverExcludes = [], subcommand = "run" } = {}) {
   console.log(`\n[test:run] ${label}`);
   invocationIndex += 1;
   const tempRootParent = process.platform === "win32" ? os.tmpdir() : "/tmp";
@@ -278,7 +377,8 @@ function runVitest(args, label, { serverExcludes = [] } = {}) {
     PAPERCLIP_INSTANCE_ID: `vt-${process.pid}-${invocationIndex}`,
     PAPERCLIP_ENV_LIVE_SSH_NO_AUTO_FIXTURE:
       process.env.PAPERCLIP_ENV_LIVE_SSH_NO_AUTO_FIXTURE ?? "true",
-    TMPDIR: path.join(testRoot, "t"),
+    // TEMP and TMP matter on Windows, where Node ignores TMPDIR (#56).
+    ...ephemeralChildEnv(path.join(testRoot, "t")),
   }, gitLocalEnvironmentVariableNames);
   delete env.PAPERCLIP_VITEST_EXCLUDE_FILE;
   mkdirSync(env.PAPERCLIP_HOME, { recursive: true });
@@ -288,16 +388,11 @@ function runVitest(args, label, { serverExcludes = [] } = {}) {
     writeFileSync(excludeFile, `${JSON.stringify(serverExcludes)}\n`, "utf8");
     env.PAPERCLIP_VITEST_EXCLUDE_FILE = excludeFile;
   }
-  const result = spawnSync(
-    "pnpm",
-    ["exec", "vitest", "run", ...commonVitestArgs, ...args],
-    {
-      cwd: repoRoot,
-      env,
-      shell: process.platform === "win32",
-      stdio: "inherit",
-    },
-  );
+  const result = runVitestDirect([subcommand, ...commonVitestArgs, ...sourceOnlyVitestArgs, ...args], {
+    cwd: repoRoot,
+    env,
+    stdio: "inherit",
+  });
   if (result.error) {
     console.error(`[test:run] Failed to start Vitest: ${result.error.message}`);
     process.exit(1);
@@ -313,13 +408,16 @@ function runGeneralSuites(routeTests) {
   }
 }
 
-function runProjectGroup(projects, groupName) {
+function runProjectGroup(projects, groupName, shardIndex = null, shardCount = null) {
+  const shardArgs =
+    shardCount !== null && shardCount > 1 ? [`--shard=${shardIndex + 1}/${shardCount}`] : [];
+  const shardSuffix = shardArgs.length > 0 ? ` shard ${shardIndex + 1}/${shardCount}` : "";
   for (const project of projects) {
-    runVitest(["--project", project], `${groupName} project ${project}`);
+    runVitest(["--project", project, ...shardArgs], `${groupName} project ${project}${shardSuffix}`);
   }
 }
 
-function runGeneralGroup(routeTests, groupName, shardIndex = null, shardCount = null) {
+function runGeneralGroup(routeTests, groupName, shardIndex = null, shardCount = null, allowEmptyShard = false) {
   if (groupName === generalServerGroupName) {
     if (shardCount !== null && shardCount > 1) {
       const shardFiles = selectGeneralServerShard(
@@ -331,6 +429,14 @@ function runGeneralGroup(routeTests, groupName, shardIndex = null, shardCount = 
       console.log(
         `\n[test:run] general-server shard ${shardIndex + 1}/${shardCount} running ${shardFiles.length} of ${generalServerTestFiles.length} suites`,
       );
+      rejectEmptyServerShard({
+        kind: "general-server",
+        selectedCount: shardFiles.length,
+        totalCount: generalServerTestFiles.length,
+        shardIndex,
+        shardCount,
+        allowEmptyShard,
+      });
       if (shardFiles.length === 0) {
         return;
       }
@@ -360,7 +466,7 @@ function runGeneralGroup(routeTests, groupName, shardIndex = null, shardCount = 
   }
 
   if (groupName === generalWorkspacesAGroupName) {
-    runProjectGroup(generalWorkspacesAProjects, groupName);
+    runProjectGroup(generalWorkspacesAProjects, groupName, shardIndex, shardCount);
     return;
   }
 
@@ -372,11 +478,220 @@ function runGeneralGroup(routeTests, groupName, shardIndex = null, shardCount = 
   fail(`Unknown group "${groupName}".`);
 }
 
-function runSerializedSuites(routeTests, shardIndex, shardCount) {
+/**
+ * Run only the suites whose module graph reaches one of `files`.
+ *
+ * This backs the pre-commit hook's fast path. It runs across every vitest project (no
+ * `--project` filter) so a changed package pulls in its consumers' suites too, and it reuses
+ * `runVitest` so related runs get the same isolated PAPERCLIP_HOME/TMPDIR sandbox the full
+ * lanes get — running bare `vitest related` would leak the developer's real paperclip home
+ * into the suites.
+ *
+ * Related-set resolution uses `passWithNoTests`: most commits touch files no suite imports,
+ * and Vitest must return an empty set rather than reject every such commit. Execution starts
+ * only after the resolver returns one or more concrete suite paths.
+ *
+ * The selection is run under the same isolation the serialized lane hand-rolls
+ * (`runSerializedSuites` spawns one vitest per route/authz suite). A related selection can pull
+ * route/authz suites and general suites into one invocation, and those suites are not safe to
+ * share a Vitest process — batching them produced environment and mock leakage that vanished
+ * when the same suites ran apart. Every selected file therefore gets a separate Vitest process;
+ * worker isolation flags alone are insufficient because the coordinator process also owns
+ * mutable test-environment state.
+ */
+/**
+ * Default ceiling on how many suites a single pre-commit related run may execute.
+ *
+ * Rationale: `vitest related` is honest about the import graph, and that is exactly the
+ * problem. Server suites import the app, and the app imports ~everything, so almost any
+ * `server/src` change is a "hub" change. Measured on this repo (2026-08-12):
+ *
+ *   server/src/services/heartbeat.ts                    159 of 1130 specs
+ *   server/src/services/execution-allowlist.ts          160 of 1130 specs
+ *   packages/adapter-utils/src/sandbox-managed-runtime.ts  288 of 1130 specs
+ *   ui/src/lib/activity-format.ts                         9 of 1130 specs  (a genuine leaf)
+ *
+ * A capped run of 25 server suites measured 673.9s wall, of which 618.5s was module IMPORT
+ * and only 28.0s was test execution — i.e. cost is ~27s per suite and scales linearly with
+ * the count, so 159 suites extrapolates to ~70 minutes. Uncapped, the hook silently degrades
+ * into the full sweep it was introduced to avoid.
+ *
+ * 12 keeps a hub-module commit near a ~5 minute test budget while leaving genuine leaf changes
+ * (the common case) completely untouched — they select fewer suites than the cap and still run
+ * their full related set.
+ *
+ * This inverts the usual test-impact-analysis convention (Azure DevOps / Datadog / Google all
+ * fall back to running MORE tests when selection is untrustworthy). That is deliberate: those
+ * systems' selection guards a MERGE. This one guards a local commit, and it is not the
+ * approximate local gate. Pre-push runs deterministic exact changed/sibling suites, while
+ * pull requests into dev and master run the exhaustive hosted lanes. Correctness gates
+ * (forbidden tokens, gitleaks, react-doctor, typecheck) are untouched by this cap.
+ *
+ * HARD PRECONDITION: this cap is only safe when pre-push actually dispatches and hosted PR CI
+ * covers the target branch. A missing .husky/pre-push is indistinguishable from a pass, so
+ * "no output" is not evidence. Resolve core.hooksPath and verify its dispatcher plus the
+ * repository .husky/pre-push target.
+ *
+ * Override with PAPERCLIP_PRECOMMIT_RELATED_CAP (0 disables the cap and restores the
+ * uncapped related run).
+ */
+const defaultRelatedSuiteCap = 12;
+
+function resolveRelatedSuiteCap() {
+  const raw = process.env.PAPERCLIP_PRECOMMIT_RELATED_CAP;
+  if (raw === undefined || raw === "") return defaultRelatedSuiteCap;
+  const parsed = Number(raw);
+  if (!Number.isInteger(parsed) || parsed < 0) {
+    fail(`PAPERCLIP_PRECOMMIT_RELATED_CAP must be a non-negative integer; got "${raw}".`);
+  }
+  return parsed;
+}
+
+/**
+ * Resolve the suites vitest's `related` selection would run, WITHOUT running them.
+ *
+ * Uses vitest's Node API so the cap can be applied before any test process is spawned. This
+ * builds the module graph once (~70s on this repo); the selected files are then handed to a
+ * normal `vitest run`, so the graph is not rebuilt by a second `vitest related` invocation.
+ *
+ * Resolution only globs and traces imports — it never executes a suite, so it does not need
+ * the isolated PAPERCLIP_HOME/TMPDIR sandbox that `runVitest` sets up for execution.
+ */
+async function resolveRelatedSpecFiles(files) {
+  const { createVitest } = await import("vitest/node");
+  const vitest = await createVitest("test", {
+    watch: false,
+    run: true,
+    related: files,
+    passWithNoTests: true,
+  });
+  try {
+    const specs = await vitest.getRelevantTestSpecifications();
+    const unique = new Set();
+    for (const spec of specs) {
+      if (spec.moduleId) unique.add(toRepoPath(spec.moduleId));
+    }
+    return [...unique].sort();
+  } finally {
+    await vitest.close();
+  }
+}
+
+/**
+ * Rank selected suites by proximity to the changed files, then keep the first `cap`.
+ *
+ * Proximity beats arbitrary truncation: a change's own co-located suite is the one most likely
+ * to catch the regression, and it keeps the subset deterministic (stable ordering => the same
+ * commit always runs the same suites, so a green hook is reproducible).
+ *
+ * Tier 0: the changed file IS a suite (always run — never drop a directly staged test).
+ * Tier 1: suite lives in the same directory as a changed file.
+ * Tier 2: suite shares the changed file's workspace package (first two path segments).
+ * Tier 3: everything else, alphabetically.
+ */
+function selectRepresentativeSuites(specFiles, changedFiles, cap) {
+  const changed = new Set(changedFiles.map((file) => toRepoPath(path.resolve(repoRoot, file))));
+  const changedDirs = new Set([...changed].map((file) => path.posix.dirname(file)));
+  const packageOf = (file) => file.split("/").slice(0, 2).join("/");
+  const changedPackages = new Set([...changed].map(packageOf));
+
+  const tierOf = (file) => {
+    if (changed.has(file)) return 0;
+    if (changedDirs.has(path.posix.dirname(file))) return 1;
+    if (changedPackages.has(packageOf(file))) return 2;
+    return 3;
+  };
+
+  return [...specFiles]
+    .sort((left, right) => tierOf(left) - tierOf(right) || left.localeCompare(right))
+    .slice(0, cap);
+}
+
+async function runRelatedSuites(files) {
+  if (files.length === 0) {
+    console.log("\n[test:run] related mode: no candidate source files; nothing to run.");
+    return;
+  }
+
+  const cap = resolveRelatedSuiteCap();
+  console.log(`\n[test:run] resolving suites related to ${files.length} changed file(s)...`);
+  const selected = await resolveRelatedSpecFiles(files);
+  if (selected.length === 0) {
+    console.log("[test:run] related mode: no suite imports the changed files; nothing to run.");
+    return;
+  }
+
+  if (cap === 0) {
+    runRelatedFilesIndependently(
+      selected,
+      `uncapped related selection for ${files.length} changed file(s)`,
+    );
+    return;
+  }
+
+  if (selected.length <= cap) {
+    runRelatedFilesIndependently(
+      selected,
+      `related to ${files.length} changed file(s): ${selected.length} suite(s)`,
+    );
+    return;
+  }
+
+  const subset = selectRepresentativeSuites(selected, files, cap);
+  console.log(
+    `\n[test:run] ${selected.length} suites import the staged files (cap ${cap}). ` +
+      `The staged change reaches a hub module, so the related set has degenerated toward the ` +
+      `full suite.\n` +
+      `[test:run] Running the ${subset.length} suites closest to the change locally. ` +
+      `Pre-push runs exact changed/sibling suites without import-graph expansion, and ` +
+      `pull requests into dev or master run the exhaustive hosted lanes.\n` +
+      `[test:run] For a full local sweep before pushing: PAPERCLIP_PRECOMMIT_ALL=1 git commit ...` +
+      ` (or PAPERCLIP_PRECOMMIT_RELATED_CAP=0 to run all ${selected.length}).`,
+  );
+  runRelatedFilesIndependently(
+    subset,
+    `related subset: ${subset.length} of ${selected.length} suite(s)`,
+  );
+}
+
+function runRelatedFilesIndependently(files, label) {
+  forEachExactVitestFile(files, (file) => {
+    runVitest(
+      ["--pool=forks", "--isolate", ...serializedServerVitestArgs, file],
+      `${label}: ${file}`,
+    );
+  });
+}
+
+function runExactSuites(files) {
+  const invalid = files.filter((file) => !/\.(?:test|spec)\.[mc]?[jt]sx?$/i.test(file));
+  if (invalid.length > 0) {
+    fail(`--files accepts only exact test paths; received: ${invalid.join(", ")}`);
+  }
+  // Run each exact file separately. Some workspace projects deliberately include
+  // only *.test.ts while others include *.spec.ts; one accepted file must never
+  // let an excluded file disappear behind an otherwise successful invocation.
+  forEachExactVitestFile(files, (file) => {
+    runVitest(
+      ["--pool=forks", "--isolate", ...serializedServerVitestArgs, file],
+      `exact pre-push selection: ${file}`,
+    );
+  });
+}
+
+function runSerializedSuites(routeTests, shardIndex, shardCount, allowEmptyShard = false) {
   const shardTests = selectSerializedSuites(routeTests, shardIndex, shardCount);
   console.log(
     `\n[test:run] serialized shard ${shardIndex + 1}/${shardCount} running ${shardTests.length} of ${routeTests.length} suites`,
   );
+  rejectEmptyServerShard({
+    kind: "serialized",
+    selectedCount: shardTests.length,
+    totalCount: routeTests.length,
+    shardIndex,
+    shardCount,
+    allowEmptyShard,
+  });
 
   for (const routeTest of shardTests) {
     runVitest(
@@ -450,6 +765,18 @@ if (options.dryRun) {
             ...serializedServerVitestArgs,
           ],
         },
+        workspaceProjects:
+          options.group === generalWorkspacesAGroupName
+            ? generalWorkspacesAProjects
+            : options.group === generalWorkspacesBGroupName
+              ? generalWorkspacesBProjects
+              : null,
+        workspacesVitestShard:
+          options.group === generalWorkspacesAGroupName &&
+          options.shardCount !== null &&
+          options.shardCount > 1
+            ? `${options.shardIndex + 1}/${options.shardCount}`
+            : null,
       },
       null,
       2,
@@ -458,19 +785,25 @@ if (options.dryRun) {
   process.exit(0);
 }
 
-// Self-heal stale fixture temp dirs from previous killed/aborted runs (#33).
-// Deliberately after the dry-run branch: --dry-run's contract is stdout is
-// nothing but the JSON plan, and this log line would break that.
-cleanStaleTestTempDirs({ log: (message) => console.log(`[test:run] ${message}`) });
+if (options.related) {
+  // Top-level await: resolving the related set needs vitest's async Node API.
+  await runRelatedSuites(options.relatedFiles);
+  process.exit(0);
+}
+
+if (options.exact) {
+  runExactSuites(options.exactFiles);
+  process.exit(0);
+}
 
 if (options.mode === generalModeName || options.mode === allModeName) {
   if (options.group) {
-    runGeneralGroup(routeTests, options.group, options.shardIndex, options.shardCount);
+    runGeneralGroup(routeTests, options.group, options.shardIndex, options.shardCount, options.allowEmptyShard);
   } else {
     runGeneralSuites(routeTests);
   }
 }
 
 if (options.mode === serializedModeName || options.mode === allModeName) {
-  runSerializedSuites(routeTests, options.shardIndex ?? 0, options.shardCount ?? 1);
+  runSerializedSuites(routeTests, options.shardIndex ?? 0, options.shardCount ?? 1, options.allowEmptyShard);
 }

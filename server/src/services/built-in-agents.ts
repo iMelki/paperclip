@@ -18,6 +18,7 @@ import {
   withBuiltInAgentMarker,
 } from "./built-in-agent-metadata.js";
 import { companySkillService } from "./company-skills.js";
+import { isBuiltInBundleActorUserId, resolveEligibleCompanyActorUserId, userHasActiveCompanyAccess, userRowExists } from "./company-actor-user.js";
 import { routineService } from "./routines.js";
 import { accessService } from "./access.js";
 import { listAdapterModels } from "../adapters/registry.js";
@@ -181,7 +182,7 @@ const FALLBACK_REFLECTION_COACH_SKILL = [
 const FALLBACK_SUMMARIZER_INSTRUCTIONS = [
   "You are Summarizer, a built-in reporting agent at Paperclip.",
   "",
-  "Turn the current state of a Paperclip scope (project, workspaces overview, or a single project workspace) into a short, honest, human-readable Markdown summary and write it back to that scope's summary slot as a new revision. Use the `summarize-status` skill as your operating procedure.",
+  "Turn the current state of a Paperclip scope (project, workspaces overview, project workspace, or execution workspace) into a short, honest, human-readable Markdown summary and write it back to that scope's summary slot as a new revision. Use the `summarize-status` skill as your operating procedure.",
   "",
   "Read-and-report only: never change issues, workspaces, or code. Cite issue identifiers, never fabricate status, keep every read company-scoped, and run on the low-cost model profile lane by default.",
   "",
@@ -401,7 +402,7 @@ const DEFINITIONS = validateBuiltInAgentDefinitions([
     displayName: "Summarizer",
     featureKeys: ["summarizer"],
     shortPurpose:
-      "Writes short, human-readable Markdown status summaries into project, workspaces-overview, and project-workspace summary slots on demand.",
+      "Writes short, human-readable Markdown status summaries into project, workspaces-overview, project-workspace, and execution-workspace summary slots on demand.",
     defaultInstructions: SUMMARIZER_INSTRUCTIONS,
     defaultRole: "general",
     defaultTitle: "Summarizer",
@@ -419,7 +420,7 @@ const DEFINITIONS = validateBuiltInAgentDefinitions([
     },
     defaultBudgetMonthlyCents: 0,
     bundle: {
-      stockVersion: "2026-07-15",
+      stockVersion: "2026-08-02",
       instructions: {
         entryFile: "AGENTS.md",
         files: {
@@ -452,7 +453,7 @@ const DEFINITIONS = validateBuiltInAgentDefinitions([
             type: "select",
             defaultValue: "all",
             required: true,
-            options: ["all", "project", "workspaces_overview", "project_workspace"],
+            options: ["all", "project", "workspaces_overview", "project_workspace", "execution_workspace"],
           },
         ],
         triggers: [
@@ -470,6 +471,12 @@ const DEFINITIONS = validateBuiltInAgentDefinitions([
 ]);
 
 const DEFINITIONS_BY_KEY = new Map(DEFINITIONS.map((definition) => [definition.key, definition]));
+
+// Bundled built-in agents that should be provisioned automatically when a
+// company is created (and re-ensured on startup reconcile). Empty by default so
+// a new user starts clean — the Reflection Coach and Summarizer are opt-in, not
+// seeded. Add a definition key here to restore automatic provisioning.
+const AUTO_PROVISION_ON_COMPANY_CREATE_KEYS = new Set<string>([]);
 
 const ROOT_AGENT_DEFAULT_CHANGE_GRANTS: PermissionKey[] = ["agents:configure", "skills:create"];
 const BUILT_IN_AGENT_DEFAULT_GRANTS: Record<string, PermissionKey[]> = {
@@ -700,6 +707,80 @@ function hasCompleteAdapterConfig(adapterType: string, adapterConfig: unknown) {
     return nonEmptyString(adapterConfig.baseUrl) || nonEmptyString(adapterConfig.url);
   }
   return nonEmptyString(adapterConfig.model);
+}
+
+function asAdapterConfig(value: unknown): Record<string, unknown> {
+  return isPlainRecord(value) ? value : {};
+}
+
+// Persisted shape shared by ensure and bundled skill-sync. String keys when no
+// entry is version-pinned; `{ key, versionId }` objects otherwise. Extra keys
+// on the existing object are kept. A missing or non-object value stays absent.
+function canonicalPaperclipSkillSync(config: Record<string, unknown>): Record<string, unknown> | undefined {
+  if (!Object.prototype.hasOwnProperty.call(config, "paperclipSkillSync")) return undefined;
+  const raw = config.paperclipSkillSync;
+  if (!isPlainRecord(raw)) return undefined;
+  const preference = readPaperclipSkillSyncPreference(config);
+  // Sorted by key so the stored value does not depend on insertion order:
+  // ensure and bundled skill-sync would otherwise keep moving the bundled
+  // entry and write a revision each time.
+  const written = writePaperclipSkillSyncPreference(
+    { paperclipSkillSync: raw },
+    [...preference.desiredSkillEntries].sort((left, right) =>
+      left.key < right.key ? -1 : left.key > right.key ? 1 : 0),
+  );
+  return isPlainRecord(written.paperclipSkillSync) ? written.paperclipSkillSync : undefined;
+}
+
+// An incoming skill selection that names a key without a version pin keeps the
+// pin the stored selection already has for that key; otherwise ensure would drop
+// the pin that bundled skill-sync wrote and the two would trade revisions.
+function carryForwardSkillPins(
+  existingConfig: Record<string, unknown>,
+  merged: Record<string, unknown>,
+): Record<string, unknown> {
+  if (!Object.prototype.hasOwnProperty.call(existingConfig, "paperclipSkillSync")) return merged;
+  if (!isPlainRecord(merged.paperclipSkillSync) || merged.paperclipSkillSync === existingConfig.paperclipSkillSync) {
+    return merged;
+  }
+  if (!Array.isArray((merged.paperclipSkillSync as Record<string, unknown>).desiredSkills)) return merged;
+  const pins = new Map(
+    readPaperclipSkillSyncPreference(existingConfig).desiredSkillEntries
+      .filter((entry) => entry.versionId)
+      .map((entry) => [entry.key, entry.versionId] as const),
+  );
+  if (pins.size === 0) return merged;
+  // `{ key, versionId: null }` is an explicit request to track latest content,
+  // unlike a plain string key, which only omits the pin. Honor it.
+  const explicitlyUnpinned = new Set<string>();
+  for (const value of (merged.paperclipSkillSync as Record<string, unknown>).desiredSkills as unknown[]) {
+    if (!isPlainRecord(value) || typeof value.key !== "string") continue;
+    if (Object.prototype.hasOwnProperty.call(value, "versionId") && value.versionId === null) {
+      explicitlyUnpinned.add(value.key.trim());
+    }
+  }
+  const incoming = readPaperclipSkillSyncPreference(merged).desiredSkillEntries.map((entry) => ({
+    key: entry.key,
+    versionId: entry.versionId ?? (explicitlyUnpinned.has(entry.key) ? null : pins.get(entry.key) ?? null),
+  }));
+  return writePaperclipSkillSyncPreference(merged, incoming);
+}
+
+function withCanonicalSkillSync(config: Record<string, unknown>): Record<string, unknown> {
+  if (!Object.prototype.hasOwnProperty.call(config, "paperclipSkillSync")) return config;
+  const canonical = canonicalPaperclipSkillSync(config);
+  if (!canonical) {
+    const next = { ...config };
+    delete next.paperclipSkillSync;
+    return next;
+  }
+  if (stableJson(config.paperclipSkillSync) === stableJson(canonical)) return config;
+  return { ...config, paperclipSkillSync: canonical };
+}
+
+function adapterConfigsEffectivelyEqual(left: unknown, right: unknown): boolean {
+  return stableJson(withCanonicalSkillSync(asAdapterConfig(left)))
+    === stableJson(withCanonicalSkillSync(asAdapterConfig(right)));
 }
 
 export function deriveBuiltInAgentStatus(agent: Pick<Agent, "adapterType" | "adapterConfig" | "status" | "pausedAt"> | null): BuiltInAgentStatus {
@@ -1054,12 +1135,18 @@ export function builtInAgentService(db: Db) {
   }
 
   async function syncBundledSkillToAgent(agent: Agent, skill: CompanySkill) {
-    const desired = readPaperclipSkillSyncPreference(agent.adapterConfig as Record<string, unknown>).desiredSkillEntries;
+    const currentConfig = asAdapterConfig(agent.adapterConfig);
+    const desired = readPaperclipSkillSyncPreference(currentConfig).desiredSkillEntries;
     const nextDesired = [
       ...desired.filter((entry) => entry.key !== skill.key),
       { key: skill.key, versionId: skill.currentVersionId ?? null },
     ];
-    const adapterConfig = writePaperclipSkillSyncPreference(agent.adapterConfig as Record<string, unknown>, nextDesired);
+    const adapterConfig = withCanonicalSkillSync(
+      writePaperclipSkillSyncPreference(currentConfig, nextDesired),
+    );
+    // Same effective skill set (including string keys vs `{ key, versionId: null }`,
+    // and object key order) must not write a row or a config revision.
+    if (adapterConfigsEffectivelyEqual(currentConfig, adapterConfig)) return agent;
     const updated = await agentSvc.update(agent.id, { adapterConfig }, {
       allowBuiltInAgentMetadata: true,
       recordRevision: { source: "built-in-bundle:skill-sync" },
@@ -1278,7 +1365,16 @@ export function builtInAgentService(db: Db) {
 
   async function createOrResetRoutine(agent: Agent, definition: BuiltInAgentDefinition, existing: Routine | null, mode: "reconcile" | "reset") {
     const routine = definition.bundle!.routine;
-    const actor = { agentId: null, userId: "built-in-bundles" };
+    const eligibleUserId = await resolveEligibleCompanyActorUserId(db, agent.companyId);
+    const storedUserId = existing?.responsibleUserId ?? null;
+    const storedCanStay = Boolean(
+      storedUserId
+      && !isBuiltInBundleActorUserId(storedUserId)
+      && await userRowExists(db, storedUserId)
+      && await userHasActiveCompanyAccess(db, agent.companyId, storedUserId),
+    );
+    const actorUserId = storedCanStay ? storedUserId : eligibleUserId;
+    const actor = { agentId: null, userId: actorUserId, allowUnresolvedResponsibleUser: true };
     const nextRoutine = existing
       ? await routineSvc.update(existing.id, {
         title: routine.title,
@@ -1619,8 +1715,29 @@ export function builtInAgentService(db: Db) {
       ) {
         const adapterType = resolvedInput.adapterType ?? existing.adapterType;
         assertAdapterAllowed(definition, adapterType);
-        patch.adapterType = adapterType;
-        patch.adapterConfig = resolvedInput.adapterConfig ?? existing.adapterConfig;
+        const existingConfig = asAdapterConfig(existing.adapterConfig);
+        const incomingConfig = resolvedInput.adapterConfig === undefined
+          ? existingConfig
+          : asAdapterConfig(resolvedInput.adapterConfig);
+        // Explicit setup replaces adapter settings, including omitted credentials
+        // and commands. Only the adapter-independent skill selection carries
+        // over. Implicit reconciliation can retain the current config.
+        const mergeBase = input.adapterConfig !== undefined
+          || (adapterType !== existing.adapterType && resolvedInput.adapterConfig !== undefined)
+          ? Object.prototype.hasOwnProperty.call(existingConfig, "paperclipSkillSync")
+            ? { paperclipSkillSync: existingConfig.paperclipSkillSync }
+            : {}
+          : existingConfig;
+        // Apply the incoming settings onto the selected base while preserving
+        // the skill selection that bundled skill-sync manages.
+        // When `incomingConfig.env` is set, that assignment replaces the whole
+        // env map. Do not deep-merge env keys. PATCH `adapterConfig.env` has
+        // the same full-replacement behavior; leave that route alone.
+        const nextConfig = withCanonicalSkillSync(carryForwardSkillPins(existingConfig, { ...mergeBase, ...incomingConfig }));
+        if (adapterType !== existing.adapterType) patch.adapterType = adapterType;
+        if (!adapterConfigsEffectivelyEqual(existingConfig, nextConfig)) {
+          patch.adapterConfig = nextConfig;
+        }
       }
       if (!existingPendingApproval && resolvedInput.budgetMonthlyCents !== undefined) {
         patch.budgetMonthlyCents = resolvedInput.budgetMonthlyCents;
@@ -1783,28 +1900,29 @@ export function builtInAgentService(db: Db) {
       throw error;
     }
 
+    const approvalPayload = await approvalSvc.prepareHirePayloadForPersistence(companyId, {
+      name: pending.name,
+      role: pending.role,
+      title: pending.title,
+      icon: pending.icon,
+      reportsTo: pending.reportsTo,
+      capabilities: pending.capabilities,
+      adapterType: pending.adapterType,
+      adapterConfig: pending.adapterConfig,
+      runtimeConfig: pending.runtimeConfig,
+      permissions: pending.permissions,
+      budgetMonthlyCents: pending.budgetMonthlyCents,
+      metadata: pending.metadata,
+      agentId: pending.id,
+      sourceBuiltInAgentKey: definition.key,
+      featureKeys: definition.featureKeys,
+    });
     const approval = await approvalSvc.create(companyId, {
       type: "hire_agent",
       requestedByAgentId: actor.requestedByAgentId ?? null,
       requestedByUserId: actor.requestedByUserId ?? null,
       status: "pending",
-      payload: {
-        name: pending.name,
-        role: pending.role,
-        title: pending.title,
-        icon: pending.icon,
-        reportsTo: pending.reportsTo,
-        capabilities: pending.capabilities,
-        adapterType: pending.adapterType,
-        adapterConfig: pending.adapterConfig,
-        runtimeConfig: pending.runtimeConfig,
-        permissions: pending.permissions,
-        budgetMonthlyCents: pending.budgetMonthlyCents,
-        metadata: pending.metadata,
-        agentId: pending.id,
-        sourceBuiltInAgentKey: definition.key,
-        featureKeys: definition.featureKeys,
-      },
+      payload: approvalPayload,
       decisionNote: null,
       decidedByUserId: null,
       decidedAt: null,
@@ -1917,7 +2035,17 @@ export function builtInAgentService(db: Db) {
     const company = await ensureCompany(companyId);
     let autoEnsured = 0;
     let pendingApprovals = 0;
+    // A fresh company starts with only its own lead agent — the Reflection
+    // Coach and Summarizer are no longer auto-created for new users. They stay
+    // available to enable on demand (via ensure / provision / the built-in
+    // bundle panel). We still reconcile any bundled agent that already exists
+    // (e.g. one an operator enabled) so its instructions/skill/routine keep
+    // tracking stock. Add a key to AUTO_PROVISION_ON_COMPANY_CREATE_KEYS to
+    // restore automatic creation for that definition.
     for (const definition of DEFINITIONS.filter((entry) => entry.bundle)) {
+      const existing = await findSingleAgent(companyId, definition);
+      const shouldProvision = existing !== null || AUTO_PROVISION_ON_COMPANY_CREATE_KEYS.has(definition.key);
+      if (!shouldProvision) continue;
       if (company.requireBoardApprovalForNewAgents) {
         const result = await provision(companyId, definition.key);
         if (result.approval) pendingApprovals += 1;

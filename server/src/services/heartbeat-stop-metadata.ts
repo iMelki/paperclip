@@ -1,3 +1,10 @@
+import {
+  adapterDefaultTimeoutSec,
+  resolveAdapterTimeoutSec,
+  resolvePaperclipRunnerTimeoutMs,
+  resolveHttpAdapterTimeout,
+} from "@paperclipai/adapter-utils/adapter-timeout";
+
 export type HeartbeatRunOutcome = "succeeded" | "interrupted" | "failed" | "cancelled" | "timed_out";
 
 export type HeartbeatRunStopReason =
@@ -16,7 +23,7 @@ export interface HeartbeatRunTimeoutPolicy {
   effectiveTimeoutSec: number | null;
   effectiveTimeoutMs?: number | null;
   timeoutConfigured: boolean;
-  timeoutSource: "config" | "default" | "unknown";
+  timeoutSource: "config" | "env" | "default" | "unknown";
 }
 
 export interface HeartbeatRunStopMetadata extends HeartbeatRunTimeoutPolicy {
@@ -24,23 +31,12 @@ export interface HeartbeatRunStopMetadata extends HeartbeatRunTimeoutPolicy {
   timeoutFired: boolean;
 }
 
-function readFiniteNumber(value: unknown): number | null {
-  if (typeof value === "number") {
-    return Number.isFinite(value) ? value : null;
-  }
-  if (typeof value === "string") {
-    const parsed = Number(value.trim());
-    return Number.isFinite(parsed) ? parsed : null;
-  }
-  return null;
-}
-
-function hasOwn(record: Record<string, unknown>, key: string) {
-  return Object.prototype.hasOwnProperty.call(record, key);
-}
-
-function defaultTimeoutSecForAdapter(adapterType: string) {
-  return adapterType === "openclaw_gateway" ? 120 : 0;
+function heartbeatTimeoutSource(
+  source: "configured" | "env" | "adapter_default",
+): HeartbeatRunTimeoutPolicy["timeoutSource"] {
+  if (source === "configured") return "config";
+  if (source === "env") return "env";
+  return "default";
 }
 
 export function normalizeMaxTurnStopReason(value: unknown): Extract<HeartbeatRunStopReason, "max_turns_exhausted"> | null {
@@ -56,26 +52,38 @@ export function resolveHeartbeatRunTimeoutPolicy(
   const config = adapterConfig ?? {};
 
   if (adapterType === "http") {
-    const hasTimeoutMs = hasOwn(config, "timeoutMs");
-    const rawTimeoutMs = hasTimeoutMs ? readFiniteNumber(config.timeoutMs) : 0;
-    const timeoutMs = Math.max(0, Math.floor(rawTimeoutMs ?? 0));
+    const resolved = resolveHttpAdapterTimeout({
+      timeoutSec: config.timeoutSec,
+      timeoutMs: config.timeoutMs,
+    });
     return {
-      effectiveTimeoutSec: timeoutMs / 1000,
-      effectiveTimeoutMs: timeoutMs,
-      timeoutConfigured: timeoutMs > 0,
-      timeoutSource: hasTimeoutMs ? "config" : "default",
+      effectiveTimeoutSec: resolved.timeoutMs / 1000,
+      effectiveTimeoutMs: resolved.timeoutMs,
+      timeoutConfigured: resolved.source === "configured",
+      timeoutSource: heartbeatTimeoutSource(resolved.source),
     };
   }
 
-  const hasTimeoutSec = hasOwn(config, "timeoutSec");
-  const defaultTimeoutSec = defaultTimeoutSecForAdapter(adapterType);
-  const rawTimeoutSec = hasTimeoutSec ? readFiniteNumber(config.timeoutSec) : defaultTimeoutSec;
-  const timeoutSec = Math.max(0, Math.floor(rawTimeoutSec ?? defaultTimeoutSec));
+  const resolved = resolveAdapterTimeoutSec({
+    configured: config.timeoutSec,
+    adapterDefaultSec: adapterDefaultTimeoutSec(adapterType),
+  });
+
+  if (adapterType === "paperclip_runner") {
+    // The runner coordinator accepts only 1s to 24h, so report the timeout it
+    // actually enforces rather than the raw configured or env value.
+    const timeoutMs = resolvePaperclipRunnerTimeoutMs({ configured: config.timeoutSec });
+    return {
+      effectiveTimeoutSec: timeoutMs / 1000,
+      timeoutConfigured: resolved.source === "configured",
+      timeoutSource: heartbeatTimeoutSource(resolved.source),
+    };
+  }
 
   return {
-    effectiveTimeoutSec: timeoutSec,
-    timeoutConfigured: timeoutSec > 0,
-    timeoutSource: hasTimeoutSec ? "config" : "default",
+    effectiveTimeoutSec: resolved.timeoutSec,
+    timeoutConfigured: resolved.source === "configured",
+    timeoutSource: heartbeatTimeoutSource(resolved.source),
   };
 }
 

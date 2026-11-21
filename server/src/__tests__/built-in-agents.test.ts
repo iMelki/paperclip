@@ -22,7 +22,10 @@ import {
   routines,
   routineTriggers,
 } from "@paperclipai/db";
-import { readPaperclipSkillSyncPreference } from "@paperclipai/adapter-utils/server-utils";
+import {
+  readPaperclipSkillSyncPreference,
+  writePaperclipSkillSyncPreference,
+} from "@paperclipai/adapter-utils/server-utils";
 import {
   EMBEDDED_POSTGRES_TEST_SETUP_TIMEOUT_MS,
   getEmbeddedPostgresTestSupport,
@@ -31,6 +34,7 @@ import {
 import { agentInstructionsService } from "../services/agent-instructions.ts";
 import { agentService } from "../services/agents.ts";
 import { approvalService } from "../services/approvals.ts";
+import { companySkillService } from "../services/company-skills.ts";
 import {
   builtInAgentService,
   deriveBuiltInAgentStatus,
@@ -570,7 +574,7 @@ describeEmbeddedPostgres("built-in agents", () => {
     });
   });
 
-  it("auto-provisions a paused Reflection Coach bundle with skill sync and a disabled routine", async () => {
+  it("reconciles an enabled Reflection Coach bundle with skill sync and a disabled routine", async () => {
     const companyId = await seedCompany({ requireApproval: false });
     const root = await agentService(db).create(companyId, {
       name: "CEO",
@@ -582,6 +586,17 @@ describeEmbeddedPostgres("built-in agents", () => {
       permissions: {},
     });
 
+    // The Reflection Coach is opt-in (not auto-created). Enabling it on demand
+    // materializes its managed bundle in a single pass.
+    const enabled = await builtInAgentService(db).ensure(companyId, "reflection-coach");
+    expect(enabled.agent?.adapterConfig).toMatchObject({
+      instructionsBundleMode: "managed",
+      instructionsEntryFile: "AGENTS.md",
+    });
+    expect(enabled.agent?.adapterConfig).not.toMatchObject({ model: "gpt-5.4", apiKey: "do-not-copy" });
+
+    // Startup reconcile keeps the enabled bundle tracking stock and re-grants
+    // the root/company default permissions.
     const result = await reconcileBuiltInAgentsOnStartup(db);
     expect(result.autoEnsured).toBeGreaterThanOrEqual(1);
     expect(result.defaultGrantsEnsured).toBeGreaterThanOrEqual(4);
@@ -607,11 +622,6 @@ describeEmbeddedPostgres("built-in agents", () => {
         },
       },
     });
-    expect(state.agent?.adapterConfig).toMatchObject({
-      instructionsBundleMode: "managed",
-      instructionsEntryFile: "AGENTS.md",
-    });
-    expect(state.agent?.adapterConfig).not.toMatchObject({ model: "gpt-5.4", apiKey: "do-not-copy" });
     expect(state.resources.map((resource) => [resource.resourceKind, resource.stockStatus])).toEqual([
       ["instructions", "stock_current"],
       ["skill", "stock_current"],
@@ -694,7 +704,7 @@ describeEmbeddedPostgres("built-in agents", () => {
     )).size).toBe(3);
   });
 
-  it("preserves new-agent approval gates during automatic Reflection Coach provisioning", async () => {
+  it("preserves new-agent approval gates during on-demand Reflection Coach provisioning", async () => {
     const companyId = await seedCompany({ requireApproval: true });
     const root = await agentService(db).create(companyId, {
       name: "CEO",
@@ -711,12 +721,11 @@ describeEmbeddedPostgres("built-in agents", () => {
       applyInSeparateFollowUpRun: true,
     };
 
-    const result = await reconcileBuiltInAgentsOnStartup(db);
-
-    expect(result).toMatchObject({
-      autoEnsured: 2,
-      pendingApprovals: 2,
-    });
+    // The Reflection Coach is opt-in, so it's enabled on demand. With board
+    // approval required, provisioning it must leave a pending agent + a
+    // hire_agent approval rather than an active agent.
+    const provisioned = await builtInAgentService(db).provision(companyId, "reflection-coach");
+    expect(provisioned.approval).not.toBeNull();
     const state = await builtInAgentService(db).get(companyId, "reflection-coach");
     expect(state).toMatchObject({
       status: "pending_approval",
@@ -752,7 +761,7 @@ describeEmbeddedPostgres("built-in agents", () => {
     });
 
     const pendingReconcile = await reconcileBuiltInAgentsOnStartup(db);
-    expect(pendingReconcile.pendingApprovals).toBe(2);
+    expect(pendingReconcile.pendingApprovals).toBe(1);
     const stillPending = await builtInAgentService(db).get(companyId, "reflection-coach");
     expect(stillPending).toMatchObject({
       status: "pending_approval",
@@ -788,7 +797,7 @@ describeEmbeddedPostgres("built-in agents", () => {
     const agentRows = await db.select().from(agents).where(eq(agents.companyId, companyId));
     expect(agentRows.filter((row) => readBuiltInAgentMarker(row.metadata)?.key === "reflection-coach")).toHaveLength(1);
     const approvalRows = await db.select().from(approvals).where(eq(approvals.companyId, companyId));
-    expect(approvalRows).toHaveLength(2);
+    expect(approvalRows).toHaveLength(1);
   });
 
   it("preserves Reflection Coach instruction drift on reconcile and restores it on reset", async () => {
@@ -1063,7 +1072,21 @@ describeEmbeddedPostgres("built-in agents", () => {
     const { olderId, newerId } = await seedLegacyDuplicateBriefs(affectedCompanyId);
     // A second company created after the affected one — previously skipped
     // entirely because the duplicate error escaped the reconciliation loop.
+    // Give it a drifted built-in row so we can prove reconcile still reached it.
     const healthyCompanyId = await seedCompany({ requireApproval: false });
+    const healthyBriefsId = randomUUID();
+    await db.insert(agents).values({
+      id: healthyBriefsId,
+      companyId: healthyCompanyId,
+      name: "Stale Briefs",
+      role: "engineer",
+      status: "idle",
+      adapterType: "codex_local",
+      adapterConfig: { model: "gpt-5.4" },
+      runtimeConfig: {},
+      permissions: {},
+      metadata: withBuiltInAgentMarker({}, { key: "briefs", featureKeys: ["briefs"] }),
+    });
 
     const result = await reconcileBuiltInAgentsOnStartup(db);
     expect(result.companyFailures).toBe(0);
@@ -1078,9 +1101,10 @@ describeEmbeddedPostgres("built-in agents", () => {
       ),
     ).toHaveLength(1);
 
-    // The company after the affected one still had its bundled agents provisioned.
-    const healthyCoach = await builtInAgentService(db).get(healthyCompanyId, "reflection-coach");
-    expect(healthyCoach.agentId).toBeTruthy();
+    // The company after the affected one was still reconciled (its drifted
+    // built-in row was repaired to stock) rather than skipped.
+    const [healthyBriefs] = await db.select().from(agents).where(eq(agents.id, healthyBriefsId));
+    expect(healthyBriefs?.name).toBe("Briefs Agent");
   });
 
   it("automatically materializes the Reflection Coach bundle without enabling background work", async () => {
@@ -1614,5 +1638,261 @@ describeEmbeddedPostgres("built-in agents", () => {
     expect((await instructionsSvc.readFile(reset.agent!, "AGENTS.md")).content).toContain("You are Reflection Coach");
     const [resetRoutine] = await db.select().from(routines).where(eq(routines.companyId, companyId));
     expect(resetRoutine?.title).toBe("Review recent agent trajectories for coaching proposals");
+  });
+
+  it("stops ensure and bundled skill-sync from rewriting paperclipSkillSync", async () => {
+    const companyId = await seedCompany({ requireApproval: false });
+    await agentService(db).create(companyId, {
+      name: "CEO",
+      role: "ceo",
+      status: "idle",
+      adapterType: "codex_local",
+      adapterConfig: { model: "gpt-5.4", apiKey: "do-not-copy" },
+      runtimeConfig: {},
+      permissions: {},
+    });
+    const builtIns = builtInAgentService(db);
+
+    async function revisionSources(agentId: string) {
+      const rows = await db
+        .select({
+          source: agentConfigRevisions.source,
+          changedKeys: agentConfigRevisions.changedKeys,
+        })
+        .from(agentConfigRevisions)
+        .where(eq(agentConfigRevisions.agentId, agentId));
+      return rows.map((row) => `${row.source}:${JSON.stringify(row.changedKeys)}`);
+    }
+
+    const converged = await builtIns.ensure(companyId, "reflection-coach");
+    const agentId = converged.agentId!;
+    expect(converged.agent?.adapterConfig).not.toMatchObject({ apiKey: "do-not-copy" });
+    const bundledSkill = readPaperclipSkillSyncPreference(
+      converged.agent!.adapterConfig as Record<string, unknown>,
+    ).desiredSkills.find((key) => key.includes("reflection-coach"));
+    expect(bundledSkill).toBeTruthy();
+
+    const afterConvergence = (await revisionSources(agentId)).length;
+
+    // Object entries with a null version and reversed key order are the same
+    // effective value as the canonical string list. Repeating ensure (which
+    // runs bundled skill-sync) must not record another revision.
+    const current = await agentService(db).getById(agentId);
+    const currentConfig = { ...(current!.adapterConfig as Record<string, unknown>) };
+    const desiredKeys = readPaperclipSkillSyncPreference(currentConfig).desiredSkills;
+    currentConfig.paperclipSkillSync = {
+      desiredSkills: [...desiredKeys].reverse().map((key) => ({ versionId: null, key })),
+    };
+    await db.update(agents).set({ adapterConfig: currentConfig }).where(eq(agents.id, agentId));
+
+    for (let cycle = 0; cycle < 5; cycle += 1) {
+      await builtIns.ensure(companyId, "reflection-coach");
+    }
+    const afterRepeats = await revisionSources(agentId);
+    expect(afterRepeats.length, afterRepeats.join("\n")).toBe(afterConvergence);
+
+    const beforeChange = afterRepeats.length;
+    const cleared = await agentService(db).getById(agentId);
+    const clearedConfig = { ...(cleared!.adapterConfig as Record<string, unknown>) };
+    clearedConfig.paperclipSkillSync = { desiredSkills: [] };
+    await db.update(agents).set({ adapterConfig: clearedConfig }).where(eq(agents.id, agentId));
+
+    await builtIns.ensure(companyId, "reflection-coach");
+    const afterChange = await revisionSources(agentId);
+    expect(afterChange.length, afterChange.join("\n")).toBe(beforeChange + 1);
+    expect(afterChange.at(-1)).toContain("built-in-bundle:skill-sync");
+
+    const restored = await agentService(db).getById(agentId);
+    expect(readPaperclipSkillSyncPreference(restored!.adapterConfig as Record<string, unknown>).desiredSkills)
+      .toContain(bundledSkill);
+
+    await builtIns.ensure(companyId, "reflection-coach");
+    const afterFollowUp = await revisionSources(agentId);
+    expect(afterFollowUp.length, afterFollowUp.join("\n")).toBe(beforeChange + 1);
+  });
+
+  it("does not keep another adapter's settings when a built-in switches adapter type", async () => {
+    const companyId = await seedCompany({ requireApproval: false });
+    const builtIns = builtInAgentService(db);
+    const first = await builtIns.ensure(companyId, "briefs", {
+      adapterType: "process",
+      adapterConfig: { command: "/bin/echo", paperclipSkillSync: { desiredSkills: ["company/kept-skill"] } },
+    });
+    expect(first.agent?.adapterConfig).toMatchObject({ command: "/bin/echo" });
+
+    const switched = await builtIns.ensure(companyId, "briefs", {
+      adapterType: "codex_local",
+      adapterConfig: { model: "gpt-5.4" },
+    });
+
+    expect(switched.agent?.adapterType).toBe("codex_local");
+    expect(switched.agent?.adapterConfig).toMatchObject({ model: "gpt-5.4" });
+    expect(switched.agent?.adapterConfig).not.toHaveProperty("command");
+    expect(
+      readPaperclipSkillSyncPreference(switched.agent!.adapterConfig as Record<string, unknown>).desiredSkills,
+    ).toContain("company/kept-skill");
+  });
+
+  it("converges with several skills without writing a revision on every ensure", async () => {
+    const companyId = await seedCompany({ requireApproval: false });
+    await agentService(db).create(companyId, {
+      name: "CEO",
+      role: "ceo",
+      status: "idle",
+      adapterType: "codex_local",
+      adapterConfig: { model: "gpt-5.4" },
+      runtimeConfig: {},
+      permissions: {},
+    });
+    const builtIns = builtInAgentService(db);
+    const converged = await builtIns.ensure(companyId, "reflection-coach");
+    const agentId = converged.agentId!;
+    const bundledSkill = readPaperclipSkillSyncPreference(
+      converged.agent!.adapterConfig as Record<string, unknown>,
+    ).desiredSkills.find((key) => key.includes("reflection-coach"))!;
+
+    // A caller that keeps sending the bundled skill first and a custom skill
+    // second must not make ensure and bundled skill-sync trade places forever.
+    const desiredInput = () => ({
+      adapterType: "codex_local",
+      adapterConfig: {
+        model: "gpt-5.4",
+        paperclipSkillSync: { desiredSkills: [bundledSkill, "aaa/custom-skill"] },
+      },
+    });
+    await builtIns.ensure(companyId, "reflection-coach", desiredInput());
+    const countRevisions = () => db
+      .select({ id: agentConfigRevisions.id })
+      .from(agentConfigRevisions)
+      .where(eq(agentConfigRevisions.agentId, agentId))
+      .then((rows) => rows.length);
+    const settled = await countRevisions();
+    for (let cycle = 0; cycle < 4; cycle += 1) {
+      await builtIns.ensure(companyId, "reflection-coach", desiredInput());
+    }
+    expect(await countRevisions()).toBe(settled);
+    const final = await agentService(db).getById(agentId);
+    expect(readPaperclipSkillSyncPreference(final!.adapterConfig as Record<string, unknown>).desiredSkills.sort())
+      .toEqual([bundledSkill, "aaa/custom-skill"].sort());
+  });
+  it("keeps the version pin of the bundled skill when ensure sends it as a plain key", async () => {
+    const companyId = await seedCompany({ requireApproval: false });
+    await agentService(db).create(companyId, {
+      name: "CEO",
+      role: "ceo",
+      status: "idle",
+      adapterType: "codex_local",
+      adapterConfig: { model: "gpt-5.4" },
+      runtimeConfig: {},
+      permissions: {},
+    });
+    const builtIns = builtInAgentService(db);
+    const converged = await builtIns.ensure(companyId, "reflection-coach");
+    const agentId = converged.agentId!;
+    const entriesOf = (agent: { adapterConfig: unknown }) =>
+      readPaperclipSkillSyncPreference(agent.adapterConfig as Record<string, unknown>).desiredSkillEntries;
+    const bundledKey = entriesOf(converged.agent!).find((entry) => entry.key.includes("reflection-coach"))!.key;
+    const skill = await companySkillService(db).getByKey(companyId, bundledKey);
+    const version = await companySkillService(db).createVersion(companyId, skill!.id, { label: "pin" });
+    const pinned = { key: bundledKey, versionId: version.id };
+    // The agent stores the bundled skill pinned to a concrete version.
+    const current = await agentService(db).getById(agentId);
+    await agentService(db).update(agentId, {
+      adapterConfig: writePaperclipSkillSyncPreference(
+        current!.adapterConfig as Record<string, unknown>,
+        [pinned],
+      ),
+    });
+
+    const desiredInput = () => ({
+      adapterType: "codex_local",
+      adapterConfig: {
+        model: "gpt-5.4",
+        paperclipSkillSync: { desiredSkills: [pinned.key] },
+      },
+    });
+    const countRevisions = () => db
+      .select({ id: agentConfigRevisions.id })
+      .from(agentConfigRevisions)
+      .where(eq(agentConfigRevisions.agentId, agentId))
+      .then((rows) => rows.length);
+    await builtIns.ensure(companyId, "reflection-coach", desiredInput());
+    const before = await countRevisions();
+    for (let cycle = 0; cycle < 3; cycle += 1) {
+      await builtIns.ensure(companyId, "reflection-coach", desiredInput());
+    }
+    expect(await countRevisions()).toBe(before);
+    const final = await agentService(db).getById(agentId);
+    expect(entriesOf(final!).find((entry) => entry.key === pinned.key)?.versionId).toBe(pinned.versionId);
+  });
+
+  it("honors an explicit null version so ensure can unpin a custom skill", async () => {
+    const companyId = await seedCompany({ requireApproval: false });
+    await agentService(db).create(companyId, {
+      name: "CEO",
+      role: "ceo",
+      status: "idle",
+      adapterType: "codex_local",
+      adapterConfig: { model: "gpt-5.4" },
+      runtimeConfig: {},
+      permissions: {},
+    });
+    const builtIns = builtInAgentService(db);
+    const converged = await builtIns.ensure(companyId, "reflection-coach");
+    const agentId = converged.agentId!;
+    const entriesOf = (agent: { adapterConfig: unknown }) =>
+      readPaperclipSkillSyncPreference(agent.adapterConfig as Record<string, unknown>).desiredSkillEntries;
+    const bundledKey = entriesOf(converged.agent!).find((entry) => entry.key.includes("reflection-coach"))!.key;
+    const customKey = "aaa/custom-skill";
+    const current = await agentService(db).getById(agentId);
+    await agentService(db).update(agentId, {
+      adapterConfig: writePaperclipSkillSyncPreference(
+        current!.adapterConfig as Record<string, unknown>,
+        [
+          { key: bundledKey, versionId: null },
+          { key: customKey, versionId: "pinned-version" },
+        ],
+      ),
+    });
+    const pinnedBefore = await agentService(db).getById(agentId);
+    expect(entriesOf(pinnedBefore!).find((entry) => entry.key === customKey)?.versionId).toBe("pinned-version");
+
+    // A plain string key only omits the pin, so the stored pin is kept.
+    await builtIns.ensure(companyId, "reflection-coach", {
+      adapterType: "codex_local",
+      adapterConfig: { model: "gpt-5.4", paperclipSkillSync: { desiredSkills: [bundledKey, customKey] } },
+    });
+    const keptPin = await agentService(db).getById(agentId);
+    expect(entriesOf(keptPin!).find((entry) => entry.key === customKey)?.versionId).toBe("pinned-version");
+
+    // An explicit null asks to track the latest content again.
+    await builtIns.ensure(companyId, "reflection-coach", {
+      adapterType: "codex_local",
+      adapterConfig: {
+        model: "gpt-5.4",
+        paperclipSkillSync: { desiredSkills: [bundledKey, { key: customKey, versionId: null }] },
+      },
+    });
+    const unpinned = await agentService(db).getById(agentId);
+    expect(entriesOf(unpinned!).find((entry) => entry.key === customKey)?.versionId).toBeNull();
+  });
+
+  it("replaces explicit settings for the same adapter without retaining removed credentials", async () => {
+    const companyId = await seedCompany({ requireApproval: false });
+    const builtIns = builtInAgentService(db);
+    const first = await builtIns.ensure(companyId, "briefs", {
+      adapterType: "codex_local",
+      adapterConfig: { model: "gpt-5.4", command: "old-command", apiKey: "synthetic-old-key", env: { OPENAI_API_KEY: "synthetic-old-env-key" }, paperclipSkillSync: { desiredSkills: ["company/kept-skill"] } },
+    });
+    expect(first.agent?.adapterConfig).toMatchObject({ command: "old-command", apiKey: "synthetic-old-key", env: { OPENAI_API_KEY: { type: "plain", value: "synthetic-old-env-key" } } });
+    const replaced = await builtIns.ensure(companyId, "briefs", {
+      adapterType: "codex_local", adapterConfig: { model: "gpt-5.4" },
+    });
+    expect(replaced.agent?.adapterConfig).not.toHaveProperty("command");
+    expect(replaced.agent?.adapterConfig).not.toHaveProperty("apiKey");
+    expect(replaced.agent?.adapterConfig).not.toHaveProperty("env");
+    expect(replaced.agent?.adapterConfig).toMatchObject({ model: "gpt-5.4" });
+    expect(readPaperclipSkillSyncPreference(replaced.agent!.adapterConfig as Record<string, unknown>).desiredSkills)
+      .toContain("company/kept-skill");
   });
 });

@@ -1,12 +1,15 @@
 import fs from "node:fs";
 import path from "node:path";
 import {
+  findStrandedPrevLinks,
   MANAGED_SHIM_MARKER,
+  manualCurrentRecoveryCommand,
   readInstallManifest,
   resolveInstallStorePaths,
   type InstallStorePaths,
 } from "../install-store.js";
 import type { CheckResult } from "./index.js";
+import { isSupportedNodeVersion, MINIMUM_NODE_VERSION } from "@paperclipai/shared/node-version";
 
 function pathContains(directory: string): boolean {
   const normalized = path.resolve(directory);
@@ -32,15 +35,48 @@ function hasManagedArtifacts(paths: InstallStorePaths): boolean {
   }
 }
 
+/**
+ * On Windows, flipCurrent renames `current` aside before renaming the new link
+ * in. A crash in between leaves no `current`, which also breaks the shim, so
+ * report that state by name and give the exact recovery.
+ */
+function strandedCurrentCheck(paths: InstallStorePaths): CheckResult | null {
+  const prevLinks = findStrandedPrevLinks(paths);
+  if (prevLinks.length === 0) return null;
+  let currentPresent = true;
+  try {
+    fs.lstatSync(paths.currentPath);
+  } catch {
+    currentPresent = false;
+  }
+  if (!currentPresent) {
+    return {
+      name: "Managed install current link",
+      status: "fail",
+      message: prevLinks.length === 1
+        ? `${paths.currentPath} is missing after an interrupted update; the last good link is ${prevLinks[0]}`
+        : `${paths.currentPath} is missing and ${prevLinks.length} previous links exist: ${prevLinks.join(", ")}`,
+      repairHint: prevLinks.length === 1
+        ? `Restore it: ${manualCurrentRecoveryCommand(prevLinks[0]!, paths)}`
+        : `Restore the correct one, e.g. ${manualCurrentRecoveryCommand(prevLinks[0]!, paths)}`,
+    };
+  }
+  return {
+    name: "Managed install current link",
+    status: "warn",
+    message: `Leftover previous link(s) from an earlier update: ${prevLinks.join(", ")}`,
+    repairHint: "Safe to remove; each is a link, not a payload. Removing it never deletes the payload it points to.",
+  };
+}
+
 export function nodeRuntimeCheck(): CheckResult {
-  const major = Number.parseInt(process.versions.node.split(".")[0] ?? "0", 10);
-  return major >= 20
+  return isSupportedNodeVersion(process.versions.node)
     ? { name: "Node.js runtime", status: "pass", message: `Node.js ${process.versions.node}` }
     : {
         name: "Node.js runtime",
         status: "fail",
         message: `Node.js ${process.versions.node} is unsupported`,
-        repairHint: "Install Node.js 20 or newer before installing or running Paperclip",
+        repairHint: `Install Node.js ${MINIMUM_NODE_VERSION} or newer before installing or running Paperclip`,
       };
 }
 
@@ -83,6 +119,8 @@ export function managedInstallChecks(
   }
 
   const results: CheckResult[] = [];
+  const stranded = strandedCurrentCheck(paths);
+  if (stranded) results.push(stranded);
   const payloadPath = path.resolve(manifest.payloadPath);
   const relativePayload = path.relative(paths.installsRoot, payloadPath);
   const payloadInStore = Boolean(relativePayload) && !relativePayload.startsWith("..") && !path.isAbsolute(relativePayload);

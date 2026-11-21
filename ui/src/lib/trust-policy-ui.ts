@@ -21,13 +21,18 @@ export const TRUST_PRESET_LABELS: Record<TrustPreset, string> = {
 };
 
 export const TRUST_PRESET_DESCRIPTIONS: Record<TrustPreset, string> = {
-  standard: "Company-visible collaboration. This is the default for normal work.",
+  standard: "Organization-visible collaboration. This is the default for normal work.",
   low_trust_review:
     "Contained for hostile or untrusted input. Narrow Paperclip API, quarantined output. Use for PR review and external-content triage.",
 };
 
 export function getTrustPreset(permissions: Partial<AgentPermissions> | null | undefined): TrustPreset {
-  return permissions?.trustPreset === LOW_TRUST_REVIEW_PRESET ? LOW_TRUST_REVIEW_PRESET : DEFAULT_TRUST_PRESET;
+  const policy = permissions?.authorizationPolicy;
+  const lowTrust = permissions?.trustPreset === LOW_TRUST_REVIEW_PRESET
+    || policy?.trustPreset === LOW_TRUST_REVIEW_PRESET
+    || policy?.reviewPreset?.id === LOW_TRUST_REVIEW_PRESET
+    || policy?.trustBoundary?.mode === LOW_TRUST_REVIEW_PRESET;
+  return lowTrust ? LOW_TRUST_REVIEW_PRESET : DEFAULT_TRUST_PRESET;
 }
 
 export function buildLowTrustReviewPolicy(

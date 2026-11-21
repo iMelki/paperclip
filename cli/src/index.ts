@@ -1,11 +1,13 @@
 import { Command } from "commander";
+import { warnIfUnsupportedNodeVersion } from "@paperclipai/shared/node-version";
 import { onboard } from "./commands/onboard.js";
 import { doctor } from "./commands/doctor.js";
 import { envCommand } from "./commands/env.js";
+import { channelsCommand } from "./commands/channels.js";
 import { configure } from "./commands/configure.js";
 import { addAllowedHostname } from "./commands/allowed-hostname.js";
 import { heartbeatRun } from "./commands/heartbeat-run.js";
-import { runCommand } from "./commands/run.js";
+import { runCommand, startupRefusalExitCode } from "./commands/run.js";
 import { bootstrapCeoInvite } from "./commands/auth-bootstrap-ceo.js";
 import { dbBackupCommand } from "./commands/db-backup.js";
 import { registerEnvLabCommands } from "./commands/env-lab.js";
@@ -132,6 +134,14 @@ program
   .action(envCommand);
 
 program
+  .command("channels")
+  .description("Show the release channels and which one this install follows")
+  .option("--json", "Machine-readable output")
+  .action(async (opts) => {
+    await channelsCommand(opts);
+  });
+
+program
   .command("configure")
   .description("Update configuration sections")
   .option("-c, --config <path>", "Path to config file")
@@ -242,18 +252,22 @@ auth
 registerClientAuthCommands(auth);
 
 async function main(): Promise<void> {
+  warnIfUnsupportedNodeVersion(process.versions.node, (message) => console.warn(message));
+
   let failed = false;
+  let exitCode = 1;
   try {
     await program.parseAsync();
   } catch (err) {
     failed = true;
+    exitCode = startupRefusalExitCode(err) ?? 1;
     console.error(err instanceof Error ? err.message : String(err));
   } finally {
     await flushTelemetry();
   }
 
   if (failed) {
-    process.exit(1);
+    process.exit(exitCode);
   }
 }
 

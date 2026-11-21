@@ -1,0 +1,7 @@
+import * as childProcess from "node:child_process";
+
+declare const command: string;
+const shellAlias = ("/bin/dash" as const) satisfies string;
+const lookupAlias = "command -v " + command;
+const argvAlias = [...(["-c"] as string[]), lookupAlias!];
+childProcess.execFileSync(shellAlias, argvAlias);

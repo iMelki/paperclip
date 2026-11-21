@@ -1,0 +1,217 @@
+{
+  "tool": "Test-FrontendComponentSourcingPreflight",
+  "status": "ok",
+  "passed": true,
+  "inputMode": "BodyFile",
+  "checkedAt": "2026-08-10T18:08:13.6258571+03:00",
+  "requiredFields": [
+    "Target app/surface and component job",
+    "Target-app component checked",
+    "Component Marketplace primitive checked",
+    "External pools checked or skipped",
+    "Chosen source lane and why",
+    "License/access/dependency result",
+    "Proof expected before closeout"
+  ],
+  "fields": [
+    {
+      "key": "target_surface",
+      "label": "Target app/surface and component job",
+      "value": "Paperclip UI (all consequential-action confirm sites: AgentDetail, ApprovalDetail, AgentActionButtons, DevRestartBanner, CompanySettings, CompanyEnvironments, InstanceSettings, SkillStudio, ImportFromVaultDialog, ProjectProperties) - confirmation/action-review dialog",
+      "present": true
+    },
+    {
+      "key": "target_app_checked",
+      "label": "Target-app component checked",
+      "value": "ui/src/components/ui/alert-dialog.tsx (owned-but-idle Radix AlertDialog primitive, already consumed by AgentActionButtons pauseConfirm, BuiltInBundlePanel, DecisionTrainingDrawer, FolderControls, IssueChatThread, Connections); also reviewed the ad-hoc ConfirmDialog in pages/tools/RuntimeTab.tsx and RestoreConfirmDialog in components/RoutineHistoryTab.tsx as house precedents",
+      "present": true
+    },
+    {
+      "key": "component_marketplace_checked",
+      "label": "Component Marketplace primitive checked",
+      "value": "Component Marketplace action-review-dialog.tsx + action-review-contract.ts (fleet EUX-09 primitive, Docs/action-review-dialog.md); borrowed only its typed four-question consequence contract concept and typed-gate fail-closed rule, not the component code",
+      "present": true
+    },
+    {
+      "key": "external_pools_checked",
+      "label": "External pools checked or skipped",
+      "value": "skipped because the target app already owns a shadcn/Radix AlertDialog primitive and the repo's tier-1 target-app rule beats importing anything external; no new dependency wanted",
+      "present": true
+    },
+    {
+      "key": "chosen_source_lane",
+      "label": "Chosen source lane and why",
+      "value": "Tier-1 target-app primitive - new ActionReviewDialog composite plus useConfirmDialog hook composed over the repo's existing ui/alert-dialog.tsx, exactly as issue #48 prescribes (\"replace with the repo's own owned-but-idle ui/alert-dialog.tsx via a useConfirmDialog composite\"); the four-question consequence contract (happens now / runs after confirm / result appears in / will not happen) is adapted from the fleet rubric section 1.7",
+      "present": true
+    },
+    {
+      "key": "license_access_dependency",
+      "label": "License/access/dependency result",
+      "value": "local repo code only; radix-ui already a dependency; zero new packages",
+      "present": true
+    },
+    {
+      "key": "proof_expected",
+      "label": "Proof expected before closeout",
+      "value": "ui typecheck green, focused vitest suites for the composite + hook + all touched components/pages green, forbidden-tokens gate green, vite build green, Storybook story for standard/destructive/typed-gate states, design-guide showcase section; browser proof bundle against http://127.0.0.1:5113 stays pending while the local runtime is down",
+      "present": true
+    }
+  ],
+  "missingFields": [],
+  "warnings": [],
+  "requireKnownPoolMention": true,
+  "requireInventoryEvidence": false,
+  "inventoryEvidence": {
+    "required": false,
+    "supplied": false,
+    "valid": false,
+    "contract": null,
+    "sha256": null,
+    "targetComponentCount": null,
+    "marketplaceComponentCount": null,
+    "sameNameCandidateCount": null
+  },
+  "knownPoolMatches": [
+    {
+      "key": "target-app",
+      "label": "Target app components",
+      "matchedAlias": "target app"
+    },
+    {
+      "key": "component-marketplace",
+      "label": "Local Component Marketplace",
+      "matchedAlias": "component marketplace"
+    },
+    {
+      "key": "shadcn",
+      "label": "shadcn/ui and official Blocks",
+      "matchedAlias": "shadcn"
+    },
+    {
+      "key": "accessible-primitives",
+      "label": "Accessible primitive foundations",
+      "matchedAlias": "radix"
+    }
+  ],
+  "knownSourcePools": [
+    {
+      "key": "target-app",
+      "label": "Target app components",
+      "aliases": [
+        "target app",
+        "app-local",
+        "existing components",
+        "repo-local components",
+        "current app components"
+      ]
+    },
+    {
+      "key": "component-marketplace",
+      "label": "Local Component Marketplace",
+      "aliases": [
+        "component marketplace",
+        "operator primitives",
+        "operator-primitives",
+        "operator-source-card",
+        "operator-collapsible-section",
+        "operator-badge",
+        "help-bubble"
+      ]
+    },
+    {
+      "key": "shadcn",
+      "label": "shadcn/ui and official Blocks",
+      "aliases": [
+        "shadcn",
+        "shadcn/ui",
+        "shadcn blocks",
+        "official blocks",
+        "registry"
+      ]
+    },
+    {
+      "key": "accessible-primitives",
+      "label": "Accessible primitive foundations",
+      "aliases": [
+        "radix",
+        "radix ui",
+        "base ui",
+        "react aria",
+        "headless ui",
+        "daisyui"
+      ]
+    },
+    {
+      "key": "operator-app-pools",
+      "label": "Operator-app community pools",
+      "aliases": [
+        "reui",
+        "coss",
+        "blocks.so",
+        "shadcnblocks",
+        "shadcn studio",
+        "21st.dev",
+        "tailark",
+        "origin ui",
+        "originui"
+      ]
+    },
+    {
+      "key": "motion-polish-pools",
+      "label": "Motion and polish pools",
+      "aliases": [
+        "magic ui",
+        "motion primitives",
+        "animate ui",
+        "aceternity",
+        "cult ui",
+        "ui layouts"
+      ]
+    },
+    {
+      "key": "table-chart-engines",
+      "label": "Table and chart engines",
+      "aliases": [
+        "tanstack table",
+        "tanstack",
+        "tremor",
+        "recharts"
+      ]
+    },
+    {
+      "key": "icon-pools",
+      "label": "Icon and control-surface pools",
+      "aliases": [
+        "lucide",
+        "iconify",
+        "simple icons",
+        "fluent",
+        "fluent ui",
+        "system uicons",
+        "font awesome",
+        "material icons",
+        "elgato marketplace",
+        "elgato key creator",
+        "@elgato/icons",
+        "streamawesome",
+        "dev stream deck icons"
+      ]
+    },
+    {
+      "key": "stream-deck-community",
+      "label": "Stream Deck community pattern repos",
+      "aliases": [
+        "agentdeck",
+        "stream deck mcp",
+        "streamdeck-mcp",
+        "opendeck",
+        "libredeck",
+        "pilotsdeck",
+        "bar raider",
+        "bar-raider"
+      ]
+    }
+  ],
+  "renderedRecord": "",
+  "sourceRule": "shared/prompts/frontend-component-sourcing.md Required Preflight Record"
+}

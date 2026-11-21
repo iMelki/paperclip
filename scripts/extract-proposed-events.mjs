@@ -2,7 +2,7 @@
 import { readFileSync } from "node:fs";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
-import ts from "typescript";
+import ts from "typescript-compiler-api";
 
 export const PROPOSED_TELEMETRY_SCHEMA_VERSION = "proposed-telemetry-extractor.v2";
 

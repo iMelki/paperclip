@@ -204,13 +204,17 @@ test("keeps authoritative parent and ancestor context from task markdown", () =>
 
 test("renders safe Paperclip API examples from environment variables with multiline update preservation", () => {
   const prompt = buildPrompt(baseContext(), {
-    paperclipApiUrl: "http://paperclip.local/api",
+    paperclipApiUrl: "http://127.0.0.1:3101/api",
   });
 
   expect(prompt).toContain("Use `$PAPERCLIP_API_URL`, `$PAPERCLIP_API_KEY`, and `$PAPERCLIP_RUN_ID`");
-  expect(prompt).toContain("Displayed command logs may redact secrets");
-  expect(prompt).toContain('-H "Authorization: Bearer $PAPERCLIP_API_KEY"');
-  expect(prompt).toContain('-H "X-Paperclip-Run-Id: $PAPERCLIP_RUN_ID"');
+  // The run key must never be expanded onto a command line (the arguments are visible to other
+  // processes); the documented call reads both headers from a private file written with printf.
+  expect(prompt).not.toContain('-H "Authorization: Bearer $PAPERCLIP_API_KEY"');
+  expect(prompt).not.toMatch(/curl[^\n]*\$PAPERCLIP_API_KEY/);
+  expect(prompt).toContain("printf 'Authorization: Bearer %s\\nX-Paperclip-Run-Id: %s\\n' \"$PAPERCLIP_API_KEY\" \"$PAPERCLIP_RUN_ID\" > \"$hdr\"");
+  expect(prompt).toContain('-H @"$hdr"');
+  expect(prompt).toContain('rm -f "$hdr"');
   expect(prompt).toContain("body=$(cat <<'MD'");
   expect(prompt).toContain("jq -n --arg status done --arg comment \"$body\"");
   expect(prompt).toContain("--data-binary @-");
@@ -219,7 +223,7 @@ test("renders safe Paperclip API examples from environment variables with multil
 
 test("preserves custom prompt templates while exposing runtime and wake variables", () => {
   const prompt = buildPrompt(baseContext(), {
-    paperclipApiUrl: "http://paperclip.local/api",
+    paperclipApiUrl: "http://127.0.0.1:3101/api",
     promptTemplate: [
       "CUSTOM TEMPLATE",
       "agent={{agent.name}}",
@@ -235,7 +239,7 @@ test("preserves custom prompt templates while exposing runtime and wake variable
 
   expect(prompt).toContain("CUSTOM TEMPLATE");
   expect(prompt).toContain("agent=Hermes Engineer");
-  expect(prompt).toContain("api=http://paperclip.local/api");
+  expect(prompt).toContain("api=http://127.0.0.1:3101/api");
   expect(prompt).toContain("keyEnv=PAPERCLIP_API_KEY");
   expect(prompt).toContain("runEnv=PAPERCLIP_RUN_ID");
   expect(prompt).toContain("wakePrompt=## Paperclip Wake Payload");

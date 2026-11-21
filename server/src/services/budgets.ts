@@ -7,6 +7,7 @@ import {
   budgetPolicies,
   companies,
   costEvents,
+  heartbeatRuns,
   projects,
 } from "@paperclipai/db";
 import type {
@@ -44,6 +45,52 @@ export type BudgetEnforcementScope = {
 export type BudgetServiceHooks = {
   cancelWorkForScope?: (scope: BudgetEnforcementScope) => Promise<void>;
 };
+
+/**
+ * Newest run of this agent whose usage could not be measured (adapter set
+ * `resultJson.usage_status = "unknown"`) and that no later measured run
+ * (`usage_status = "reported"`) of the same session has recovered. Such a run
+ * may have spent tokens that were never recorded, so a budget must not count
+ * it as free. Recovery needs a later reported run whose final session
+ * (session_id_after) equals the unknown run's session AND whose cost event is
+ * already recorded (the report is persisted before its cost event, so a bare
+ * report is not proof the budget includes the usage). A run with no recorded
+ * session has nothing to match, so it stays blocking until reconciled.
+ */
+async function findUnrecoveredUnmeasuredRun(db: Db, companyId: string, agentId: string) {
+  const runTime = sql`coalesce(${heartbeatRuns.finishedAt}, ${heartbeatRuns.createdAt})`;
+  const unknownSession = sql`coalesce(${heartbeatRuns.sessionIdAfter}, ${heartbeatRuns.sessionIdBefore})`;
+  return db
+    .select({
+      id: heartbeatRuns.id,
+      reason: sql<string | null>`${heartbeatRuns.resultJson}->>'usage_unavailable_reason'`,
+    })
+    .from(heartbeatRuns)
+    .where(
+      and(
+        eq(heartbeatRuns.companyId, companyId),
+        eq(heartbeatRuns.agentId, agentId),
+        sql`${heartbeatRuns.resultJson}->>'usage_status' = 'unknown'`,
+        sql`not exists (
+          select 1 from heartbeat_runs r
+          where r.agent_id = ${heartbeatRuns.agentId}
+            and r.company_id = ${heartbeatRuns.companyId}
+            and r.result_json->>'usage_status' = 'reported'
+            and coalesce(r.finished_at, r.created_at) > ${runTime}
+            and ${unknownSession} = r.session_id_after
+            and exists (
+              select 1 from cost_events ce
+              where ce.heartbeat_run_id = r.id
+                and ce.company_id = r.company_id
+                and ce.agent_id = r.agent_id
+            )
+        )`,
+      ),
+    )
+    .orderBy(desc(runTime))
+    .limit(1)
+    .then((rows) => rows[0] ?? null);
+}
 
 function currentUtcMonthWindow(now = new Date()) {
   const year = now.getUTCFullYear();
@@ -809,6 +856,23 @@ export function budgetService(db: Db, hooks: BudgetServiceHooks = {}) {
             scopeId: agentId,
             scopeName: agent.name,
             reason: "Agent cannot start because its budget hard-stop is still exceeded.",
+          };
+        }
+      }
+
+      const hasHardStop = (policy: typeof agentPolicy) =>
+        Boolean(policy && policy.hardStopEnabled && policy.amount > 0);
+      if (hasHardStop(agentPolicy) || hasHardStop(companyPolicy)) {
+        const unmeasured = await findUnrecoveredUnmeasuredRun(db, companyId, agentId);
+        if (unmeasured) {
+          return {
+            scopeType: "agent" as const,
+            scopeId: agentId,
+            scopeName: agent.name,
+            reason:
+              `Agent cannot start because run ${unmeasured.id} has unmeasured usage` +
+              `${unmeasured.reason ? ` (${unmeasured.reason})` : ""}` +
+              " and its budget hard-stop cannot rule out an overspend until a later measured run of the same session recovers it.",
           };
         }
       }

@@ -101,6 +101,19 @@ describe("redaction", () => {
     expect(result).not.toContain(jwt);
   });
 
+  it.each([
+    ['{"browserCode":"ABCD123456"}'],
+    ['{"browser_code":"ABCD123456"}'],
+    ['{"browser-code":"ABCD123456"}'],
+    ['{\\"browserCode\\":\\"ABCD123456\\"}'],
+    ['{"loginUrl":"ABCD123456"}'],
+  ])("redacts a standalone browser login code in %s", (input) => {
+    const result = redactSensitiveText(input);
+
+    expect(result).toContain(REDACTED_EVENT_VALUE);
+    expect(result).not.toContain("ABCD123456");
+  });
+
   it("redacts inline secrets from command metadata without hiding safe command text", () => {
     const input = {
       command: "custom-acp --token ghp_example_secret env OPENAI_API_KEY=sk-live-example custom-acp",

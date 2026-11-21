@@ -36,7 +36,11 @@ function normalize(raw: unknown): Record<string, unknown> | null {
     readString(record.agentId) ??
     readString(record.sessionId);
   if (!cursorAgentId) return null;
-  const latestRunId = readString(record.latestRunId) ?? readString(record.runId);
+  const timedOutRunId = readString(record.timedOutRunId);
+  const storedLatestRunId = readString(record.latestRunId) ?? readString(record.runId);
+  const latestRunId = storedLatestRunId && storedLatestRunId !== timedOutRunId
+    ? storedLatestRunId
+    : null;
   const runtime = readString(record.runtime) ?? "cloud";
   const envType = readString(record.envType);
   const envName = readString(record.envName);
@@ -44,6 +48,7 @@ function normalize(raw: unknown): Record<string, unknown> | null {
   return {
     cursorAgentId,
     ...(latestRunId ? { latestRunId } : {}),
+    ...(timedOutRunId ? { timedOutRunId } : {}),
     runtime,
     ...(envType ? { envType } : {}),
     ...(envName ? { envName } : {}),

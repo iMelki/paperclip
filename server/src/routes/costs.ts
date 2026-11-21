@@ -120,13 +120,13 @@ export function costRoutes(
       return;
     }
 
-    const event = await costs.createEvent(companyId, {
+    const { event, created } = await costs.createEventWithOutcome(companyId, {
       ...req.body,
       occurredAt: new Date(req.body.occurredAt),
     });
 
     const actor = getActorInfo(req);
-    await logActivity(db, {
+    if (created) await logActivity(db, {
       companyId,
       actorType: actor.actorType,
       actorId: actor.actorId,
@@ -137,7 +137,7 @@ export function costRoutes(
       details: { costCents: event.costCents, model: event.model },
     });
 
-    res.status(201).json(event);
+    res.status(created ? 201 : 200).json(event);
   });
 
   router.post("/companies/:companyId/finance-events", validate(createFinanceEventSchema), async (req, res) => {

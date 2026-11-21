@@ -1,0 +1,17 @@
+✔ start rejects the original ENOENT spawn error (2.3622ms)
+✔ start rejects the original EACCES spawn error (0.8101ms)
+✔ start rejects nonzero exit with diagnostics (1.0154ms)
+✔ stop rejects the original ENOENT spawn error (0.8771ms)
+✔ stop rejects the original EACCES spawn error (0.6362ms)
+✔ stop rejects nonzero exit with diagnostics (1.4777ms)
+✔ start preserves paths, quotes each server argument, and recovers the server PID (1.5141ms)
+✔ stop waits for pg_ctl fast shutdown instead of the old child exit (0.6695ms)
+✔ POSIX stop still signals and waits for the server (0.7982ms)
+ℹ tests 9
+ℹ suites 0
+ℹ pass 9
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 26.1542

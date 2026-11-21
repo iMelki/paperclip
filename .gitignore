@@ -64,6 +64,7 @@ tests/e2e/test-results/
 tests/e2e/playwright-report/
 tests/release-smoke/test-results/
 tests/release-smoke/playwright-report/
+test-results/issue-detail-perf/
 tests/storybook-visual/.cache/
 tests/storybook-visual/.snapshots/
 tests/storybook-visual/baseline-review/
@@ -73,3 +74,8 @@ tests/storybook-visual/playwright-report/
 .superpowers/
 .claude/worktrees/
 .herenow
+
+# Local agent/operator run logs. Fleet convention (agent-settings, projects-ops,
+# command-center, mission-control-kanban). Untracked logs here break pre-push
+# pristine-worktree checks and can exceed Repo Doctor per-file size limits.
+/.local-logs/

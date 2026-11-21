@@ -5,11 +5,12 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import * as p from "@clack/prompts";
 import pc from "picocolors";
+import { isSupportedNodeVersion, MINIMUM_NODE_VERSION } from "@paperclipai/shared/node-version";
 import {
   addManagedPathBlock,
   assertManagedShimWritable,
   buildNextManifest,
-  flipCurrentAtomic,
+  flipCurrent,
   payloadPathFor,
   pruneInstallPayloads,
   readInstallManifest,
@@ -84,9 +85,8 @@ export function resolveGitInstallWorkspacePackages(checkoutPath: string): Releas
 }
 
 function assertSupportedNodeVersion(): void {
-  const major = Number(process.versions.node.split(".")[0]);
-  if (!Number.isFinite(major) || major < 20) {
-    throw new Error(`Managed installs require Node.js 20 or newer (found ${process.version}).`);
+  if (!isSupportedNodeVersion(process.versions.node)) {
+    throw new Error(`Managed installs require Node.js ${MINIMUM_NODE_VERSION} or newer (found ${process.version}).`);
   }
 }
 
@@ -373,8 +373,8 @@ export async function installCommand(
       const record: InstallRecord = { source: "git", version: payload.version, channel: "pinned", repo: gitRequest.repo, ref: gitRequest.ref, sha, payloadPath: payload.payloadPath, installedAt: (dependencies.now?.() ?? new Date()).toISOString() };
       const nextManifest = buildNextManifest(record, currentManifest);
       const oldTarget = fs.existsSync(paths.currentPath) ? fs.readlinkSync(paths.currentPath) : null;
-      flipCurrentAtomic(payload.payloadPath, paths);
-      try { writeInstallManifestAtomic(nextManifest, paths); } catch (error) { if (oldTarget) flipCurrentAtomic(path.resolve(paths.cliRoot, oldTarget), paths); else fs.rmSync(paths.currentPath, { force: true }); throw error; }
+      flipCurrent(payload.payloadPath, paths);
+      try { writeInstallManifestAtomic(nextManifest, paths); } catch (error) { if (oldTarget) flipCurrent(path.resolve(paths.cliRoot, oldTarget), paths); else fs.rmSync(paths.currentPath, { force: true }); throw error; }
       writeManagedShim(paths); pruneInstallPayloads(nextManifest, paths); return payload;
     }, paths);
     await ensureShimOnPath(options);
@@ -400,11 +400,11 @@ export async function installCommand(
     };
     const nextManifest = buildNextManifest(record, currentManifest);
     const oldTarget = fs.existsSync(paths.currentPath) ? fs.readlinkSync(paths.currentPath) : null;
-    flipCurrentAtomic(payload.payloadPath, paths);
+    flipCurrent(payload.payloadPath, paths);
     try {
       writeInstallManifestAtomic(nextManifest, paths);
     } catch (error) {
-      if (oldTarget) flipCurrentAtomic(path.resolve(paths.cliRoot, oldTarget), paths);
+      if (oldTarget) flipCurrent(path.resolve(paths.cliRoot, oldTarget), paths);
       else fs.rmSync(paths.currentPath, { force: true });
       throw error;
     }

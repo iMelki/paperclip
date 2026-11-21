@@ -196,9 +196,12 @@ function registerModuleMocks() {
 }
 
 async function createApp(actor: Record<string, unknown>) {
+  // Load through the mocked module graph. importActual skips doMock, so after
+  // resetModules the route can bind the real telemetry client and never call
+  // the skill-import spy.
   const [{ companySkillRoutes }, { errorHandler }] = await Promise.all([
-    vi.importActual<typeof import("../routes/company-skills.js")>("../routes/company-skills.js"),
-    vi.importActual<typeof import("../middleware/index.js")>("../middleware/index.js"),
+    import("../routes/company-skills.js"),
+    import("../middleware/index.js"),
   ]);
   const app = express();
   app.use(express.json());

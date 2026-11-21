@@ -3,7 +3,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { runChildProcess } from "@paperclipai/adapter-utils/server-utils";
-import { testEnvironment } from "@paperclipai/adapter-cursor-local/server";
+import { execute, testEnvironment } from "@paperclipai/adapter-cursor-local/server";
 
 async function writeFakeAgentCommand(binDir: string, argsCapturePath: string): Promise<string> {
   const commandPath = path.join(binDir, "agent");
@@ -139,7 +139,7 @@ describe("cursor environment diagnostics", () => {
     await fs.rm(path.dirname(cwd), { recursive: true, force: true });
   });
 
-  it("adds --yolo to hello probe args by default", async () => {
+  it("does not add --yolo or -f to hello probe args when extraArgs are empty", async () => {
     const root = path.join(
       os.tmpdir(),
       `paperclip-cursor-local-probe-${Date.now()}-${Math.random().toString(16).slice(2)}`,
@@ -166,11 +166,83 @@ describe("cursor environment diagnostics", () => {
 
     expect(result.status).toBe("pass");
     const args = JSON.parse(await fs.readFile(argsCapturePath, "utf8")) as string[];
-    expect(args).toContain("--yolo");
+    expect(args).toContain("--trust");
+    expect(args).not.toContain("--yolo");
+    expect(args).not.toContain("-f");
     await fs.rm(root, { recursive: true, force: true });
   });
 
-  it("does not auto-add --yolo when extraArgs already bypass trust", async () => {
+  it("does not add --yolo or -f to execute args when extraArgs are empty", async () => {
+    const root = path.join(
+      os.tmpdir(),
+      `paperclip-cursor-local-execute-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+    );
+    const binDir = path.join(root, "bin");
+    const cwd = path.join(root, "workspace");
+    const homeDir = path.join(root, "home");
+    const argsCapturePath = path.join(root, "args.json");
+    await fs.mkdir(binDir, { recursive: true });
+    await fs.mkdir(cwd, { recursive: true });
+    await fs.mkdir(homeDir, { recursive: true });
+    await writeFakeAgentCommand(binDir, argsCapturePath);
+
+    const previousHome = process.env.HOME;
+    process.env.HOME = homeDir;
+
+    let commandArgs: string[] = [];
+    let commandNotes: string[] = [];
+    try {
+      const result = await execute({
+        runId: "run-cursor-trust-1",
+        agent: {
+          id: "agent-1",
+          companyId: "company-1",
+          name: "Cursor",
+          adapterType: "cursor",
+          adapterConfig: {},
+        },
+        runtime: {
+          sessionId: null,
+          sessionParams: null,
+          sessionDisplayId: null,
+          taskKey: null,
+        },
+        config: {
+          command: "agent",
+          cwd,
+          promptTemplate: "Respond with hello.",
+          env: {
+            CURSOR_API_KEY: "test-key",
+            PAPERCLIP_TEST_ARGS_PATH: argsCapturePath,
+            PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
+          },
+        },
+        context: {},
+        onLog: async () => {},
+        onMeta: async (meta) => {
+          commandArgs = Array.isArray(meta.commandArgs) ? meta.commandArgs : [];
+          commandNotes = Array.isArray(meta.commandNotes) ? meta.commandNotes : [];
+        },
+      });
+
+      expect(result.exitCode).toBe(0);
+      expect(commandArgs).toContain("--trust");
+      expect(commandArgs).not.toContain("--yolo");
+      expect(commandArgs).not.toContain("-f");
+      expect(commandNotes.some((note) => note.includes("Auto-added --trust"))).toBe(true);
+      expect(commandNotes.some((note) => note.includes("--yolo"))).toBe(false);
+      const args = JSON.parse(await fs.readFile(argsCapturePath, "utf8")) as string[];
+      expect(args).toContain("--trust");
+      expect(args).not.toContain("--yolo");
+      expect(args).not.toContain("-f");
+    } finally {
+      if (previousHome === undefined) delete process.env.HOME;
+      else process.env.HOME = previousHome;
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("does not auto-add --trust when extraArgs already bypass trust", async () => {
     const root = path.join(
       os.tmpdir(),
       `paperclip-cursor-local-probe-extra-${Date.now()}-${Math.random().toString(16).slice(2)}`,
@@ -200,6 +272,40 @@ describe("cursor environment diagnostics", () => {
     const args = JSON.parse(await fs.readFile(argsCapturePath, "utf8")) as string[];
     expect(args).toContain("--yolo");
     expect(args).not.toContain("--trust");
+    await fs.rm(root, { recursive: true, force: true });
+  });
+
+  it("does not auto-add a second --trust when extraArgs already include --trust", async () => {
+    const root = path.join(
+      os.tmpdir(),
+      `paperclip-cursor-local-probe-trust-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+    );
+    const binDir = path.join(root, "bin");
+    const cwd = path.join(root, "workspace");
+    const argsCapturePath = path.join(root, "args.json");
+    await fs.mkdir(binDir, { recursive: true });
+    await writeFakeAgentCommand(binDir, argsCapturePath);
+
+    const result = await testEnvironment({
+      companyId: "company-1",
+      adapterType: "cursor",
+      config: {
+        command: "agent",
+        cwd,
+        extraArgs: ["--trust"],
+        env: {
+          CURSOR_API_KEY: "test-key",
+          PAPERCLIP_TEST_ARGS_PATH: argsCapturePath,
+          PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
+        },
+      },
+    });
+
+    expect(result.status).toBe("pass");
+    const args = JSON.parse(await fs.readFile(argsCapturePath, "utf8")) as string[];
+    expect(args.filter((arg) => arg === "--trust")).toHaveLength(1);
+    expect(args).not.toContain("--yolo");
+    expect(args).not.toContain("-f");
     await fs.rm(root, { recursive: true, force: true });
   });
 

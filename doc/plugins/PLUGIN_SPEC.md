@@ -245,10 +245,10 @@ This on-disk model is the reason the current implementation expects a persistent
 Paperclip should add CLI commands:
 
 - `pnpm paperclipai plugin list`
-- `pnpm paperclipai plugin install <package[@version]>`
-- `pnpm paperclipai plugin uninstall <plugin-id>`
-- `pnpm paperclipai plugin upgrade <plugin-id> [version]`
-- `pnpm paperclipai plugin doctor <plugin-id>`
+- `npx paperclipai plugin install <package[@version]>`
+- `npx paperclipai plugin uninstall <plugin-id>`
+- `npx paperclipai plugin upgrade <plugin-id> [version]`
+- `npx paperclipai plugin doctor <plugin-id>`
 
 These commands are instance-level operations.
 
@@ -395,6 +395,11 @@ Rules:
   - `projects` → `projects.managed`
   - `routines` → `routines.managed`
   - `skills` → `skills.managed`
+- an `environmentDrivers` entry with `kind: "sandbox_provider"` declares sandbox
+  capabilities through `sandboxCapabilities`. See the
+  [sandbox provider capability contract](./SANDBOX_PROVIDER_CAPABILITIES.md) for
+  the supported keys, the worker-method prerequisites, and the narrowing and
+  failure rules.
 
 ## 11. Agent Tools
 
@@ -490,6 +495,7 @@ If a worker fails:
 - keep the rest of the instance running
 - retry start with bounded backoff
 - do not drop other plugins or core services
+- a bundled plugin (shipped with the release image) that is still `error` at the next server boot is moved back to `ready` once per boot, so the startup loader gets a fresh activation attempt; an operator-`disabled` plugin is never touched
 
 ## 12.5 Graceful Shutdown Policy
 
@@ -586,6 +592,44 @@ The host provides:
 - trigger source
 - run id
 - schedule metadata
+
+Jobs may opt into `dispatchScope: "company"` in their manifest declaration.
+The host then resolves authorized companies from that plugin's stored config
+rows and dispatches sequentially once per company. Each execution has its own
+`plugin_job_runs.company_id` and run ID. The trusted RPC envelope's `companyId`
+matches `job.companyId`; the worker echoes the host-issued invocation ID for
+nested calls. The plugin handler must process only the supplied company and
+must await its work. Plugin mappings, state and company lists cannot authorize
+additional targets. Missing/invalid scope declarations or failed/empty company
+configuration resolution never fall back to unrestricted dispatch.
+
+Omitting `dispatchScope` (or specifying `instance`) preserves the existing
+single-dispatch contract below. An opted-in plugin requires a host supporting
+this contract; it should reject a missing company context rather than fan out
+itself on an older host. Company retry dispatch identifies the prior failed or
+cancelled run; the host reloads that run's original company and revalidates the
+current configuration. It does not replay other companies. No retry API/UI is
+introduced by this contract; existing instance-admin manual-trigger access stays
+unchanged and its response adds a `runs` array while retaining the first `runId`.
+
+The scheduler records ordinary company failures independently. On RPC timeout,
+worker loss, or batch RPC-budget exhaustion, remaining executions are explicitly
+cancelled/deferred rather than silently skipped or overlapped. The shared time
+budget applies to the RPC-dispatch batch; database/config-resolution operations
+retain their own underlying database timeout policy. It is not a process-kill or
+whole-scheduler deadline. Unregistering revokes the exact batch owner before
+asynchronous cleanup; late completion cannot resume that batch or rewrite a
+cancelled run. Re-registering does not revive old owners.
+
+For a job without an explicit company envelope, the worker manager registers a
+company invocation when the plugin has exactly one host-authorized configured
+company. Nested `config.get()` calls can then resolve that company's config,
+and explicit reads for another company remain denied. Zero or multiple configured
+companies leave the job unscoped; the host does not choose a company from plugin
+state or an instance-wide company list. This legacy fallback does not itself
+populate `PluginJobContext.companyId` or fan out; use the opt-in contract above
+for that behavior. Job handlers must await
+their scoped work before returning, because the invocation ends with the RPC.
 
 ### 13.7 `handleWebhook`
 
@@ -1008,6 +1052,10 @@ Job rules:
 4. Every job run is recorded in Postgres.
 5. Failed jobs are retryable.
 6. For recurring business workflows that should create visible Paperclip work, prefer managed routines and managed resources over jobs. Jobs remain useful for private plugin-runtime maintenance tasks.
+7. A job may declare `scope: "company" | "instance"`. Undeclared jobs are `"instance"`.
+   - `"instance"` jobs run once per trigger, with one run record. They get a company scope only when exactly one company has configured the plugin.
+   - `"company"` jobs run once per company that has configured the plugin, sequentially in sorted company order. Each company run has its own run record (with that `companyId`), its own `runId`, `job.companyId`, and that company's invocation scope. With no configured company the job runs once unscoped.
+   - A manual trigger of a `"company"` job may name one configured `companyId` to run or retry only that company.
 
 ## 18. Webhooks
 
@@ -1554,7 +1602,7 @@ When a plugin is uninstalled, the host must handle plugin-owned data explicitly.
 3. Plugin-owned data (`plugin_state`, `plugin_entities`, `plugin_jobs`, `plugin_job_runs`, `plugin_webhook_deliveries`, `plugin_config`) is retained for a configurable grace period (default: 30 days).
 4. During the grace period, the operator can reinstall the same plugin and recover its state.
 5. After the grace period, the host purges all plugin-owned data for the uninstalled plugin.
-6. The operator may force-purge immediately via CLI: `pnpm paperclipai plugin purge <plugin-id>`.
+6. The operator may force-purge immediately via CLI: `npx paperclipai plugin purge <plugin-id>`.
 
 ### 25.2 Upgrade Data Considerations
 
@@ -1718,7 +1766,7 @@ expect(data.syncedCount).toBeGreaterThan(0);
 
 For developing a plugin against a running Paperclip instance:
 
-- The operator installs the plugin from a local path: `pnpm paperclipai plugin install ./path/to/plugin`
+- The operator installs the plugin from a local path: `npx paperclipai plugin install ./path/to/plugin`
 - The host watches the plugin directory for changes and restarts the worker on rebuild.
 - `devUiUrl` in plugin config can point to a local Vite dev server for UI hot-reload.
 - The plugin settings page shows real-time logs from the worker for debugging.

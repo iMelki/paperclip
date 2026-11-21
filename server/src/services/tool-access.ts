@@ -1,6 +1,11 @@
+import { isDeepStrictEqual } from "node:util";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
+import type { ScheduledBoardAccess, ScheduledGitHubPageInput } from "./github-project-scheduled-contract.js";
 import { readFileSync } from "node:fs";
-import { and, asc, desc, eq, gte, inArray, lt, max, ne, sql } from "drizzle-orm";
+import { exactTimestampRevision } from "./exact-timestamp-revision.js";
+import { exactConnectionUpdatedAtPredicate, toolConnectionSnapshotColumns } from "./tool-connection-snapshot.js";
+import { lockToolConnectionMutation } from "./tool-connection-mutation-lock.js";
+import { and, asc, desc, eq, gte, inArray, isNull, lt, max, ne, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
   activityLog,
@@ -10,6 +15,7 @@ import {
   authUsers,
   companySecretBindings,
   companySecrets,
+  companyMemberships,
   heartbeatRuns,
   issues,
   issueThreadInteractions,
@@ -110,6 +116,7 @@ import type {
 import { CLASS3_STATIC_LEASE_ALLOWLIST, credentialConfigPath, getAvailableConnectionMethod, getConnectableAppDefinition, isToolConnectionAttentionHealth, recommendedDefaultsForApp } from "@paperclipai/shared";
 import { badRequest, conflict, forbidden, HttpError, notFound, unprocessable } from "../errors.js";
 import { logActivity } from "./activity-log.js";
+import { logger } from "../middleware/logger.js";
 import { mcpHttpRequestHeaders, parseMcpHttpResponseBody } from "./mcp-http.js";
 import {
   buildRemoteMcpHeaders,
@@ -124,11 +131,23 @@ import { readSignedToolArgumentsPayload } from "./tool-content-guards.js";
 import { narrowestScopeBindings, profileIdsInBindingOrder } from "./tool-profile-binding-precedence.js";
 import { recordToolRuntimeAuditWriteFailure, TOOL_RUNTIME_AUDIT_WRITE_FAILURE_METRIC } from "./tool-runtime-metrics.js";
 import { createToolRuntimeSupervisor, ToolRuntimeSupervisorError } from "./tool-runtime-supervisor.js";
+import { createGitHubOAuthProviderConfig, GITHUB_OAUTH_METHOD_KEY, githubOAuthRequestedScopes, githubPrivateRepoAccessOptIn, githubStoredPrivateRepoAccessOptIn,
+  getGitHubOAuthConnectionMethod } from "@paperclipai/shared/github-oauth";
+import { bindGitHubOAuthState, isBoundGitHubOAuthState, verifyGitHubOAuthState } from "./github-oauth-state.js";
+import { isNativeGitHubOAuthConnection, githubOAuthToolDescriptors, getGitHubOAuthToolDescriptor,
+  verifyGitHubOAuthAccount, verifyGitHubOAuthAuthorization,
+  executeGitHubOAuthTool as dispatchGitHubOAuthTool } from "./github-oauth-transport.js";
+import { readGitHubOAuthProjectPage, validateGitHubProjectPageInput, githubProjectAuthorizationDigest,
+  githubProjectConsentDigest, parseGitHubProjectBoardUrl,
+  type GitHubProjectPageInput } from "./github-oauth-project-page.js";
 
 type ActorInfo = {
   actorType?: "agent" | "user" | "system" | "plugin";
   actorId?: string | null;
   sessionId?: string | null;
+};
+type GitHubCredentialRevision = {
+  current: typeof toolConnections.$inferSelect; secretId: string; latestVersion: number;
 };
 
 const ACTIVE_BROKER_RUN_STATUSES = new Set(["running"]);
@@ -467,14 +486,20 @@ export function googleSheetsRobotEmailFromEnv(
   return { available: false, reason: "Google Sheets is not available on this instance yet." };
 }
 
-function connectionMethodFor(app: AppDefinition) {
-  const method = getAvailableConnectionMethod(app);
+function connectionMethodFor(app: AppDefinition, methodKey?: unknown) {
+  const method = methodKey === undefined
+    ? getAvailableConnectionMethod(app)
+    : typeof methodKey === "string"
+      ? getAvailableConnectionMethod({ ...app, methods: app.methods.filter((candidate) => candidate.key === methodKey) })
+      : null;
   if (!method) throw unprocessable("This app does not have an available connection method");
+  if (app.slug === "github" && method.key === GITHUB_OAUTH_METHOD_KEY
+    && !getGitHubOAuthConnectionMethod(app)) throw unprocessable("GitHub OAuth definition is invalid");
   return method;
 }
 
-function credentialFieldsFor(app: AppDefinition) {
-  const method = connectionMethodFor(app);
+function credentialFieldsFor(app: AppDefinition, methodKey?: unknown) {
+  const method = connectionMethodFor(app, methodKey);
   return (method.credentialFields ?? []).map((field) => ({
     label: field.label,
     configPath: credentialConfigPath(field),
@@ -1404,6 +1429,100 @@ function readStdioTemplateId(config: Record<string, unknown>): string {
   return templateId.trim();
 }
 
+function usesGitHubOAuthScopes(tokenUrl: unknown): boolean {
+  return tokenUrl === "https://github.com/login/oauth/access_token";
+}
+
+/** GitHub's CSV dialect is opt-in; a comma remains an opaque scope character for other providers. */
+export function normalizeOauthScopes(value: unknown, githubCsv = false): string[] {
+  if (!githubCsv) {
+    if (Array.isArray(value)) return value.filter((item): item is string => typeof item === "string" && item.trim().length > 0);
+    return typeof value === "string" ? value.split(/\s+/).map((item) => item.trim()).filter(Boolean) : [];
+  }
+  const entries = Array.isArray(value) ? value : typeof value === "string" ? value.split(/[, \t\r\n]+/) : [];
+  if (entries.some((item) => typeof item !== "string"
+    || (item.trim().length > 0 && /[^\x21-\x7e]|["\\,]/.test(item.replace(/^ +| +$/g, ""))))) {
+    throw unprocessable("GitHub OAuth scopes contain a malformed scope token", { code: "oauth_scope_invalid" });
+  }
+  return [...new Set((entries as string[]).filter((item) => item.trim().length > 0)
+    .map((item) => item.replace(/^ +| +$/g, "")))];
+}
+
+interface OAuthTokenExchangeInput {
+  tokenUrl: string;
+  clientId: string;
+  clientSecret?: string | null;
+  grantType?: "authorization_code" | "refresh_token" | "client_credentials";
+  scopes?: string[];
+  redirectUri?: string | null;
+  codeVerifier?: string | null;
+  code?: string | null;
+  refreshToken?: string | null;
+}
+
+function oauthTokenRequestBody(input: OAuthTokenExchangeInput): URLSearchParams {
+  const body = new URLSearchParams();
+  if (input.grantType === "client_credentials") {
+    body.set("grant_type", "client_credentials");
+    if (input.scopes && input.scopes.length > 0) body.set("scope", input.scopes.join(" "));
+  } else if (input.refreshToken) {
+    body.set("grant_type", "refresh_token");
+    body.set("refresh_token", input.refreshToken);
+  } else {
+    body.set("grant_type", "authorization_code");
+    body.set("code", input.code ?? "");
+    body.set("redirect_uri", input.redirectUri ?? "");
+    body.set("code_verifier", input.codeVerifier ?? "");
+  }
+  body.set("client_id", input.clientId);
+  if (input.clientSecret) body.set("client_secret", input.clientSecret);
+  return body;
+}
+
+/** The service supplies its guarded transport; this helper never selects a network or credential source. */
+export async function exchangeOAuthToken(
+  input: OAuthTokenExchangeInput,
+  fetchRemoteHttpUrl: (value: string, init?: RequestInit) => Promise<Response>,
+) {
+  const response = await fetchRemoteHttpUrl(input.tokenUrl, {
+    method: "POST",
+    headers: { "content-type": "application/x-www-form-urlencoded", accept: "application/json" },
+    body: oauthTokenRequestBody(input),
+  });
+  const record = asRecord(await response.json().catch(() => ({})) as unknown);
+  const providerError = typeof record.error === "string" ? record.error : null;
+  if (!response.ok || record.ok === false || Boolean(providerError)) {
+    const message = typeof record.error_description === "string"
+      ? record.error_description : providerError ?? "OAuth token exchange failed";
+    if (input.grantType === "refresh_token" && (providerError === "invalid_grant"
+      || (usesGitHubOAuthScopes(input.tokenUrl) && providerError === "bad_refresh_token"))) {
+      throw new HttpError(422, "OAuth authorization has expired. Reconnect this app to continue.", {
+        code: "oauth_reauthorization_required", providerError, status: response.status,
+      });
+    }
+    throw new HttpError(502, message, { code: "oauth_token_exchange_failed", providerError, status: response.status });
+  }
+  const accessToken = typeof record.access_token === "string" ? record.access_token : null;
+  if (!accessToken?.trim()) {
+    throw new HttpError(502, "OAuth provider did not return an access token", { code: "oauth_access_token_missing" });
+  }
+  const expiresIn = typeof record.expires_in === "number" ? record.expires_in : Number(record.expires_in);
+  const scope = typeof record.scope === "string" ? record.scope : null;
+  return {
+    accessToken,
+    refreshToken: typeof record.refresh_token === "string" ? record.refresh_token : null,
+    expiresIn: Number.isFinite(expiresIn) && expiresIn > 0 ? expiresIn : null,
+    scope: scope !== null && usesGitHubOAuthScopes(input.tokenUrl) ? normalizeOauthScopes(scope, true).join(" ") : scope,
+    tokenType: typeof record.token_type === "string" ? record.token_type : "Bearer",
+    raw: record,
+  };
+}
+
+const GITHUB_OAUTH_PROTECTED_CONFIG_KEYS = ["githubPrivateRepoAccess", "oauth", "providerMetadata"] as const;
+const GITHUB_OAUTH_ACCESS_PATHS = [["githubPrivateRepoAccess"], ["oauth", "scopes"],
+  ["providerMetadata", "githubOAuth", "grantedScopes"]];
+const GITHUB_OAUTH_IDENTITY_CONFIG_KEYS = ["sourceTemplateKey", "methodKey"] as const;
+
 export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}) {
   const secrets = secretService(db);
   const policySvc = toolAccessPolicyService(db);
@@ -1439,7 +1558,7 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
       const location = REMOTE_HTTP_REDIRECT_STATUSES.has(response.status)
         ? response.headers?.get?.("location") ?? null
         : null;
-      if (!location) return response;
+      if (!location || init.redirect === "manual") return response;
       if (method !== "GET" && method !== "HEAD") {
         throw new HttpError(502, "Remote OAuth endpoint redirected unexpectedly", { code: "oauth_redirect_rejected" });
       }
@@ -2766,7 +2885,7 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
     const where = companyId
       ? and(identifier, eq(toolConnections.companyId, companyId))
       : identifier;
-    const [row] = await db.select().from(toolConnections).where(where);
+    const [row] = await db.select(toolConnectionSnapshotColumns).from(toolConnections).where(where);
     if (!row) throw notFound("Tool connection not found");
     return row;
   }
@@ -3221,6 +3340,11 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
 
   async function discoverTools(connection: typeof toolConnections.$inferSelect): Promise<ToolDiscoveryResult> {
     if (connection.transport === "mcp_remote") return remoteTools(connection);
+    if (isNativeGitHubOAuthConnection(connection)) {
+      await checkGitHubOAuthAccount(connection);
+      return { descriptors: githubOAuthToolDescriptors(), remoteMcpHeaderSummary: null };
+    }
+    if (connection.transport === "rest_api") throw unprocessable("This REST connection is not supported");
     await resolveCredentialHeaders(connection);
     return {
       descriptors: await localTools(connection),
@@ -3261,11 +3385,16 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
       let remoteMcpHeaderSummary: RemoteMcpHeaderSummary | null = null;
       if (connection.transport === "mcp_remote") {
         remoteMcpHeaderSummary = (await remoteTools(connection)).remoteMcpHeaderSummary;
+      } else if (isNativeGitHubOAuthConnection(connection)) {
+        await checkGitHubOAuthAccount(connection);
       } else {
+        if (connection.transport === "rest_api") throw unprocessable("This REST connection is not supported");
         await resolveCredentialHeaders(connection);
         await stdioTemplateId(connection.companyId, connection.config);
       }
-      const updated = await updateConnectionHealth(connection, "ok", connection.transport === "local_stdio"
+      const updated = await updateConnectionHealth(connection, "ok", isNativeGitHubOAuthConnection(connection)
+        ? "GitHub account and repository/Projects permissions verified. Tools need explicit review."
+        : connection.transport === "local_stdio"
         ? "Approved stdio template is ready."
         : "Remote MCP server responded to tools/list.");
       const runtimeSlot = await ensureRuntimeSlot(updated);
@@ -4058,6 +4187,10 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
     connection: typeof toolConnections.$inferSelect,
     provider: string,
   ) {
+    // A dedicated customer registration must not silently borrow another app's client.
+    if (connection.config.sourceTemplateKey === "github" && connection.config.methodKey === GITHUB_OAUTH_METHOD_KEY) {
+      return { clientIdEnv: null, clientSecretEnv: null, clientId: null, clientSecret: null };
+    }
     if (isSmokeLabOAuthFixture(connection) && provider === "smoke_lab") {
       return {
         clientIdEnv: "SMOKE_LAB_FIXED_CLIENT_ID",
@@ -4126,6 +4259,235 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
     return metadata;
   }
 
+  function gitHubGrantExpectation(connection: typeof toolConnections.$inferSelect) {
+    const facts = asRecord(asRecord(connection.config.providerMetadata).githubOAuth);
+    const expectedLogin = connection.config.expectedGitHubLogin;
+    if (typeof expectedLogin !== "string" || !expectedLogin) {
+      throw unprocessable("GitHub account expectation is missing. Reconnect.");
+    }
+    return { expectedLogin, expectedAccountId: typeof facts.accountId === "number" ? facts.accountId : undefined,
+      privateRepoAccess: githubStoredPrivateRepoAccessOptIn(connection.config) };
+  }
+
+  async function verifiedGitHubCredential(
+    connection: typeof toolConnections.$inferSelect, actor?: ActorInfo, allowRefresh = true,
+    beforeProvider?: (revision: GitHubCredentialRevision) => Promise<void>,
+  ) {
+    if (allowRefresh) await maybeRefreshOAuthCredentials(connection, actor);
+    else {
+      const expiry = oauthConfig(connection).expiresAt;
+      if (expiry !== undefined && expiry !== null &&
+        (typeof expiry !== "string" || !Number.isFinite(Date.parse(expiry)) || Date.parse(expiry) <= Date.now() + 60_000)) {
+        throw conflict("Scheduled GitHub authorization needs operator renewal; no unattended refresh is allowed");
+      }
+    }
+    const current = await getConnectionRow(connection.id, connection.companyId);
+    if (!isNativeGitHubOAuthConnection(current)) throw forbidden("GitHub connector configuration changed");
+    const facts = asRecord(asRecord(current.config.providerMetadata).githubOAuth);
+    if (typeof facts.accountId !== "number") throw unprocessable("GitHub authorization is not verified");
+    const ref = current.credentialSecretRefs.find((candidate) => candidate.configPath === "oauth.access_token");
+    if (!ref) throw unprocessable("GitHub authorization credential is missing");
+    const [secret] = await db.select({ latestVersion: companySecrets.latestVersion }).from(companySecrets).where(and(
+      eq(companySecrets.id, ref.secretId), eq(companySecrets.companyId, current.companyId),
+      eq(companySecrets.status, "active"),
+    )).limit(1);
+    if (!secret) throw unprocessable("GitHub authorization credential is not active");
+    const version = ref.versionSelector === undefined || ref.versionSelector === "latest"
+      ? secret.latestVersion : ref.versionSelector;
+    const value = await secrets.resolveSecretValue(current.companyId, ref.secretId, version, {
+      consumerType: "tool_connection", consumerId: current.id, configPath: "oauth.access_token",
+      actorType: actor?.actorType ?? "system", actorId: actor?.actorId ?? null,
+    });
+    await beforeProvider?.({ current, secretId: ref.secretId, latestVersion: secret.latestVersion });
+    const headers = { Authorization: `Bearer ${value}` };
+    const verified = await verifyGitHubOAuthAccount({ headers, scope: oauthConfig(current).scope,
+      ...gitHubGrantExpectation(current) }, fetchRemoteHttpUrl);
+    return { current, headers, facts: verified, secretId: ref.secretId, version, latestVersion: secret.latestVersion };
+  }
+
+  async function checkGitHubOAuthAccount(connection: typeof toolConnections.$inferSelect) {
+    return (await verifiedGitHubCredential(connection)).facts;
+  }
+
+  async function assertGitHubBoardReadApplication(connection: typeof toolConnections.$inferSelect) {
+    const [application] = await db.select({ id: toolApplications.id }).from(toolApplications).where(and(
+      eq(toolApplications.id, connection.applicationId), eq(toolApplications.companyId, connection.companyId),
+      eq(toolApplications.status, "active"), isNull(toolApplications.archivedAt),
+    )).limit(1);
+    if (!application) throw conflict("GitHub board read application is not active");
+  }
+
+  async function assertGitHubBoardReadSnapshot(
+    verified: Awaited<ReturnType<typeof verifiedGitHubCredential>>, actor: ActorInfo,
+  ) {
+    await assertGitHubExecutionActor(verified.current.companyId, actor);
+    await assertGitHubBoardReadRevision(verified);
+  }
+
+  async function assertGitHubBoardReadRevision(verified: GitHubCredentialRevision) {
+    await assertGitHubBoardReadApplication(verified.current);
+    const [fresh] = await db.select({ id: toolConnections.id }).from(toolConnections).where(and(
+      eq(toolConnections.id, verified.current.id), eq(toolConnections.companyId, verified.current.companyId),
+      ...gitHubConnectionSnapshot(verified.current), eq(toolConnections.enabled, true), eq(toolConnections.status, "active"),
+    )).limit(1);
+    const [secret] = await db.select({ latestVersion: companySecrets.latestVersion }).from(companySecrets).where(and(
+      eq(companySecrets.id, verified.secretId), eq(companySecrets.companyId, verified.current.companyId),
+      eq(companySecrets.status, "active"), isNull(companySecrets.deletedAt),
+    )).limit(1);
+    if (!fresh || !secret || secret.latestVersion !== verified.latestVersion) {
+      throw conflict("GitHub authorization changed during board read");
+    }
+  }
+
+  /** Operator-only fixed Projects read bridge; no bearer, caller URL/query or agent catalog is exposed. */
+  async function readVerifiedGitHubProjectPage(input: {
+    companyId: string; connectionId: string; page: GitHubProjectPageInput;
+    expectedAccountId?: number; expectedLogin?: string; actor?: ActorInfo;
+  }) {
+    const page = validateGitHubProjectPageInput(input.page);
+    if (input.actor?.actorType !== "user") throw forbidden("GitHub board read requires a signed-in operator");
+    const actor = await assertGitHubExecutionActor(input.companyId, input.actor);
+    const connection = await getConnectionRow(input.connectionId, input.companyId);
+    if (!isNativeGitHubOAuthConnection(connection) || !connection.enabled || connection.status !== "active") {
+      throw forbidden("Selected native GitHub OAuth connection is not active");
+    }
+    await assertGitHubBoardReadApplication(connection);
+    const verified = await verifiedGitHubCredential(connection, actor);
+    if ((input.expectedAccountId !== undefined && verified.facts.accountId !== input.expectedAccountId)
+      || (input.expectedLogin !== undefined && verified.facts.login.toLowerCase() !== input.expectedLogin.toLowerCase())) {
+      throw conflict("GitHub account does not match the native board binding");
+    }
+    await assertGitHubBoardReadSnapshot(verified, actor);
+    const result = await readGitHubOAuthProjectPage(page, verified.headers, fetchRemoteHttpUrl);
+    await assertGitHubBoardReadSnapshot(verified, actor);
+    return { page: result.data, account: { accountId: verified.facts.accountId, login: verified.facts.login },
+      authorizationDigest: githubProjectAuthorizationDigest(verified.current,
+        { secretId: verified.secretId, latestVersion: verified.latestVersion }) };
+  }
+
+  /** Native host only: authority comes from an in-process issuer, never worker JSON or a user API key. */
+  async function readVerifiedGitHubProjectPageScheduled(input: ScheduledGitHubPageInput, access: ScheduledBoardAccess) {
+    const page = validateGitHubProjectPageInput(input.page);
+    const validate = async () => db.transaction(async tx => {
+      const executor = tx as unknown as Db;
+      await executor.execute(sql`set local statement_timeout = '10000ms'`);
+      await executor.execute(sql`set local lock_timeout = '5000ms'`);
+      const verified = await access.validate(executor, input.authority, input.target, "read-page");
+      const board = parseGitHubProjectBoardUrl(verified.binding.boardUrl);
+      if (input.companyId !== input.target.companyId || verified.binding.companyId !== input.companyId
+        || verified.binding.connectionId !== input.connectionId || verified.binding.accountId !== input.expectedAccountId
+        || verified.binding.login !== input.expectedLogin || verified.authorizationDigest !== input.authorizationDigest
+        || page.ownerType !== board.ownerType || page.owner !== board.owner || page.number !== board.number) {
+        throw forbidden("Scheduled provider input differs from issued native binding");
+      }
+      return verified;
+    });
+    const native = await validate();
+    const connection = await getConnectionRow(input.connectionId, input.companyId);
+    if (!isNativeGitHubOAuthConnection(connection) || !connection.enabled || connection.status !== "active") {
+      throw forbidden("Selected native GitHub OAuth connection is not active");
+    }
+    await assertGitHubBoardReadApplication(connection);
+    // Secret resolution updates lastResolvedAt. No outer metadata SHARE transaction spans this call or HTTP.
+    const credential = await verifiedGitHubCredential(connection,
+      { actorType: "system", actorId: native.actorId }, false, async revision => {
+        const digest = githubProjectConsentDigest(revision.current,
+          { secretId: revision.secretId, latestVersion: revision.latestVersion });
+        if (digest !== input.authorizationDigest) throw conflict("Scheduled credential changed before provider access");
+        await validate();
+        await assertGitHubBoardReadRevision(revision);
+        access.inspect(input.authority, input.target);
+      });
+    const authorizationDigest = githubProjectConsentDigest(credential.current,
+      { secretId: credential.secretId, latestVersion: credential.latestVersion });
+    if (credential.facts.accountId !== input.expectedAccountId
+      || credential.facts.login.toLowerCase() !== input.expectedLogin.toLowerCase()
+      || authorizationDigest !== input.authorizationDigest) {
+      throw conflict("Scheduled GitHub credential differs from the delegated revision");
+    }
+    await validate();
+    await assertGitHubBoardReadRevision(credential);
+    access.inspect(input.authority, input.target);
+    const result = await readGitHubOAuthProjectPage(page, credential.headers, fetchRemoteHttpUrl);
+    await assertGitHubBoardReadRevision(credential);
+    await validate();
+    return { page: result.data,
+      account: { accountId: credential.facts.accountId, login: credential.facts.login }, authorizationDigest };
+  }
+
+  async function assertGitHubExecutionActor(companyId: string, actor?: ActorInfo) {
+    if (!actor?.actorId || (actor.actorType !== "agent" && actor.actorType !== "user")) {
+      throw forbidden("GitHub action requires a company-scoped user or agent");
+    }
+    if (actor.actorType === "agent") {
+      const [agent] = await db.select({ status: agents.status }).from(agents).where(and(
+        eq(agents.companyId, companyId), eq(agents.id, actor.actorId),
+      )).limit(1);
+      if (!agent || !["active", "idle", "running"].includes(agent.status)) {
+        throw forbidden("GitHub action requires an active, unpaused agent");
+      }
+    }
+    else {
+      const [membership] = await db.select().from(companyMemberships).where(and(
+        eq(companyMemberships.companyId, companyId), eq(companyMemberships.principalType, "user"),
+        eq(companyMemberships.principalId, actor.actorId), eq(companyMemberships.status, "active"),
+      )).limit(1);
+      if (!membership || membership.membershipRole === "viewer") throw forbidden("GitHub action requires active company membership");
+    }
+    return { actorType: actor.actorType, actorId: actor.actorId, sessionId: actor.sessionId };
+  }
+
+  async function assertGitHubExecutionRun(companyId: string, actor: ActorInfo,
+    context?: { runId: string | null; issueId: string | null }) {
+    await assertGitHubExecutionActor(companyId, actor);
+    if (actor.actorType !== "agent") return;
+    if (!context?.runId) throw forbidden("GitHub dispatch requires the same active agent run");
+    const [run] = await db.select().from(heartbeatRuns).where(and(eq(heartbeatRuns.companyId, companyId),
+      eq(heartbeatRuns.agentId, actor.actorId!), eq(heartbeatRuns.id, context.runId),
+      eq(heartbeatRuns.status, "running"))).limit(1);
+    if (!run) throw forbidden("GitHub dispatch requires the same active agent run");
+    if (context.issueId) {
+      const [issue] = await db.select().from(issues).where(and(eq(issues.companyId, companyId),
+        eq(issues.id, context.issueId))).limit(1);
+      if (!issue || ["done", "cancelled"].includes(issue.status)) throw forbidden("GitHub dispatch task is no longer open");
+    }
+  }
+
+  async function executeGitHubOAuthTool(input: {
+    companyId: string; connectionId: string; catalogEntryId: string; toolName: string;
+    parameters: unknown; actor?: ActorInfo; timeoutMs?: number;
+    runContext?: { runId: string | null; issueId: string | null };
+    beforeDispatch: () => Promise<void>;
+  }) {
+    const actor = await assertGitHubExecutionActor(input.companyId, input.actor);
+    const connection = await getConnectionRow(input.connectionId, input.companyId);
+    if (!isNativeGitHubOAuthConnection(connection) || connection.status !== "active" || !connection.enabled) {
+      throw forbidden("GitHub connection is not active");
+    }
+    const [entry] = await db.select().from(toolCatalogEntries).where(and(
+      eq(toolCatalogEntries.id, input.catalogEntryId), eq(toolCatalogEntries.companyId, input.companyId),
+      eq(toolCatalogEntries.connectionId, connection.id), eq(toolCatalogEntries.status, "active"),
+    )).limit(1);
+    const descriptor = getGitHubOAuthToolDescriptor(input.toolName);
+    if (!entry || entry.quarantinedAt || entry.toolName !== input.toolName || !descriptor
+      || entry.riskLevel !== descriptor.risk) throw forbidden("GitHub action must be reviewed before use");
+    const verified = await verifiedGitHubCredential(connection, actor);
+    const fresh = await getConnectionRow(connection.id, input.companyId);
+    const [secret] = await db.select({ latestVersion: companySecrets.latestVersion }).from(companySecrets).where(and(
+      eq(companySecrets.id, verified.secretId), eq(companySecrets.companyId, input.companyId),
+      eq(companySecrets.status, "active"),
+    )).limit(1);
+    if (!fresh.enabled || fresh.status !== "active" || exactTimestampRevision(fresh) !== exactTimestampRevision(verified.current)
+      || !secret || secret.latestVersion !== verified.latestVersion) throw conflict("GitHub authorization changed before dispatch");
+    if (typeof input.beforeDispatch !== "function") throw forbidden("GitHub dispatch authorization is missing");
+    await input.beforeDispatch();
+    await assertGitHubExecutionRun(input.companyId, actor, input.runContext);
+    const payload = await dispatchGitHubOAuthTool({ toolName: input.toolName, arguments: input.parameters,
+      headers: verified.headers, timeoutMs: Math.min(input.timeoutMs ?? 10_000, 30_000) }, fetchRemoteHttpUrl);
+    return { content: [{ type: "text" as const, text: JSON.stringify(payload) }],
+      structuredContent: { result: payload }, isError: false };
+  }
+
   function connectionSetupUrl(connection: typeof toolConnections.$inferSelect) {
     return `/apps/${connection.id}/setup`;
   }
@@ -4155,12 +4517,6 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
       id,
       hash: stableHash({ companyId: connection.companyId, connectionId: connection.id, type, id }),
     };
-  }
-
-  function normalizeOauthScopes(value: unknown): string[] {
-    if (Array.isArray(value)) return value.filter((item): item is string => typeof item === "string" && item.trim().length > 0);
-    if (typeof value === "string") return value.split(/\s+/).map((item) => item.trim()).filter(Boolean);
-    return [];
   }
 
   function isSmokeLabOAuthUrl(value: string | null | undefined) {
@@ -4223,6 +4579,12 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
     configPath: "oauth.access_token" | "oauth.refresh_token" | "oauth.client_secret",
   ) {
     return connection.credentialSecretRefs.find((ref) => ref.configPath === configPath) ?? null;
+  }
+
+  function isNonExpiringGitHubOAuth(connection: typeof toolConnections.$inferSelect, expiresAtMs: number | null): boolean {
+    return expiresAtMs === null
+      && oauthConfig(connection).provider === "github"
+      && !oauthSecretRef(connection, "oauth.refresh_token");
   }
 
   function oauthExpiresAtMs(connection: typeof toolConnections.$inferSelect): number | null {
@@ -4315,11 +4677,12 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
       typeof oauth.authorizationUrl === "string" ? oauth.authorizationUrl : hints?.authorizationUrl ?? null;
     const configuredTokenUrl = typeof oauth.tokenUrl === "string" ? oauth.tokenUrl : hints?.tokenUrl ?? null;
     const provider = oauthProviderForConnection(connection, typeof oauth.metadataUrl === "string" ? oauth.metadataUrl : hints?.metadataUrl);
-    const scopes = normalizeOauthScopes(oauth.scopes).length > 0
-      ? normalizeOauthScopes(oauth.scopes)
-      : normalizeOauthScopes(oauth.scope).length > 0
-        ? normalizeOauthScopes(oauth.scope)
-        : normalizeOauthScopes(hints?.scope);
+    const githubCsv = usesGitHubOAuthScopes(configuredTokenUrl);
+    const scopes = normalizeOauthScopes(oauth.scopes, githubCsv).length > 0
+      ? normalizeOauthScopes(oauth.scopes, githubCsv)
+      : normalizeOauthScopes(oauth.scope, githubCsv).length > 0
+        ? normalizeOauthScopes(oauth.scope, githubCsv)
+        : normalizeOauthScopes(hints?.scope, githubCsv);
     const grantType = oauth.grantType === "client_credentials" || oauth.clientCredentials === true
       ? "client_credentials" as const
       : "authorization_code" as const;
@@ -4358,8 +4721,8 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
     return null;
   }
 
-  async function oauthProviderEndpoints(app: AppDefinition): Promise<OAuthProviderEndpoints> {
-    const method = connectionMethodFor(app);
+  async function oauthProviderEndpoints(app: AppDefinition, methodKey?: unknown): Promise<OAuthProviderEndpoints> {
+    const method = connectionMethodFor(app, methodKey);
     if (method.auth !== "oauth") throw unprocessable("This app does not support sign in");
     let authorizationUrl = method.defaults?.authorizationEndpoint ?? null;
     let tokenUrl = method.defaults?.tokenEndpoint ?? null;
@@ -4385,7 +4748,7 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
     const smokeLabEndpoints = smokeLabOAuthEndpoints(connection, redirectUri);
     const sourceTemplateKey = typeof connection.config.sourceTemplateKey === "string" ? connection.config.sourceTemplateKey : null;
     const galleryEntry = sourceTemplateKey ? getConnectableAppDefinition(sourceTemplateKey) : null;
-    const galleryMethod = galleryEntry ? connectionMethodFor(galleryEntry) : null;
+    const galleryMethod = galleryEntry ? connectionMethodFor(galleryEntry, connection.config.methodKey) : null;
     const hasCompleteGalleryEndpointHints = Boolean(
       galleryMethod?.defaults?.authorizationEndpoint && galleryMethod.defaults.tokenEndpoint,
     );
@@ -4394,8 +4757,8 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
       : null;
     const endpoints = smokeLabEndpoints
       ?? discovered
-      ?? (galleryEntry && connectionMethodFor(galleryEntry).auth === "oauth"
-        ? await oauthProviderEndpoints(galleryEntry)
+      ?? (galleryEntry && galleryMethod?.auth === "oauth"
+        ? await oauthProviderEndpoints(galleryEntry, connection.config.methodKey)
         : await discoverOAuthEndpoints(connection, challenge));
     if (!endpoints) throw unprocessable("This app connection does not advertise OAuth sign in");
     assertNotSmokeLabOAuthEndpoints(connection, endpoints);
@@ -4406,7 +4769,7 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
     const sourceTemplateKey = typeof connection.config.sourceTemplateKey === "string" ? connection.config.sourceTemplateKey : null;
     if (!sourceTemplateKey) throw unprocessable("This app connection was not created from the app gallery");
     const galleryEntry = getConnectableAppDefinition(sourceTemplateKey);
-    if (!galleryEntry || connectionMethodFor(galleryEntry).auth !== "oauth") {
+    if (!galleryEntry || connectionMethodFor(galleryEntry, connection.config.methodKey).auth !== "oauth") {
       throw unprocessable("This app connection does not use sign in");
     }
     return galleryEntry;
@@ -4651,19 +5014,24 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
         eq(toolConnections.id, input.connection.id),
         eq(toolConnections.companyId, input.connection.companyId),
       ))
-      .returning();
+      .returning(toolConnectionSnapshotColumns);
     if (!updated) throw notFound("Tool connection not found");
     await syncCredentialBindings(updated);
     return updated;
   }
 
   async function ensureOAuthClient(input: {
-    connection: typeof toolConnections.$inferSelect;
+    connection: Awaited<ReturnType<typeof getConnectionRow>>;
     endpoints: OAuthProviderEndpoints;
     redirectUri: string;
     galleryEntry: AppDefinition | null;
     actor?: ActorInfo;
   }) {
+    if (isNativeGitHubOAuthConnection(input.connection)) {
+      const client = await oauthClientForConnection(input.connection, "github", input.actor);
+      if (!client.clientId || !client.clientSecret) throw unprocessable("GitHub OAuth app credentials are incomplete");
+      return { connection: input.connection, client };
+    }
     const configured = configuredOAuthClientForConnection(input.connection, input.endpoints.provider);
     if (configured.clientId) return { connection: input.connection, client: configured };
     const oauth = oauthConfig(input.connection);
@@ -4677,7 +5045,7 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
         client: await oauthClientForConnection(input.connection, input.endpoints.provider, input.actor),
       };
     }
-    const method = input.galleryEntry ? connectionMethodFor(input.galleryEntry) : null;
+    const method = input.galleryEntry ? connectionMethodFor(input.galleryEntry, input.connection.config.methodKey) : null;
     if (!method?.ownershipModes.includes("dcr")) {
       throw unprocessable(`OAuth client id is not configured for ${input.endpoints.provider}`);
     }
@@ -4711,73 +5079,6 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
     });
   }
 
-  async function exchangeOAuthToken(input: {
-    tokenUrl: string;
-    clientId: string;
-    clientSecret?: string | null;
-    grantType?: "authorization_code" | "refresh_token" | "client_credentials";
-    scopes?: string[];
-    redirectUri?: string | null;
-    codeVerifier?: string | null;
-    code?: string | null;
-    refreshToken?: string | null;
-  }) {
-    const body = new URLSearchParams();
-    if (input.grantType === "client_credentials") {
-      body.set("grant_type", "client_credentials");
-      if (input.scopes && input.scopes.length > 0) body.set("scope", input.scopes.join(" "));
-    } else if (input.refreshToken) {
-      body.set("grant_type", "refresh_token");
-      body.set("refresh_token", input.refreshToken);
-    } else {
-      body.set("grant_type", "authorization_code");
-      body.set("code", input.code ?? "");
-      body.set("redirect_uri", input.redirectUri ?? "");
-      body.set("code_verifier", input.codeVerifier ?? "");
-    }
-    body.set("client_id", input.clientId);
-    if (input.clientSecret) body.set("client_secret", input.clientSecret);
-
-    const response = await fetchRemoteHttpUrl(input.tokenUrl, {
-      method: "POST",
-      headers: { "content-type": "application/x-www-form-urlencoded" },
-      body,
-    });
-    const payload = await response.json().catch(() => ({})) as unknown;
-    const record = asRecord(payload);
-    if (!response.ok || record.ok === false) {
-      const providerError = typeof record.error === "string" ? record.error : null;
-      const message = typeof record.error_description === "string"
-        ? record.error_description
-        : providerError
-          ? providerError
-          : "OAuth token exchange failed";
-      if (input.grantType === "refresh_token" && providerError === "invalid_grant") {
-        throw new HttpError(422, "OAuth authorization has expired. Reconnect this app to continue.", {
-          code: "oauth_reauthorization_required",
-          providerError,
-          status: response.status,
-        });
-      }
-      throw new HttpError(502, message, {
-        code: "oauth_token_exchange_failed",
-        providerError,
-        status: response.status,
-      });
-    }
-    const accessToken = typeof record.access_token === "string" ? record.access_token : null;
-    if (!accessToken) throw new HttpError(502, "OAuth provider did not return an access token", { code: "oauth_access_token_missing" });
-    const expiresIn = typeof record.expires_in === "number" ? record.expires_in : Number(record.expires_in);
-    return {
-      accessToken,
-      refreshToken: typeof record.refresh_token === "string" ? record.refresh_token : null,
-      expiresIn: Number.isFinite(expiresIn) && expiresIn > 0 ? expiresIn : null,
-      scope: typeof record.scope === "string" ? record.scope : null,
-      tokenType: typeof record.token_type === "string" ? record.token_type : "Bearer",
-      raw: record,
-    };
-  }
-
   function withoutOAuthRefreshLease(oauth: Record<string, unknown>) {
     const { refreshLease: _refreshLease, ...rest } = oauth;
     return rest;
@@ -4786,6 +5087,18 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
   function oauthRefreshLeaseId(connection: typeof toolConnections.$inferSelect): string | null {
     const lease = asRecord(oauthConfig(connection).refreshLease);
     return typeof lease.id === "string" && lease.id ? lease.id : null;
+  }
+
+  function gitHubConnectionSnapshot(connection: typeof toolConnections.$inferSelect) {
+    return [exactConnectionUpdatedAtPredicate(connection),
+      eq(toolConnections.applicationId, connection.applicationId), eq(toolConnections.transport, connection.transport),
+      eq(toolConnections.authKind, connection.authKind), eq(toolConnections.status, connection.status),
+      eq(toolConnections.enabled, connection.enabled), eq(toolConnections.ownership, connection.ownership),
+      sql`${toolConnections.config} = ${JSON.stringify(connection.config)}::jsonb`,
+      sql`${toolConnections.transportConfig} = ${JSON.stringify(connection.transportConfig)}::jsonb`,
+      sql`${toolConnections.credentialSecretRefs} = ${JSON.stringify(connection.credentialSecretRefs)}::jsonb`,
+      sql`${toolConnections.credentialRefs} = ${JSON.stringify(connection.credentialRefs)}::jsonb`,
+    ];
   }
 
   async function clearOAuthRefreshLease(
@@ -4805,8 +5118,9 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
         eq(toolConnections.id, latest.id),
         eq(toolConnections.companyId, latest.companyId),
         sql`${toolConnections.config} -> 'oauth' -> 'refreshLease' ->> 'id' = ${leaseId}`,
+        ...(isNativeGitHubOAuthConnection(latest) ? gitHubConnectionSnapshot(latest) : []),
       ))
-      .returning();
+      .returning(toolConnectionSnapshotColumns);
     return updated ?? getConnectionRow(connection.id, connection.companyId);
   }
 
@@ -4853,8 +5167,9 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
             eq(toolConnections.companyId, latest.companyId),
             sql`${toolConnections.config} = ${JSON.stringify(latest.config)}::jsonb`,
             sql`${toolConnections.config} #>> '{oauth,refreshLease,id}' is null`,
+            ...(isNativeGitHubOAuthConnection(latest) ? gitHubConnectionSnapshot(latest) : []),
           ))
-          .returning();
+          .returning(toolConnectionSnapshotColumns);
         if (claimed) return { connection: claimed, leaseId };
       }
 
@@ -4897,12 +5212,10 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
         reauthorizationRequiredAt: now().toISOString(),
       },
     };
-    const [updated] = await db
-      .update(toolConnections)
-      .set({
-        status: "draft",
+    const values = {
+        status: "draft" as const,
         enabled: false,
-        healthStatus: "error",
+        healthStatus: "error" as const,
         healthMessage: "OAuth authorization expired. Reconnect this app to continue.",
         lastError: "oauth_reauthorization_required",
         config: nextConfig,
@@ -4910,21 +5223,45 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
         credentialSecretRefs: nextCredentialSecretRefs,
         credentialRefs: nextCredentialRefs,
         updatedAt: now(),
-      })
-      .where(and(
+      };
+    const secretVersionGuard = sql`exists (
+      select 1 from ${companySecrets}
+      where ${companySecrets.id} = ${guard.refreshSecretId}
+        and ${companySecrets.companyId} = ${connection.companyId}
+        and ${companySecrets.latestVersion} = ${guard.refreshTokenVersion}
+    )`;
+    const updated = isNativeGitHubOAuthConnection(connection)
+      ? await saveGitHubRefreshCandidate(connection, guard.leaseId, values, [secretVersionGuard])
+      : (await db.update(toolConnections).set(values).where(and(
         eq(toolConnections.id, connection.id),
         eq(toolConnections.companyId, connection.companyId),
         sql`${toolConnections.config} -> 'oauth' -> 'refreshLease' ->> 'id' = ${guard.leaseId}`,
-        sql`exists (
-          select 1 from ${companySecrets}
-          where ${companySecrets.id} = ${guard.refreshSecretId}
-            and ${companySecrets.companyId} = ${connection.companyId}
-            and ${companySecrets.latestVersion} = ${guard.refreshTokenVersion}
-        )`,
-      ))
-      .returning();
+        secretVersionGuard,
+      )).returning())[0];
     if (updated) await syncCredentialBindings(updated);
     return updated ?? null;
+  }
+
+  async function saveGitHubRefreshCandidate(connection: typeof toolConnections.$inferSelect,
+    leaseId: string, values: Partial<typeof toolConnections.$inferInsert>,
+    extraConditions: ReturnType<typeof gitHubConnectionSnapshot> = []) {
+    return db.transaction(async (tx) => {
+      const [application] = await tx.select({ status: toolApplications.status }).from(toolApplications).where(and(
+        eq(toolApplications.id, connection.applicationId), eq(toolApplications.companyId, connection.companyId),
+      )).for("update").limit(1);
+      if (application?.status !== "active") {
+        throw conflict("GitHub refresh application changed", { code: "oauth_refresh_superseded" });
+      }
+      const [updated] = await tx.update(toolConnections).set(values).where(and(
+        eq(toolConnections.id, connection.id), eq(toolConnections.companyId, connection.companyId),
+        ...gitHubConnectionSnapshot(connection), eq(toolConnections.status, "active"),
+        eq(toolConnections.enabled, true),
+        sql`${toolConnections.config} -> 'oauth' -> 'refreshLease' ->> 'id' = ${leaseId}`,
+        ...extraConditions,
+      )).returning(toolConnectionSnapshotColumns);
+      if (!updated) throw conflict("GitHub refresh target changed", { code: "oauth_refresh_superseded" });
+      return updated;
+    });
   }
 
   async function refreshOAuthCredentials(
@@ -4941,6 +5278,8 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
     if (typeof oauth.tokenUrl !== "string" || typeof oauth.provider !== "string") return connection;
     const expiresAtMs = oauthExpiresAtMs(connection);
     if (expiresAtMs && expiresAtMs > Date.now() + 60_000) return connection;
+    // GitHub OAuth App tokens do not expire: no expiry and no refresh token means nothing to refresh.
+    if (isNonExpiringGitHubOAuth(connection, expiresAtMs)) return connection;
     const grantType = oauth.grantType === "client_credentials" || oauth.clientCredentials === true
       ? "client_credentials" as const
       : "refresh_token" as const;
@@ -4984,9 +5323,11 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
         clientId: client.clientId,
         clientSecret: client.clientSecret,
         grantType,
-        scopes: normalizeOauthScopes(oauth.scopes).length > 0 ? normalizeOauthScopes(oauth.scopes) : normalizeOauthScopes(oauth.scope),
+        scopes: normalizeOauthScopes(oauth.scopes, usesGitHubOAuthScopes(oauth.tokenUrl)).length > 0
+          ? normalizeOauthScopes(oauth.scopes, usesGitHubOAuthScopes(oauth.tokenUrl))
+          : normalizeOauthScopes(oauth.scope, usesGitHubOAuthScopes(oauth.tokenUrl)),
         refreshToken,
-      });
+      }, fetchRemoteHttpUrl);
     } catch (error) {
       if (error instanceof HttpError && asRecord(error.details).code === "oauth_reauthorization_required") {
         const marked = refreshRef && refreshTokenVersion !== null
@@ -5016,6 +5357,7 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
     // Rotating providers invalidate the submitted refresh token immediately.
     // Persist its replacement before the new access token can be returned to a
     // caller, so a crash cannot leave the grant with only the consumed token.
+    const githubOAuth = isNativeGitHubOAuthConnection(connection);
     let nextRefreshRef: Awaited<ReturnType<typeof createOrRotateOAuthSecret>> | null = null;
     if (token.refreshToken) {
       nextRefreshRef = await createOrRotateOAuthSecret({
@@ -5025,8 +5367,22 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
         label: "OAuth refresh token",
         value: token.refreshToken,
         actor,
+        ...(githubOAuth ? { existingRefs: [] } : {}),
       });
     }
+    // The submitted GitHub refresh token is already consumed. Preserve its
+    // replacement before the identity request, without dispatching a new bearer.
+    if (githubOAuth && nextRefreshRef) {
+      connection = await saveGitHubRefreshCandidate(connection, leaseId, {
+        credentialSecretRefs: [
+          ...connection.credentialSecretRefs.filter((ref) => ref.configPath !== "oauth.refresh_token"), nextRefreshRef,
+        ], updatedAt: new Date(),
+      });
+      await syncCredentialBindings(connection);
+    }
+    const githubFacts = githubOAuth
+      ? await verifyGitHubOAuthAuthorization({ ...token, scope: token.raw.scope,
+          ...gitHubGrantExpectation(connection) }, fetchRemoteHttpUrl) : null;
     const accessRef = await createOrRotateOAuthSecret({
       companyId: connection.companyId,
       connection,
@@ -5034,6 +5390,7 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
       label: "OAuth access token",
       value: token.accessToken,
       actor,
+      ...(githubOAuth ? { existingRefs: [] } : {}),
     });
     const nextCredentialSecretRefs = [
       ...connection.credentialSecretRefs.filter((ref) =>
@@ -5056,6 +5413,7 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
       },
       providerMetadata: {
         ...asRecord(connection.config.providerMetadata),
+        ...(githubFacts ? { githubOAuth: { ...githubFacts, verifiedAt: new Date().toISOString() } } : {}),
         oauth: {
           expiresAt,
           scope: token.scope ?? oauth.scope ?? null,
@@ -5063,9 +5421,7 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
         },
       },
     };
-    const [updated] = await db
-      .update(toolConnections)
-      .set({
+    const values = {
         config: nextConfig,
         transportConfig: nextConfig,
         credentialSecretRefs: nextCredentialSecretRefs,
@@ -5081,13 +5437,14 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
           },
         ],
         updatedAt: new Date(),
-      })
-      .where(and(
+      };
+    const updated = githubOAuth
+      ? await saveGitHubRefreshCandidate(connection, leaseId, values)
+      : (await db.update(toolConnections).set(values).where(and(
         eq(toolConnections.id, connection.id),
         eq(toolConnections.companyId, connection.companyId),
         sql`${toolConnections.config} -> 'oauth' -> 'refreshLease' ->> 'id' = ${leaseId}`,
-      ))
-      .returning();
+      )).returning())[0];
     if (!updated) {
       throw conflict("OAuth credentials changed while refresh was in progress. Retry the request.", {
         code: "oauth_refresh_superseded",
@@ -5119,6 +5476,8 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
     if (typeof oauth.tokenUrl !== "string" || typeof oauth.provider !== "string") return connection;
     const expiresAtMs = oauthExpiresAtMs(connection);
     if (expiresAtMs && expiresAtMs > Date.now() + 60_000) return connection;
+    // GitHub OAuth App tokens do not expire: no expiry and no refresh token means nothing to refresh.
+    if (isNonExpiringGitHubOAuth(connection, expiresAtMs)) return connection;
     return oauthSingleFlight(oauthRefreshFlights, connection.id, async () => {
       const lease = await acquireOAuthRefreshLease(connection);
       if (!lease.leaseId) return lease.connection;
@@ -5154,15 +5513,51 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
     }
 
     const name = input.name ?? existingApplication?.name ?? galleryEntry?.name ?? defaultLinkName(input.link ?? "");
-    const method = galleryEntry ? connectionMethodFor(galleryEntry) : null;
+    const method = galleryEntry ? connectionMethodFor(galleryEntry, input.methodKey) : null;
     const transport = method?.transport ?? "mcp_remote";
+    const githubOAuth = galleryEntry?.slug === "github" && method?.key === GITHUB_OAUTH_METHOD_KEY;
+    if (transport === "rest_api" && !githubOAuth) throw unprocessable("This REST app is not supported yet");
+    if ((input.credentialSecretRefs?.length ?? 0) > 0 && !githubOAuth) {
+      throw badRequest("Secret-reference setup is supported only for the dedicated GitHub OAuth connector");
+    }
+    if (githubOAuth && existingApplication && existingApplication.type !== "rest_api") {
+      throw conflict("Keep the existing GitHub connection. Create a separate OAuth connection.");
+    }
     const baseConfig = transport === "mcp_remote"
       ? { url: method?.defaults?.serverUrl ?? input.link ?? "" }
+      : transport === "rest_api"
+        ? { serverUrl: method?.defaults?.serverUrl }
       : { templateId: method?.defaults?.templateKey };
     const suppliedConfig = input.configValues ?? {};
     let config: Record<string, unknown> = galleryEntry
-      ? { ...suppliedConfig, ...baseConfig, sourceTemplateKey: galleryEntry.slug, quarantineNewEntries: true }
+      ? { ...suppliedConfig, ...baseConfig, sourceTemplateKey: galleryEntry.slug, methodKey: method!.key,
+          quarantineNewEntries: true }
       : { ...suppliedConfig, ...baseConfig, quarantineNewEntries: true };
+    if (githubOAuth) {
+      const expectedLogin = suppliedConfig.expectedGitHubLogin;
+      if (typeof expectedLogin !== "string" || !/^[a-z\d](?:[a-z\d-]{0,37}[a-z\d])?$/i.test(expectedLogin)) {
+        throw badRequest("Enter the GitHub account you intend to connect");
+      }
+      const privateRepoAccess = githubPrivateRepoAccessOptIn(suppliedConfig);
+      const refs = input.credentialSecretRefs ?? [];
+      if (refs.length !== 1 || refs[0].configPath !== "oauth.client_secret") {
+        throw badRequest("Select one company-scoped OAuth client secret");
+      }
+      const [clientSecret] = await db.select({ id: companySecrets.id }).from(companySecrets).where(and(
+        eq(companySecrets.id, refs[0].secretId), eq(companySecrets.companyId, companyId),
+        eq(companySecrets.status, "active"), isNull(companySecrets.deletedAt),
+      )).limit(1);
+      if (!clientSecret) {
+        throw unprocessable("Select an active OAuth client secret saved in this company", { code: "github_oauth_client_secret_invalid" });
+      }
+      config = {
+        sourceTemplateKey: "github", methodKey: GITHUB_OAUTH_METHOD_KEY, serverUrl: method?.defaults?.serverUrl,
+        expectedGitHubLogin: expectedLogin, quarantineNewEntries: true, safeDefault: true,
+        // Least access unless the operator explicitly opted in to private repositories (full `repo`).
+        githubPrivateRepoAccess: privateRepoAccess,
+        oauth: createGitHubOAuthProviderConfig(input.credentialValues?.["credentials.clientId"] ?? "", privateRepoAccess),
+      };
+    }
     if (galleryEntry?.slug === GOOGLE_SHEETS_GALLERY_KEY) {
       const availability = googleSheetsRobotEmailFromEnv();
       if (!availability.available) {
@@ -5188,7 +5583,8 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
     assertLocalStdioCanBeEnabled(transport, false);
 
     const credentialValues = input.credentialValues ?? {};
-    const credentialSecretRefs: CreateToolConnection["credentialSecretRefs"] = [];
+    const credentialSecretRefs: CreateToolConnection["credentialSecretRefs"] = githubOAuth
+      ? [...(input.credentialSecretRefs ?? [])] : [];
     const credentialRefs: McpConnectionCredentialRef[] = [];
     const createdSecretIds: string[] = [];
     let applicationRow: typeof toolApplications.$inferSelect | null = null;
@@ -5196,7 +5592,8 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
     let revivedConnectionPrevious: typeof toolConnections.$inferSelect | null = null;
 
     try {
-      const credentialFields = galleryEntry ? credentialFieldsFor(galleryEntry) : linkCredentialFields(credentialValues);
+      const credentialFields = githubOAuth ? []
+        : galleryEntry ? credentialFieldsFor(galleryEntry, method?.key) : linkCredentialFields(credentialValues);
       for (const field of credentialFields) {
         const value = credentialValues[field.configPath];
         if (!value && field.required !== false) {
@@ -5245,7 +5642,7 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
           applicationKey: `app-gallery:${galleryEntry?.slug ?? "link"}:${randomUUID()}`,
           name,
           description: galleryEntry?.description ?? `Connected app at ${input.link}`,
-          type: transport === "mcp_remote" ? "mcp_http" : "mcp_stdio",
+          type: transport === "rest_api" ? "rest_api" : transport === "mcp_remote" ? "mcp_http" : "mcp_stdio",
           status: "draft",
           metadata: galleryEntry ? { sourceTemplateKey: galleryEntry.slug, galleryKey: galleryEntry.slug } : { source: "link" },
         }).returning();
@@ -5272,6 +5669,7 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
         [connectionRow] = await db.update(toolConnections).set({
           name,
           transport,
+          authKind: method?.auth ?? "none",
           status: "draft",
           enabled: false,
           config,
@@ -5289,7 +5687,7 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
           name,
           uid: connectionUid(applicationRow.applicationKey ?? applicationRow.name, name, connectionId),
           connectionKind: "managed",
-          authKind: galleryEntry ? connectionMethodFor(galleryEntry).auth : "none",
+          authKind: method?.auth ?? "none",
           transport,
           status: "draft",
           enabled: false,
@@ -5304,14 +5702,15 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
       await syncCredentialBindings(connectionRow);
       await ensureRuntimeSlot(connectionRow);
 
-      if (galleryEntry && connectionMethodFor(galleryEntry).auth === "oauth") {
+      if (galleryEntry && method?.auth === "oauth") {
         return {
           connectionId: connectionRow.id,
           application: toApplication(applicationRow),
           connection: toConnection(connectionRow),
           catalog: [],
           actions: { readOnly: [], canMakeChanges: [] },
-          suggestedDefaults: recommendedDefaultsForApp(galleryEntry),
+          suggestedDefaults: githubOAuth ? { access: { agentIds: [] }, askFirstRiskLevels: ["write", "destructive"] }
+            : recommendedDefaultsForApp(galleryEntry),
           auth: { kind: "oauth", startUrl: null },
         };
       }
@@ -5540,6 +5939,12 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
           metadata: { source: "app_gallery_finish" },
         }));
     const transactionResult = await db.transaction(async (tx) => {
+      const lockedConnection = await lockToolConnectionMutation(tx as unknown as Db,
+        { connectionId: connection.id, companyId, applicationId: connection.applicationId });
+      if (lockedConnection.status === "archived"
+        || exactTimestampRevision(lockedConnection) !== exactTimestampRevision(connection)) {
+        throw conflict("App connection changed before its reviewed configuration could be finished");
+      }
       const [existingProfile] = await tx
         .select()
         .from(toolProfiles)
@@ -5670,12 +6075,14 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
       const [updatedConnection] = await tx
         .update(toolConnections)
         .set({ status: "active", enabled: true, updatedAt: new Date() })
-        .where(eq(toolConnections.id, connection.id))
+        .where(and(eq(toolConnections.id, connection.id), eq(toolConnections.companyId, companyId),
+          eq(toolConnections.applicationId, connection.applicationId)))
         .returning();
+      if (!updatedConnection) throw conflict("App connection scope changed before finish");
       await tx
         .update(toolApplications)
         .set({ status: "active", updatedAt: new Date() })
-        .where(eq(toolApplications.id, connection.applicationId));
+        .where(and(eq(toolApplications.id, connection.applicationId), eq(toolApplications.companyId, companyId)));
 
       return { profileId, profileBindings, policies, updatedConnection };
     });
@@ -5720,7 +6127,10 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
     const sourceTemplateKey =
       typeof connection.config.sourceTemplateKey === "string" ? connection.config.sourceTemplateKey : null;
     const galleryEntry = sourceTemplateKey ? getConnectableAppDefinition(sourceTemplateKey) : null;
-    const credentialFields = galleryEntry ? credentialFieldsFor(galleryEntry) : [
+    if (sourceTemplateKey === "github" && connection.config.methodKey === GITHUB_OAUTH_METHOD_KEY) {
+      throw conflict("Reconnect GitHub through its consent button, not a replacement token");
+    }
+    const credentialFields = galleryEntry ? credentialFieldsFor(galleryEntry, connection.config.methodKey) : [
       {
         label: "App key",
         configPath: "credentials.authorization",
@@ -5791,6 +6201,11 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
     if (connection.status === "archived") throw conflict("Archived app connections cannot start sign in");
     const sourceTemplateKey = typeof connection.config.sourceTemplateKey === "string" ? connection.config.sourceTemplateKey : null;
     const galleryEntry = sourceTemplateKey ? getConnectableAppDefinition(sourceTemplateKey) : null;
+    const githubOAuth = isNativeGitHubOAuthConnection(connection);
+    if (connection.transport === "rest_api" && !githubOAuth) throw unprocessable("This REST connection is not supported");
+    if (githubOAuth && (input.subjectUserId || input.actor.actorType !== "user")) {
+      throw forbidden("Start GitHub sign-in from the company board, not an agent request");
+    }
     assertOAuthRedirectConstraints(galleryEntry, input.redirectUri);
     const endpoints = await oauthEndpointsForConnection(connection, null, input.redirectUri);
     if (endpoints.grantType === "client_credentials") {
@@ -5820,7 +6235,9 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
       state,
       companyId,
       connectionId: connection.id,
-      codeVerifier,
+      codeVerifier: githubOAuth ? bindGitHubOAuthState({ verifier: codeVerifier, clientId: client.clientId,
+        redirectUri: input.redirectUri, expectedLogin: gitHubGrantExpectation(connection).expectedLogin,
+        scopes: githubOAuthRequestedScopes(githubStoredPrivateRepoAccessOptIn(connection.config)) }) : codeVerifier,
       createdByActorType: binding.actorType,
       createdByActorId: binding.actorId,
       createdBySessionId: binding.sessionId,
@@ -5838,8 +6255,12 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
     authorizationUrl.searchParams.set("state", state);
     authorizationUrl.searchParams.set("code_challenge", base64UrlSha256(codeVerifier));
     authorizationUrl.searchParams.set("code_challenge_method", "S256");
-    const authorizationScopes = input.scopes ?? endpoints.scopes;
+    const authorizationScopes = githubOAuth ? githubOAuthRequestedScopes(githubStoredPrivateRepoAccessOptIn(connection.config)) : input.scopes ?? endpoints.scopes;
     if (authorizationScopes.length > 0) authorizationUrl.searchParams.set("scope", authorizationScopes.join(" "));
+    if (githubOAuth) {
+      authorizationUrl.searchParams.set("login", gitHubGrantExpectation(connection).expectedLogin);
+      authorizationUrl.searchParams.set("allow_signup", "false");
+    }
 
     if (input.subjectUserId && input.issueId && binding.actorType === "agent") {
       const idempotencyKey = `connection-authorization:${connection.id}:${input.subjectUserId}`;
@@ -5906,10 +6327,14 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
         credentialScope: credentialScope(connection, input.actor),
       },
     };
-    await db
+    const [startedConnection] = await db
       .update(toolConnections)
       .set({ config: nextConfig, transportConfig: nextConfig, updatedAt: new Date() })
-      .where(eq(toolConnections.id, connection.id));
+      .where(githubOAuth ? and(eq(toolConnections.id, connection.id), eq(toolConnections.companyId, companyId),
+        ...gitHubConnectionSnapshot(connection)) : eq(toolConnections.id, connection.id)).returning(toolConnectionSnapshotColumns);
+    if (githubOAuth && !startedConnection) {
+      throw conflict("GitHub setup changed before sign-in started. Reconnect.", { code: "github_oauth_target_changed" });
+    }
 
     return {
       connectionId: connection.id,
@@ -5926,6 +6351,33 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
       .where(eq(toolOauthStates.state, state))
       .limit(1);
     return row ?? null;
+  }
+
+  async function adoptOAuthConnection(previous: typeof toolConnections.$inferSelect,
+    values: Partial<typeof toolConnections.$inferInsert>, githubOAuth: boolean) {
+    const save = async (client: ToolAccessMutationDb) => {
+      const [updated] = await client.update(toolConnections).set(values)
+        .where(githubOAuth ? and(eq(toolConnections.id, previous.id),
+          eq(toolConnections.companyId, previous.companyId), ...gitHubConnectionSnapshot(previous),
+          ne(toolConnections.status, "archived")) : eq(toolConnections.id, previous.id)).returning(toolConnectionSnapshotColumns);
+      if (!updated) throw conflict("GitHub setup changed before authorization was saved. Reconnect.", {
+        code: "github_oauth_target_changed",
+      });
+      await client.update(toolApplications).set({ status: "active", updatedAt: new Date() })
+        .where(and(eq(toolApplications.id, previous.applicationId), eq(toolApplications.companyId, previous.companyId)));
+      return updated;
+    };
+    if (!githubOAuth) return save(db);
+    // Short adoption transaction only; no provider I/O while holding the parent row.
+    return db.transaction(async (tx) => {
+      const [application] = await tx.select().from(toolApplications).where(and(
+        eq(toolApplications.id, previous.applicationId), eq(toolApplications.companyId, previous.companyId),
+      )).for("update").limit(1);
+      if (!application || ["archived", "disabled"].includes(application.status)) {
+        throw conflict("GitHub app was disabled or archived during sign-in", { code: "github_oauth_target_changed" });
+      }
+      return save(tx);
+    });
   }
 
   async function completeOAuthCallback(input: {
@@ -5952,24 +6404,45 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
     } else {
       assertSameOAuthActor(stateRow, input.actor);
     }
-    await db.delete(toolOauthStates).where(eq(toolOauthStates.state, input.state));
+    const [claimedState] = await db.delete(toolOauthStates).where(and(
+      eq(toolOauthStates.state, input.state), gte(toolOauthStates.expiresAt, new Date()),
+    )).returning();
+    if (!claimedState) throw badRequest("OAuth state was already used or expired");
 
     let connection = await getConnectionRow(stateRow.connectionId, stateRow.companyId);
+    const githubOAuth = isNativeGitHubOAuthConnection(connection);
+    if (isBoundGitHubOAuthState(stateRow.codeVerifier) && !githubOAuth) {
+      throw conflict("GitHub connector changed during sign-in. Start again.", { code: "github_oauth_target_changed" });
+    }
     const sourceTemplateKey = typeof connection.config.sourceTemplateKey === "string" ? connection.config.sourceTemplateKey : null;
     const galleryEntry = sourceTemplateKey ? getConnectableAppDefinition(sourceTemplateKey) : null;
     assertOAuthRedirectConstraints(galleryEntry, input.redirectUri);
     const endpoints = await oauthEndpointsForConnection(connection, null, input.redirectUri);
     const client = await oauthClientForConnection(connection, endpoints.provider, input.actor);
     if (!client.clientId) throw unprocessable(`OAuth client id is not configured for ${endpoints.provider}`);
+    if (connection.transport === "rest_api" && !githubOAuth) throw unprocessable("This REST connection is not supported");
+    const codeVerifier = githubOAuth ? verifyGitHubOAuthState(stateRow.codeVerifier, {
+      clientId: client.clientId, redirectUri: input.redirectUri,
+      expectedLogin: gitHubGrantExpectation(connection).expectedLogin,
+      scopes: githubOAuthRequestedScopes(githubStoredPrivateRepoAccessOptIn(connection.config)),
+    }) : stateRow.codeVerifier;
 
     const token = await exchangeOAuthToken({
       tokenUrl: endpoints.tokenUrl,
       clientId: client.clientId,
       clientSecret: client.clientSecret,
       redirectUri: input.redirectUri,
-      codeVerifier: stateRow.codeVerifier,
+      codeVerifier,
       code: input.code,
-    });
+    }, fetchRemoteHttpUrl);
+    const githubFacts = githubOAuth ? await verifyGitHubOAuthAuthorization({ ...token, scope: token.raw.scope,
+      ...gitHubGrantExpectation(connection) }, fetchRemoteHttpUrl) : null;
+    if (githubOAuth) {
+      const fresh = await getConnectionRow(connection.id, connection.companyId);
+      if (fresh.status === "archived" || exactTimestampRevision(fresh) !== exactTimestampRevision(connection)) {
+        throw conflict("GitHub setup changed during sign-in. Reconnect.", { code: "github_oauth_target_changed" });
+      }
+    }
     const [existingUserGrant] = stateRow.subjectUserId
       ? await db.select().from(connectionGrants).where(and(
           eq(connectionGrants.companyId, connection.companyId),
@@ -5988,7 +6461,9 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
       label: "OAuth access token",
       value: token.accessToken,
       actor: input.actor,
-      existingRefs: stateRow.subjectUserId ? subjectCredentialSecretRefs : undefined,
+      // Native callback secrets are new immutable candidates. A failed final CAS
+      // never rotates the credential still used by the old or archived connection.
+      existingRefs: githubOAuth ? [] : stateRow.subjectUserId ? subjectCredentialSecretRefs : undefined,
     });
     const nextCredentialSecretRefs = [
       ...subjectCredentialSecretRefs.filter((ref) => ref.configPath !== "oauth.access_token" && ref.configPath !== "oauth.refresh_token"),
@@ -6002,12 +6477,39 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
         label: "OAuth refresh token",
         value: token.refreshToken,
         actor: input.actor,
-        existingRefs: stateRow.subjectUserId ? subjectCredentialSecretRefs : undefined,
+        existingRefs: githubOAuth ? [] : stateRow.subjectUserId ? subjectCredentialSecretRefs : undefined,
       }));
-    } else {
-      const existingRefreshRef = subjectCredentialSecretRefs.find((ref) => ref.configPath === "oauth.refresh_token");
-      if (existingRefreshRef) nextCredentialSecretRefs.push(existingRefreshRef);
     }
+    const existingRefreshRef = token.refreshToken
+      ? undefined : subjectCredentialSecretRefs.find((ref) => ref.configPath === "oauth.refresh_token");
+    // A GitHub grant with no expires_in and no refresh_token is a non-expiring OAuth App token.
+    // Keeping an earlier refresh ref would make every health or tool call try to refresh it, so
+    // drop the ref and, once the new credentials are saved, delete that connection's own secret.
+    // GitHub only: other providers (Slack and others) often omit both fields on reconnect while the
+    // prior refresh token stays valid, so their refresh ref is kept.
+    const staleRefreshRef = githubOAuth && existingRefreshRef && !token.expiresIn ? existingRefreshRef : null;
+    if (existingRefreshRef && !staleRefreshRef) nextCredentialSecretRefs.push(existingRefreshRef);
+    const removeStaleRefreshSecret = async () => {
+      if (!staleRefreshRef) return;
+      if (nextCredentialSecretRefs.some((ref) => ref.secretId === staleRefreshRef.secretId)) return;
+      const [owned] = await db.select({ id: companySecrets.id }).from(companySecrets)
+        .where(and(eq(companySecrets.id, staleRefreshRef.secretId), eq(companySecrets.companyId, connection.companyId)));
+      if (!owned) return;
+      // Only this connection's own secret: refuse when any other connection or grant still binds it.
+      const needle = JSON.stringify([{ secretId: staleRefreshRef.secretId }]);
+      const [boundConnection] = await db.select({ id: toolConnections.id }).from(toolConnections)
+        .where(sql`${toolConnections.credentialSecretRefs} @> ${needle}::jsonb`).limit(1);
+      const [boundGrant] = await db.select({ id: connectionGrants.id }).from(connectionGrants)
+        .where(sql`${connectionGrants.credentialSecretRefs} @> ${needle}::jsonb`).limit(1);
+      if (boundConnection || boundGrant) return;
+      // Best effort: the reconnect is already saved without the ref, so a failed delete only leaves an
+      // unreferenced secret. Log the id and error class only, never secret values.
+      await secrets.remove(staleRefreshRef.secretId).catch((error: unknown) => {
+        logger.warn({ connectionId: connection.id, secretId: staleRefreshRef.secretId,
+          errorName: error instanceof Error ? error.name : typeof error },
+        "Could not remove stale GitHub OAuth refresh secret after reconnect");
+      });
+    };
     const expiresAt = token.expiresIn ? new Date(Date.now() + token.expiresIn * 1000).toISOString() : null;
     if (stateRow.subjectUserId) {
       const grantValues = {
@@ -6020,6 +6522,7 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
       };
       if (existingUserGrant) {
         await db.update(connectionGrants).set(grantValues).where(eq(connectionGrants.id, existingUserGrant.id));
+        await removeStaleRefreshSecret();
       } else {
         await db.insert(connectionGrants).values({
           companyId: connection.companyId,
@@ -6078,12 +6581,11 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
       },
       providerMetadata: {
         ...asRecord(connection.config.providerMetadata),
+        ...(githubFacts ? { githubOAuth: { ...githubFacts, verifiedAt: new Date().toISOString() } } : {}),
         oauth: { expiresAt, scope: token.scope, tokenType: token.tokenType },
       },
     };
-    const [updatedConnection] = await db
-      .update(toolConnections)
-      .set({
+    connection = await adoptOAuthConnection(connection, {
         status: "active",
         enabled: true,
         config: nextConfig,
@@ -6101,15 +6603,9 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
           },
         ],
         updatedAt: new Date(),
-      })
-      .where(eq(toolConnections.id, connection.id))
-      .returning();
-    connection = updatedConnection;
-    await db
-      .update(toolApplications)
-      .set({ status: "active", updatedAt: new Date() })
-      .where(eq(toolApplications.id, connection.applicationId));
+      }, githubOAuth);
     await syncCredentialBindings(connection);
+    await removeStaleRefreshSecret();
 
     await checkConnectionHealth(connection.id, input.actor);
     const refresh = await refreshCatalog(connection.id, input.actor);
@@ -6120,7 +6616,8 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
       connection: refresh.connection,
       catalog: refresh.catalog,
       actions: groupedActions(refresh.catalog),
-      suggestedDefaults: galleryEntry ? recommendedDefaultsForApp(galleryEntry) : {
+      suggestedDefaults: githubOAuth ? { access: { agentIds: [] }, askFirstRiskLevels: ["write", "destructive"] }
+        : galleryEntry ? recommendedDefaultsForApp(galleryEntry) : {
         access: "all_agents",
         askFirstRiskLevels: ["write", "destructive"],
       },
@@ -6317,6 +6814,9 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
     },
 
     connectGalleryApp,
+    executeGitHubOAuthTool,
+    readVerifiedGitHubProjectPage,
+    readVerifiedGitHubProjectPageScheduled,
 
     finishGalleryAppConnection,
 
@@ -6919,8 +7419,47 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
 
     updateConnection: async (connectionId: string, input: UpdateToolConnection): Promise<ToolConnection> => {
       const existing = await getConnectionRow(connectionId);
-      const config = normalizeGoogleSheetsConnectionConfig(input.config ?? input.transportConfig ?? existing.config);
-      const transportConfig = isGoogleSheetsConnectionConfig(config) ? config : input.transportConfig ?? config;
+      let config = normalizeGoogleSheetsConnectionConfig(input.config ?? input.transportConfig ?? existing.config);
+      let transportConfig = isGoogleSheetsConnectionConfig(config) ? config : input.transportConfig ?? config;
+      if (existing.config.methodKey === GITHUB_OAUTH_METHOD_KEY) {
+        // Private-repository access and OAuth state are set only by the connect/reconnect flow.
+        // The identity keys are also carried so a whole-config PATCH cannot turn the connection non-GitHub.
+        for (const supplied of [input.config, input.transportConfig]) {
+          if (!supplied || typeof supplied !== "object") continue;
+          const record = supplied as Record<string, unknown>;
+          if (GITHUB_OAUTH_IDENTITY_CONFIG_KEYS.some((key) => key in record && record[key] !== existing.config[key])) {
+            throw badRequest("A GitHub OAuth connection cannot change its app or method. Connect a new app instead.",
+              { code: "github_oauth_config_immutable" });
+          }
+        }
+        // A generic update can neither drop them (which would re-derive access from legacy scopes)
+        // nor widen them (which would skip the create-time opt-in).
+        for (const supplied of [input.config, input.transportConfig]) {
+          if (!supplied || typeof supplied !== "object") continue;
+          const record = supplied as Record<string, unknown>;
+          // A whole-config round trip may echo a stale copy of server-owned OAuth state (refresh lease,
+          // expiry), so only the access-defining values are compared; all three keys are carried below.
+          const pick = (value: unknown, path: string[]) => path.reduce<unknown>((node, key) =>
+            node !== null && typeof node === "object" && !Array.isArray(node) ? (node as Record<string, unknown>)[key] : undefined, value);
+          const changed = (path: string[]) => path[0] in record && !isDeepStrictEqual(pick(record, path), pick(existing.config, path));
+          const malformed = (key: string) => key in record && key !== "githubPrivateRepoAccess"
+            && (record[key] === null || typeof record[key] !== "object" || Array.isArray(record[key]));
+          if (GITHUB_OAUTH_ACCESS_PATHS.some(changed) || GITHUB_OAUTH_PROTECTED_CONFIG_KEYS.some(malformed)) {
+            throw badRequest("GitHub private repository access and OAuth settings cannot be changed here. Change private repository access by reconnecting.",
+              { code: "github_oauth_config_immutable" });
+          }
+        }
+        const carry = (value: Record<string, unknown>) => {
+          const next: Record<string, unknown> = { ...value };
+          for (const key of [...GITHUB_OAUTH_PROTECTED_CONFIG_KEYS, ...GITHUB_OAUTH_IDENTITY_CONFIG_KEYS]) {
+            if (key in existing.config) next[key] = existing.config[key];
+            else delete next[key];
+          }
+          return next;
+        };
+        config = carry(config);
+        transportConfig = carry(transportConfig);
+      }
       if (existing.transport === "mcp_remote") {
         assertRemoteMcpHeaderPolicy(config, transportConfig);
         await assertRemoteEndpointAllowed(config);
@@ -6950,10 +7489,12 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
 
     archiveConnection: async (connectionId: string): Promise<ToolConnection> => {
       const row = await db.transaction(async (tx) => {
+        const lockedConnection = await lockToolConnectionMutation(tx as unknown as Db, { connectionId });
         const [updatedConnection] = await tx
           .update(toolConnections)
           .set({ status: "archived", enabled: false, updatedAt: new Date() })
-          .where(eq(toolConnections.id, connectionId))
+          .where(and(eq(toolConnections.id, connectionId), eq(toolConnections.companyId, lockedConnection.companyId),
+            eq(toolConnections.applicationId, lockedConnection.applicationId)))
           .returning();
         if (!updatedConnection) throw notFound("Tool connection not found");
 
@@ -6963,6 +7504,7 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
           .where(
             and(
               eq(toolConnections.applicationId, updatedConnection.applicationId),
+              eq(toolConnections.companyId, updatedConnection.companyId),
               ne(toolConnections.status, "archived"),
             ),
           )
@@ -6973,7 +7515,8 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
           await tx
             .update(toolApplications)
             .set({ status: "archived", archivedAt: now, updatedAt: now })
-            .where(eq(toolApplications.id, updatedConnection.applicationId));
+            .where(and(eq(toolApplications.id, updatedConnection.applicationId),
+              eq(toolApplications.companyId, updatedConnection.companyId)));
         }
 
         return updatedConnection;
@@ -7125,21 +7668,37 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
       const invocationById = new Map(invocations.map((invocation) => [invocation.id, invocation]));
       let visibleRequests = requests;
       if (status === "pending") {
-        const invalidRequestIds = requests
-          .filter((request) => {
-            const invocation = invocationById.get(request.invocationId);
-            if (!invocation) return true;
-            try {
-              return !readSignedToolArgumentsPayload({
-                signedArguments: request.signedArguments,
-                invocationId: invocation.id,
-                toolName: invocation.toolName,
-              });
-            } catch {
-              return true;
-            }
-          })
-          .map((request) => request.id);
+        // A pending request that the creator has not signed yet is still being
+        // set up. The gateway creates the row (signedArguments = null) and signs
+        // it in a second step, so a review-queue read can observe the row inside
+        // that window. Hide such a request from the queue, but do not cancel it —
+        // cancelling here races the two-step create and makes the later approve
+        // fail with action_not_pending. Only cancel a request that carries a
+        // signature we cannot verify (secret rotation or tampering).
+        const unsignedRequestIds = new Set<string>();
+        const invalidRequestIds: string[] = [];
+        for (const request of requests) {
+          const invocation = invocationById.get(request.invocationId);
+          if (!invocation) {
+            invalidRequestIds.push(request.id);
+            continue;
+          }
+          if (request.signedArguments === null) {
+            unsignedRequestIds.add(request.id);
+            continue;
+          }
+          let readable = false;
+          try {
+            readable = Boolean(readSignedToolArgumentsPayload({
+              signedArguments: request.signedArguments,
+              invocationId: invocation.id,
+              toolName: invocation.toolName,
+            }));
+          } catch {
+            readable = false;
+          }
+          if (!readable) invalidRequestIds.push(request.id);
+        }
         if (invalidRequestIds.length > 0) {
           await db
             .update(toolActionRequests)
@@ -7149,8 +7708,10 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
               eq(toolActionRequests.status, "pending"),
               inArray(toolActionRequests.id, invalidRequestIds),
             ));
-          const invalidIds = new Set(invalidRequestIds);
-          visibleRequests = requests.filter((request) => !invalidIds.has(request.id));
+        }
+        const hiddenIds = new Set([...invalidRequestIds, ...unsignedRequestIds]);
+        if (hiddenIds.size > 0) {
+          visibleRequests = requests.filter((request) => !hiddenIds.has(request.id));
         }
       }
       if (visibleRequests.length === 0) return [];

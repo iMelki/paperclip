@@ -16,7 +16,7 @@ import { uninstallCommand } from "../commands/uninstall.js";
 import { resolvePaperclipInstanceId } from "../config/home.js";
 import {
   INSTALL_MANIFEST_VERSION,
-  flipCurrentAtomic,
+  flipCurrent,
   initializeInstallStore,
   payloadPathFor,
   readInstallManifest,
@@ -344,7 +344,7 @@ describe("managed install commands", () => {
     const payloadPath = payloadPathFor(paths, "npm", "2026.720.0");
     initializeInstallStore(paths);
     fs.mkdirSync(payloadPath, { recursive: true });
-    flipCurrentAtomic(payloadPath, paths);
+    flipCurrent(payloadPath, paths);
     writeInstallManifestAtomic({
       schemaVersion: INSTALL_MANIFEST_VERSION,
       source: "npm",

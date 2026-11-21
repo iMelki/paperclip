@@ -1,25 +1,618 @@
 # Changelog
 
+- **[#162]** The patched acpx 0.12.0 client now advertises AIR `sessionFailure`
+  support and fails error-severity typed terminal turns even when the agent
+  returns `end_turn`. A record with no severity counts as an error, as the AIR
+  contract defines. Only an explicit warning stays successful. Per-turn callbacks receive the
+  complete title and details for later diagnostic handling. The current
+  codex-acp 1.1.14 ignores this capability; its existing behavior is unchanged.
+  A warning or incident that an agent sends on `session_info_update` is shown as
+  status text (its title, else the category) instead of the generic "session
+  updated". The failed run result records the typed category as
+  `resultJson.sessionFailureCategory`; mapping it to quota or retry handling is
+  left to the recovery changes.
+  Prompt-response usage is recorded once per turn, including failed turns.
+  Refresh the lockfile patch hash in a separate dependency pull request.
+
+- Preserve historical browser proof variants in a verified private archive and dated index without replacing current gauntlet images or receipts.
+
 All notable changes to this repository should be recorded here.
 
 ## Unreleased
 
-- Made trusted pull-request reviews usable on public forks without weakening
-  upstream authentication. Fork workflows use their scoped GitHub token,
-  while non-fork repositories retain the commitperclip App credential and
-  fail closed when its private-key secret is missing. Consolidated review
-  comments are reused for both bot identities instead of accumulating on fork
-  review reruns. Credential selection runs from the immutable workflow
-  revision before the job switches to the pull request's trusted base, so an
-  older base cannot remove the bootstrap helper.
+- **[Refs #288]** `hermes_local` now binds what it launches. Operators must act on
+  four changes:
+  1. **An explicit model is required.** A run refuses to start when `model` is
+     unset, empty, `auto`, or a provider's auto router such as `openrouter/auto`,
+     because the provider would choose the model per call. Set `adapterConfig.model`
+     and `adapterConfig.provider` on every `hermes_local` agent before upgrading;
+     an agent that relied on the former `auto` default fails fast until you do.
+     `extraArgs` may no longer carry `-m`, `--model`, `--provider`, `--profile` or
+     `-p`.
+  2. **A configured `paperclipApiUrl` must be a loopback address** (`localhost`,
+     `127.0.0.1` or `[::1]`) without credentials, query or fragment. The child's
+     `PAPERCLIP_API_URL` is the bare origin, like every other adapter.
+  3. **Skills are linked where Hermes reads them, and only there.** On Windows an
+     inherited `LOCALAPPDATA` selects `%LOCALAPPDATA%\hermes\skills` when no
+     `HERMES_HOME` is set; strict isolation links into its own profile home. A home
+     reached through a symlink or junction is refused, and `HERMES_HOME` must be
+     absolute.
+  4. **The run key stays off command lines.** The prompt and the Paperclip skill
+     send headers from a private file (`curl -H @file`) instead of expanding
+     `$PAPERCLIP_API_KEY` into `curl`'s arguments. The adapter preloads the Paperclip
+     skill (`-s paperclip`) so its declared variables reach Hermes' tool shell. When the Paperclip skill is in
+     the runtime inventory but its source is missing or it cannot be linked, the run fails before
+     Hermes is spawned instead of starting without those variables. This includes a runtime inventory that lacks
+     the skill or is empty; only `adapterConfig.paperclipSkill: "disabled"` runs Hermes without it.
+
+- **[Refs #265]** `check:tokens` accepts a per-machine ignore list for dynamic
+  usernames: `CHECK_FORBIDDEN_TOKENS_IGNORE_USERNAMES`. Use it only on a shared
+  or generic account whose name is an ordinary word in the repo. Without it, the
+  pre-push check fails on every file that contains that word. The value is a list
+  of exact account names, separated by commas, semicolons or whitespace. Matching
+  is case-insensitive. Wildcards and prefixes are not supported. An empty,
+  whitespace-only or separator-only value ignores nothing. A listed name is not
+  used as a dynamic token. The private and tracked lists stay in effect, also for
+  the same spelling. Each run that ignores a name prints a warning on stderr with
+  the count only, never the name. There is no switch that turns off dynamic
+  usernames for all accounts. When every detected username is filtered out and no
+  list has patterns, the check now says that nothing was scanned, not that the
+  list is empty.
+
+- **[#129, candidate only]** Integrate upstream `v2026.831.1` with the fork's
+  deployed migration history, company-scoped contracts, and Windows process
+  ownership safeguards. Add regression proof for the restored Git Bash fallback
+  and verified runtime shutdown. Live migration and deployment remain gated;
+  see the dated Factory host integration qualification checkpoint.
+- **Fix:** embedded PostgreSQL start-up now survives slow crash recovery on
+  Windows. When `pg_ctl` stops waiting (60 s) while the server log shows crash
+  recovery (fsync of the data directory, WAL redo, end-of-recovery checkpoint)
+  and the postmaster is alive, start-up keeps waiting for readiness while new
+  recovery progress lines appear. It gives up after 300 s without progress or
+  at an upper bound of 1800 s (set with
+  `PAPERCLIP_EMBEDDED_POSTGRES_RECOVERY_STALL_SEC` and
+  `PAPERCLIP_EMBEDDED_POSTGRES_RECOVERY_MAX_WAIT_SEC`). While it waits, and
+  after it gives up, the embedded-postgres exit hook cannot stop the server, so
+  recovery is not restarted from zero. The error names the server log path.
+  Each readiness probe has a deadline inside the remaining wait, and a probe
+  that is still pending is awaited again rather than repeated. "resetting unlogged
+  relations" progress lines count as recovery progress. While the server log
+  shows unfinished recovery, the next start's refusal says to wait instead of
+  naming a stop command. Only the latest startup episode in the log counts, so
+  an earlier "ready to accept connections" line does not hide a newer recovery.
+  The refusal and the start wait read one server log path, resolved once from
+  the instance options. When the log already shows "ready" but the readiness
+  check keeps failing, the give-up says so. The wait logs its policy when it
+  starts and a heartbeat every 30 s without new progress, and each readiness
+  probe passes a connect timeout close to its deadline.
+
+- **Fix:** a second embedded PostgreSQL start on the same data directory no
+  longer moves the first start's live `postmaster.pid` aside. The lock is
+  verified again just before `start()`. A live owner is reused, an owner that
+  cannot be verified makes startup refuse, and only a lock that is still stale
+  is moved aside.
+
+- Embedded PostgreSQL process discovery reads `-c data_directory=<path>` and
+  `--data_directory=<path>` as the effective data directory, ahead of `-D`. A
+  readable working directory of a server now decides ownership first. A `-D`
+  that names another cluster no longer proves that the server stores a
+  different one, because a configuration file or an include can replace it; such
+  a server is "unknown", and startup refuses instead of moving the lock aside.
+  A lock is moved aside only if it is the file that was examined: the file is
+  verified through a hard link before anything is moved, an unknown identity
+  fails closed, and a file that replaces it in the last instant is put back
+  without overwriting a newer file. A start lock beside the data directory keeps
+  two Paperclip starts apart. It is keyed on the physical path, it is never moved
+  or removed automatically (a dead owner is refused with a manual step), a
+  `postmaster.pid` is moved aside only while that start lock is held, and a start
+  refuses (instead of continuing unserialised) when the lock cannot be created or
+  written. A refusal names every server whose ownership could
+  not be proven and the safe manual step.
+- **[Refs #173]** Recovery reads the Claude session-limit statement only from
+  the ACP error and stop reason, or from a non-ACP run's own error field. A run
+  whose summary, output or transcript only quotes the phrase is no longer parked
+  as a provider quota wait. The reset clock is read only from the run's own
+  error (and the ACP error and stop reason), never from quoted result text.
+  Each `resets` or `try again at` candidate is validated before one is chosen,
+  so an impossible clock or an unknown timezone no longer hides a later valid
+  reset. A clock must be a complete token: `9:000` is not read as `9:00`, and
+  `9:00pm:30` or `9pm30` is not read as `9:00pm` or `9pm`, in the adapter and in
+  recovery.
+  The Claude adapter now decides "provider quota" and "transient upstream", and
+  extracts the retry time, only from provider error evidence: the `result` of a
+  result event that the CLI marked as an error, its `errors` list, stderr, and
+  the adapter's own fallback message. Raw stdout and the result of a result
+  event that is not an error are ignored. The run result records where the
+  verdict and the retry time came from as `providerQuotaEvidenceSource` and
+  `retryNotBeforeSource`. The failure message that recovery reads as the run's
+  own error no longer carries the text of a result event that is not an error,
+  every reset statement in a source is tried in turn, and a reset clock that
+  names an unknown timezone is skipped instead of being read in the server's
+  timezone. Recovery decides the quota verdict from the run's own error only,
+  never from the result JSON: a non-error result that quotes "usage limit
+  reached", "you've hit your usage limit" or "provider quota exceeded" no longer
+  parks the run. Prose after a clock ("try again at 10:40pm or upgrade your
+  plan") is no longer read as a timezone; only a word written in capitals is a
+  timezone candidate, and an unknown one still makes the candidate unusable.
+
+- Embedded PostgreSQL process discovery reads only an uppercase `-D` as the
+  data directory option. PostgreSQL's lowercase `-d <debug level>` no longer
+  replaces it, so a server that is started with `-D <dir> -d 5` is identified
+  by its `-D` value.
+
+- Windows embedded PostgreSQL now writes its server log outside the data
+  directory, in the same log directory as the server log: by default
+  `<instance>/logs/postgres-<id>.log`, or the configured `logging.logDir` /
+  `PAPERCLIP_LOG_DIR`. Each data directory gets its own file, so instances that
+  share a log directory never share one. When the data directory contains that
+  directory, including through a symlink or junction, the log goes to a sibling
+  of the data directory, which is also where it goes when the configured
+  directory is a UNC share or contains a character (such as `&`) that the
+  dependency does not pass to `pg_ctl`. Server startup also
+  allows up to 600 seconds to start when the last shutdown was unclean (a
+  `postmaster.pid` was left behind); the CLI, worktree and migration paths that
+  start the database still wait 60 seconds. An open log inside the data
+  directory made crash recovery fail with a sharing violation and outlast
+  pg_ctl's 60-second wait.
+
+- **Docs:** the fork getting-started guide uses placeholders for local
+  workspace and notes-vault paths instead of one machine's paths.
+
+- **[Refs #162]** Recovery recognizes Claude ACP session-limit failures and
+  `resets` clock messages. These failures use the existing provider-quota wait
+  and monitor path instead of immediate continuation retries. Ordinary ACP
+  errors, generic `session limit` tool or MCP wording, and deliberately paused
+  issues retain their existing behavior.
+
+- **[#20]** Limited DB Vitest discovery to authored `src` and `scripts`
+  suites. Compiled and stale `dist` tests no longer run a second time.
+  A CLI-backed regression runs through the root workspace and checks source
+  extensions, default exclusions, stale-file filters, and maintenance suites.
+  It reuses the pinned canonical scratch helper and confines child temp output.
+  This does not repair embedded PostgreSQL startup or process cleanup.
+  The scratch helper now rejects unsafe file extensions and unique suffixes,
+  keeps every created path inside its root, and creates owner-only scratch.
+
+- **[#169]** Server startup reuses an embedded PostgreSQL only when a query on
+  the `postmaster.pid` port reports the configured data directory, compared by
+  physical path (case-insensitive on Windows) with the embedded login. If the
+  PID may still be alive but identity cannot be verified, startup stops (exit
+  code 75) and leaves the lock file unchanged. A lock is treated as stale and
+  moved aside to `postmaster.pid.stale-<timestamp>` (never deleted) when its PID
+  is dead, is the server's own, belongs to a live process that is not PostgreSQL
+  while nothing answers on the recorded or configured port, or when the lock is
+  unreadable or garbled and no PostgreSQL answers or references this data
+  directory. Any lock still present just before start is moved aside the same
+  way; if it cannot be moved, startup refuses (exit code 75).
+
+- **[#148]** Preserve declared Codex model ordering after discovery and keep
+  ordinary model picker entries in the adapter’s order. GPT-6 entries stay
+  ahead of older declared models; unknown discovered IDs remain available and
+  deterministic. Detected-model promotion, provider groups, manual IDs, saved
+  selections and model discovery caching retain their existing behavior.
+
+- **[#164]** Refresh Lockfile accepts manual `ref` and `base` inputs that default
+  to `dev`. Each base has its own refresh branch and matching PR lookup. Master
+  pushes still refresh their triggering commit and retain auto-merge; other bases
+  require maintainer review. Both lockfile gates accept the bot's exact per-base branch.
+
+- **[#160]** The PR security step now lists each flag (check name and file,
+  or package names) in the job log and in the `security-review` check-run
+  summary. For `secret-scan` flags it names only the pattern, never the
+  matched text. A failed draft-advisory call (403 for the workflow token on
+  this fork) is logged and no longer stops the check run or the exit-0
+  contract. The summary stays under the GitHub size limit and counts the
+  flags it leaves out. Refs #137.
+
+- **[#159]** A Codex ACP run whose whole reply is a provider error object now
+  fails. codex-acp 1.1.14 sends a rejected request (for example an unsupported
+  model id) as reply text and ends the turn normally, so the run was recorded
+  as succeeded and started corrective runs on the same dead model. The Codex
+  ACP executor now returns exit code 1, error code
+  `codex_provider_error_reply`, and the provider error type and message as the
+  failure reason. Only a reply that, without blank lines and the model-metadata
+  warning, parses as one JSON error object (`type: "error"`, or an `error`
+  object with HTTP status 400-599) matches. Prose that quotes an error stays a
+  success.
+
+- **[#148]** Corrected comments in the Codex adapter and its test that said
+  `gpt-5.6-sol` "stays the default model". `DEFAULT_CODEX_LOCAL_MODEL` only
+  sets an entry of the model dropdown list. A Codex agent with an empty model
+  field runs without `--model`, so it uses the `model` key of its company's
+  Codex home `config.toml`. Comments only; no code or assertion changed.
+
+- Agent hires accept a company-scoped `Idempotency-Key` header or `idempotencyKey` body field. Matching retries return the original hire with HTTP 200; changed payloads return 409. A database unique index and transaction prevent concurrent duplicate agents and approvals. Plan-based hiring docs now recommend a revision-and-slot key.
+
+- **[#150]** Pin the Codex client under `codex-acp` 1.1.14 to `@openai/codex`
+  0.160.0 with a scoped pnpm override, so Codex agents can run the GPT-6
+  models (the server refuses them from 0.147.0 with HTTP 400). The lockfile
+  changes only `@openai/codex` and its platform packages, plus one
+  `@babel/runtime` line that pnpm re-resolved. A frozen reinstall and a
+  restart are needed to take effect.
+
+- **[#148]** Added the GPT-6 model ids (`gpt-6.1-sol`, `gpt-6-astra`,
+  `gpt-6-sol`, `gpt-6-luna`) to the Codex adapter's fixed model list and its
+  fast-mode list, with matching help text, docs and tests. The default model
+  stays `gpt-5.6-sol`. The ids need the Codex client 0.160.0 that #150
+  pins; this change touches no dependency or version pin.
+
+- **[#144]** Pass the configured bind host to detect-port when choosing the
+  listen port, so a port held on another address of the machine no longer
+  moves the server. Add opt-in `PAPERCLIP_STRICT_PORT=true` to fail startup
+  instead of moving to another port. Real-socket tests and docs included. A
+  wildcard listener on Windows is still not detected.
+
+- **[#140]** Registered the Hermes adapter's Vitest project in the root test
+  workspace and grouped PR runner. Exact pre-push selection now runs its
+  sibling tests locally; the registration and test-policy changes still
+  require a topic-branch PR and hosted CI before publication to `dev`.
+
+- **[#20]** Moved the access-route permissions test's one-time module import
+  into bounded suite setup after timing showed it exceeded the test's 10-second
+  limit on Windows. Bounded the adapter-route suite's per-test reset/import
+  setup at 60 seconds after a 30-second hook timeout under the staged gate;
+  the focused suite passed 13/13. The self-lockout assertion and timeout are
+  unchanged; process-tree leak and full-suite validation remain open.
+
+- **[#140]** Added an opt-in, fail-closed Hermes Local launch boundary for a
+  separate named profile and scrubbed child environment, bounded strict runs to
+  900 seconds and three turns, removed unconditional `--yolo`, and made the
+  CLI fixture portable on Windows. Adapter tests pass; effective Hermes auth,
+  provider hard spending limits, sandboxing, and live dispatch remain separate
+  acceptance gates.
+
+- **[#114]** Added optional company/system/account-scoped source identities to
+  cost events. Identical imports replay without duplicating spend; changed
+  payloads return HTTP 409. Company totals and budget pauses are transactional,
+  and replay retries failed cancellation. Existing reports without source IDs
+  remain append-only. Migration 0214 is prepared; live databases are unchanged.
+- **[#115]** Removed synthetic provider/biller budget percentages and inferred
+  weekly allowances. Cards show recorded spend with unallocated budgets and
+  keep provider-reported quota separate.
+
+- **[#53]** Added and merged (PR #113, `715b453bc`) a fail-closed, additive
+  task-coordination v2 route at
+  `/api/issues/:rootIssueId/coordination/v2`. It persists a positive root
+  coordination generation, vendors and pins the canonical Projects Ops schema
+  by SHA-256, keeps company predicates in the loader, limits placements to the
+  board or assigned/participating agent, and never claims process/output health
+  without independent evidence. Focused v2, route, real HTTP isolation, and DB
+  contract tests pass; deliberate audience, evidence-authority, generation,
+  and schema-drift breaks fail for the expected reasons with receipts under
+  `doc/evidence/coordination-v2/`.
+
+- Addressed PR #108's automated-review findings with caller-shaped negative
+  proof: HTTP request logs now omit parsed query/params and query strings,
+  attach rejected-request diagnostics only at response time, redact
+  board-claim path tokens and URL-bearing headers, omit credential-route
+  bodies case-insensitively, and structurally redact ordinary-route bodies.
+  Connection-string and credential-code aliases, nonempty plain bindings, and
+  camelCase URL/URI fields are covered. The final production-shaped security
+  set passes 34/34 after an eight-failure negative control; the independent
+  server regression set passes 109/109.
+
+- Kept the same review repair narrow across approval behavior:
+  standalone-hire metadata accepts only object records; budget writes are
+  tested against the active transaction handle; hire resubmit forwards the
+  exact centralized-guard result; and test-only cleanup guarantees PostgreSQL
+  trigger/function and second-connection teardown.
+
+- Tightened delivery portability after review. Removed production files keep a
+  surviving declared contract test instead of being needlessly deferred to
+  hosted CI; the PR #45 census fails early with exact fetch guidance when its
+  preservation refs or full history are unavailable and never force-updates
+  its protected local WIP branch; SSH fixture admission includes `ps`; all SSH
+  destinations terminate option parsing; and direct plus managed runners share
+  strict environment-key validation and the reviewed shell quoter. The
+  generated Playwright output from focused proof was recycled, not committed.
+
+- **[#47]** Made remote-managed-runtime validation treat `localPath` as a host
+  path, accepting POSIX or Windows absolute forms while keeping the remote
+  sandbox path POSIX-only. The formerly failing Windows tests and related
+  commit hook pass; the real old-head pre-push caller also completed under the
+  identity-bound, disk-monitored process owner with zero survivors.
+
+- Hardened deterministic pre-push coverage for production code exercised by
+  intentionally higher-level contract suites. Five exact source-to-test
+  declarations now reuse the PR #45 generator, HTTP-log redaction, and
+  onboarding persistence suites without restoring an unbounded import-graph
+  scan. A missing declared test fails closed by exact source and test path; the
+  selector proofs pass 19/19, including the new onboarding route helper, and
+  the selected contract suites use their exact real runners.
+
+- **[#80]** Turned the four preserved PR #45 WIP commits into a reproducible
+  no-loss disposition manifest: 162 commit/path rows, 131 unique historical
+  paths, and 3,032 unified-zero hunks with zero unowned or unknown rows. Exact
+  named-commit/current-tree evidence distinguishes already-landed results from
+  selective extraction and semantic re-derivation. Every remerge-diff hunk is
+  conservatively assigned to semantic re-derivation/manual review because the
+  reconstructed-merge comparison can contain meaningful conflict resolution;
+  none is called stale without path-specific proof. The generator pins both local and
+  remote-tracking preservation refs to `7bae4af2`, and explicitly forbids a
+  wholesale merge/cherry-pick, branch deletion, stash mutation, or evidence
+  retirement without separate authority. Recovery fetches only the
+  remote-tracking ref and creates a missing local preservation branch without
+  force; the final owning suite passes 5/5.
+
+- **[#63]** Replaced SSH executable discovery through interpolated
+  `sh -c "command -v ..."` with a shared shell-free PATH/PATHEXT resolver, and
+  reused the canonical shell quoter instead of keeping a second copy. The
+  resolver mirrors Node's unset/empty PATH behavior, Windows environment-key
+  selection, documented PATHEXT fallback, platform-specific path forms,
+  file-type checks, and executable-access checks. Adapter-utils typecheck now
+  invokes an AST gate first; its deliberately unsafe aliased shell/argv,
+  named-import launcher, and zsh/composite-flag/`which` fixtures must make that
+  exact caller exit nonzero,
+  while passive text and the real SSH source remain accepted. ACPX/Gemini's
+  separate `cmd.exe /c` probe stays tracked in #100.
+  Post-review proof also prevents a second private shell quoter and keeps the
+  env-lab admission list synchronized with its required `ps` descendant probe.
+
+- **[#88]** Preserved an intentionally empty plain API-key binding in hire
+  approvals while continuing to redact every non-empty or whitespace-only
+  secret. Hire payload preparation is enforced at the approval-service boundary
+  for normal, built-in, plugin-managed, create, and resubmit paths; redacted
+  values can be restored only from the same path on a same-company pending
+  agent, and missing, changed, embedded-marker, cross-company, or non-pending
+  baselines fail closed. Approval resolution, activation/creation,
+  reconciliation, and budget persistence now share one database transaction,
+  with notification attempted only after commit. Standalone approvals preserve
+  icon, runtime config, default environment, and restrictive permissions;
+  revision/resubmit updates use status compare-and-set guards. The confirmed
+  Drizzle `params:` error-log path, provider-prefixed credentials, camelCase
+  private-key/secret/token keys, ambiguous bare `token` fields, query objects,
+  and sensitive route/path/header values are redacted or omitted through the
+  production pino configuration. The final production-shaped negative control
+  failed eight exact assertions before restoration; the restored set passed
+  34/34, the independent server set passed 109/109, and server typecheck passed
+  through the task-owned resource/disk envelope.
+  Historical-row migration, creation-time
+  agent/approval atomicity, durable notification delivery, and broader
+  structured error-context allowlisting remain tracked separately in #102,
+  #103, #101, and #104.
+
+- **[#84]** Replaced the stale mandatory Greptile 5/5 language with truthful,
+  provider-specific review evidence. CodeRabbit is the primary automated
+  review lane, exact-head Cursor Bugbot/review is the documented fallback when
+  CodeRabbit is unavailable, and Greptile is explicitly optional/N/A unless a
+  maintainer configures it. Hosted CI, automated review, and human review remain
+  separate gates. A caller-shaped negative proof restored the legacy 5/5 claim
+  and made the exact policy test fail before the restored policy passed 4/4.
+
+- **[#87]** Returning onboarding now persists the selected adapter and config
+  on the existing lead instead of leaving the saved agent on Claude while the
+  UI displays Codex. Changing adapters clears a stale model; reselecting the
+  same adapter preserves an intentional model override plus hidden
+  ACP/profile/arguments/workspace/runtime/timeout policy. Only onboarding-owned
+  fields are overlaid on a same-adapter resume; an adapter change still drops
+  stale adapter-specific state. The Review step reads the saved agent, compares
+  the server-normalized saved configuration, displays its persisted
+  adapter/model, and blocks **Get started** on a pending, failed, mismatched, or
+  reload-without-exact-expectation readback. Returning agents test the effective
+  merged command/cwd/env configuration before PATCH, so a failing preserved
+  configuration cannot advance. The final set passed 21/21 plus UI typecheck.
+  Deliberate launch-gate, destructive-replace, and draft-instead-of-effective-
+  config regressions failed for their exact reasons before byte restoration.
+  Independent static review is GO with no P0/P1; opaque server-owned config
+  revisions/CAS and controller extraction remain tracked in #105 and #107.
+  Two real Playwright journeys now preserve the submitted adapter/config while
+  disabling only automatic wakes, then require Saved configuration to report
+  Verified / Claude Code / Adapter default before **Get started** can proceed.
+  The shared route helper has its own registered Playwright contract and exact
+  deterministic pre-push mapping. The reused Shadcn Badge/StatusGlyph treatment
+  passes the repository token gates without arbitrary palette or grid values.
+
+- Narrow-viewport follow-up for #89/#94: members table stacks below `md`
+  (the `--gtc-24` 420px floor was the 99px members overflow), dashboard
+  charts collapse to one column before `sm`, mobile `<main>` clips
+  horizontal overflow, `/onboarding` and two ux-lab routes now have a
+  `<main>` landmark, and `prefers-reduced-motion` zeros Tailwind
+  `transition-duration`. `/onboarding` remains inside `CloudAccessGate`, so
+  the landmark change does not bypass the authenticated access/claim flow.
+  Does not close #89 or #94. Does not claim
+  Awwwards 8+. Gauntlet 21/21 remains the run 10 receipt only.
+
+- Factory gauntlet run 10 on `:5113` @ `f7a0160fc` is **21/21**. First-pass
+  `/ASS/design-guide` rendered 16 capsules, `mainTextLen` 17664, empty
+  `consoleErrors`. Receipt:
+  `docs/uiux/browser-evidence-2026-08-27/gauntlet-run10-f7a0160fc.json`.
+  Tracks #48; does not close #94 or #89.
+
+- Design-guide Issue Output showcase now uses the existing public
+  `/paperclip-thinking.svg` instead of a fake `/api/attachments/.../content`
+  video. That was the remaining gauntlet Technical quality 404 on
+  `/ASS/design-guide`. Run 10 later proved Technical quality 3 on factory
+  `:5113`. Tracks #48.
+
+- **[#95]** `db:migrate` now skips DDL that is already true on the live schema
+  (existing tables/columns/indexes/constraints, dropped columns, indexes on
+  removed columns, SQL-comment prefixes). That repairs a drifted
+  `__drizzle_migrations` ledger without wiping embedded-postgres data. Factory
+  start still requires a clean checkout after this lands.
+
+- Enrolled the fork in Repo Doctor plan resolution for Projects Ops #117 with
+  one `on_demand`, repository-scoped, observe-only genome. Four explicit
+  authored-runtime source sets select 3,246 server/CLI, package, UI, and script
+  files and exclude the two declared generated files. `node.typecheck` is
+  required; `node.lint` and `architecture.boundaries` remain optional, and no
+  commit/push gate, exception, analyzer execution, authority, or quality
+  decision was added. A deliberately undeclared source-set reference made the
+  exact resolver return `invalid`/exit 2 for that reason. Agent Settings
+  `c91e70cc` repaired the shared current-report contract, after which the same
+  broken input returned `invalid_genome`/exit 2 without exposing private issue
+  text. Restoring it made the resolver and shared adapter return
+  `resolved`/exit 0. The new genome and ledger entry are declarative governance
+  surfaces; no production or test source file changed.
+
+- Separated coordination loading from view projection without changing the
+  public response or weakening company isolation (#82). The production facade
+  still requires the authorized `companyId`; private loader helpers retain it
+  on root, child, participation, lease, intent, instance, and host reads. A new
+  pure projector receives a fixed observation time, which makes status,
+  heartbeat, placement, lease, participant, and control mapping deterministic
+  to test before #53 adds truthful v2 semantics. Root reassignment after scope
+  authorization now has an explicit fail-closed regression. Caller-shaped
+  negative proof, 42/42 focused tests, server typecheck, the real pre-push
+  workspace typecheck, and independent static review passed. Review hardening
+  also proves newest-heartbeat selection is independent of participation row
+  order. This slice does not adopt `task-coordination.v2` or change current
+  evidence claims.
+
+- Scoped coordination-detail reads to the authenticated root company (#52).
+  The route now rejects anonymous callers before the root-scope lookup and
+  returns the same not-found response for missing and foreign-company roots.
+  The detailed service requires the authorized company identifier and retains
+  that predicate across child issues, participations, leases, control intents,
+  agent instances, and hosts. Focused route and embedded-PostgreSQL isolation
+  fixtures cover anonymous, foreign-board, foreign-agent, inconsistent-row,
+  and real HTTP-to-database boundary cases. Caller-shaped negative proof and
+  restored validation passed, including 10/10 focused tests and server typecheck.
+
+- Prevented the local ACP process-session proxy from forwarding late stdin
+  events after a remote terminal frame has already ended its socket (#59).
+  The exact PR #66 hosted shard exposed the race as
+  `ERR_STREAM_WRITE_AFTER_END`; the proxy now ignores writes once it is
+  exiting, destroyed, or writable-ended. The owning streamed-order test now
+  holds stdin open through terminal output and proves a late EOF exits cleanly;
+  buffered data is also drained before a runner rejection without accepting a
+  buffered terminal frame as proof, and the terminal error uses a flush-safe
+  socket close so backpressure cannot discard queued data. Remote termination
+  probes use bounded deadline-clamped backoff, and proven wrappers receive a
+  separate bounded cleanup window. The same real hook
+  also exposed a cluster of POSIX-only `0600`/`0700` assertions, a bare `sh`
+  fixture, and literal `/` temp-path prefixes in the Codex credential tests;
+  Windows now retains the functional credential/rotation assertions, POSIX
+  continues to verify permission bits, shell-backed fixtures use the reviewed
+  Git-for-Windows resolver, and temp paths use native joins (#22). The next
+  hosted shard exposed a stale OpenCode missing-command assertion; it now checks
+  the earlier, attributable PATH-resolution error introduced by this branch.
+  The final exact-head review also hardened the late-EOF test helper so a
+  missing output marker closes stdin, reaps its child, and consumes the pending
+  exit result before returning the timeout. The fixture launches its idle child
+  through `process.execPath -e` so the same custody proof is executable on both
+  Windows and POSIX hosts.
+
+- Corrected the deterministic pre-push baseline for existing topic branches
+  after they merge current `dev` (#73). The old path diffed the remote topic tip
+  to `HEAD`, so a real PR #66 push re-selected five already-published `dev`
+  files and failed on their missing local siblings. Every content update now
+  validates the configured destination, resolves its advertised `dev`, requires
+  that object to be an ancestor, and tests the final `dev..HEAD` tree. The
+  Gitleaks caller deliberately retains the exact outgoing
+  `remote-topic..HEAD` commit range. A deliberate old-baseline regression failed
+  for the exact A-versus-C range mismatch; the restored planner/secret suites
+  passed 22/22 and the real hook passed all exact suites without a bypass.
+
+- Extended the adapter/runtime `git push` gate repair after adversarial review (#76, #77).
+  `scripts/check-no-git-push.mjs` swallowed three filesystem errors
+  (`statSync` on a scan root, `readdirSync` mid-walk, `readFileSync` on a
+  file), so an unreadable or renamed tree produced exit 0 and the message
+  "No unapproved `git push` invocations found" having scanned zero files.
+  Renaming the four scan roots was enough to clear an offending file that was
+  still on disk. Unreadable paths now exit 2 naming the path and errno, a scan
+  of zero files is an error in its own right, and the success line carries a
+  non-zero denominator. Reopened evidence in `bf81b90e` then proved three
+  working bypasses: one renamed required root still passed, and a committed
+  mode-120000 directory symlink silently dropped its entire target subtree
+  because its directory entry described the link rather than the target,
+  and `.mts`/`.cts`/`.jsx` files were never scanned. Follow-up review also found
+  tracked paths hidden from the visible working tree. Required roots now fail
+  when absent or empty; every tracked in-scope path must be physically observed
+  or deliberately classified with normal index state; skip-worktree and
+  assume-unchanged byte-substitution attempts reject before content scanning;
+  and symlinks, junctions, tracked generated/cache
+  directories, unknown entry kinds, encodings, and undeclared file types fail
+  integrity. Declared untracked package-manager/build directories stay outside
+  the pushed-tree denominator. The language-aware scanner covers JavaScript,
+  TypeScript, shell, PowerShell, Python, and configuration sources without
+  treating URLs or regex literals as comments. Ambiguous data languages,
+  including PowerShell here-strings, cannot grant exemptions from inside
+  multiline strings. Executable substitutions inside expandable PowerShell
+  here-strings remain visible to the command gate; only column-zero PowerShell
+  closers end a here-string. Every shell heredoc body and exact delimiter line
+  remains scan-visible even when its delimiter is quoted; this intentionally
+  review-gates command-shaped literal data so a false heredoc classification
+  cannot hide a following command. Exact delimiters still receive quote removal
+  across ordinary/ANSI-quoted fragments and LF/CRLF continuations to end lexical
+  state, while unsupported forms remain conservative. Arithmetic `<<` stays in
+  arithmetic state rather than creating
+  a false heredoc that could hide a following command. Arithmetic
+  that contains a quote, expansion, or escape keeps the remaining source
+  conservatively scan-visible instead of guessing at shell parsing, and legacy
+  `$[...]` arithmetic uses the same fail-closed treatment. The gate runs in both
+  platform pre-push callers and in PR CI for `dev` and `master`.
+  The deterministic pre-push planner applies the same normal-index proof to
+  the whole repository, so substituted UI, script, package, or test bytes
+  cannot be executed in place of the pushed HEAD. Final review hardening aligns
+  lexical blanking with JavaScript's UTF-16 offsets, requires the stable-runner
+  regression in PR policy, retains native PowerShell stderr/status, and cleans
+  POSIX temporary artifacts on HUP, INT, and TERM.
+
+- Replaced the floating React Doctor `npx` hook invocation with a local-only
+  resolver, minimized child environment, and normalized fail-closed receipt.
+  The current branch intentionally remains incomplete until a separately
+  reviewed dependency pin and lock update is approved. Until then the hook
+  reports an explicit disabled state (exit 2); analyzer failures still block
+  commits. No fallback or network bootstrap is permitted.
+
+- Fixed native-Windows adapter-utils execution by moving the process-session
+  payload out of the Git-for-Windows `sh -c` argument, using Node-native file
+  copying, resolving script wrappers through Node, and making shell discovery
+  support PATH-derived, per-user, and Scoop Git installs with a clear failure
+  when no complete Git shell is available. Process-session stdin and EOF writes
+  are now ordered, and cleanup waits for proven wrapper termination before
+  removing the remote session or workspace. Gemini version detection now uses
+  the shared trusted Windows shim launcher, supports install paths with spaces,
+  downgrades pre-0.33 CLIs to `--experimental-acp`, and reports probe failures
+  before retaining `--acp`. Adapter-utils managed-runtime host archives now
+  bind to System32 `tar.exe` on Windows so Git Bash cannot reinterpret
+  drive-letter paths as remote archives. The environment transport remains
+  bounded; #64 tracks reducing or replacing the oversized ambient-env payload.
+
+- Normalized drive-letter paths before embedding them in Git workspace and
+  sandbox asset-provision shell commands, exposed the canonical provision-path
+  quoting helpers for adapter extensions, and isolated Git workspace fixtures
+  from host-global Git configuration (#63, #70).
+
 - Replaced the unsupported fork Dependency Review call in the trusted PR-review
   workflow with a fail-closed fork policy: dependency manifests, lockfiles, and
   package patches now require the maintainer-only `dependency-review-approved`
   label. Non-fork repositories retain GitHub's native Dependency Review action,
   and every review executes the trusted PR base commit rather than hard-coded
-  `master` content. The same default-branch compatibility repair pins two exact
-  reviewed synthetic-fixture fingerprints so the complete-history secret scan
-  no longer blocks every `master` pull request on its existing tip.
+  `master` content.
+
+- Replaced the all-or-nothing/uncapped-related pre-push suite with a real Git
+  update parser and runner-aware exact selection. Changed tests and deterministic
+  siblings run under Node or Vitest; missing coverage fails closed; hosted-only
+  changes require a topic PR. A push must be one pristine checked-out HEAD, new
+  branches resolve the actual destination's advertised `dev`, and outgoing
+  secrets use its exact base-to-head range. Git's literal `HEAD` local-ref form
+  from an explicit `HEAD:topic` refspec is accepted without weakening the OID or
+  pristine-worktree binding. PR CI now covers `dev` without adding `push: dev`
+  and scans only the PR range rather than known-red full history. Both platform
+  callers remove their temporary update artifacts after every outcome while
+  retaining the consolidated log; the POSIX caller also removes per-step files,
+  supports isolated caller-test logging, and the PowerShell caller streams long
+  step output as it arrives. Exact Vitest paths now run independently so an
+  included suite cannot mask a second path excluded by its project config;
+  capped and uncapped pre-commit related selections also run every selected
+  suite in a separate Vitest process so coordinator-owned environment and mock
+  state cannot leak across otherwise independent suites. Linux-only Bubblewrap
+  characterization cases now skip unsupported hosts while portable parsers
+  continue to run on every platform;
+  option-shaped missing values and non-array selector inputs reject before work,
+  and only a real non-ancestor Git result is translated into the advertised-dev
+  ancestry message while infrastructure failures retain their cause.
+
+- Normalized release-package discovery directories to forward-slash manifest
+  paths, with a Windows-separator regression, so release-map validation does
+  not report every package as missing on native Windows.
+- Replaced nine published-package POSIX prepack/postpack fragments with shared
+  Node prepare/restore helpers that preserve package bytes and fail safely on
+  backup collisions or generator errors.
+- Fixed a Windows portability edge found while validating the release batch:
+  host-native Codex sandbox home paths for local sandbox fixtures.
+
 - Bounded the POSIX runtime-service adoption fallback for #20: the `ps`
   command/parent-lineage walk now has a two-second total deadline and explicit
   child-process timeouts, with a regression fixture proving a non-returning

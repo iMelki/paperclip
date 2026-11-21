@@ -6,11 +6,17 @@ import {
   checkConfiguration,
   findUnpublishableWorkspaceEdges,
   getReleasePackages,
+  toManifestDir,
 } from "./release-package-map.mjs";
 
 function pkg(name, { publishFromCi, ...deps } = {}) {
   return { name, dir: name, publishFromCi, pkg: { name, ...deps } };
 }
+
+test("release package directories use manifest separators on every host", () => {
+  assert.equal(toManifestDir("packages\\adapters\\codex-local"), "packages/adapters/codex-local");
+  assert.equal(toManifestDir("packages/adapters/codex-local"), "packages/adapters/codex-local");
+});
 
 test("release package manifest covers all public packages with explicit CI enrollment", () => {
   const packages = buildReleasePackagePlan();

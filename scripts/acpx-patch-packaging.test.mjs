@@ -48,9 +48,19 @@ test("published packages preserve the patched embedded-postgres runtime", () => 
     rootPackage.pnpm.patchedDependencies["embedded-postgres@18.1.0-beta.16"],
     "patches/embedded-postgres@18.1.0-beta.16.patch",
   );
-  assert.deepEqual(dbPackage.bundleDependencies, ["embedded-postgres"]);
+  assert.equal(dbPackage.bundleDependencies.includes("embedded-postgres"), true);
   assert.equal(bundledCliNpmDependencies.has("embedded-postgres"), true);
   assert.equal(cliEsbuildConfig.external.includes("embedded-postgres"), false);
+});
+
+test("published packages preserve the patched postgres driver", () => {
+  assert.equal(
+    rootPackage.pnpm.patchedDependencies["postgres@3.4.9"],
+    "patches/postgres@3.4.9.patch",
+  );
+  assert.equal(dbPackage.bundleDependencies.includes("postgres"), true);
+  assert.equal(bundledCliNpmDependencies.has("postgres"), true);
+  assert.equal(cliEsbuildConfig.external.includes("postgres"), false);
 });
 
 test("bundled package staging materializes publishConfig entrypoints", () => {
@@ -195,3 +205,85 @@ test("npm builds use corepack instead of requiring a global pnpm", () => {
   assert.match(buildNpmScript, /corepack pnpm -r typecheck/);
   assert.doesNotMatch(buildNpmScript, /^\s*pnpm -r typecheck/m);
 });
+
+
+for (const markerPresent of [true, false]) {
+  test(
+    "bundled postgres staging " + (markerPresent ? "accepts the settleFinal patch marker" : "rejects a successful patch command that leaves settleFinal missing"),
+    (t) => {
+      const fixtureDir = mkdtempSync(join(tmpdir(), "paperclip-postgres-stage-"));
+      const sourceDir = join(fixtureDir, "source");
+      const destinationDir = join(fixtureDir, "destination");
+      const binDir = join(fixtureDir, "bin");
+      const callLog = join(fixtureDir, "calls.log");
+      t.after(() => rmSync(fixtureDir, { recursive: true, force: true }));
+      mkdirSync(join(sourceDir, "dist"), { recursive: true });
+      mkdirSync(binDir);
+      writeFileSync(join(sourceDir, "dist/index.js"), "export {};\n");
+      // Isolate the postgres staging guard from the other bundled runtime guards.
+      writeFileSync(join(sourceDir, "package.json"), JSON.stringify({
+        ...dbPackage,
+        bundleDependencies: ["postgres"],
+      }));
+      writeFileSync(callLog, "");
+      writeFileSync(join(binDir, "npm"), [
+        "#!/usr/bin/env bash",
+        "set -euo pipefail",
+        "printf 'npm %s\\n' \"$*\" >> \"$FAKE_CALL_LOG\"",
+        "[ \"$*\" = \"install --omit=dev --ignore-scripts --no-audit --no-fund\" ]",
+        "mkdir -p node_modules/postgres/src",
+        "printf 'export const unpatched = true;\\n' > node_modules/postgres/src/connection.js",
+      ].join("\n") + "\n", { mode: 0o755 });
+      writeFileSync(join(binDir, "patch"), [
+        "#!/usr/bin/env bash",
+        "set -euo pipefail",
+        "printf 'patch %s\\n' \"$*\" >> \"$FAKE_CALL_LOG\"",
+        "[ \"$#\" -eq 4 ] && [ \"$1\" = \"-p1\" ] && [ \"$2\" = \"--forward\" ] && [ \"$3\" = \"-d\" ]",
+        "target=\"$4\"",
+        "[ \"$target\" = \"$FAKE_EXPECTED_POSTGRES_DIR\" ]",
+        "patch_input=\"$(cat)\"",
+        "grep -Fq '+  function settleFinal(err) {' <<< \"$patch_input\"",
+        "if [ \"$FAKE_POSTGRES_MARKER\" = \"present\" ]; then",
+        "  printf 'function settleFinal(err) { return err; }\\n' > \"$target/src/connection.js\"",
+        "fi",
+      ].join("\n") + "\n", { mode: 0o755 });
+
+      const runStage = () => execFileSync(
+        process.execPath,
+        [new URL("./prepare-bundled-package.mjs", import.meta.url).pathname, sourceDir, destinationDir],
+        {
+          env: {
+            ...process.env,
+            PATH: binDir + ":" + process.env.PATH,
+            FAKE_CALL_LOG: callLog,
+            FAKE_EXPECTED_POSTGRES_DIR: join(destinationDir, "node_modules/postgres"),
+            FAKE_POSTGRES_MARKER: markerPresent ? "present" : "missing",
+          },
+          stdio: ["ignore", "pipe", "pipe"],
+          windowsHide: true,
+          timeout: 10_000,
+        },
+      );
+      if (markerPresent) {
+        assert.doesNotThrow(runStage);
+        assert.equal(lstatSync(join(destinationDir, "node_modules/postgres")).isDirectory(), true);
+        const stagedManifest = JSON.parse(readFileSync(join(destinationDir, "package.json"), "utf8"));
+        assert.deepEqual(stagedManifest.bundleDependencies, ["postgres"]);
+      } else {
+        assert.throws(runStage, (error) => {
+          assert.equal(error.status, 1);
+          assert.equal(error.signal, null);
+          assert.match(String(error.stderr), /staged postgres driver is missing the repository patch/);
+          assert.doesNotMatch(String(error.stderr), /staged (acpx|embedded-postgres) runtime is missing/);
+          return true;
+        });
+      }
+      const stagedSource = readFileSync(join(destinationDir, "node_modules/postgres/src/connection.js"), "utf8");
+      assert.equal(stagedSource.includes("function settleFinal("), markerPresent);
+      const calls = readFileSync(callLog, "utf8").trim().split("\n");
+      assert.equal(calls.length, 2);
+      assert.equal(calls[0], "npm install --omit=dev --ignore-scripts --no-audit --no-fund");
+      assert.equal(calls[1], "patch -p1 --forward -d " + join(destinationDir, "node_modules/postgres"));
+    },
+  );
+}

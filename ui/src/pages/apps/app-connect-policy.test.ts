@@ -4,6 +4,7 @@ import {
   appSourceConnectHref,
   canEnterAppsConnect,
   isMcpDirectOAuthConnectSlug,
+  isGitHubOAuthConnectSource,
 } from "./app-connect-policy";
 
 describe("app connect policy", () => {
@@ -17,9 +18,18 @@ describe("app connect policy", () => {
 
   it("admits the Notion deep link without opening other source slugs", () => {
     expect(canEnterAppsConnect(new URLSearchParams("source=notion"))).toBe(true);
-    expect(canEnterAppsConnect(new URLSearchParams("source=github"))).toBe(false);
+    expect(canEnterAppsConnect(new URLSearchParams("source=github"))).toBe(true);
     expect(canEnterAppsConnect(new URLSearchParams("source=zapier"))).toBe(false);
     expect(canEnterAppsConnect(new URLSearchParams("byo=1&source=zapier"))).toBe(true);
+  });
+
+  it("admits only the dedicated GitHub customer source without widening MCP", () => {
+    expect(isGitHubOAuthConnectSource("github")).toBe(true);
+    expect(isGitHubOAuthConnectSource("GitHub")).toBe(false);
+    expect(isGitHubOAuthConnectSource("oauth-generic")).toBe(false);
+    expect(isGitHubOAuthConnectSource(null)).toBe(false);
+    expect(isMcpDirectOAuthConnectSlug("github")).toBe(false);
+    expect(canEnterAppsConnect(new URLSearchParams("source=oauth-generic"))).toBe(false);
   });
 
   it("builds a generic source deep link", () => {

@@ -2233,13 +2233,19 @@ describeEmbeddedPostgres("tool access service", () => {
       .expect(403);
   });
 
-  it("returns 404 for cross-company profile reads, 403 for mutations, and 404 for missing profiles", async () => {
+  it("returns 404 for cross-company profile routes and missing profiles", async () => {
     const allowedCompany = await createCompany(db);
     const otherCompany = await createCompany(db);
-    const profile = await toolAccessService(db).createProfile(otherCompany.id, {
+    const service = toolAccessService(db);
+    const profile = await service.createProfile(otherCompany.id, {
       profileKey: `other-profile-${randomUUID()}`,
       name: "Other company profile",
       defaultAction: "deny",
+    });
+    const entry = await service.addProfileEntry(profile.id, {
+      selectorType: "tool_name",
+      effect: "include",
+      toolName: "read_notes",
     });
     const app = createRouteApp(db, {
       type: "board",
@@ -2258,33 +2264,123 @@ describeEmbeddedPostgres("tool access service", () => {
       source: "session",
     });
 
-    await request(app).get(`/api/tool-profiles/${profile.id}/new-tools`).expect(404);
-    await request(app)
-      .post(`/api/tool-profiles/${profile.id}/duplicate`)
-      .send({ name: "Forbidden copy", includeAssignments: false })
-      .expect(403);
-    await request(app)
-      .delete(`/api/tool-profiles/${profile.id}`)
-      .send({ force: false })
-      .expect(403);
-    await request(app)
-      .post(`/api/tool-profiles/${profile.id}/new-tools/review`)
-      .send({ decisions: [{ catalogEntryId: randomUUID(), decision: "keep_blocked" }] })
-      .expect(403);
+    const crossTenantResponses = [
+      await request(app).get(`/api/tool-profiles/${profile.id}/new-tools`),
+      await request(app)
+        .patch(`/api/tool-profiles/${profile.id}`)
+        .send({ name: "Cross-tenant edit" }),
+      await request(app)
+        .post(`/api/tool-profiles/${profile.id}/duplicate`)
+        .send({ name: "Copy" }),
+      await request(app)
+        .delete(`/api/tool-profiles/${profile.id}`)
+        .send({}),
+      await request(app)
+        .post(`/api/tool-profiles/${profile.id}/new-tools/review`)
+        .send({ decisions: [{ catalogEntryId: randomUUID(), decision: "keep_blocked" }] }),
+      await request(app)
+        .post(`/api/tool-profiles/${profile.id}/entries`)
+        .send({ selectorType: "tool_name", effect: "include", toolName: "write_notes" }),
+      await request(app)
+        .patch(`/api/tool-profile-entries/${entry.id}`)
+        .send({ effect: "exclude" }),
+      await request(app).delete(`/api/tool-profile-entries/${entry.id}`),
+    ];
+    const missingRes = await request(app).get(`/api/tool-profiles/${randomUUID()}/new-tools`);
 
-    await request(createRouteApp(db)).get(`/api/tool-profiles/${randomUUID()}/new-tools`).expect(404);
-    await request(createRouteApp(db))
-      .post(`/api/tool-profiles/${randomUUID()}/duplicate`)
-      .send({ name: "Missing copy", includeAssignments: false })
-      .expect(404);
-    await request(createRouteApp(db))
-      .delete(`/api/tool-profiles/${randomUUID()}`)
-      .send({ force: false })
-      .expect(404);
-    await request(createRouteApp(db))
-      .post(`/api/tool-profiles/${randomUUID()}/new-tools/review`)
-      .send({ decisions: [{ catalogEntryId: randomUUID(), decision: "keep_blocked" }] })
-      .expect(404);
+    expect(crossTenantResponses.map((response) => response.status)).toEqual(
+      crossTenantResponses.map(() => 404),
+    );
+    expect(missingRes.status).toBe(404);
+    expect(crossTenantResponses[0]!.body).toEqual(missingRes.body);
+  });
+
+  it("returns 404 for cross-company connection routes, including instance admins", async () => {
+    const allowedCompany = await createCompany(db);
+    const otherCompany = await createCompany(db);
+    const service = toolAccessService(db);
+    const connection = await service.createConnection(otherCompany.id, {
+      name: "Other company connection",
+      transport: "mcp_remote",
+      config: { url: "https://other-company.example/mcp" },
+    });
+    const oauthState = randomUUID();
+    await db.insert(toolOauthStates).values({
+      state: oauthState,
+      companyId: otherCompany.id,
+      connectionId: connection.id,
+      codeVerifier: "cross-tenant-code-verifier",
+      createdByActorType: "user",
+      createdByActorId: "other-user",
+      createdBySessionId: null,
+      expiresAt: new Date(Date.now() + 60_000),
+    });
+    const toolGateway = {} as ToolGatewayService;
+    const app = createRouteApp(db, {
+      type: "board",
+      userId: "member-user",
+      userName: "Member User",
+      userEmail: null,
+      companyIds: [allowedCompany.id],
+      memberships: [
+        {
+          companyId: allowedCompany.id,
+          membershipRole: "owner",
+          status: "active",
+        },
+      ],
+      isInstanceAdmin: true,
+      source: "session",
+    }, toolGateway);
+    const foreignOAuthRes = await request(app)
+      .get("/api/tools/oauth/callback")
+      .query({ state: oauthState, code: "oauth-code" });
+    const missingOAuthRes = await request(app)
+      .get("/api/tools/oauth/callback")
+      .query({ state: randomUUID(), code: "oauth-code" });
+
+    const crossTenantResponses = [
+      await request(app).post(`/api/tools/oauth/${connection.id}/start`),
+      await request(app).get(`/api/tool-connections/${connection.id}`),
+      await request(app).get(`/api/tool-connections/${connection.id}/grants`),
+      await request(app)
+        .post(`/api/tool-connections/${connection.id}/grants/installations`)
+        .send({}),
+      await request(app).delete(`/api/tool-connections/${connection.id}/grants/${randomUUID()}`),
+      await request(app).get(`/api/tool-connections/${connection.id}/usage`),
+      await request(app).get(`/api/tool-connections/${connection.id}/installs`),
+      await request(app)
+        .put(`/api/tool-connections/${connection.id}/installs`)
+        .send({ installs: [] }),
+      await request(app).get(`/api/tool-connections/${connection.id}/test-agents`),
+      await request(app)
+        .post(`/api/tool-connections/${connection.id}/test-calls`)
+        .send({ agentId: randomUUID(), toolName: "read_notes", parameters: {} }),
+      await request(app)
+        .get(`/api/tool-connections/${connection.id}/test-calls/${randomUUID()}`),
+      await request(app)
+        .patch(`/api/tool-connections/${connection.id}`)
+        .send({ name: "Cross-tenant edit" }),
+      await request(app).delete(`/api/tool-connections/${connection.id}`),
+      await request(app).post(`/api/tool-connections/${connection.id}/health-check`),
+      await request(app)
+        .post(`/api/tool-connections/${connection.id}/reconnect`)
+        .send({ credentialValues: {} }),
+      await request(app).post(`/api/tool-connections/${connection.id}/catalog/refresh`),
+      await request(app).get(`/api/tool-connections/${connection.id}/catalog`),
+      await request(app).get(`/api/tool-connections/${connection.id}/activity?limit=5`),
+    ];
+    expect(foreignOAuthRes.status).toBe(400);
+    expect(missingOAuthRes.status).toBe(400);
+    expect(foreignOAuthRes.body).toEqual(missingOAuthRes.body);
+    const missingRes = await request(app).get(`/api/tool-connections/${randomUUID()}`);
+
+    for (const response of crossTenantResponses) {
+      expect(response.status).toBe(404);
+    }
+    expect(missingRes.status).toBe(404);
+    expect(crossTenantResponses[1]!.body).toEqual(missingRes.body);
+    await expect(service.getConnection(connection.id)).resolves.toMatchObject({ id: connection.id });
   });
 
   it("installs the safe example fixture idempotently and smokes allow, deny, and audit paths", async () => {
@@ -2899,6 +2995,51 @@ describeEmbeddedPostgres("tool access service", () => {
       GOOGLE_SHEETS_ALLOWED_SPREADSHEET_IDS: "same-company-sheet,new-company-sheet",
     });
     expect(updated.transportConfig).toEqual(updated.config);
+  });
+
+  it("keeps a non-GitHub refresh ref and secret when a reconnect returns no refresh_token and no expires_in", async () => {
+    vi.stubEnv("PAPERCLIP_TOOL_OAUTH_SLACK_CLIENT_ID", "slack-client-id");
+    vi.stubEnv("PAPERCLIP_TOOL_OAUTH_SLACK_CLIENT_SECRET", "slack-client-secret");
+    const company = await createCompany(db);
+    const service = toolAccessService(db);
+    const connected = await service.connectGalleryApp(company.id, { galleryKey: "slack", name: "Slack reconnect keeps refresh" });
+    const actor = { actorType: "user" as const, actorId: "workspace-owner" };
+    const redirectUri = "https://paperclip.example/api/tools/oauth/callback";
+    let reconnect = false;
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (url) => {
+      const href = String(url);
+      if (href === "https://slack.com/api/oauth.v2.access") {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => (reconnect
+            ? { access_token: "second-access-token" }
+            : { access_token: "first-access-token", refresh_token: "first-refresh-token", expires_in: 3600 }),
+        } as Response;
+      }
+      if (href === "https://mcp.slack.com/mcp") {
+        return mcpHttpResponse({ jsonrpc: "2.0", id: "paperclip-catalog-refresh", result: { tools: [] } });
+      }
+      throw new Error(`unexpected fetch ${href}`);
+    });
+    const signIn = async () => {
+      const started = await service.startOAuth(company.id, connected.connectionId, { redirectUri, actor });
+      await service.completeOAuthCallback({
+        state: new URL(started.authorizationUrl).searchParams.get("state")!,
+        code: "authorization-code", redirectUri, actor,
+      });
+      const [row] = await db.select().from(toolConnections).where(eq(toolConnections.id, connected.connectionId));
+      return row;
+    };
+    const first = await signIn();
+    const firstRefresh = first.credentialSecretRefs.find((ref) => ref.configPath === "oauth.refresh_token");
+    expect(firstRefresh).toBeDefined();
+    reconnect = true;
+    const second = await signIn();
+    expect(second.credentialSecretRefs.find((ref) => ref.configPath === "oauth.refresh_token")?.secretId)
+      .toBe(firstRefresh!.secretId);
+    const [secret] = await db.select().from(companySecrets).where(eq(companySecrets.id, firstRefresh!.secretId));
+    expect(secret).toMatchObject({ status: "active", deletedAt: null });
   });
 
   it("creates and resolves an agent-initiated user authorization grant card", async () => {
@@ -4044,7 +4185,7 @@ describeEmbeddedPostgres("tool access service", () => {
     ]);
   });
 
-  it("cancels stale pending action requests with invalid signatures before listing the review queue", async () => {
+  it("cancels invalid-signature pending action requests but keeps unsigned in-flight ones out of the review queue without cancelling them", async () => {
     vi.stubEnv("PAPERCLIP_TOOL_ACTION_SIGNING_SECRET", "current-secret");
     const company = await createCompany(db);
     const [application] = await db.insert(toolApplications).values({
@@ -4136,7 +4277,10 @@ describeEmbeddedPostgres("tool access service", () => {
 
     expect(list.map((item) => item.request.id)).toEqual([validRequest.id]);
     expect(statusById.get(validRequest.id)).toBe("pending");
-    expect(statusById.get(missingSignatureRequest.id)).toBe("cancelled");
+    // An unsigned request is still being created; the read hides it but keeps it
+    // pending, so the creator can finish signing and the later approve succeeds.
+    expect(statusById.get(missingSignatureRequest.id)).toBe("pending");
+    // A request signed with a rotated/old secret is unverifiable and is cancelled.
     expect(statusById.get(oldSecretRequest.id)).toBe("cancelled");
   });
 
@@ -4916,9 +5060,21 @@ describeEmbeddedPostgres("tool access service", () => {
       credentialRefs: [],
     }).returning();
 
-    // Mock fetch before startOAuth: remote OAuth discovery still probes the fixture
-    // URL's .well-known paths. Unmocked, that hits the network, which fails fast
-    // on NXDOMAIN but hangs past the test timeout where DNS answers every name.
+    const result = await service.startOAuth(company.id, connection!.id, {
+      redirectUri: "http://paperclip.test/api/tools/oauth/callback",
+      actor: { actorType: "user", actorId: "board" },
+    });
+
+    const authorizationUrl = new URL(result.authorizationUrl);
+    expect(`${authorizationUrl.origin}${authorizationUrl.pathname}`).toBe(
+      `http://paperclip.test/api/companies/${company.id}/smoke-lab/oauth/authorize`,
+    );
+    expect(authorizationUrl.searchParams.get("client_id")).toBe("paperclip-smoke-lab");
+    expect(authorizationUrl.searchParams.get("scope")).toBe("smoke:openid smoke:profile smoke:email");
+    await expect(db.select().from(toolOauthStates)).resolves.toHaveLength(1);
+
+    const state = authorizationUrl.searchParams.get("state");
+    expect(state).toBeTruthy();
     const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (url) => {
       if (String(url).endsWith("/smoke-lab/oauth/token")) {
         return {
@@ -4940,22 +5096,6 @@ describeEmbeddedPostgres("tool access service", () => {
       }
       throw new Error(`unexpected fetch ${String(url)}`);
     });
-
-    const result = await service.startOAuth(company.id, connection!.id, {
-      redirectUri: "http://paperclip.test/api/tools/oauth/callback",
-      actor: { actorType: "user", actorId: "board" },
-    });
-
-    const authorizationUrl = new URL(result.authorizationUrl);
-    expect(`${authorizationUrl.origin}${authorizationUrl.pathname}`).toBe(
-      `http://paperclip.test/api/companies/${company.id}/smoke-lab/oauth/authorize`,
-    );
-    expect(authorizationUrl.searchParams.get("client_id")).toBe("paperclip-smoke-lab");
-    expect(authorizationUrl.searchParams.get("scope")).toBe("smoke:openid smoke:profile smoke:email");
-    await expect(db.select().from(toolOauthStates)).resolves.toHaveLength(1);
-
-    const state = authorizationUrl.searchParams.get("state");
-    expect(state).toBeTruthy();
 
     await service.completeOAuthCallback({
       state: state!,
@@ -5896,7 +6036,7 @@ describeEmbeddedPostgres("tool access service", () => {
     });
   });
 
-  it("returns 403 for cross-company application updates and 404 for missing applications", async () => {
+  it("returns 404 for cross-company application updates and missing applications", async () => {
     const allowedCompany = await createCompany(db);
     const otherCompany = await createCompany(db);
     const application = await toolAccessService(db).createApplication(otherCompany.id, {
@@ -5927,7 +6067,7 @@ describeEmbeddedPostgres("tool access service", () => {
       .patch(`/api/tool-applications/${randomUUID()}`)
       .send({ name: "Missing edit" });
 
-    expect(forbiddenRes.status).toBe(403);
+    expect(forbiddenRes.status).toBe(404);
     expect(missingRes.status).toBe(404);
   });
 
@@ -6282,7 +6422,7 @@ describeEmbeddedPostgres("tool access service", () => {
     expect(remainingConnection).toHaveLength(0);
   });
 
-  it("returns 403 for cross-company application deletes and 404 for missing applications", async () => {
+  it("returns 404 for cross-company application deletes and missing applications", async () => {
     const allowedCompany = await createCompany(db);
     const otherCompany = await createCompany(db);
     const application = await toolAccessService(db).createApplication(otherCompany.id, {
@@ -6309,7 +6449,7 @@ describeEmbeddedPostgres("tool access service", () => {
     const forbiddenRes = await request(app).delete(`/api/tool-applications/${application.id}`);
     const missingRes = await request(createRouteApp(db)).delete(`/api/tool-applications/${randomUUID()}`);
 
-    expect(forbiddenRes.status).toBe(403);
+    expect(forbiddenRes.status).toBe(404);
     expect(missingRes.status).toBe(404);
     const stillThere = await db
       .select()

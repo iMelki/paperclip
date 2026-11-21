@@ -46,7 +46,7 @@ function LabSection({
 
 function Frame({ label, children }: { label: string; children: ReactNode }) {
   return (
-    <div className="space-y-2">
+    <div className="min-w-0 space-y-2">
       <div className="text-(length:--text-micro) font-semibold uppercase tracking-(--tracking-caps) text-muted-foreground">
         {label}
       </div>
@@ -67,7 +67,7 @@ function AgentCommentBubble({
 }) {
   return (
     <div className="flex flex-col items-start py-1.5">
-      <div className="mb-1 flex items-center gap-1.5 px-1">
+      <div className="mb-1 flex min-w-0 flex-wrap items-center gap-1.5 px-1">
         <span className="flex size-5 shrink-0 items-center justify-center text-muted-foreground">
           <Avatar size="sm" className="size-5">
             <AvatarFallback className="text-(length:--text-nano)">
@@ -119,7 +119,7 @@ export function CrossIssueCollaborationUxLab() {
   const resolveUserLabel = (id: string) => (id === "user-dotta" ? "Dotta" : null);
 
   return (
-    <div className="min-h-screen bg-muted/20 p-6">
+    <div className="min-h-dvh min-w-0 bg-muted/20 p-6">
       <div className="mx-auto max-w-5xl space-y-6">
         <header>
           <div className="text-(length:--text-micro) font-semibold uppercase tracking-(--tracking-caps) text-muted-foreground">

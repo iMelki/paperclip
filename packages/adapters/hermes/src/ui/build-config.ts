@@ -46,9 +46,10 @@ export function buildHermesConfig(
   ac.timeoutSec = DEFAULT_TIMEOUT_SEC;
   if (v.maxTurnsPerRun > 0) {
     ac.maxTurnsPerRun = v.maxTurnsPerRun;
-    // Scale timeout to match: ~20s per tool turn is generous headroom.
-    // Never go below the default (1800s / 30 min).
-    ac.timeoutSec = Math.max(DEFAULT_TIMEOUT_SEC, v.maxTurnsPerRun * 20);
+    // Small, bounded jobs must be able to enforce a 15-minute wall-clock cap.
+    ac.timeoutSec = v.maxTurnsPerRun <= 3
+      ? 900
+      : Math.max(DEFAULT_TIMEOUT_SEC, v.maxTurnsPerRun * 20);
   }
 
   // Session persistence (default: on)
