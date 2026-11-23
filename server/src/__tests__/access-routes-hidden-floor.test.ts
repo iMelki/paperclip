@@ -1,6 +1,7 @@
 import express from "express";
 import request from "supertest";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
+import { EMBEDDED_POSTGRES_TEST_SETUP_TIMEOUT_MS } from "./helpers/embedded-postgres.js";
 
 /**
  * Operator-hidden Access surface floor (`instance.access` in
@@ -54,10 +55,11 @@ describe("operator-hidden access admin floor", () => {
   let app: express.Express;
 
   // The access router is a large module; import and build the app once so the
-  // cost is not charged to the first test's timeout on slow CI runners.
+  // cost is not charged to the first test's timeout on slow CI runners. The
+  // shared budget is never allowed below the 30 s this hook already had.
   beforeAll(async () => {
     app = await createApp();
-  }, 30_000);
+  }, Math.max(30_000, EMBEDDED_POSTGRES_TEST_SETUP_TIMEOUT_MS));
 
   afterEach(() => {
     delete process.env.PAPERCLIP_HIDDEN_SETTINGS;
