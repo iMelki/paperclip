@@ -21,7 +21,8 @@ export interface GitHubBoardReadGrant {
 }
 
 type BoardStatus = "fresh" | "partial" | "stale" | "unavailable";
-type BoardResult = { projectId: string; state: BoardStatus; card: GitHubProjectCard | null };
+export type BoardResult = { projectId: string; state: BoardStatus; card: GitHubProjectCard | null;
+  grant?: GitHubBoardReadGrant };
 
 type ReadResult =
   | { state: "denied" }
@@ -109,7 +110,7 @@ export async function readGitHubIssueBoards(
   const boards: BoardResult[] = [];
   for (const { grant, result } of results) {
     if (sameGrant(grant, final.grants.get(result.projectId) ?? null, scope, result.projectId)) {
-      boards.push(result);
+      boards.push({ ...result, grant });
     } else {
       accessRequired = true;
     }

@@ -6409,13 +6409,18 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
     } else {
       assertSameOAuthActor(stateRow, input.actor);
     }
+    let connection = await getConnectionRow(stateRow.connectionId, stateRow.companyId);
+    const githubOAuth = isNativeGitHubOAuthConnection(connection);
+    // A native GitHub consent must come from the signed-in user who started it. Check this before the
+    // state is claimed and before the token exchange, so a refusal leaves no state change and no orphan secret.
+    if (githubOAuth && !stateRow.subjectUserId && (stateRow.createdByActorType !== "user"
+      || input.actor?.actorType !== "user" || input.actor.actorId !== stateRow.createdByActorId)) {
+      throw forbidden("GitHub consent requires the same signed-in user");
+    }
     const [claimedState] = await db.delete(toolOauthStates).where(and(
       eq(toolOauthStates.state, input.state), gte(toolOauthStates.expiresAt, new Date()),
     )).returning();
     if (!claimedState) throw badRequest("OAuth state was already used or expired");
-
-    let connection = await getConnectionRow(stateRow.connectionId, stateRow.companyId);
-    const githubOAuth = isNativeGitHubOAuthConnection(connection);
     if (isBoundGitHubOAuthState(stateRow.codeVerifier) && !githubOAuth) {
       throw conflict("GitHub connector changed during sign-in. Start again.", { code: "github_oauth_target_changed" });
     }

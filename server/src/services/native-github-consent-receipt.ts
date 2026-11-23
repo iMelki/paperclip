@@ -28,7 +28,7 @@ export async function verifyNativeGitHubConsent(executor: Db, connection: Connec
     responsibleUserId: activityLog.responsibleUserId, details: activityLog.details, createdAt: activityLog.createdAt })
     .from(activityLog).where(and(eq(activityLog.companyId, connection.companyId),
       eq(activityLog.entityType, "tool_connection"), eq(activityLog.entityId, connection.id),
-      eq(activityLog.action, action))).orderBy(desc(activityLog.createdAt)).limit(2);
+      eq(activityLog.action, action), eq(activityLog.responsibleUserId, userId))).orderBy(desc(activityLog.createdAt)).limit(2);
   const [receipt, earlier] = rows;
   if (!receipt || receipt.actorType !== "user" || receipt.actorId !== userId || receipt.responsibleUserId !== userId
     || (earlier && receipt.createdAt.getTime() === earlier.createdAt.getTime())) return null;

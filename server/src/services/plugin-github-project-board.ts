@@ -63,6 +63,12 @@ const parse = <T>(schema: z.ZodType<T>, value: unknown): T => {
 };
 
 /** The host, not worker-writable state or secret refs, owns the OAuth authority for each destination. */
+/** A GitHub read failure that says nothing about access: rate limit, 5xx, timeout, GraphQL or payload errors. */
+export function isTransientGitHubReadError(error: unknown) {
+  if (!(error instanceof GitHubOAuthTransportError)) return false;
+  return !(error.status === 401 || error.status === 404 || error.code === "github_oauth_bearer_invalid");
+}
+
 export function pluginGitHubProjectBoardService(
   db: Db, identity: { pluginId: string; pluginKey: string }, readPage: ReadPage,
   scheduledAccess?: ScheduledBoardAccess,
@@ -294,6 +300,12 @@ export function pluginGitHubProjectBoardService(
       return await grants.finalAuthorization(scope, issue, projectIds);
   }
 
+  /** One saved-card key for a registered board. The writer and the reader both use it. */
+  const registeredMirrorKey = (scope: GitHubMirrorReadScope, grant: { projectId: string; connectionId: string;
+    authorizationRevision: string; grantId: string }) => "issue-mirror-v2:" + createHash("sha256").update(JSON.stringify(
+    [scope.companyId, scope.paperclipProjectId, scope.paperclipIssueId, scope.objectId, scope.userId,
+      grant.projectId, grant.connectionId, grant.authorizationRevision, grant.grantId])).digest("hex");
+
   async function refreshRegisteredIssueMirrors(context: BoardImportHostContext,
     input: { scope: GitHubMirrorReadScope; issue: GitHubIssueIdentity;
       assertCurrentIssue: (executor: Db) => Promise<boolean> }): Promise<GitHubMirrorRead | null> {
@@ -321,10 +333,7 @@ export function pluginGitHubProjectBoardService(
       currentGrant: async (_scope, id) => initial.grants.get(id) ?? null,
       finalAuthorization: (_scope, _issue, projectIds) => readMirrorGrantSnapshot(context, { ...input, projectIds }),
       async retained(_scope, _issue, grant) {
-        const identity = [scope.companyId, scope.paperclipProjectId, scope.paperclipIssueId, scope.objectId,
-          scope.userId, grant.projectId, grant.connectionId, grant.authorizationRevision, grant.grantId];
-        const key = "issue-mirror-v2:" + createHash("sha256").update(JSON.stringify(identity)).digest("hex");
-        const value = await readProtectedState(db, scope.companyId, key) as GitHubIssueMirror | null;
+        const value = await readProtectedState(db, scope.companyId, registeredMirrorKey(scope, grant)) as GitHubIssueMirror | null;
         if (value?.issue.nodeId !== issue.nodeId || value.issue.url !== issue.url) return null;
         return value.projects.find(card => card.projectId === grant.projectId) ?? null;
       },
@@ -352,6 +361,7 @@ export function pluginGitHubProjectBoardService(
           return { state: "readable", projectId: grant.projectId, url: grant.projectUrl, title,
             authorizationRevision: grant.authorizationRevision, observedAt, pages };
         } catch (error) {
+          if (isTransientGitHubReadError(error)) return { state: "unavailable" };
           if (error instanceof GitHubOAuthTransportError
             || (error instanceof HttpError && [401, 403, 404, 409].includes(error.status))) return { state: "denied" };
           throw error;
@@ -359,7 +369,23 @@ export function pluginGitHubProjectBoardService(
       },
     });
     if (read.state === "denied") throw forbidden("The linked GitHub issue is no longer readable");
-    return { state: read.truncated ? "partial" : "fresh", coverage: "registered_projects", accessRequired: read.accessRequired,
+    const fresh = read.boards.filter(board => board.state === "fresh" && board.card && board.grant);
+    if (fresh.length) {
+      await db.transaction(async tx => {
+        const executor = tx as unknown as Db;
+        for (const board of fresh) {
+          const stateKey = registeredMirrorKey(scope, board.grant!);
+          const value: GitHubIssueMirror = { issue, projects: [board.card!] };
+          await store(executor).set(identity.pluginId, { scopeKind: "company", scopeId: scope.companyId,
+            namespace: GITHUB_PROJECT_BINDING_NAMESPACE, stateKey, value });
+          if (!isDeepStrictEqual(await readProtectedState(executor, scope.companyId, stateKey), value)) {
+            throw conflict("GitHub Project mirror readback failed");
+          }
+        }
+      });
+    }
+    const complete = !read.truncated && read.boards.every(board => board.state === "fresh");
+    return { state: complete ? "fresh" : "partial", coverage: "registered_projects", accessRequired: read.accessRequired,
       boardReadStates: read.boards.map(({ projectId, state }) => ({ projectId, state })),
       mirror: { issue, projects: read.boards.flatMap(board => board.card ? [board.card] : []) } };
   }
@@ -636,12 +662,21 @@ export function pluginGitHubProjectBoardService(
       const startedAt = Date.now();
       const deadline = startedAt + 20_000;
       let completedInTime = true;
+      let unavailable = false;
       let after: string | null = null;
       let title = "";
       for (let index = 0; index < 20 && Date.now() < deadline; index++) {
         const { url: _url, ...reference } = board;
         const request = validateGitHubProjectPageInput({ ...reference, first: 50, after });
-        const received = await fetchBound(initial, request);
+        let received: Awaited<ReturnType<typeof fetchBound>>;
+        try {
+          received = await fetchBound(initial, request);
+        } catch (error) {
+          // A rate limit, a GitHub 5xx or a timeout says nothing about access: keep the saved card.
+          if (!isTransientGitHubReadError(error)) throw error;
+          unavailable = true;
+          break;
+        }
         if (Date.now() >= deadline) {
           completedInTime = false;
           break;
@@ -664,6 +699,7 @@ export function pluginGitHubProjectBoardService(
         const previous = retained?.issue.nodeId === issue.nodeId && retained.issue.url === issue.url
           ? { issue, projects: retained.projects.filter(card => card.projectId === current.binding.boardId
             && card.authorizationRevision === current.authorizationDigest) } : { issue, projects: [] };
+        if (unavailable) return { state: "unavailable", coverage: "bound_project", mirror: previous };
         if (!completedInTime || Date.now() >= deadline) return { state: "partial", coverage: "bound_project", mirror: previous };
         const read = updateGitHubIssueMirror(previous, {
           state: "readable", projectId: current.binding.boardId, title, url: board.url,
