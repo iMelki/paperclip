@@ -88,6 +88,7 @@ describeEmbeddedPostgres("budgetService unmeasured usage block (#294)", () => {
     session?: string | null;
     sessionBefore?: string | null;
     cost?: boolean;
+    costProjectId?: string | null;
     reason?: string;
   }) {
     const id = randomUUID();
@@ -112,6 +113,7 @@ describeEmbeddedPostgres("budgetService unmeasured usage block (#294)", () => {
         provider: "test",
         model: "test-model",
         costCents: 5,
+        projectId: input.costProjectId ?? null,
         occurredAt: input.finishedAt,
       });
     }
@@ -374,6 +376,64 @@ describeEmbeddedPostgres("budgetService unmeasured usage block (#294)", () => {
       usageStatus: "unknown",
       finishedAt: new Date("2026-11-01T10:00:00Z"),
       session: "sess-1",
+    });
+    expect(await budgetService(db).getInvocationBlock(companyId, agentId, { projectId })).toBeNull();
+  });
+
+  async function setupProjectHold() {
+    const { companyId, agentId } = await createAgent({ withBudget: false });
+    const projectId = randomUUID();
+    const otherProjectId = randomUUID();
+    await db.insert(projects).values([
+      { id: projectId, companyId, name: "Budgeted project" },
+      { id: otherProjectId, companyId, name: "Other project" },
+    ]);
+    await db.insert(budgetPolicies).values({
+      companyId,
+      scopeType: "project",
+      scopeId: projectId,
+      metric: "billed_cents",
+      windowKind: "calendar_month_utc",
+      amount: 1000,
+      warnPercent: 80,
+      hardStopEnabled: true,
+      notifyEnabled: true,
+      isActive: true,
+    });
+    await insertRun({
+      companyId,
+      agentId,
+      usageStatus: "unknown",
+      finishedAt: new Date("2026-11-01T10:00:00Z"),
+      session: "sess-1",
+    });
+    return { companyId, agentId, projectId, otherProjectId };
+  }
+
+  it("a later same-session event attributed to a different project does not clear the project hold", async () => {
+    const { companyId, agentId, projectId, otherProjectId } = await setupProjectHold();
+    await insertRun({
+      companyId,
+      agentId,
+      usageStatus: "reported",
+      finishedAt: new Date("2026-11-01T11:00:00Z"),
+      session: "sess-1",
+      cost: true,
+      costProjectId: otherProjectId,
+    });
+    expect(await budgetService(db).getInvocationBlock(companyId, agentId, { projectId })).not.toBeNull();
+  });
+
+  it("a later same-session event attributed to the same project clears the project hold", async () => {
+    const { companyId, agentId, projectId } = await setupProjectHold();
+    await insertRun({
+      companyId,
+      agentId,
+      usageStatus: "reported",
+      finishedAt: new Date("2026-11-01T11:00:00Z"),
+      session: "sess-1",
+      cost: true,
+      costProjectId: projectId,
     });
     expect(await budgetService(db).getInvocationBlock(companyId, agentId, { projectId })).toBeNull();
   });

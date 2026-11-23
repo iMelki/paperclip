@@ -56,8 +56,19 @@ export type BudgetServiceHooks = {
  * already recorded (the report is persisted before its cost event, so a bare
  * report is not proof the budget includes the usage). A run with no recorded
  * session has nothing to match, so it stays blocking until reconciled.
+ *
+ * With `projectId` (project-scope hard stop) recovery also needs the cost event
+ * to be attributed to that project, because a project budget sums only events
+ * attributed to it. Without `projectId` (agent and company scope) the recovery
+ * rule is unchanged.
  */
-async function findUnrecoveredUnmeasuredRun(db: Db, companyId: string, agentId: string) {
+async function findUnrecoveredUnmeasuredRun(
+  db: Db,
+  companyId: string,
+  agentId: string,
+  projectId?: string,
+) {
+  const projectMatch = projectId ? sql`and ce.project_id = ${projectId}` : sql``;
   const runTime = sql`coalesce(${heartbeatRuns.finishedAt}, ${heartbeatRuns.createdAt})`;
   const unknownSession = sql`coalesce(${heartbeatRuns.sessionIdAfter}, ${heartbeatRuns.sessionIdBefore})`;
   return db
@@ -83,6 +94,7 @@ async function findUnrecoveredUnmeasuredRun(db: Db, companyId: string, agentId: 
               where ce.heartbeat_run_id = r.id
                 and ce.company_id = r.company_id
                 and ce.agent_id = r.agent_id
+                ${projectMatch}
             )
         )`,
       ),
@@ -862,8 +874,8 @@ export function budgetService(db: Db, hooks: BudgetServiceHooks = {}) {
 
       const hasHardStop = (policy: typeof agentPolicy) =>
         Boolean(policy && policy.hardStopEnabled && policy.amount > 0);
-      const unmeasuredBlock = async () => {
-        const unmeasured = await findUnrecoveredUnmeasuredRun(db, companyId, agentId);
+      const unmeasuredBlock = async (scopeProjectId?: string) => {
+        const unmeasured = await findUnrecoveredUnmeasuredRun(db, companyId, agentId, scopeProjectId);
         if (!unmeasured) return null;
         return {
           scopeType: "agent" as const,
@@ -875,8 +887,7 @@ export function budgetService(db: Db, hooks: BudgetServiceHooks = {}) {
             " and its budget hard-stop cannot rule out an overspend until a later measured run of the same session recovers it.",
         };
       };
-      const unmeasuredAlreadyChecked = hasHardStop(agentPolicy) || hasHardStop(companyPolicy);
-      if (unmeasuredAlreadyChecked) {
+      if (hasHardStop(agentPolicy) || hasHardStop(companyPolicy)) {
         const block = await unmeasuredBlock();
         if (block) return block;
       }
@@ -922,13 +933,14 @@ export function budgetService(db: Db, hooks: BudgetServiceHooks = {}) {
         }
       }
 
-      // #301: a project-scope hard stop must also fail closed after an unknown-usage run when no
-      // agent or company hard stop exists (those cases were already checked above).
+      // #301: a project-scope hard stop must also fail closed after an unknown-usage run, even with
+      // no agent or company hard stop. Recovery is scoped to this project: a later cost event
+      // attributed to another project never reaches this project's budget, so it cannot clear it.
       // Known limit: a run that reported zero tokens and zero cost creates no cost event, so it
       // never satisfies the recovery check and keeps blocking until reconciled. This is deliberate
       // (fail-closed); a later reconciliation path could clear such holds explicitly.
-      if (!unmeasuredAlreadyChecked && hasHardStop(projectPolicy)) {
-        const block = await unmeasuredBlock();
+      if (hasHardStop(projectPolicy)) {
+        const block = await unmeasuredBlock(project.id);
         if (block) return block;
       }
 
