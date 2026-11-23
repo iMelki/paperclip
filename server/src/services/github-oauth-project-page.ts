@@ -134,11 +134,11 @@ export function githubProjectPageQuery(ownerType: GitHubProjectPageInput["ownerT
           ... on Issue{id number title url state repository{nameWithOwner}}
           ... on PullRequest{title url repository{nameWithOwner}}
           ... on DraftIssue{title}}
-        fieldValues(first:100){pageInfo{hasNextPage} nodes{
-          ... on ProjectV2ItemFieldTextValue{text field{... on ProjectV2FieldCommon{name}}}
-          ... on ProjectV2ItemFieldSingleSelectValue{name field{... on ProjectV2FieldCommon{name}}}
-          ... on ProjectV2ItemFieldNumberValue{number field{... on ProjectV2FieldCommon{name}}}
-          ... on ProjectV2ItemFieldDateValue{date field{... on ProjectV2FieldCommon{name}}}
+        fieldValues(first:100){pageInfo{hasNextPage} nodes{__typename
+          ... on ProjectV2ItemFieldTextValue{id text field{... on ProjectV2FieldCommon{id name}}}
+          ... on ProjectV2ItemFieldSingleSelectValue{id name optionId field{... on ProjectV2FieldCommon{id name}}}
+          ... on ProjectV2ItemFieldNumberValue{id number field{... on ProjectV2FieldCommon{id name}}}
+          ... on ProjectV2ItemFieldDateValue{id date field{... on ProjectV2FieldCommon{id name}}}
         }}
       }}
     }}

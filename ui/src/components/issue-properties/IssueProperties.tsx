@@ -2329,6 +2329,8 @@ export function IssueProperties({
         ) : null}
 
         <ExternalObjectRows
+          key={issue.id}
+          issueId={issue.id}
           externalObjects={externalObjects}
           externalObjectsLoading={externalObjectsLoading}
           externalObjectsError={externalObjectsError}
