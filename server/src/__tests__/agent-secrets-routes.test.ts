@@ -44,7 +44,7 @@ describeEmbeddedPostgres("agent secret routes", () => {
     const started = await startEmbeddedPostgresTestDatabase("agent-secret-routes");
     stopDb = started.cleanup;
     db = createDb(started.connectionString);
-  }, EMBEDDED_POSTGRES_TEST_SETUP_TIMEOUT_MS);
+  }, Math.max(30_000, EMBEDDED_POSTGRES_TEST_SETUP_TIMEOUT_MS));
 
   afterEach(async () => {
     await db.delete(activityLog);

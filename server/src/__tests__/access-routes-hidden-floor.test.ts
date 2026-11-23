@@ -51,15 +51,18 @@ async function createApp() {
   return app;
 }
 
+// This suite uses a stub db, so the embedded-Postgres budget does not apply; it
+// only borrows the shared value as a floor and never goes below the old 30 s.
+const SETUP_TIMEOUT_MS = Math.max(30_000, EMBEDDED_POSTGRES_TEST_SETUP_TIMEOUT_MS);
+
 describe("operator-hidden access admin floor", () => {
   let app: express.Express;
 
   // The access router is a large module; import and build the app once so the
-  // cost is not charged to the first test's timeout on slow CI runners. The
-  // shared budget is never allowed below the 30 s this hook already had.
+  // cost is not charged to the first test's timeout on slow CI runners.
   beforeAll(async () => {
     app = await createApp();
-  }, Math.max(30_000, EMBEDDED_POSTGRES_TEST_SETUP_TIMEOUT_MS));
+  }, SETUP_TIMEOUT_MS);
 
   afterEach(() => {
     delete process.env.PAPERCLIP_HIDDEN_SETTINGS;
