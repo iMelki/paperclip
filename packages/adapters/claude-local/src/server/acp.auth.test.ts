@@ -418,8 +418,13 @@ describe("Claude ACP hello probe on local and SSH targets", () => {
 
   beforeEach(async () => {
     tempDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-acp-localprobe-"));
-    claudePath = path.join(tempDir, "claude");
-    await writeFile(claudePath, "#!/bin/sh\nexit 0\n");
+    // The resolver only accepts a PATHEXT extension on Windows, so the fake
+    // claude is a .cmd file there and an executable shell script elsewhere.
+    claudePath = path.join(tempDir, process.platform === "win32" ? "claude.cmd" : "claude");
+    await writeFile(
+      claudePath,
+      process.platform === "win32" ? "@echo off\r\nexit /b 0\r\n" : "#!/bin/sh\nexit 0\n",
+    );
     await chmod(claudePath, 0o755);
     savedPath = process.env.PATH;
     process.env.PATH = tempDir;
@@ -493,7 +498,11 @@ describe("Claude ACP hello probe on local and SSH targets", () => {
     const spawnedCommand = call[2] as string;
     const spawnedEnv = (call[4] as { env: Record<string, string> }).env;
     // The trusted resolved claude executable, never the caller command path.
-    expect(spawnedCommand).toBe(claudePath);
+    // Windows resolves the extension with the PATHEXT casing (.CMD), and the
+    // file system ignores case there.
+    expect(process.platform === "win32" ? spawnedCommand.toLowerCase() : spawnedCommand).toBe(
+      process.platform === "win32" ? claudePath.toLowerCase() : claudePath,
+    );
     // The approved key reaches the child; the hostile keys never do.
     expect(spawnedEnv.ANTHROPIC_API_KEY).toBe("keep-this-key");
     expect(spawnedEnv.NODE_OPTIONS).toBeUndefined();
