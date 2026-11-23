@@ -24,6 +24,7 @@ import { secretRoutes } from "../routes/secrets.js";
 import { secretService } from "../services/secrets.js";
 import { createRunSecretRedactionRegistry } from "../services/run-secret-redaction.js";
 import {
+  EMBEDDED_POSTGRES_TEST_SETUP_TIMEOUT_MS,
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
@@ -43,7 +44,7 @@ describeEmbeddedPostgres("agent secret routes", () => {
     const started = await startEmbeddedPostgresTestDatabase("agent-secret-routes");
     stopDb = started.cleanup;
     db = createDb(started.connectionString);
-  });
+  }, Math.max(30_000, EMBEDDED_POSTGRES_TEST_SETUP_TIMEOUT_MS));
 
   afterEach(async () => {
     await db.delete(activityLog);

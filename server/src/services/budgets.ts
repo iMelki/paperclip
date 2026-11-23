@@ -1,4 +1,4 @@
-import { and, desc, eq, gte, inArray, lt, ne, sql } from "drizzle-orm";
+import { and, desc, eq, gte, inArray, lt, ne, sql, type AnyColumn } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
   agents,
@@ -47,6 +47,23 @@ export type BudgetServiceHooks = {
 };
 
 /**
+ * SQL form of the project a run's cost events are charged to. MUST stay equal to
+ * `resolveLedgerScopeForRun` in heartbeat.ts (the context issue's project_id in the same
+ * company, else the context's projectId); a parity test pins the two together.
+ */
+export function ledgerProjectIdOfRunSql(run: {
+  contextSnapshot: AnyColumn;
+  companyId: AnyColumn;
+}) {
+  return sql`coalesce(
+    (select i.project_id::text from issues i
+      where i.id::text = nullif(${run.contextSnapshot}->>'issueId', '')
+        and i.company_id = ${run.companyId}),
+    nullif(${run.contextSnapshot}->>'projectId', '')
+  )`;
+}
+
+/**
  * Newest run of this agent whose usage could not be measured (adapter set
  * `resultJson.usage_status = "unknown"`) and that no later measured run
  * (`usage_status = "reported"`) of the same session has recovered. Such a run
@@ -56,8 +73,22 @@ export type BudgetServiceHooks = {
  * already recorded (the report is persisted before its cost event, so a bare
  * report is not proof the budget includes the usage). A run with no recorded
  * session has nothing to match, so it stays blocking until reconciled.
+ *
+ * With `projectId` (project-scope hard stop) recovery also needs the cost event
+ * to be attributed to that project, because a project budget sums only events
+ * attributed to it. Without `projectId` (agent and company scope) the recovery
+ * rule is unchanged. In that scope the unknown run itself must also be charged
+ * to that project (same attribution as the ledger), so a run in another project
+ * or in no project, whose spend this budget can never include, never blocks it.
  */
-async function findUnrecoveredUnmeasuredRun(db: Db, companyId: string, agentId: string) {
+async function findUnrecoveredUnmeasuredRun(
+  db: Db,
+  companyId: string,
+  agentId: string,
+  projectId?: string,
+) {
+  const projectMatch = projectId ? sql`and ce.project_id = ${projectId}` : sql``;
+  const unknownRunInProject = projectId ? sql`${ledgerProjectIdOfRunSql(heartbeatRuns)} = ${projectId}` : sql`true`;
   const runTime = sql`coalesce(${heartbeatRuns.finishedAt}, ${heartbeatRuns.createdAt})`;
   const unknownSession = sql`coalesce(${heartbeatRuns.sessionIdAfter}, ${heartbeatRuns.sessionIdBefore})`;
   return db
@@ -71,6 +102,7 @@ async function findUnrecoveredUnmeasuredRun(db: Db, companyId: string, agentId: 
         eq(heartbeatRuns.companyId, companyId),
         eq(heartbeatRuns.agentId, agentId),
         sql`${heartbeatRuns.resultJson}->>'usage_status' = 'unknown'`,
+        unknownRunInProject,
         sql`not exists (
           select 1 from heartbeat_runs r
           where r.agent_id = ${heartbeatRuns.agentId}
@@ -83,6 +115,7 @@ async function findUnrecoveredUnmeasuredRun(db: Db, companyId: string, agentId: 
               where ce.heartbeat_run_id = r.id
                 and ce.company_id = r.company_id
                 and ce.agent_id = r.agent_id
+                ${projectMatch}
             )
         )`,
       ),
@@ -862,19 +895,25 @@ export function budgetService(db: Db, hooks: BudgetServiceHooks = {}) {
 
       const hasHardStop = (policy: typeof agentPolicy) =>
         Boolean(policy && policy.hardStopEnabled && policy.amount > 0);
-      if (hasHardStop(agentPolicy) || hasHardStop(companyPolicy)) {
-        const unmeasured = await findUnrecoveredUnmeasuredRun(db, companyId, agentId);
-        if (unmeasured) {
-          return {
-            scopeType: "agent" as const,
-            scopeId: agentId,
-            scopeName: agent.name,
-            reason:
-              `Agent cannot start because run ${unmeasured.id} has unmeasured usage` +
-              `${unmeasured.reason ? ` (${unmeasured.reason})` : ""}` +
+      const unmeasuredBlock = async (scopeProject?: { id: string; name: string }) => {
+        const unmeasured = await findUnrecoveredUnmeasuredRun(db, companyId, agentId, scopeProject?.id);
+        if (!unmeasured) return null;
+        const detail = unmeasured.reason ? ` (${unmeasured.reason})` : "";
+        return {
+          scopeType: "agent" as const,
+          scopeId: agentId,
+          scopeName: agent.name,
+          reason: scopeProject
+            ? `Agent cannot start because run ${unmeasured.id} has unmeasured usage${detail}` +
+              ` in project ${scopeProject.name}, and that project's budget hard-stop cannot rule out an` +
+              " overspend until a later measured run of the same session records a cost event charged to that project."
+            : `Agent cannot start because run ${unmeasured.id} has unmeasured usage${detail}` +
               " and its budget hard-stop cannot rule out an overspend until a later measured run of the same session recovers it.",
-          };
-        }
+        };
+      };
+      if (hasHardStop(agentPolicy) || hasHardStop(companyPolicy)) {
+        const block = await unmeasuredBlock();
+        if (block) return block;
       }
 
       const candidateProjectId = context?.projectId ?? null;
@@ -916,6 +955,17 @@ export function budgetService(db: Db, hooks: BudgetServiceHooks = {}) {
             reason: "Project cannot start work because its budget hard-stop is still exceeded.",
           };
         }
+      }
+
+      // #301: a project-scope hard stop must also fail closed after an unknown-usage run, even with
+      // no agent or company hard stop. Recovery is scoped to this project: a later cost event
+      // attributed to another project never reaches this project's budget, so it cannot clear it.
+      // Known limit: a run that reported zero tokens and zero cost creates no cost event, so it
+      // never satisfies the recovery check and keeps blocking until reconciled. This is deliberate
+      // (fail-closed); a later reconciliation path could clear such holds explicitly.
+      if (hasHardStop(projectPolicy)) {
+        const block = await unmeasuredBlock({ id: project.id, name: project.name });
+        if (block) return block;
       }
 
       if (!project.pausedAt || project.pauseReason !== "budget") return null;
