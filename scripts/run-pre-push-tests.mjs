@@ -21,6 +21,24 @@ const SAFE_REMOTE_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const PROTECTED_REFS = new Set(["refs/heads/dev", "refs/heads/master"]);
 const WORKFLOW_FILE_PATTERN = /^\.github\/workflows\/[^/]+\.ya?ml$/i;
 export const TEST_CHILD_TIMEOUT_MS = 10 * 60 * 1000;
+// The Vitest budget grows with the selected work, in fixed steps, up to a fixed ceiling.
+// The ceiling stays below the windowless hook host limit (about 2560 s). There is no
+// environment override: a timeout always fails the push.
+export const TEST_CHILD_TIMEOUT_PER_EXTRA_SUITE_MS = 45 * 1000;
+export const TEST_CHILD_TIMEOUT_FREE_SUITES = 10;
+export const TEST_CHILD_TIMEOUT_CEILING_MS = 35 * 60 * 1000;
+
+export function vitestChildTimeout(vitestFileCount) {
+  const count = Number.isSafeInteger(vitestFileCount) && vitestFileCount > 0 ? vitestFileCount : 0;
+  const extraSuites = Math.max(0, count - TEST_CHILD_TIMEOUT_FREE_SUITES);
+  const scaled = TEST_CHILD_TIMEOUT_MS + TEST_CHILD_TIMEOUT_PER_EXTRA_SUITE_MS * extraSuites;
+  const timeoutMs = Math.min(TEST_CHILD_TIMEOUT_CEILING_MS, Math.max(TEST_CHILD_TIMEOUT_MS, scaled));
+  const reason = timeoutMs === TEST_CHILD_TIMEOUT_CEILING_MS && scaled > timeoutMs
+    ? `${count} suites, capped at the ${TEST_CHILD_TIMEOUT_CEILING_MS / 60000} min ceiling`
+    : `${count} suites: ${TEST_CHILD_TIMEOUT_MS / 60000} min base`
+      + (extraSuites > 0 ? ` + ${TEST_CHILD_TIMEOUT_PER_EXTRA_SUITE_MS / 1000} s x ${extraSuites} suites above ${TEST_CHILD_TIMEOUT_FREE_SUITES}` : "");
+  return { timeoutMs, reason };
+}
 export const TEST_CHILD_MAX_BUFFER = 8 * 1024 * 1024;
 
 export class PrePushIntegrityError extends Error {
@@ -298,15 +316,17 @@ export function resolveOutgoingChangedFiles({
 function runChild(
   label,
   args,
-  { spawn = spawnSync, log = console.log, error = console.error, cwd = process.cwd(), env = process.env } = {},
+  { spawn = spawnSync, log = console.log, error = console.error, cwd = process.cwd(), env = process.env,
+    timeoutMs = TEST_CHILD_TIMEOUT_MS, timeoutReason = "" } = {},
 ) {
   log(`Running ${label}...`);
+  if (timeoutReason) log(`  timeout for this step: ${Math.round(timeoutMs / 1000)} s (${timeoutReason})`);
   const result = spawn(process.execPath, args, {
     cwd,
     env,
     stdio: ["ignore", "pipe", "pipe"],
     encoding: "utf8",
-    timeout: TEST_CHILD_TIMEOUT_MS,
+    timeout: timeoutMs,
     maxBuffer: TEST_CHILD_MAX_BUFFER,
     killSignal: "SIGKILL",
     windowsHide: true,
@@ -389,10 +409,11 @@ export function executeTestPlan(
   }
 
   if (selection.vitestFiles.length > 0) {
+    const { timeoutMs, reason } = vitestChildTimeout(selection.vitestFiles.length);
     const status = runChild(
       `exact Vitest suites (${selection.vitestFiles.length})`,
       [path.join(repoRoot, "scripts/run-vitest-stable.mjs"), "--files", ...selection.vitestFiles],
-      { spawn, log, error, cwd: repoRoot, env: childEnv },
+      { spawn, log, error, cwd: repoRoot, env: childEnv, timeoutMs, timeoutReason: reason },
     );
     if (status !== 0) return status;
   }

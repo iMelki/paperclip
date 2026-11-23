@@ -11,6 +11,7 @@ import { fileURLToPath } from "node:url";
 import {
   PrePushIntegrityError,
   TEST_CHILD_MAX_BUFFER,
+  TEST_CHILD_TIMEOUT_CEILING_MS,
   TEST_CHILD_TIMEOUT_MS,
   assertAdvertisedDevAncestor,
   assertPushMatchesWorkingTree,
@@ -20,6 +21,7 @@ import {
   readHeadTrackedFiles,
   resolveOutgoingChangedFiles,
   runGit,
+  vitestChildTimeout,
 } from "./run-pre-push-tests.mjs";
 
 const A = "a".repeat(40);
@@ -657,4 +659,43 @@ test("failed Git environment enumeration refuses test execution", () => {
   assert.equal(status, 2);
   assert.equal(spawned, false);
   assert.match(errors.join("\n"), /cannot isolate test Git environment: synthetic enumeration failure/);
+});
+
+test("the Vitest child timeout scales with the selected suites and never exceeds the ceiling", () => {
+  const minutes = count => vitestChildTimeout(count).timeoutMs / 60000;
+  assert.equal(minutes(5), 10);
+  assert.equal(minutes(10), 10);
+  assert.equal(minutes(11), 10.75);
+  assert.equal(minutes(26), 22);
+  assert.ok(vitestChildTimeout(26).timeoutMs > TEST_CHILD_TIMEOUT_MS);
+  assert.equal(vitestChildTimeout(200).timeoutMs, TEST_CHILD_TIMEOUT_CEILING_MS);
+  assert.equal(TEST_CHILD_TIMEOUT_CEILING_MS, 35 * 60 * 1000);
+  assert.match(vitestChildTimeout(200).reason, /capped at the 35 min ceiling/);
+  assert.equal(vitestChildTimeout(0).timeoutMs, TEST_CHILD_TIMEOUT_MS);
+  assert.equal(vitestChildTimeout(Number.NaN).timeoutMs, TEST_CHILD_TIMEOUT_MS);
+  assert.ok(vitestChildTimeout(1e9).timeoutMs <= TEST_CHILD_TIMEOUT_CEILING_MS);
+});
+
+test("a 26-suite plan gets the scaled timeout, prints it, and a child timeout still fails the push", () => {
+  const logs = [];
+  const errors = [];
+  const timeouts = [];
+  const vitestFiles = Array.from({ length: 26 }, (_v, index) => `server/src/probe-${index}.test.ts`);
+  const status = executeTestPlan({
+    selection: baseSelection({ vitestFiles }),
+    targetRefs: ["refs/heads/topic"],
+  }, {
+    repoRoot: "C:/repo",
+    spawn: (_command, _args, options) => {
+      timeouts.push(options.timeout);
+      return { status: null, stdout: "", stderr: "",
+        error: Object.assign(new Error("synthetic timeout"), { code: "ETIMEDOUT" }) };
+    },
+    log: value => logs.push(value), error: value => errors.push(value),
+  });
+  assert.equal(status, 2);
+  assert.deepEqual(timeouts, [vitestChildTimeout(26).timeoutMs]);
+  assert.ok(timeouts[0] > TEST_CHILD_TIMEOUT_MS);
+  assert.match(logs.join(" | "), /timeout for this step: 1320 s \(26 suites: 10 min base \+ 45 s x 16 suites above 10\)/);
+  assert.match(errors.join(" | "), /did not complete \(ETIMEDOUT\)/);
 });
