@@ -13,11 +13,14 @@ import {
   TEST_CHILD_MAX_BUFFER,
   TEST_CHILD_TIMEOUT_CEILING_MS,
   TEST_CHILD_TIMEOUT_MS,
+  TEST_PLAN_BUDGET_MS,
+  TEST_STEP_MIN_START_MS,
   assertAdvertisedDevAncestor,
   assertPushMatchesWorkingTree,
   executeTestPlan,
   listChangedWorkflowFiles,
   parsePushUpdates,
+  planStepTimeout,
   readHeadTrackedFiles,
   resolveOutgoingChangedFiles,
   runGit,
@@ -698,4 +701,71 @@ test("a 26-suite plan gets the scaled timeout, prints it, and a child timeout st
   assert.ok(timeouts[0] > TEST_CHILD_TIMEOUT_MS);
   assert.match(logs.join(" | "), /timeout for this step: 1320 s \(26 suites: 10 min base \+ 45 s x 16 suites above 10\)/);
   assert.match(errors.join(" | "), /did not complete \(ETIMEDOUT\)/);
+});
+
+test("the Vitest step cap reaches the ceiling exactly at 44 suites", () => {
+  assert.equal(vitestChildTimeout(43).timeoutMs, 2085 * 1000);
+  assert.doesNotMatch(vitestChildTimeout(43).reason, /capped/);
+  assert.equal(vitestChildTimeout(44).timeoutMs, 2100 * 1000);
+  assert.match(vitestChildTimeout(44).reason, /capped at the 35 min ceiling/);
+  assert.match(vitestChildTimeout(1).reason, /^1 suite: /);
+  assert.match(vitestChildTimeout(11).reason, /x 1 suite above 10/);
+});
+
+test("the plan budget stays below the hook host limit and a step needs a minimum time to start", () => {
+  assert.ok(TEST_PLAN_BUDGET_MS <= 2560 * 1000 - 600 * 1000);
+  assert.equal(planStepTimeout(600 * 1000, "cap", 0).timeoutMs, 600 * 1000);
+  assert.equal(planStepTimeout(600 * 1000, "cap", TEST_PLAN_BUDGET_MS - 100 * 1000).timeoutMs, 100 * 1000);
+  assert.equal(planStepTimeout(600 * 1000, "cap", TEST_PLAN_BUDGET_MS - TEST_STEP_MIN_START_MS).exhausted, false);
+  assert.equal(planStepTimeout(600 * 1000, "cap", TEST_PLAN_BUDGET_MS - TEST_STEP_MIN_START_MS + 1).exhausted, true);
+  assert.equal(planStepTimeout(600 * 1000, "cap", TEST_PLAN_BUDGET_MS * 2).exhausted, true);
+});
+
+function timedPlan({ vitestCount, stepDurationsMs }) {
+  let clock = 0;
+  const calls = [];
+  const errors = [];
+  const logs = [];
+  const status = executeTestPlan({
+    selection: baseSelection({
+      changedFiles: [".github/workflows/docker.yml"],
+      hostedCiFiles: [".github/workflows/docker.yml"],
+      nodeTestFiles: ["scripts/probe.test.mjs"],
+      vitestFiles: Array.from({ length: vitestCount }, (_v, index) => `server/src/probe-${index}.test.ts`),
+    }),
+    targetRefs: ["refs/heads/topic"],
+  }, {
+    repoRoot: "C:/repo",
+    now: () => clock,
+    spawn: (_command, args, options) => {
+      calls.push({ args, timeout: options.timeout });
+      clock += stepDurationsMs[calls.length - 1] ?? 0;
+      return { status: 0 };
+    },
+    log: value => logs.push(value), error: value => errors.push(value),
+  });
+  return { status, calls, errors, logs };
+}
+
+test("a mixed plan gives the lint and Node steps 600 s and scales only the Vitest step", () => {
+  const { status, calls } = timedPlan({ vitestCount: 26, stepDurationsMs: [1000, 1000, 1000] });
+  assert.equal(status, 0);
+  assert.deepEqual(calls.map(call => call.timeout), [600 * 1000, 600 * 1000, 1320 * 1000]);
+});
+
+test("the plan budget clamps later steps to the time that is left", () => {
+  const { status, calls, logs } = timedPlan({ vitestCount: 44, stepDurationsMs: [600 * 1000, 600 * 1000, 0] });
+  assert.equal(status, 0);
+  assert.deepEqual(calls.map(call => call.timeout), [
+    600 * 1000, 600 * 1000, TEST_PLAN_BUDGET_MS - 1200 * 1000,
+  ]);
+  assert.ok(calls[2].timeout < vitestChildTimeout(44).timeoutMs);
+  assert.match(logs.join(" | "), /clamped to the 720 s left in the 32 min plan budget/);
+});
+
+test("an exhausted plan budget fails closed without starting the next step", () => {
+  const { status, calls, errors } = timedPlan({ vitestCount: 26, stepDurationsMs: [100 * 1000, TEST_PLAN_BUDGET_MS - 100 * 1000 - 10 * 1000] });
+  assert.equal(status, 2);
+  assert.equal(calls.length, 2);
+  assert.match(errors.join(" | "), /exact Vitest suites was not started: plan budget exhausted \(10 s left\)\. The push fails closed\./);
 });

@@ -21,23 +21,42 @@ const SAFE_REMOTE_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const PROTECTED_REFS = new Set(["refs/heads/dev", "refs/heads/master"]);
 const WORKFLOW_FILE_PATTERN = /^\.github\/workflows\/[^/]+\.ya?ml$/i;
 export const TEST_CHILD_TIMEOUT_MS = 10 * 60 * 1000;
-// The Vitest budget grows with the selected work, in fixed steps, up to a fixed ceiling.
-// The ceiling stays below the windowless hook host limit (about 2560 s). There is no
-// environment override: a timeout always fails the push.
+// The Vitest step cap grows with the selected work, in fixed steps, up to a fixed ceiling.
+// The whole plan (workflow lint, Node tests and Vitest together) also has one total budget.
+// The windowless hook host kills the whole hook at about 2560 s, and the steps before the
+// test plan (policy checks, secret scan, preflight, full typecheck) use time first. They took
+// 87 s to 332 s in the measured pushes on one Windows host (see the pull request). The plan
+// budget leaves about 640 s for them. A step that has no time left does not start and the plan
+// fails with exit 2. There is no environment override.
 export const TEST_CHILD_TIMEOUT_PER_EXTRA_SUITE_MS = 45 * 1000;
 export const TEST_CHILD_TIMEOUT_FREE_SUITES = 10;
 export const TEST_CHILD_TIMEOUT_CEILING_MS = 35 * 60 * 1000;
+export const TEST_PLAN_BUDGET_MS = 32 * 60 * 1000;
+export const TEST_STEP_MIN_START_MS = 30 * 1000;
 
 export function vitestChildTimeout(vitestFileCount) {
   const count = Number.isSafeInteger(vitestFileCount) && vitestFileCount > 0 ? vitestFileCount : 0;
   const extraSuites = Math.max(0, count - TEST_CHILD_TIMEOUT_FREE_SUITES);
   const scaled = TEST_CHILD_TIMEOUT_MS + TEST_CHILD_TIMEOUT_PER_EXTRA_SUITE_MS * extraSuites;
-  const timeoutMs = Math.min(TEST_CHILD_TIMEOUT_CEILING_MS, Math.max(TEST_CHILD_TIMEOUT_MS, scaled));
-  const reason = timeoutMs === TEST_CHILD_TIMEOUT_CEILING_MS && scaled > timeoutMs
-    ? `${count} suites, capped at the ${TEST_CHILD_TIMEOUT_CEILING_MS / 60000} min ceiling`
-    : `${count} suites: ${TEST_CHILD_TIMEOUT_MS / 60000} min base`
-      + (extraSuites > 0 ? ` + ${TEST_CHILD_TIMEOUT_PER_EXTRA_SUITE_MS / 1000} s x ${extraSuites} suites above ${TEST_CHILD_TIMEOUT_FREE_SUITES}` : "");
+  const timeoutMs = Math.min(TEST_CHILD_TIMEOUT_CEILING_MS, scaled);
+  const noun = count === 1 ? "suite" : "suites";
+  const reason = scaled >= TEST_CHILD_TIMEOUT_CEILING_MS
+    ? `${count} ${noun}, capped at the ${TEST_CHILD_TIMEOUT_CEILING_MS / 60000} min ceiling`
+    : `${count} ${noun}: ${TEST_CHILD_TIMEOUT_MS / 60000} min base`
+      + (extraSuites > 0 ? ` + ${TEST_CHILD_TIMEOUT_PER_EXTRA_SUITE_MS / 1000} s x ${extraSuites} ${extraSuites === 1 ? "suite" : "suites"} above ${TEST_CHILD_TIMEOUT_FREE_SUITES}` : "");
   return { timeoutMs, reason };
+}
+
+/** Limit for one plan step: its own cap, clamped to the time left in the plan budget. */
+export function planStepTimeout(capMs, capReason, elapsedMs) {
+  const remainingMs = TEST_PLAN_BUDGET_MS - Math.max(0, elapsedMs);
+  if (remainingMs < TEST_STEP_MIN_START_MS) {
+    return { timeoutMs: 0, remainingMs, exhausted: true, reason: `plan budget exhausted (${Math.round(remainingMs / 1000)} s left)` };
+  }
+  const timeoutMs = Math.min(capMs, remainingMs);
+  const clamped = remainingMs < capMs;
+  return { timeoutMs, remainingMs, exhausted: false,
+    reason: `${capReason}${clamped ? `; clamped to the ${Math.round(remainingMs / 1000)} s left in the ${TEST_PLAN_BUDGET_MS / 60000} min plan budget` : ""}` };
 }
 export const TEST_CHILD_MAX_BUFFER = 8 * 1024 * 1024;
 
@@ -349,8 +368,16 @@ function runChild(
 export function executeTestPlan(
   { selection, targetRefs },
   { spawn = spawnSync, log = console.log, error = console.error, repoRoot = process.cwd(),
-    env = process.env, resolveGitEnv = resolveGitLocalEnvironmentVariableNames } = {},
+    env = process.env, resolveGitEnv = resolveGitLocalEnvironmentVariableNames, now = Date.now } = {},
 ) {
+  const planStart = now();
+  const limitFor = (label, capMs, capReason) => {
+    const limit = planStepTimeout(capMs, capReason, now() - planStart);
+    if (limit.exhausted) {
+      error(`ERROR: ${label} was not started: ${limit.reason}. The push fails closed.`);
+    }
+    return limit;
+  };
   if (selection.selectionErrors.length > 0) {
     error("ERROR: deterministic pre-push test selection failed closed:");
     selection.selectionErrors.forEach((item) => error(`  ${item}`));
@@ -388,32 +415,41 @@ export function executeTestPlan(
   // A missing default actionlint fails closed. This step does not download it.
   const workflowFiles = listChangedWorkflowFiles(selection);
   if (workflowFiles.length > 0) {
+    const limit = limitFor("changed workflow lint", TEST_CHILD_TIMEOUT_MS, "10 min step cap");
+    if (limit.exhausted) return 2;
     const status = runChild(
       `changed workflow lint (${workflowFiles.length})`,
       [
         path.join(repoRoot, "scripts/lint-changed-workflows.mjs"),
         ...workflowFiles.flatMap((file) => ["--file", file]),
       ],
-      { spawn, log, error, cwd: repoRoot, env: childEnv },
+      { spawn, log, error, cwd: repoRoot, env: childEnv,
+        timeoutMs: limit.timeoutMs, timeoutReason: limit.reason },
     );
     if (status !== 0) return status;
   }
 
   if (selection.nodeTestFiles.length > 0) {
+    const limit = limitFor("exact Node test suites", TEST_CHILD_TIMEOUT_MS, "10 min step cap");
+    if (limit.exhausted) return 2;
     const status = runChild(
       `exact Node test suites (${selection.nodeTestFiles.length})`,
       ["--test", ...selection.nodeTestFiles],
-      { spawn, log, error, cwd: repoRoot, env: childEnv },
+      { spawn, log, error, cwd: repoRoot, env: childEnv,
+        timeoutMs: limit.timeoutMs, timeoutReason: limit.reason },
     );
     if (status !== 0) return status;
   }
 
   if (selection.vitestFiles.length > 0) {
-    const { timeoutMs, reason } = vitestChildTimeout(selection.vitestFiles.length);
+    const cap = vitestChildTimeout(selection.vitestFiles.length);
+    const limit = limitFor("exact Vitest suites", cap.timeoutMs, cap.reason);
+    if (limit.exhausted) return 2;
     const status = runChild(
       `exact Vitest suites (${selection.vitestFiles.length})`,
       [path.join(repoRoot, "scripts/run-vitest-stable.mjs"), "--files", ...selection.vitestFiles],
-      { spawn, log, error, cwd: repoRoot, env: childEnv, timeoutMs, timeoutReason: reason },
+      { spawn, log, error, cwd: repoRoot, env: childEnv,
+        timeoutMs: limit.timeoutMs, timeoutReason: limit.reason },
     );
     if (status !== 0) return status;
   }
