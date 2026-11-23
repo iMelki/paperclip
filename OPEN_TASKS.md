@@ -223,8 +223,8 @@ This file is the durable local index for active `paperclip` issues.
 
 ## Recently Closed Issues
 
-- [#6 - Design and build a landing page](https://github.com/iMelki/paperclip/issues/6) — **closed 2026-09-26 as not planned**
-  - Former goal: define and implement a landing page with clear audience, value proposition, proof, and CTA.
+- [#6 - Design and build a public project page](https://github.com/iMelki/paperclip/issues/6) — **closed 2026-09-26 as not planned**
+  - Former goal: define and implement a public project page with clear audience, value proposition, proof, and CTA.
 
 - [#5 - Use relevant skills for market research, competitor analysis, and monetization planning](https://github.com/iMelki/paperclip/issues/5) — **closed 2026-09-26 as not planned**
   - Former goal: map competitors, ICPs, monetization options, and positioning for paperclip.
@@ -627,7 +627,7 @@ This file is the durable local index for active `paperclip` issues.
     defects: direct-parent reads needed a narrowly scoped Process/run
     authorization exception, and PowerShell REST array results required
     explicit enumeration. Both repairs now have focused regression coverage;
-    resume the factory only after the Agent Settings wrapper is pushed and the
+    resume the factory only after the private settings repo wrapper is pushed and the
     live Validator retry succeeds.
 
 - [#15 - Provision native and WSL Paperclip factory runtimes](https://github.com/iMelki/paperclip/issues/15)
@@ -679,21 +679,21 @@ This file is the durable local index for active `paperclip` issues.
 
 ## Recently Completed
 
-- [x] [Projects Ops #117 - Enroll Paperclip in Repo Doctor](https://github.com/iMelki/projects-ops/issues/117)
+- [x] Enroll Paperclip in Repo Doctor (task tracked in a private repo)
   - The governed checkout now has an observe-only `on_demand` genome with four
     bounded authored-source sets, 3,246 selected files, two explicit generated
     exclusions, and no analyzer execution or quality authority. The direct
     invalid-reference proof failed closed as direct `invalid`/2 and shared
     `invalid_genome`/2, with private issue text withheld. The restored
     direct/shared plan resolution passed at 3,246 selected files and two
-    exclusions. Agent Settings fixed the classification contract in
+    exclusions. The private settings repo fixed the classification contract in
     `c91e70cc`; an invalid genome remains non-green and no analyzer ran.
 
 - [#53 - Make coordination evidence and health fail closed](https://github.com/iMelki/paperclip/issues/53) — **merged via PR #113 (`715b453bc`)**
   - #82 is closed and is no longer a blocker. The remaining v2 contract is an
     additive presentation-only route at
     `/api/issues/:rootIssueId/coordination/v2`, backed by migration `0213` and
-    the exact vendored Projects Ops schema (SHA-256
+    the exact vendored schema from a private portfolio repo (SHA-256
     `3f47037b1f7b5e1705e719e4b087be88223abac19590521024d2f8960823b258`).
     `unassigned` is a non-authorizing sentinel; unknown, malformed, stale, or
     ownership-mismatched facts stay non-positive and can never be projected as
@@ -846,7 +846,7 @@ This file is the durable local index for active `paperclip` issues.
 - [#3 - Review and split preserved remote execution and continuation WIP](https://github.com/iMelki/paperclip/issues/3)
   - Closed after the preserved remote-execution and continuation work was
     reviewed and split out of the active task lane.
-- [#1 - Adopt projects-ops repo bootstrap governance baseline](https://github.com/iMelki/paperclip/issues/1)
+- [#1 - Adopt the portfolio repo bootstrap governance baseline](https://github.com/iMelki/paperclip/issues/1)
   - Completed via [PR #2](https://github.com/iMelki/paperclip/pull/2) on 2026-05-10.
 
 ## Supporting Docs
