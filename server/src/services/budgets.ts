@@ -862,19 +862,23 @@ export function budgetService(db: Db, hooks: BudgetServiceHooks = {}) {
 
       const hasHardStop = (policy: typeof agentPolicy) =>
         Boolean(policy && policy.hardStopEnabled && policy.amount > 0);
-      if (hasHardStop(agentPolicy) || hasHardStop(companyPolicy)) {
+      const unmeasuredBlock = async () => {
         const unmeasured = await findUnrecoveredUnmeasuredRun(db, companyId, agentId);
-        if (unmeasured) {
-          return {
-            scopeType: "agent" as const,
-            scopeId: agentId,
-            scopeName: agent.name,
-            reason:
-              `Agent cannot start because run ${unmeasured.id} has unmeasured usage` +
-              `${unmeasured.reason ? ` (${unmeasured.reason})` : ""}` +
-              " and its budget hard-stop cannot rule out an overspend until a later measured run of the same session recovers it.",
-          };
-        }
+        if (!unmeasured) return null;
+        return {
+          scopeType: "agent" as const,
+          scopeId: agentId,
+          scopeName: agent.name,
+          reason:
+            `Agent cannot start because run ${unmeasured.id} has unmeasured usage` +
+            `${unmeasured.reason ? ` (${unmeasured.reason})` : ""}` +
+            " and its budget hard-stop cannot rule out an overspend until a later measured run of the same session recovers it.",
+        };
+      };
+      const unmeasuredAlreadyChecked = hasHardStop(agentPolicy) || hasHardStop(companyPolicy);
+      if (unmeasuredAlreadyChecked) {
+        const block = await unmeasuredBlock();
+        if (block) return block;
       }
 
       const candidateProjectId = context?.projectId ?? null;
@@ -916,6 +920,16 @@ export function budgetService(db: Db, hooks: BudgetServiceHooks = {}) {
             reason: "Project cannot start work because its budget hard-stop is still exceeded.",
           };
         }
+      }
+
+      // #301: a project-scope hard stop must also fail closed after an unknown-usage run when no
+      // agent or company hard stop exists (those cases were already checked above).
+      // Known limit: a run that reported zero tokens and zero cost creates no cost event, so it
+      // never satisfies the recovery check and keeps blocking until reconciled. This is deliberate
+      // (fail-closed); a later reconciliation path could clear such holds explicitly.
+      if (!unmeasuredAlreadyChecked && hasHardStop(projectPolicy)) {
+        const block = await unmeasuredBlock();
+        if (block) return block;
       }
 
       if (!project.pausedAt || project.pauseReason !== "budget") return null;

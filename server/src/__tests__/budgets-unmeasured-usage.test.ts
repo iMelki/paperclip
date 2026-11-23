@@ -7,6 +7,7 @@ import {
   costEvents,
   createDb,
   heartbeatRuns,
+  projects,
 } from "@paperclipai/db";
 import { budgetService } from "../services/budgets.ts";
 import {
@@ -33,6 +34,7 @@ describeEmbeddedPostgres("budgetService unmeasured usage block (#294)", () => {
     await db.delete(costEvents);
     await db.delete(heartbeatRuns);
     await db.delete(budgetPolicies);
+    await db.delete(projects);
     await db.delete(agents);
     await db.delete(companies);
   });
@@ -318,5 +320,61 @@ describeEmbeddedPostgres("budgetService unmeasured usage block (#294)", () => {
       scopeType: "agent",
       scopeId: agentId,
     });
+  });
+
+  it("blocks an unmeasured run under a project-scope hard stop with no agent or company policy (#301)", async () => {
+    const { companyId, agentId } = await createAgent({ withBudget: false });
+    const projectId = randomUUID();
+    await db.insert(projects).values({ id: projectId, companyId, name: "Budgeted project" });
+    await db.insert(budgetPolicies).values({
+      companyId,
+      scopeType: "project",
+      scopeId: projectId,
+      metric: "billed_cents",
+      windowKind: "calendar_month_utc",
+      amount: 1000,
+      warnPercent: 80,
+      hardStopEnabled: true,
+      notifyEnabled: true,
+      isActive: true,
+    });
+    const runId = await insertRun({
+      companyId,
+      agentId,
+      usageStatus: "unknown",
+      finishedAt: new Date("2026-11-01T10:00:00Z"),
+      session: "sess-1",
+    });
+    const block = await budgetService(db).getInvocationBlock(companyId, agentId, { projectId });
+    expect(block).toMatchObject({ scopeType: "agent", scopeId: agentId });
+    expect(block?.reason).toContain(runId);
+    // A wake for an unrelated project (or none) with no hard stop in scope is not blocked.
+    expect(await budgetService(db).getInvocationBlock(companyId, agentId)).toBeNull();
+  });
+
+  it("does not block under a project-scope policy without a hard stop", async () => {
+    const { companyId, agentId } = await createAgent({ withBudget: false });
+    const projectId = randomUUID();
+    await db.insert(projects).values({ id: projectId, companyId, name: "Soft project" });
+    await db.insert(budgetPolicies).values({
+      companyId,
+      scopeType: "project",
+      scopeId: projectId,
+      metric: "billed_cents",
+      windowKind: "calendar_month_utc",
+      amount: 1000,
+      warnPercent: 80,
+      hardStopEnabled: false,
+      notifyEnabled: true,
+      isActive: true,
+    });
+    await insertRun({
+      companyId,
+      agentId,
+      usageStatus: "unknown",
+      finishedAt: new Date("2026-11-01T10:00:00Z"),
+      session: "sess-1",
+    });
+    expect(await budgetService(db).getInvocationBlock(companyId, agentId, { projectId })).toBeNull();
   });
 });
