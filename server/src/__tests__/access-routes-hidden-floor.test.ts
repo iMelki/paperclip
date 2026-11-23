@@ -54,10 +54,11 @@ describe("operator-hidden access admin floor", () => {
   let app: express.Express;
 
   // The access router is a large module; import and build the app once so the
-  // cost is not charged to the first test's timeout on slow CI runners.
+  // cost is not charged to the first test's timeout. A cold transform of the full
+  // route graph can exceed 30 s on a loaded host, so allow 120 s here.
   beforeAll(async () => {
     app = await createApp();
-  }, 30_000);
+  }, 120_000);
 
   afterEach(() => {
     delete process.env.PAPERCLIP_HIDDEN_SETTINGS;

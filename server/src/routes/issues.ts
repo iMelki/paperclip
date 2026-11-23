@@ -235,6 +235,7 @@ import {
   type TrustPresetResolution,
 } from "../services/trust-preset-resolver.js";
 import { externalObjectService } from "../services/external-objects.js";
+import { findLinkedGitHubMirrorIssue, linkedGitHubIssueMirrorService } from "../services/linked-github-issue-mirror.js";
 import { deliverAgentUnblockNotification } from "../services/routable-blocked.js";
 import {
   assertIssueReviewVerdictActorAllowed,
@@ -2879,6 +2880,7 @@ export function issueRoutes(
       ? heartbeat.wakeup
       : opts.taskWatchdogEnqueueWakeup ?? undefined,
   }) ?? noopTaskWatchdogService();
+  const linkedGitHubMirror = linkedGitHubIssueMirrorService(db);
   const externalObjectsSvc = externalObjectService(db, {
     pluginWorkerManager: opts.pluginWorkerManager,
     enabled: async () => (await instanceSettings.getExperimental()).enableExternalObjects === true,
@@ -3824,8 +3826,9 @@ export function issueRoutes(
       status: string;
     },
     action: "issue:comment" | "issue:read" | "issue:mutate",
+    accessForDecision = access,
   ) {
-    return access.decide({
+    return accessForDecision.decide({
       actor: req.actor,
       action,
       resource: {
@@ -7132,6 +7135,76 @@ export function issueRoutes(
     if (!(await assertIssueReadAllowed(req, res, issue))) return;
     const objects = await externalObjectsSvc.listForIssue(issue.id);
     res.json(objects);
+  });
+
+  router.post("/issues/:id/github-project-mirror", validate(z.object({
+    objectId: z.string().guid(), projectNodeId: z.string().regex(/^[A-Za-z0-9_=-]{1,256}$/).optional(),
+  }).strict()), async (req, res) => {
+    const id = req.params.id as string;
+    const issue = await getAccessibleResource(req, res, getIssueById(req, id), "Issue not found");
+    if (!issue || !(await assertIssueReadAllowed(req, res, issue))) return;
+    const actor = getActorInfo(req);
+    if (actor.actorType !== "user" || actor.actorSource === "board_key" || actor.actorSource === "local_implicit") {
+      throw forbidden("GitHub Project details require a signed-in operator");
+    }
+    const selected = findLinkedGitHubMirrorIssue(await externalObjectsSvc.listForIssue(issue.id), req.body.objectId, issue.companyId);
+    if (!selected || !issue.projectId) throw notFound("Linked GitHub issue or Project binding not found");
+    const result = await linkedGitHubMirror.refresh({
+      companyId: issue.companyId, projectId: issue.projectId, issueId: issue.id, objectId: req.body.objectId,
+      userId: actor.actorId, issue: selected, requestedProjectId: req.body.projectNodeId,
+      canRead: async (lockedIssue, executor) =>
+        (await decideIssueAccess(req, lockedIssue, "issue:read", accessService(executor))).allowed,
+    });
+    const current = await getAccessibleResource(req, res, getIssueById(req, id), "Issue not found");
+    if (!current) return;
+    if (!(await decideIssueAccess(req, current, "issue:read")).allowed) {
+      throw forbidden("The linked GitHub issue is no longer readable");
+    }
+    const linked = findLinkedGitHubMirrorIssue(await externalObjectsSvc.listForIssue(current.id), req.body.objectId, current.companyId);
+    if (current.companyId !== issue.companyId || current.projectId !== issue.projectId
+      || !linked || linked.nodeId !== selected.nodeId || linked.url !== selected.url) {
+      throw conflict("The linked GitHub issue or Project changed during refresh");
+    }
+    res.json(result);
+  });
+
+  router.post("/issues/:id/github-project-access", validate(z.object({
+    objectId: z.string().guid(),
+    action: z.discriminatedUnion("op", [
+      z.object({ op: z.literal("list") }).strict(),
+      z.object({ op: z.literal("saved") }).strict(),
+      z.object({ op: z.literal("register"), boardUrl: z.string().max(2048), connectionId: z.string().guid() }).strict(),
+      z.object({ op: z.literal("revoke"), projectId: z.string().regex(/^[A-Za-z0-9_=-]{1,256}$/),
+        expectedGrantId: z.string().uuid() }).strict(),
+    ]),
+  }).strict()), async (req, res) => {
+    const id = req.params.id as string;
+    const issue = await getAccessibleResource(req, res, getIssueById(req, id), "Issue not found");
+    if (!issue || !(await assertIssueReadAllowed(req, res, issue))) return;
+    const actor = getActorInfo(req);
+    if (actor.actorType !== "user" || actor.actorSource === "board_key" || actor.actorSource === "local_implicit") {
+      throw forbidden("GitHub Project details require a signed-in operator");
+    }
+    const selected = findLinkedGitHubMirrorIssue(await externalObjectsSvc.listForIssue(issue.id), req.body.objectId, issue.companyId);
+    if (!selected || !issue.projectId) throw notFound("Linked GitHub issue or Project binding not found");
+    const result = await linkedGitHubMirror.refresh({
+      companyId: issue.companyId, projectId: issue.projectId, issueId: issue.id, objectId: req.body.objectId,
+      userId: actor.actorId, issue: selected, accessAction: req.body.action,
+      canRead: async (lockedIssue, executor) =>
+        (await decideIssueAccess(req, lockedIssue, "issue:read", accessService(executor))).allowed,
+    });
+    if (req.body.action.op === "register" || req.body.action.op === "revoke") return res.json(result);
+    const current = await getAccessibleResource(req, res, getIssueById(req, id), "Issue not found");
+    if (!current) return;
+    if (!(await decideIssueAccess(req, current, "issue:read")).allowed) {
+      throw forbidden("The linked GitHub issue is no longer readable");
+    }
+    const linked = findLinkedGitHubMirrorIssue(await externalObjectsSvc.listForIssue(current.id), req.body.objectId, current.companyId);
+    if (current.companyId !== issue.companyId || current.projectId !== issue.projectId
+      || !linked || linked.nodeId !== selected.nodeId || linked.url !== selected.url) {
+      throw conflict("The linked GitHub issue or Project changed during refresh");
+    }
+    res.json(result);
   });
 
   router.get("/issues/:id/external-object-summary", async (req, res) => {

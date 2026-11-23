@@ -6410,6 +6410,30 @@ registry.registerPath({
 });
 
 registry.registerPath({
+  method: "post",
+  path: "/api/issues/{id}/github-project-mirror",
+  tags: ["issues"],
+  summary: "Read the GitHub Project fields of a linked GitHub issue (signed-in operator, read only)",
+  request: {
+    params: z.object({ id: z.string() }),
+    body: jsonBody(z.object({ objectId: z.string().uuid(), projectNodeId: z.string().optional() })),
+  },
+  responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden, 404: r.notFound },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/api/issues/{id}/github-project-access",
+  tags: ["issues"],
+  summary: "List, register or revoke per-operator GitHub Project read access for a linked issue",
+  request: {
+    params: z.object({ id: z.string() }),
+    body: jsonBody(z.object({ objectId: z.string().uuid(), action: z.object({ op: z.enum(["list", "saved", "register", "revoke"]) }).passthrough() })),
+  },
+  responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden, 404: r.notFound },
+});
+
+registry.registerPath({
   method: "get",
   path: "/api/projects/{id}/external-object-summary",
   tags: ["projects"],
