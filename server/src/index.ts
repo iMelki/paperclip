@@ -8,7 +8,7 @@ import { sentryReady, shutdownSentry, captureException } from "./sentry.js";
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { createServer } from "node:http";
-import { resolve } from "node:path";
+import { join, resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { stdin, stdout } from "node:process";
 import { pathToFileURL } from "node:url";
@@ -54,6 +54,7 @@ import {
 } from "./embedded-postgres-start-wait.js";
 import { EmbeddedPostgresLockRefusal, acquireEmbeddedStartLock, isSameDataDirectory, moveStaleLockAside, readLockIdentity, readRunningEmbeddedPostgres } from "./embedded-postgres-reuse.js";
 import { logger, resolveServerLogDir } from "./middleware/logger.js";
+import { startLogRotation } from "./middleware/log-rotation.js";
 import {
   getManagedInstanceConfig,
   type ManagedInstanceConfig,
@@ -206,6 +207,11 @@ export interface StartedServer {
 
 export async function startServer(): Promise<StartedServer> {
   warnIfUnsupportedNodeVersion(process.versions.node, (message) => logger.warn(message));
+
+  // Cap server.log (default 50 MB x 5 files; PAPERCLIP_LOG_MAX_SIZE_MB / PAPERCLIP_LOG_MAX_FILES).
+  // Started here, not when the logger is imported, so test forks and other importers never rotate
+  // or prune the live instance's log directory.
+  startLogRotation(join(resolveServerLogDir(), "server.log"));
 
   // Tracing must be active (or have failed and logged) before the first DB
   // connection or the HTTP server exists — see instrumentation.ts.

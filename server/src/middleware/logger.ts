@@ -5,7 +5,6 @@ import { readConfigFile } from "../config-file.js";
 import { resolveDefaultLogsDir, resolveHomeAwarePath } from "../home-paths.js";
 import { HTTP_LOG_REDACT_PATHS } from "./http-log-redaction.js";
 import { createHttpLogger } from "./http-logger.js";
-import { startLogRotation } from "./log-rotation.js";
 
 export function resolveServerLogDir(): string {
   const envOverride = process.env.PAPERCLIP_LOG_DIR?.trim();
@@ -21,10 +20,6 @@ const logDir = resolveServerLogDir();
 fs.mkdirSync(logDir, { recursive: true });
 
 const logFile = path.join(logDir, "server.log");
-
-// Cap server.log (default 50 MB x 5 files; PAPERCLIP_LOG_MAX_SIZE_MB / PAPERCLIP_LOG_MAX_FILES).
-// Must run before the transport below opens the file.
-startLogRotation(logFile);
 
 const sharedOpts = {
   translateTime: "SYS:HH:MM:ss",
