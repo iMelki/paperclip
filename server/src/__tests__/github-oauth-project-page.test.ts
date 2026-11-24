@@ -109,3 +109,49 @@ describe("fixed server-owned GitHub Project page reader", () => {
     expect(() => checkedGitHubProjectPage(value, { ...page, after: "same" })).toThrow();
   });
 });
+
+describe("GitHub Project page reader keeps the access signal", () => {
+  const failure = async (build: () => Response | Promise<Response>) => {
+    const fetch = vi.fn(async () => build());
+    return readGitHubOAuthProjectPage(page, headers, fetch as never).then(() => null, (error: { status: number; code: string }) => error);
+  };
+
+  it.each([
+    [401, "github_project_read_failed", 401], [403, "github_project_read_failed", 403], [404, "github_project_read_failed", 404],
+    [422, "github_project_read_failed", 422], [429, "github_project_rate_limited", 429],
+    [500, "github_project_read_failed", 500], [503, "github_project_read_failed", 503],
+  ])("passes HTTP %i through as %s with status %i", async (status, code, expected) => {
+    const error = await failure(() => response({ message: "x" }, { status }));
+    expect(error).toMatchObject({ code, status: expected });
+  });
+
+  it("treats a 403 with a rate-limit marker as a rate limit, and a plain 403 as no access", async () => {
+    expect(await failure(() => response({}, { status: 403, headers: { "x-ratelimit-remaining": "0", "content-type": "application/json" } })))
+      .toMatchObject({ code: "github_project_rate_limited", status: 429 });
+    expect(await failure(() => response({}, { status: 403, headers: { "retry-after": "30", "content-type": "application/json" } })))
+      .toMatchObject({ code: "github_project_rate_limited", status: 429 });
+    expect(await failure(() => response({}, { status: 403 }))).toMatchObject({ status: 403 });
+  });
+
+  it("maps a GraphQL NOT_FOUND or FORBIDDEN error, and a null project, to no access", async () => {
+    for (const type of ["NOT_FOUND", "FORBIDDEN"]) {
+      expect(await failure(() => response({ data: { user: { projectV2: null } }, errors: [{ type, message: "x" }] })))
+        .toMatchObject({ code: "github_project_access_denied", status: 403 });
+    }
+    expect(await failure(() => response({ data: { user: { projectV2: null } } })))
+      .toMatchObject({ code: "github_project_access_denied", status: 404 });
+  });
+
+  it("keeps any other GraphQL error as an incomplete read (a server-side status)", async () => {
+    const error = await failure(() => response({ data: payload(), errors: [{ type: "RATE_LIMITED", message: "x" }] }));
+    expect(error).toMatchObject({ code: "github_project_read_incomplete", status: 502 });
+  });
+
+  it("maps a timeout to 504 and any other transport failure to 502", async () => {
+    const timeout = Object.assign(new Error("timed out"), { name: "TimeoutError" });
+    expect(await readGitHubOAuthProjectPage(page, headers, (async () => { throw timeout; }) as never).catch(error => error))
+      .toMatchObject({ code: "github_project_read_timeout", status: 504 });
+    expect(await readGitHubOAuthProjectPage(page, headers, (async () => { throw new Error("reset"); }) as never).catch(error => error))
+      .toMatchObject({ code: "github_project_read_failed", status: 502 });
+  });
+});

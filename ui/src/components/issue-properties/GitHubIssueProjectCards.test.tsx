@@ -46,6 +46,23 @@ describe("GitHubIssueProjectCards", () => {
     expect(container.textContent).toContain("GitHub Project access was denied.");
   });
 
+  it("still shows the saved cards when the whole read is unavailable, with the notice", () => {
+    render({ state: "unavailable", mirror: { issue, projects: [card] } });
+    expect(container.textContent).toContain("GitHub Project details are unavailable.");
+    expect(container.textContent).toContain("Synthetic board");
+    expect(container.textContent).toContain("Todo");
+  });
+
+  it("shows each card with its own state in a mixed result", () => {
+    const other = { ...card, projectId: "PVT_other", title: "Other board" };
+    render({ state: "partial", mirror: { issue, projects: [card, other] },
+      boardReadStates: [{ projectId: "PVT_synthetic", state: "unavailable" }, { projectId: "PVT_other", state: "fresh" }] });
+    expect(container.textContent).toContain("Synthetic board");
+    expect(container.textContent).toContain("Other board");
+    expect(container.querySelectorAll("[role='status']").length).toBe(2);
+    expect(container.textContent).toContain("GitHub Project details are unavailable.");
+  });
+
   it("does not link a URL that is not a GitHub issue or Project URL", () => {
     render({ state: "fresh", mirror: { issue: { ...issue, url: "https://example.com/x" },
       projects: [{ ...card, url: "javascript:alert(1)" }] } });

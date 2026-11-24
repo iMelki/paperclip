@@ -62,13 +62,18 @@ const parse = <T>(schema: z.ZodType<T>, value: unknown): T => {
   return result.data;
 };
 
-/** The host, not worker-writable state or secret refs, owns the OAuth authority for each destination. */
-/** A GitHub read failure that says nothing about access: rate limit, 5xx, timeout, GraphQL or payload errors. */
+/**
+ * A GitHub read failure that says nothing about access, so the saved card may still be shown:
+ * a rate limit (429), a GitHub server error (5xx), a timeout, or a response that is too large,
+ * not JSON or incomplete. Every other failure (401, 403, 404, 422, a GraphQL NOT_FOUND or FORBIDDEN,
+ * an invalid bearer) counts as lost access. This is an allow-list, so a new failure kind is denied.
+ */
 export function isTransientGitHubReadError(error: unknown) {
   if (!(error instanceof GitHubOAuthTransportError)) return false;
-  return !(error.status === 401 || error.status === 404 || error.code === "github_oauth_bearer_invalid");
+  return error.status === 429 || error.status >= 500;
 }
 
+/** The host, not worker-writable state or secret refs, owns the OAuth authority for each destination. */
 export function pluginGitHubProjectBoardService(
   db: Db, identity: { pluginId: string; pluginKey: string }, readPage: ReadPage,
   scheduledAccess?: ScheduledBoardAccess,
@@ -384,7 +389,7 @@ export function pluginGitHubProjectBoardService(
         }
       });
     }
-    const complete = !read.truncated && read.boards.every(board => board.state === "fresh");
+    const complete = !read.truncated && !read.accessRequired && read.boards.every(board => board.state === "fresh");
     return { state: complete ? "fresh" : "partial", coverage: "registered_projects", accessRequired: read.accessRequired,
       boardReadStates: read.boards.map(({ projectId, state }) => ({ projectId, state })),
       mirror: { issue, projects: read.boards.flatMap(board => board.card ? [board.card] : []) } };
@@ -673,9 +678,16 @@ export function pluginGitHubProjectBoardService(
           received = await fetchBound(initial, request);
         } catch (error) {
           // A rate limit, a GitHub 5xx or a timeout says nothing about access: keep the saved card.
-          if (!isTransientGitHubReadError(error)) throw error;
-          unavailable = true;
-          break;
+          if (isTransientGitHubReadError(error)) {
+            unavailable = true;
+            break;
+          }
+          // Lost access on GitHub: drop the card. The caller decides what else to show.
+          if (error instanceof GitHubOAuthTransportError
+            || (error instanceof HttpError && [401, 403, 404, 409].includes(error.status))) {
+            return { state: "denied", coverage: "bound_project", mirror: { issue, projects: [] } };
+          }
+          throw error;
         }
         if (Date.now() >= deadline) {
           completedInTime = false;

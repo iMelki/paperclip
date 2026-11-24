@@ -18,7 +18,8 @@ function safeGitHubLink(value: string, project: boolean) {
 
 export function GitHubIssueProjectCards({ read }: { read: GitHubMirrorRead }) {
   const { issue, projects } = read.mirror;
-  const projectAccess = read.state !== "denied" && read.state !== "unavailable";
+  // Show every card the server returned, with its own state. Only a denied read hides cards.
+  const projectAccess = read.state !== "denied";
   const issueUrl = safeGitHubLink(issue.url, false);
 
   return (

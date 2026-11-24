@@ -13,6 +13,7 @@ import { instanceSettingsService } from "../services/instance-settings.js";
 import { ensureHumanRoleDefaultGrants } from "../services/principal-access-compatibility.js";
 import { githubProjectAuthorizationDigest } from "../services/github-oauth-project-page.js";
 import { GitHubOAuthTransportError } from "../services/github-oauth-transport.js";
+import { HttpError } from "../errors.js";
 import { GITHUB_PROJECT_IMPORTER_KEY, pluginGitHubProjectBoardService } from "../services/plugin-github-project-board.js";
 import { recordNativeGitHubConsent } from "../services/native-github-consent-receipt.js";
 import { toolConnectionSnapshotColumns } from "../services/tool-connection-snapshot.js";
@@ -35,7 +36,18 @@ const ISSUE_NODE = "I_synthetic_target";
 const BOUND = { id: "PVT_bound", number: 12 };
 const OTHER = { id: "PVT_other", number: 13 };
 const pluginId = randomUUID();
-let down: Set<number> = new Set();
+// What the stand-in for the GitHub read does for a board number: throw this error, or decide per call.
+let failures: Map<number, Error | ((call: number) => Error | null)> = new Map();
+const readCalls = new Map<number, number>();
+const rateLimited = () => new GitHubOAuthTransportError("github_project_rate_limited", 429);
+const serverError = () => new GitHubOAuthTransportError("github_project_read_failed", 503);
+// The kinds of "no access" the real reader produces (see github-oauth-project-page.ts).
+const lostAccess: Array<[string, () => Error]> = [
+  ["a 401", () => new GitHubOAuthTransportError("github_project_read_failed", 401)],
+  ["a 404", () => new GitHubOAuthTransportError("github_project_read_failed", 404)],
+  ["a GraphQL NOT_FOUND", () => new GitHubOAuthTransportError("github_project_access_denied", 403)],
+  ["a conflict (account or board changed)", () => new HttpError(409, "GitHub board or account identity changed")],
+];
 let duringRead: (() => Promise<void>) | null = null;
 
 function manifest(): PaperclipPluginManifestV1 {
@@ -75,11 +87,16 @@ describeEmbeddedPostgres("GitHub Project mirror routes", () => {
   }, 60_000);
 
   beforeEach(() => {
-    down = new Set();
+    failures = new Map();
+    readCalls.clear();
     duringRead = null;
     pageReader.mockReset().mockImplementation(async (input: { connectionId: string; page: { number: number } }) => {
       if (duringRead && input.page.number === OTHER.number) await duringRead();
-      if (down.has(input.page.number)) throw new GitHubOAuthTransportError("github_project_read_failed");
+      const call = (readCalls.get(input.page.number) ?? 0) + 1;
+      readCalls.set(input.page.number, call);
+      const rule = failures.get(input.page.number);
+      const failure = typeof rule === "function" ? rule(call) : rule;
+      if (failure) throw failure;
       const [connection] = await ctx.db.select(toolConnectionSnapshotColumns).from(toolConnections)
         .where(eq(toolConnections.id, input.connectionId));
       const [secret] = await ctx.db.select().from(companySecrets).where(eq(companySecrets.id, connection.credentialSecretRefs[0].secretId));
@@ -98,7 +115,7 @@ describeEmbeddedPostgres("GitHub Project mirror routes", () => {
       memberships: [{ companyId, membershipRole: role, status: "active" }], isInstanceAdmin: false } };
   }
 
-  async function seed() {
+  async function seed(options: { bind?: boolean } = {}) {
     const owner = await seedCompanyWithBoardAccess(ctx.db, "Mirror routes");
     const { companyId } = owner;
     const projectId = randomUUID(), issueId = randomUUID(), objectId = randomUUID(), applicationId = randomUUID();
@@ -127,8 +144,10 @@ describeEmbeddedPostgres("GitHub Project mirror routes", () => {
     const foreign = await seedCompanyWithBoardAccess(ctx.db, "Foreign");
     // Bind the Paperclip project to the first board, as the importer does.
     const board = pluginGitHubProjectBoardService(ctx.db, { pluginId, pluginKey: GITHUB_PROJECT_IMPORTER_KEY }, pageReader as never);
-    await board.bind({ companyId, actor: { type: "user", userId: owner.userId } } as never,
-      { companyId, projectId, connectionId, boardUrl: `https://github.com/users/example/projects/${BOUND.number}` });
+    if (options.bind !== false) {
+      await board.bind({ companyId, actor: { type: "user", userId: owner.userId } } as never,
+        { companyId, projectId, connectionId, boardUrl: `https://github.com/users/example/projects/${BOUND.number}` });
+    }
     return { ...owner, projectId, issueId, objectId, connectionId, secretId, agentId, other, viewer, foreign };
   }
   type Seeded = Awaited<ReturnType<typeof seed>>;
@@ -230,7 +249,7 @@ describeEmbeddedPostgres("GitHub Project mirror routes", () => {
     const saved = (await ctx.db.select().from(pluginState).where(eq(pluginState.pluginId, pluginId)))
       .filter(row => row.stateKey.startsWith("issue-mirror-v2:"));
     expect(saved.length).toBeGreaterThanOrEqual(2);
-    down = new Set([OTHER.number]);
+    failures.set(OTHER.number, serverError());
     const degraded = await mirror(seeded, seeded.actor);
     expect(degraded.status).toBe(200);
     expect(ids(degraded.body)).toEqual([BOUND.id, OTHER.id]);
@@ -242,12 +261,91 @@ describeEmbeddedPostgres("GitHub Project mirror routes", () => {
   it("keeps the saved bound card when GitHub is rate limited or down", async () => {
     const seeded = await seed();
     expect((await mirror(seeded, seeded.actor)).status).toBe(200);
-    down = new Set([BOUND.number]);
+    failures.set(BOUND.number, rateLimited());
     const degraded = await mirror(seeded, seeded.actor);
     expect(degraded.status).toBe(200);
     expect(degraded.body.state).toBe("unavailable");
     expect(ids(degraded.body)).toEqual([BOUND.id]);
     expect(degraded.body.accessRequired).toBeFalsy();
+  });
+
+  describe("lost access on GitHub", () => {
+    it.each(lostAccess)("drops a registered board's saved card and asks for access after %s", async (_name, build) => {
+      const seeded = await seed();
+      await consent(seeded, seeded.userId);
+      expect((await register(seeded, seeded.actor)).status).toBe(200);
+      expect(ids((await mirror(seeded, seeded.actor)).body)).toEqual([BOUND.id, OTHER.id]);
+      failures.set(OTHER.number, build());
+      const lost = await mirror(seeded, seeded.actor);
+      expect(lost.status).toBe(200);
+      expect(ids(lost.body)).toEqual([BOUND.id]);
+      expect(lost.body.accessRequired).toBe(true);
+      expect(lost.body.state).toBe("partial");
+    });
+
+    it.each(lostAccess)("returns the denied state for the bound board, with no card, after %s", async (_name, build) => {
+      const seeded = await seed();
+      expect((await mirror(seeded, seeded.actor)).status).toBe(200);
+      failures.set(BOUND.number, build());
+      const lost = await mirror(seeded, seeded.actor);
+      expect(lost.status).toBe(200);
+      expect(lost.body.state).toBe("denied");
+      expect(lost.body.mirror.projects).toEqual([]);
+    });
+
+    it.each(lostAccess)("keeps the registered boards that read fine when the bound board lost access (%s)", async (_name, build) => {
+      const seeded = await seed();
+      await consent(seeded, seeded.userId);
+      expect((await register(seeded, seeded.actor)).status).toBe(200);
+      expect((await mirror(seeded, seeded.actor)).status).toBe(200);
+      failures.set(BOUND.number, build());
+      const mixed = await mirror(seeded, seeded.actor);
+      expect(mixed.status).toBe(200);
+      expect(ids(mixed.body)).toEqual([OTHER.id]);
+      expect(mixed.body.state).toBe("partial");
+      expect(mixed.body.accessRequired).toBe(true);
+    });
+  });
+
+  it("does not ask for access when the project has no bound board and the user has a registered board", async () => {
+    const seeded = await seed({ bind: false });
+    await consent(seeded, seeded.userId);
+    expect((await register(seeded, seeded.actor)).status).toBe(200);
+    const result = await mirror(seeded, seeded.actor);
+    expect(result.status).toBe(200);
+    expect(ids(result.body)).toEqual([OTHER.id]);
+    expect(result.body.accessRequired).toBeFalsy();
+    expect(result.body.state).toBe("fresh");
+  });
+
+  it("shows a mixed result as partial, with the saved bound card and the fresh registered card", async () => {
+    const seeded = await seed();
+    await consent(seeded, seeded.userId);
+    expect((await register(seeded, seeded.actor)).status).toBe(200);
+    expect((await mirror(seeded, seeded.actor)).status).toBe(200);
+    failures.set(BOUND.number, rateLimited());
+    const mixed = await mirror(seeded, seeded.actor);
+    expect(mixed.status).toBe(200);
+    expect(ids(mixed.body)).toEqual([BOUND.id, OTHER.id]);
+    expect(mixed.body.state).toBe("partial");
+    expect(mixed.body.accessRequired).toBeFalsy();
+    expect(mixed.body.boardReadStates).toContainEqual({ projectId: BOUND.id, state: "unavailable" });
+    expect(mixed.body.boardReadStates).toContainEqual({ projectId: OTHER.id, state: "fresh" });
+  });
+
+  it("prefers the fresh registered card when the same board is bound and registered", async () => {
+    const seeded = await seed();
+    await consent(seeded, seeded.userId);
+    expect((await register(seeded, seeded.actor, BOUND)).status).toBe(200);
+    expect((await mirror(seeded, seeded.actor)).status).toBe(200);
+    readCalls.clear();
+    // The registered read is the first read of the board and the bound read is the second.
+    failures.set(BOUND.number, call => (call === 2 ? serverError() : null));
+    const merged = await mirror(seeded, seeded.actor);
+    expect(merged.status).toBe(200);
+    expect(ids(merged.body)).toEqual([BOUND.id]);
+    expect(merged.body.state).toBe("fresh");
+    expect(merged.body.boardReadStates).toEqual([{ projectId: BOUND.id, state: "fresh" }]);
   });
 
   describe("authorization that changes while GitHub is being read", () => {

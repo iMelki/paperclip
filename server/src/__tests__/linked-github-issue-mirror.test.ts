@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import type { GitHubMirrorRead, GitHubProjectCard } from "@paperclipai/shared/github-issue-project-mirror";
 import { findLinkedGitHubMirrorIssue, mergeBoundAndRegisteredMirrors } from "../services/linked-github-issue-mirror.js";
+import { GitHubOAuthTransportError } from "../services/github-oauth-transport.js";
+import { isTransientGitHubReadError } from "../services/plugin-github-project-board.js";
 
 const COMPANY = "00000000-0000-4000-8000-000000000001";
 const OBJECT = "00000000-0000-4000-8000-000000000002";
@@ -64,11 +66,59 @@ describe("mergeBoundAndRegisteredMirrors", () => {
     expect(merged.accessRequired).toBe(true);
   });
 
-  it("reports an unavailable bound board without access required, and does not repeat a board", () => {
-    const merged = mergeBoundAndRegisteredMirrors(read("unavailable", "PVT_bound"), read("fresh", "PVT_bound"));
-    expect(merged.mirror.projects.map(row => row.projectId)).toEqual(["PVT_bound"]);
-    expect(merged.state).toBe("unavailable");
+  it("reports a mixed result as partial: an unavailable bound board and a fresh registered board", () => {
+    const merged = mergeBoundAndRegisteredMirrors(read("unavailable", "PVT_bound"), { ...read("fresh", "PVT_other"),
+      boardReadStates: [{ projectId: "PVT_other", state: "fresh" }] });
+    expect(merged.mirror.projects.map(row => row.projectId)).toEqual(["PVT_bound", "PVT_other"]);
+    expect(merged.state).toBe("partial");
     expect(merged.accessRequired).toBe(false);
-    expect(merged.boardReadStates).toEqual([{ projectId: "PVT_bound", state: "unavailable" }]);
+    expect(merged.boardReadStates).toEqual([{ projectId: "PVT_bound", state: "unavailable" }, { projectId: "PVT_other", state: "fresh" }]);
+  });
+
+  it("prefers the fresh registered card when the same board is bound and registered", () => {
+    const registeredCard = { ...card("PVT_bound"), title: "registered copy" };
+    const merged = mergeBoundAndRegisteredMirrors(read("unavailable", "PVT_bound"), { state: "fresh",
+      mirror: { issue, projects: [registeredCard] }, boardReadStates: [{ projectId: "PVT_bound", state: "fresh" }] });
+    expect(merged.mirror.projects).toEqual([registeredCard]);
+    expect(merged.state).toBe("fresh");
+    expect(merged.boardReadStates).toEqual([{ projectId: "PVT_bound", state: "fresh" }]);
+  });
+
+  it("keeps the bound card when it is fresh and the same board is registered", () => {
+    const merged = mergeBoundAndRegisteredMirrors(read("fresh", "PVT_bound"), { state: "fresh",
+      mirror: { issue, projects: [{ ...card("PVT_bound"), title: "registered copy" }] },
+      boardReadStates: [{ projectId: "PVT_bound", state: "fresh" }] });
+    expect(merged.mirror.projects.map(row => row.title)).toEqual(["PVT_bound"]);
+  });
+
+  it("does not ask for access when the project has no bound board", () => {
+    const noBoard: GitHubMirrorRead = { state: "denied", coverage: "access_required", mirror: { issue, projects: [] } };
+    const merged = mergeBoundAndRegisteredMirrors(noBoard, { ...read("fresh", "PVT_other"),
+      boardReadStates: [{ projectId: "PVT_other", state: "fresh" }] });
+    expect(merged.accessRequired).toBe(false);
+    expect(merged.state).toBe("fresh");
+    expect(merged.mirror.projects.map(row => row.projectId)).toEqual(["PVT_other"]);
+  });
+
+  it("keeps the registered boards when the bound board lost access, and asks for access", () => {
+    const lost: GitHubMirrorRead = { state: "denied", coverage: "bound_project", mirror: { issue, projects: [] } };
+    const merged = mergeBoundAndRegisteredMirrors(lost, { ...read("fresh", "PVT_other"),
+      boardReadStates: [{ projectId: "PVT_other", state: "fresh" }] });
+    expect(merged.mirror.projects.map(row => row.projectId)).toEqual(["PVT_other"]);
+    expect(merged.accessRequired).toBe(true);
+    expect(merged.state).toBe("partial");
+  });
+});
+
+describe("isTransientGitHubReadError", () => {
+  it.each([[429, true], [500, true], [502, true], [503, true], [504, true],
+    [401, false], [403, false], [404, false], [422, false], [409, false], [302, false]])(
+    "treats a GitHub transport error with status %i as transient: %s", (status, transient) => {
+      expect(isTransientGitHubReadError(new GitHubOAuthTransportError("github_project_read_failed", status))).toBe(transient);
+    });
+
+  it("never treats an error that is not a GitHub transport error as transient", () => {
+    expect(isTransientGitHubReadError(new Error("boom"))).toBe(false);
+    expect(isTransientGitHubReadError(undefined)).toBe(false);
   });
 });

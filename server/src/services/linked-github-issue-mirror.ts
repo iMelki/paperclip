@@ -1,7 +1,7 @@
 import { and, eq } from "drizzle-orm";
 import { externalObjectMentions, externalObjects, issues, plugins, type Db } from "@paperclipai/db";
 import type { GitHubIssueIdentity, GitHubMirrorRead } from "@paperclipai/shared/github-issue-project-mirror";
-import { notFound } from "../errors.js";
+import { HttpError, notFound } from "../errors.js";
 import { GITHUB_PROJECT_IMPORTER_KEY, pluginGitHubProjectBoardService } from "./plugin-github-project-board.js";
 import { toolAccessService } from "./tool-access.js";
 
@@ -23,21 +23,32 @@ export function findLinkedGitHubMirrorIssue(
 
 /** One result for the bound board and the boards the user registered. */
 export function mergeBoundAndRegisteredMirrors(bound: GitHubMirrorRead, registered: GitHubMirrorRead): GitHubMirrorRead {
-  const boundCards = bound.state === "denied" ? [] : bound.mirror.projects;
-  const projects = [...boundCards, ...registered.mirror.projects.filter(card =>
-    !boundCards.some(boundCard => boundCard.projectId === card.projectId))];
-  const boundBoard = boundCards[0]?.projectId;
-  const boundBoardState = bound.state === "fresh" || bound.state === "partial" || bound.state === "stale"
+  // A project with no bound board says "access_required" with no board. That is not a missing access.
+  const boundMissing = bound.state === "denied" && bound.coverage === "access_required";
+  const boundDenied = bound.state === "denied" && !boundMissing;
+  const boundCard = boundDenied || boundMissing ? undefined : bound.mirror.projects[0];
+  const boundState = bound.state === "fresh" || bound.state === "partial" || bound.state === "stale"
     || bound.state === "unavailable" ? bound.state : null;
-  const boardReadStates = [
-    ...(boundBoard && boundBoardState ? [{ projectId: boundBoard, state: boundBoardState }] : []),
-    ...(registered.boardReadStates ?? []).filter(row => row.projectId !== boundBoard),
+  const registeredStates = registered.boardReadStates ?? [];
+  // The same board can be bound and registered. Show the fresh card when the bound one is not fresh.
+  const sameBoard = boundCard ? registered.mirror.projects.find(card => card.projectId === boundCard.projectId) : undefined;
+  const sameBoardState = boundCard ? registeredStates.find(row => row.projectId === boundCard.projectId)?.state : undefined;
+  const preferRegistered = !!sameBoard && boundState !== "fresh" && sameBoardState === "fresh";
+  const keepBound = !!boundCard && !preferRegistered;
+  const projects = [
+    ...(keepBound ? [boundCard] : []),
+    ...registered.mirror.projects.filter(card => !(keepBound && card.projectId === boundCard.projectId)),
   ];
-  const state = bound.state === "fresh" || bound.state === "denied" ? registered.state
-    : registered.state === "fresh" ? bound.state : "partial";
+  const boundBoardState = preferRegistered ? "fresh" as const : boundState;
+  const boardReadStates = [
+    ...(boundCard && boundBoardState ? [{ projectId: boundCard.projectId, state: boundBoardState }] : []),
+    ...registeredStates.filter(row => row.projectId !== boundCard?.projectId),
+  ];
+  const boundOk = boundMissing || boundBoardState === "fresh";
   return {
-    state, coverage: "registered_projects", mirror: { issue: registered.mirror.issue, projects },
-    accessRequired: !!registered.accessRequired || bound.state === "denied", boardReadStates,
+    state: registered.state === "fresh" && boundOk ? "fresh" : "partial",
+    coverage: "registered_projects", mirror: { issue: registered.mirror.issue, projects },
+    accessRequired: !!registered.accessRequired || boundDenied, boardReadStates,
     ...(bound.checkedProject ? { checkedProject: bound.checkedProject } : {}),
   };
 }
@@ -94,7 +105,15 @@ export function linkedGitHubIssueMirrorService(db: Db) {
         const registered = await project.refreshRegisteredIssueMirrors(context, { scope, issue: input.issue, assertCurrentIssue });
         if (registered) {
           // The bound board stays visible next to the registered ones, also after the last grant is revoked.
-          const boundRead = await project.refreshLinkedIssueMirror(context, { ...input, assertCurrentIssue });
+          // A bound board that cannot be read (disabled connection, changed account) must not hide the
+          // registered boards that read fine.
+          const boundRead: GitHubMirrorRead = await project.refreshLinkedIssueMirror(context, { ...input, assertCurrentIssue })
+            .catch((error: unknown) => {
+              if (error instanceof HttpError && [401, 403, 404, 409].includes(error.status)) {
+                return { state: "denied", coverage: "bound_project", mirror: { issue: input.issue, projects: [] } } as GitHubMirrorRead;
+              }
+              throw error;
+            });
           return mergeBoundAndRegisteredMirrors(boundRead, registered);
         }
       }
