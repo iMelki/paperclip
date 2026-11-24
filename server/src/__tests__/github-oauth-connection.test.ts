@@ -530,6 +530,21 @@ describe("native GitHub OAuth service and routes (mandatory private PostgreSQL)"
     expect(tokenCalls()).toHaveLength(0); await expectNoAgentEffects(fixture.companyId);
   });
 
+  it("refuses a GitHub consent that was not started by a user before the state is claimed or any token is exchanged", async () => {
+    const fixture = await seed(); const begun = await begin(fixture);
+    const agentId = `synthetic-agent-${randomUUID()}`;
+    await db.update(toolOauthStates).set({ createdByActorType: "agent", createdByActorId: agentId, createdBySessionId: null })
+      .where(eq(toolOauthStates.state, begun.state));
+    const secretsBefore = await db.select().from(companySecrets).where(eq(companySecrets.companyId, fixture.companyId));
+    await expect(complete(fixture, begun.state, { actor: { actorType: "agent", actorId: agentId } }))
+      .rejects.toMatchObject({ status: 403 });
+    expect(tokenCalls()).toHaveLength(0);
+    expect(await db.select().from(toolOauthStates).where(eq(toolOauthStates.state, begun.state))).toHaveLength(1);
+    expect(await db.select().from(companySecrets).where(eq(companySecrets.companyId, fixture.companyId)))
+      .toHaveLength(secretsBefore.length);
+    await expectNoAgentEffects(fixture.companyId);
+  });
+
   it("rejects changed client and callback bindings before exchanging the code", async () => {
     for (const change of ["client", "callback"] as const) {
       const fixture = await seed(); const begun = await begin(fixture); const saved = await readConnection(begun.id);

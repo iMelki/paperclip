@@ -116,6 +116,8 @@ import type {
 import { CLASS3_STATIC_LEASE_ALLOWLIST, credentialConfigPath, getAvailableConnectionMethod, getConnectableAppDefinition, isToolConnectionAttentionHealth, recommendedDefaultsForApp } from "@paperclipai/shared";
 import { badRequest, conflict, forbidden, HttpError, notFound, unprocessable } from "../errors.js";
 import { logActivity } from "./activity-log.js";
+import { recordNativeGitHubConsent } from "./native-github-consent-receipt.js";
+
 import { logger } from "../middleware/logger.js";
 import { mcpHttpRequestHeaders, parseMcpHttpResponseBody } from "./mcp-http.js";
 import {
@@ -6354,7 +6356,8 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
   }
 
   async function adoptOAuthConnection(previous: typeof toolConnections.$inferSelect,
-    values: Partial<typeof toolConnections.$inferInsert>, githubOAuth: boolean) {
+    values: Partial<typeof toolConnections.$inferInsert>, githubOAuth: boolean,
+    onNativeAdopt?: (client: DbTransaction, connection: typeof toolConnections.$inferSelect) => Promise<void>) {
     const save = async (client: ToolAccessMutationDb) => {
       const [updated] = await client.update(toolConnections).set(values)
         .where(githubOAuth ? and(eq(toolConnections.id, previous.id),
@@ -6376,7 +6379,9 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
       if (!application || ["archived", "disabled"].includes(application.status)) {
         throw conflict("GitHub app was disabled or archived during sign-in", { code: "github_oauth_target_changed" });
       }
-      return save(tx);
+      const updated = await save(tx);
+      if (onNativeAdopt) await onNativeAdopt(tx, updated);
+      return updated;
     });
   }
 
@@ -6404,13 +6409,18 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
     } else {
       assertSameOAuthActor(stateRow, input.actor);
     }
+    let connection = await getConnectionRow(stateRow.connectionId, stateRow.companyId);
+    const githubOAuth = isNativeGitHubOAuthConnection(connection);
+    // A native GitHub consent must come from the signed-in user who started it. Check this before the
+    // state is claimed and before the token exchange, so a refusal leaves no state change and no orphan secret.
+    if (githubOAuth && !stateRow.subjectUserId && (stateRow.createdByActorType !== "user"
+      || input.actor?.actorType !== "user" || input.actor.actorId !== stateRow.createdByActorId)) {
+      throw forbidden("GitHub consent requires the same signed-in user");
+    }
     const [claimedState] = await db.delete(toolOauthStates).where(and(
       eq(toolOauthStates.state, input.state), gte(toolOauthStates.expiresAt, new Date()),
     )).returning();
     if (!claimedState) throw badRequest("OAuth state was already used or expired");
-
-    let connection = await getConnectionRow(stateRow.connectionId, stateRow.companyId);
-    const githubOAuth = isNativeGitHubOAuthConnection(connection);
     if (isBoundGitHubOAuthState(stateRow.codeVerifier) && !githubOAuth) {
       throw conflict("GitHub connector changed during sign-in. Start again.", { code: "github_oauth_target_changed" });
     }
@@ -6562,6 +6572,9 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
         auth: null,
       };
     }
+    const consentingUser = githubOAuth && stateRow.createdByActorType === "user" ? stateRow.createdByActorId : null;
+    if (githubOAuth && (!consentingUser || !githubFacts || input.actor?.actorType !== "user"
+      || input.actor.actorId !== consentingUser)) throw forbidden("GitHub consent requires the same signed-in user");
     const nextConfig = {
       ...connection.config,
       oauth: {
@@ -6603,7 +6616,9 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
           },
         ],
         updatedAt: new Date(),
-      }, githubOAuth);
+      }, githubOAuth, consentingUser && githubFacts ? async (tx, saved) => {
+        await recordNativeGitHubConsent(tx as unknown as Db, saved, consentingUser, githubFacts, accessRef.secretId);
+      } : undefined);
     await syncCredentialBindings(connection);
     await removeStaleRefreshSecret();
 

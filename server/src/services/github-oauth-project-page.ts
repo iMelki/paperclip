@@ -134,11 +134,11 @@ export function githubProjectPageQuery(ownerType: GitHubProjectPageInput["ownerT
           ... on Issue{id number title url state repository{nameWithOwner}}
           ... on PullRequest{title url repository{nameWithOwner}}
           ... on DraftIssue{title}}
-        fieldValues(first:100){pageInfo{hasNextPage} nodes{
-          ... on ProjectV2ItemFieldTextValue{text field{... on ProjectV2FieldCommon{name}}}
-          ... on ProjectV2ItemFieldSingleSelectValue{name field{... on ProjectV2FieldCommon{name}}}
-          ... on ProjectV2ItemFieldNumberValue{number field{... on ProjectV2FieldCommon{name}}}
-          ... on ProjectV2ItemFieldDateValue{date field{... on ProjectV2FieldCommon{name}}}
+        fieldValues(first:100){pageInfo{hasNextPage} nodes{__typename
+          ... on ProjectV2ItemFieldTextValue{id text field{... on ProjectV2FieldCommon{id name}}}
+          ... on ProjectV2ItemFieldSingleSelectValue{id name optionId field{... on ProjectV2FieldCommon{id name}}}
+          ... on ProjectV2ItemFieldNumberValue{id number field{... on ProjectV2FieldCommon{id name}}}
+          ... on ProjectV2ItemFieldDateValue{id date field{... on ProjectV2FieldCommon{id name}}}
         }}
       }}
     }}
@@ -213,14 +213,33 @@ export async function readGitHubOAuthProjectPage(
         owner: input.owner, number: input.number, after: input.after, first: input.first,
       } }),
     });
-    if (!response.ok || response.redirected) throw new GitHubOAuthTransportError("github_project_read_failed");
+    if (response.redirected) throw new GitHubOAuthTransportError("github_project_read_failed");
+    if (!response.ok) {
+      // Keep GitHub's status: 401, 403 and 404 mean no access, 429 and 5xx mean try later.
+      const limited = response.status === 429 || (response.status === 403
+        && (response.headers.get("x-ratelimit-remaining") === "0" || response.headers.has("retry-after")));
+      throw limited ? new GitHubOAuthTransportError("github_project_rate_limited", 429)
+        : new GitHubOAuthTransportError("github_project_read_failed", response.status);
+    }
     const payload = await boundedJson(response);
+    if (record(payload) && Array.isArray(payload.errors)
+      && payload.errors.some(item => record(item) && (item.type === "NOT_FOUND" || item.type === "FORBIDDEN"))) {
+      throw new GitHubOAuthTransportError("github_project_access_denied", 403);
+    }
+    const owner = record(payload) && record(payload.data) ? payload.data[input.ownerType] : undefined;
+    if (record(payload) && !("errors" in payload) && record(owner) && owner.projectV2 === null) {
+      // The token can no longer see this Project (left the org, made private, SSO).
+      throw new GitHubOAuthTransportError("github_project_access_denied", 404);
+    }
     if (!record(payload) || "errors" in payload || !record(payload.data)) {
       throw new GitHubOAuthTransportError("github_project_read_incomplete");
     }
     return checkedGitHubProjectPage(payload.data, input);
   } catch (error) {
     if (error instanceof GitHubOAuthTransportError) throw error;
+    if (error instanceof Error && error.name === "TimeoutError") {
+      throw new GitHubOAuthTransportError("github_project_read_timeout", 504);
+    }
     throw new GitHubOAuthTransportError("github_project_read_failed");
   }
 }

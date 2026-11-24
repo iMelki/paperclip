@@ -293,6 +293,8 @@ function issueSnapshot(identity: GitHubObjectIdentity, body: Record<string, unkn
       repo: identity.repo,
       number: identity.number,
       state,
+      ...(title ? { issueTitle: title } : {}),
+      ...(typeof body.node_id === "string" && /^[A-Za-z0-9_=-]{1,256}$/.test(body.node_id) ? { nodeId: body.node_id } : {}),
       ...(stateReason ? { stateReason } : {}),
       ...(authorLogin ? { authorLogin } : {}),
     },

@@ -1,4 +1,8 @@
 import { useEffect, useState, type ReactNode } from "react";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { externalObjectsApi } from "../../api/externalObjects";
+import { queryKeys } from "../../lib/queryKeys";
+import { Button } from "../ui/button";
 import type { IssueExternalObjectGroup } from "../../hooks/useIssueExternalObjects";
 import {
   externalObjectDisplayStatusLabel,
@@ -16,6 +20,7 @@ import { cn } from "../../lib/utils";
 import { ExternalObjectStatusIcon } from "../ExternalObjectStatusIcon";
 import { PropertyRow } from "./primitives";
 import { ExpandRelationListButton } from "./relation-controls";
+import { GitHubIssueProjectAccess } from "./GitHubIssueProjectAccess";
 
 const EXTERNAL_OBJECT_PROPERTY_PREVIEW_COUNT = 5;
 
@@ -156,18 +161,54 @@ function ExternalObjectPropertyValue({ group }: { group: IssueExternalObjectGrou
   );
 }
 
+function linkedGitHubIssueId(row: IssueExternalObjectGroup) {
+  const object = row.group.object;
+  return object?.providerKey === "github" && object.objectType === "issue" ? object.id : null;
+}
+
+function describeGitHubRefresh(
+  objectId: string,
+  results: Awaited<ReturnType<typeof externalObjectsApi.refreshIssueObjects>>["refreshed"],
+) {
+  const result = results.find((entry) => entry.object.id === objectId);
+  switch (result?.reason) {
+    case "resolved": return "GitHub details checked.";
+    case "backoff": return "The existing snapshot is still current or a retry is delayed.";
+    case "refresh_in_progress": return "A refresh is already running.";
+    case "refresh_superseded": return "Another check finished first. Showing the latest saved details.";
+    default: return "GitHub details could not be refreshed. The saved details are still shown.";
+  }
+}
+
 export function ExternalObjectRows({
+  issueId,
   externalObjects,
   externalObjectsLoading,
   externalObjectsError,
   onRetryExternalObjects,
 }: {
+  issueId: string;
   externalObjects?: IssueExternalObjectGroup[];
   externalObjectsLoading?: boolean;
   externalObjectsError?: boolean;
   onRetryExternalObjects?: () => void;
 }) {
   const [expanded, setExpanded] = useState(false);
+  const queryClient = useQueryClient();
+  const refreshGitHub = useMutation({
+    retry: false,
+    mutationFn: async (objectId: string) => {
+      const response = await externalObjectsApi.refreshIssueObjects(issueId, { objectIds: [objectId] });
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: queryKeys.externalObjects.byIssue(issueId), exact: true }),
+        queryClient.invalidateQueries({ queryKey: queryKeys.externalObjects.issueSummary(issueId), exact: true }),
+      ]);
+      return describeGitHubRefresh(objectId, response.refreshed);
+    },
+  });
+
+  const projectMirror = useMutation({ retry: false, mutationFn: (objectId: string) =>
+    externalObjectsApi.refreshGitHubProjectMirror(issueId, objectId) });
 
   useEffect(() => {
     setExpanded(false);
@@ -216,12 +257,52 @@ export function ExternalObjectRows({
       {visibleExternalObjects
         .map((externalObject) => {
           const { pill, group } = externalObject;
+          const githubIssueId = linkedGitHubIssueId(externalObject);
           return (
             <PropertyRow
               key={group.object?.id ?? `${pill.providerKey}:${pill.objectType}:${pill.url ?? "anon"}`}
               label={externalObjectRowLabel(externalObject)}
             >
-              <ExternalObjectPropertyValue group={externalObject} />
+              <div className="flex flex-wrap items-center gap-2">
+                <ExternalObjectPropertyValue group={externalObject} />
+                {githubIssueId ? (
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    className="h-6 px-2 text-xs"
+                    aria-label={pill.displayKey ? "Refresh GitHub issue " + pill.displayKey : "Refresh linked GitHub issue"}
+                    disabled={refreshGitHub.isPending}
+                    onClick={() => refreshGitHub.mutate(githubIssueId)}
+                  >
+                    {refreshGitHub.isPending && refreshGitHub.variables === githubIssueId
+                      ? "Refreshing…"
+                      : "Refresh"}
+                  </Button>
+                ) : null}
+                {githubIssueId ? (
+                  <Button type="button" variant="ghost" size="sm" className="h-6 px-2 text-xs"
+                    disabled={projectMirror.isPending}
+                    onClick={() => projectMirror.mutate(githubIssueId)}>
+                    {projectMirror.isPending && projectMirror.variables === githubIssueId ? "Checking…" : "Projects"}
+                  </Button>
+                ) : null}
+                {githubIssueId && refreshGitHub.variables === githubIssueId ? (
+                  <span className="text-xs text-muted-foreground" role="status">
+                    {refreshGitHub.isError ? "GitHub details could not be refreshed." : refreshGitHub.data}
+                  </span>
+                ) : null}
+              </div>
+              {githubIssueId && projectMirror.variables === githubIssueId ? (
+                <>
+                  {projectMirror.isError ? <p className="text-xs text-muted-foreground" role="status">
+                    GitHub Project details could not be read.
+                  </p> : null}
+                  <GitHubIssueProjectAccess key={issueId + ":" + githubIssueId} issueId={issueId} objectId={githubIssueId}
+                  read={projectMirror.isSuccess ? projectMirror.data : undefined}
+                  refresh={() => projectMirror.mutate(githubIssueId)} />
+                </>
+              ) : null}
             </PropertyRow>
           );
         })}
